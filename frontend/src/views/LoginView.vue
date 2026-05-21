@@ -34,7 +34,8 @@ const auth = useAuthStore()
 const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 
-async function handleSubmit() {
+async function handleSubmit({ errors }: { errors?: Record<string, unknown> }) {
+  if (errors) return
   loading.value = true
   try {
     await auth.login(form.username, form.password)
