@@ -81,7 +81,7 @@ const loading = ref(false)
 const result = ref<DiffResult | null>(null)
 
 const canDiff = computed(() =>
-  src.connId && src.dbName && dst.connId && dst.dbName
+  !!(src.connId && src.dbName && dst.connId && dst.dbName)
 )
 
 const isEmpty = computed(() =>
@@ -91,6 +91,7 @@ const isEmpty = computed(() =>
 )
 
 async function handleDiff() {
+  if (!src.connId || !dst.connId) return
   loading.value = true
   try {
     const res = await diffSchemas({
