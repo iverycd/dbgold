@@ -85,7 +85,8 @@ async function loadHistory() {
 
 function viewDetail(record: MigrationHistory) {
   try {
-    detailSqls.value = JSON.parse(record.sql_statements) as string[]
+    const parsed: unknown = JSON.parse(record.sql_statements)
+    detailSqls.value = Array.isArray(parsed) ? (parsed as string[]) : []
   } catch {
     detailSqls.value = []
   }
