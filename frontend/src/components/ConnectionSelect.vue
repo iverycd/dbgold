@@ -46,6 +46,8 @@ onMounted(async () => {
   try {
     const res = await listConnections()
     connections.value = res.data
+  } catch {
+    // silent - component will show empty list
   } finally {
     loading.value = false
   }
