@@ -19,4 +19,4 @@ export const login = (username: string, password: string) =>
 export const getMe = () => api.get<User>('/auth/me')
 
 export const changePassword = (oldPassword: string, newPassword: string) =>
-  api.put('/auth/password', { old_password: oldPassword, new_password: newPassword })
+  api.put<{ message: string }>('/auth/password', { old_password: oldPassword, new_password: newPassword })

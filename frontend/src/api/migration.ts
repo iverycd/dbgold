@@ -10,7 +10,7 @@ export interface MigrationHistory {
   dst_database: string
   sql_statements: string
   status: string
-  error_message: string
+  error_message: string | null
   created_at: string
 }
 
