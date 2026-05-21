@@ -43,6 +43,12 @@ func NewRouter() *gin.Engine {
 		authed.POST("/schema/parse", handler.ParseDDLFile)
 		authed.GET("/schema/export", handler.ExportDDL)
 		authed.POST("/diff", handler.DiffSchemas)
+
+		authed.POST("/migration/diff", handler.RunDiffMigration)
+		authed.POST("/migration/full", handler.RunFullMigration)
+		authed.POST("/migration/selective", handler.RunSelectiveMigration)
+		authed.GET("/migration", handler.ListMigrations)
+		authed.GET("/migration/:id", handler.GetMigration)
 	}
 
 	admin := r.Group("/api/admin")
