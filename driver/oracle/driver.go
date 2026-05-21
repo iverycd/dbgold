@@ -3,6 +3,7 @@ package oracle
 import (
 	"database/sql"
 	"dbgold/diff"
+	"dbgold/migrate"
 	"dbgold/schema"
 	"fmt"
 
@@ -39,11 +40,13 @@ func (d *Driver) Close() error {
 }
 
 func (d *Driver) GenerateDiffSQL(r *diff.Result) ([]string, error) {
-	return nil, fmt.Errorf("not implemented")
+	return migrate.OracleGenerateDiffSQL(r)
 }
+
 func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error) {
-	return nil, fmt.Errorf("not implemented")
+	return migrate.OracleGenerateFullMigrationSQL(src, dst)
 }
+
 func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error) {
-	return nil, fmt.Errorf("not implemented")
+	return migrate.OracleGenerateSelectiveSQL(objects)
 }
