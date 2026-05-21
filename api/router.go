@@ -37,6 +37,12 @@ func NewRouter() *gin.Engine {
 		authed.PUT("/connections/:id", handler.UpdateConnection)
 		authed.DELETE("/connections/:id", handler.DeleteConnection)
 		authed.POST("/connections/:id/test", handler.TestConnection)
+
+		authed.POST("/schema/extract", handler.ExtractSchema)
+		authed.POST("/schema/extract-full", handler.ExtractFullSchema)
+		authed.POST("/schema/parse", handler.ParseDDLFile)
+		authed.GET("/schema/export", handler.ExportDDL)
+		authed.POST("/diff", handler.DiffSchemas)
 	}
 
 	admin := r.Group("/api/admin")
