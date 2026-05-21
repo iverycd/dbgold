@@ -4,7 +4,6 @@ import (
 	"dbgold/diff"
 	"dbgold/migrate"
 	"dbgold/schema"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,12 +86,7 @@ func TestPostgresGenerateFullMigrationSQL(t *testing.T) {
 	sqls, err := migrate.PostgresGenerateFullMigrationSQL(nil, dst)
 	require.NoError(t, err)
 	assert.True(t, len(sqls) >= 2)
-	assert.Contains(t, sqls[0], `CREATE TABLE "users"`)
-	found := false
-	for _, s := range sqls {
-		if strings.Contains(s, `CREATE SEQUENCE "user_seq"`) {
-			found = true
-		}
-	}
-	assert.True(t, found, "expected CREATE SEQUENCE statement")
+	// Sequence must come first (before table)
+	assert.Contains(t, sqls[0], `CREATE SEQUENCE "user_seq"`)
+	assert.Contains(t, sqls[1], `CREATE TABLE "users"`)
 }

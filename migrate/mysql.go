@@ -66,9 +66,6 @@ func MySQLGenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error
 	for _, tr := range objects.Triggers {
 		sqls = append(sqls, tr.Body)
 	}
-	for _, idx := range objects.Indexes {
-		sqls = append(sqls, mysqlCreateIndex("", idx))
-	}
 	return sqls, nil
 }
 

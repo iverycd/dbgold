@@ -43,11 +43,11 @@ func PostgresGenerateDiffSQL(r *diff.Result) ([]string, error) {
 
 func PostgresGenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error) {
 	var sqls []string
-	for _, t := range dst.Tables {
-		sqls = append(sqls, postgresCreateTable(t))
-	}
 	for _, seq := range dst.Sequences {
 		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, seq.Name, seq.Start, seq.Increment))
+	}
+	for _, t := range dst.Tables {
+		sqls = append(sqls, postgresCreateTable(t))
 	}
 	for _, v := range dst.Views {
 		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, v.Name, v.Def))
@@ -60,20 +60,17 @@ func PostgresGenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, er
 
 func PostgresGenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error) {
 	var sqls []string
-	for _, t := range objects.Tables {
-		sqls = append(sqls, postgresCreateTable(t))
-	}
 	for _, seq := range objects.Sequences {
 		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, seq.Name, seq.Start, seq.Increment))
+	}
+	for _, t := range objects.Tables {
+		sqls = append(sqls, postgresCreateTable(t))
 	}
 	for _, v := range objects.Views {
 		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, v.Name, v.Def))
 	}
 	for _, tr := range objects.Triggers {
 		sqls = append(sqls, tr.Body)
-	}
-	for _, idx := range objects.Indexes {
-		sqls = append(sqls, postgresCreateIndex("", idx))
 	}
 	return sqls, nil
 }
