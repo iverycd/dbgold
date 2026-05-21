@@ -70,7 +70,7 @@ const fullLoading = ref(false)
 const fullSqls = ref<string[]>([])
 
 async function handleDiffMigration() {
-  if (!diffSrc.connId || !diffDst.connId) return
+  if (!diffSrc.connId || !diffSrc.dbName || !diffDst.connId || !diffDst.dbName) return
   diffLoading.value = true
   diffSqls.value = []
   try {
