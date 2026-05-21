@@ -1,0 +1,126 @@
+package handler
+
+import (
+	"dbgold/driver"
+	"dbgold/store"
+	"fmt"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type connectionRequest struct {
+	Name     string `json:"name" binding:"required"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver"`
+	Host     string `json:"host" binding:"required"`
+	Port     int    `json:"port" binding:"required,min=1,max=65535"`
+	Database string `json:"database" binding:"required"`
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+func buildDSN(c *store.Connection) string {
+	switch c.DBType {
+	case "mysql":
+		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
+			c.Username, c.Password, c.Host, c.Port, c.Database)
+	case "postgres":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
+	case "oracle":
+		return fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
+			c.Username, c.Password, c.Host, c.Port, c.Database)
+	case "sqlserver":
+		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
+			c.Username, c.Password, c.Host, c.Port, c.Database)
+	}
+	return ""
+}
+
+func GetConnections(c *gin.Context) {
+	list, err := store.ListConnections()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, list)
+}
+
+func CreateConnection(c *gin.Context) {
+	var body connectionRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	conn := &store.Connection{
+		Name: body.Name, DBType: body.DBType,
+		Host: body.Host, Port: body.Port,
+		Database: body.Database, Username: body.Username, Password: body.Password,
+	}
+	if err := store.CreateConnection(conn); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, conn)
+}
+
+func UpdateConnection(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body connectionRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	updates := map[string]any{
+		"name": body.Name, "db_type": body.DBType,
+		"host": body.Host, "port": body.Port,
+		"database": body.Database, "username": body.Username, "password": body.Password,
+	}
+	if err := store.UpdateConnection(uint(id), updates); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "updated"})
+}
+
+func DeleteConnection(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := store.DeleteConnection(uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+}
+
+func TestConnection(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	conn, err := store.GetConnection(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return
+	}
+	d, err := driver.NewDriver(conn.DBType)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer d.Close()
+	if err := d.Connect(buildDSN(conn)); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "connection successful"})
+}
