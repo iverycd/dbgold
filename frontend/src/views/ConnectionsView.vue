@@ -96,7 +96,7 @@ const testingId = ref<number | null>(null)
 const modalVisible = ref(false)
 const submitting = ref(false)
 const editingId = ref<number | null>(null)
-const formRef = ref()
+const formRef = ref<{ validate: () => Promise<Record<string, unknown> | undefined> } | null>(null)
 
 const defaultForm = () => ({
   name: '',
@@ -115,6 +115,8 @@ async function loadConnections() {
   try {
     const res = await listConnections()
     connections.value = res.data
+  } catch {
+    Message.error('加载连接列表失败')
   } finally {
     loading.value = false
   }
