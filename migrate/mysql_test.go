@@ -10,8 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func strPtr(s string) *string { return &s }
-
 func TestMySQLGenerateDiffSQL_AddTable(t *testing.T) {
 	r := &diff.Result{
 		AddedTables: []schema.Table{

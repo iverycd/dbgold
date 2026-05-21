@@ -23,7 +23,7 @@ func MySQLGenerateDiffSQL(r *diff.Result) ([]string, error) {
 			sqls = append(sqls, fmt.Sprintf("ALTER TABLE `%s` DROP COLUMN `%s`", td.TableName, col.Name))
 		}
 		for _, cd := range td.ModifiedColumns {
-			sqls = append(sqls, mysqlModifyColumn(td.TableName, cd.Column))
+			sqls = append(sqls, mysqlModifyColumn(td.TableName, cd))
 		}
 		for _, idx := range td.AddedIndexes {
 			sqls = append(sqls, mysqlCreateIndex(td.TableName, idx))
@@ -115,13 +115,13 @@ func mysqlAddColumn(table string, col schema.Column) string {
 	return def
 }
 
-func mysqlModifyColumn(table string, col schema.Column) string {
-	def := fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `%s` %s", table, col.Name, col.Type)
-	if !col.Nullable {
+func mysqlModifyColumn(table string, cd diff.ColumnDiff) string {
+	def := fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `%s` %s", table, cd.Column.Name, cd.Column.Type)
+	if !cd.Column.Nullable {
 		def += " NOT NULL"
 	}
-	if col.Default != nil {
-		def += fmt.Sprintf(" DEFAULT %s", *col.Default)
+	if cd.DefaultChanged && cd.Column.Default != nil {
+		def += fmt.Sprintf(" DEFAULT %s", *cd.Column.Default)
 	}
 	return def
 }
