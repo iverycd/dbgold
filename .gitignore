@@ -1,0 +1,4 @@
+dbgold
+dbgold.db
+*.db
+.env
