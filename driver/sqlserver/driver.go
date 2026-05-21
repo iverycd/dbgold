@@ -38,12 +38,6 @@ func (d *Driver) Close() error {
 	return nil
 }
 
-func (d *Driver) ExtractSchema(dbName string) (*schema.Schema, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (d *Driver) ExtractFullObjects(dbName string) (*schema.FullSchema, error) {
-	return nil, fmt.Errorf("not implemented")
-}
 func (d *Driver) GenerateDiffSQL(r *diff.Result) ([]string, error) {
 	return nil, fmt.Errorf("not implemented")
 }
