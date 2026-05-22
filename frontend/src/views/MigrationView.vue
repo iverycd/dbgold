@@ -162,6 +162,12 @@
               >{{ line }}</div>
             </div>
           </div>
+
+          <!-- 迁移报告 -->
+          <div v-if="dataMigrate.finished && dataMigrate.currentJobId" style="margin-top: 16px">
+            <a-divider>迁移报告</a-divider>
+            <MigrationReportPanel :jobID="dataMigrate.currentJobId" />
+          </div>
         </div>
       </a-tab-pane>
     </a-tabs>
@@ -173,6 +179,7 @@ import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
+import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import {
