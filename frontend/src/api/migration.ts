@@ -92,5 +92,8 @@ export const listDataMigrationJobs = () =>
   api.get<DataMigrationJob[]>('/migration/data-migrate/jobs')
 
 // createDataMigrateEventSource 创建 SSE 连接，返回 EventSource 实例
-export const createDataMigrateEventSource = (jobID: string): EventSource =>
-  new EventSource(`/api/migration/data-migrate/stream?jobID=${jobID}`)
+// token 通过 query string 传递，因为浏览器 EventSource 不支持自定义 header
+export const createDataMigrateEventSource = (jobID: string): EventSource => {
+  const token = localStorage.getItem('token') ?? ''
+  return new EventSource(`/api/migration/data-migrate/stream?jobID=${jobID}&token=${encodeURIComponent(token)}`)
+}

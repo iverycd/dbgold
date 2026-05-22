@@ -52,10 +52,12 @@ func NewRouter() *gin.Engine {
 
 		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
 		authed.POST("/migration/data-migrate", handler.StartDataMigration)
-		authed.GET("/migration/data-migrate/stream", handler.StreamDataMigration)
 		authed.POST("/migration/data-migrate/:jobID/cancel", handler.CancelDataMigration)
 		authed.GET("/migration/data-migrate/jobs", handler.ListDataMigrationJobs)
 	}
+
+	// SSE 端点：token 从 query string 读取，因为浏览器 EventSource 不支持自定义 header
+	r.GET("/api/migration/data-migrate/stream", handler.StreamDataMigration)
 
 	admin := r.Group("/api/admin")
 	admin.Use(middleware.Auth(), middleware.AdminOnly())

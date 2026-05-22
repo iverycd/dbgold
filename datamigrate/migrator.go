@@ -141,7 +141,8 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 			colDef += " NOT NULL"
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
-			colDef += fmt.Sprintf(" DEFAULT '%s'", *col.Default)
+			escapedDefault := strings.ReplaceAll(*col.Default, "'", "''")
+			colDef += fmt.Sprintf(" DEFAULT '%s'", escapedDefault)
 		}
 		cols = append(cols, "  "+colDef)
 	}
@@ -173,7 +174,9 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) bool {
 		}
 		if err := m.writer.CopyData(ctx, table, cols, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
-			return false
+			// 跳过失败页，继续下一页
+			offset += int64(m.cfg.PageSize)
+			continue
 		}
 		pageNum++
 		m.log.Dataf("迁移 %s: 第 %d 页 (%d 行) ... OK", table, pageNum, len(rows))

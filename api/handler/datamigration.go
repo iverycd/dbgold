@@ -10,6 +10,7 @@ import (
 	"dbgold/datamigrate"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
+	"dbgold/middleware"
 	"dbgold/store"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -155,8 +156,19 @@ func updateJobStatus(job *store.DataMigrationJob, status, summary string) {
 	_ = store.UpdateDataMigrationJob(job)
 }
 
-// StreamDataMigration 通过 SSE 推送迁移日志
+// StreamDataMigration 通过 SSE 推送迁移日志（token 从 query string 读取，因为 EventSource 不支持 Authorization header）
 func StreamDataMigration(c *gin.Context) {
+	// 手动验证 token（EventSource 不支持自定义 header）
+	tokenStr := c.Query("token")
+	if tokenStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少 token"})
+		return
+	}
+	if err := middleware.ValidateTokenString(tokenStr); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token 无效"})
+		return
+	}
+
 	jobID := c.Query("jobID")
 	if jobID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "jobID 必填"})
