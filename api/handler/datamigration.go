@@ -3,6 +3,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -136,7 +137,14 @@ func StartDataMigration(c *gin.Context) {
 			Filter:      req.TableFilter,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
-		m.Run(ctx)
+		report := m.Run(ctx)
+
+		if reportJSON, err := json.Marshal(report); err == nil {
+			_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
+				JobID:      jobID,
+				ReportJSON: string(reportJSON),
+			})
+		}
 
 		status := "done"
 		if ctx.Err() != nil {
@@ -223,4 +231,15 @@ func ListDataMigrationJobs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, jobs)
+}
+
+// GetDataMigrationReport 返回指定任务的迁移报告 JSON
+func GetDataMigrationReport(c *gin.Context) {
+	jobID := c.Param("jobID")
+	r, err := store.GetDataMigrationReport(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在"})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", []byte(r.ReportJSON))
 }
