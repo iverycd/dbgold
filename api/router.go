@@ -49,6 +49,12 @@ func NewRouter() *gin.Engine {
 		authed.POST("/migration/selective", handler.RunSelectiveMigration)
 		authed.GET("/migration", handler.ListMigrations)
 		authed.GET("/migration/:id", handler.GetMigration)
+
+		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
+		authed.POST("/migration/data-migrate", handler.StartDataMigration)
+		authed.GET("/migration/data-migrate/stream", handler.StreamDataMigration)
+		authed.POST("/migration/data-migrate/:jobID/cancel", handler.CancelDataMigration)
+		authed.GET("/migration/data-migrate/jobs", handler.ListDataMigrationJobs)
 	}
 
 	admin := r.Group("/api/admin")
