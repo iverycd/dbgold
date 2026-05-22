@@ -57,6 +57,8 @@ type ViewInfo struct {
 type Reader interface {
 	// DBType 返回数据库类型标识，如 "mysql"
 	DBType() string
+	// Close 关闭源库连接，释放资源
+	Close() error
 	// ListTables 返回过滤后的表名列表
 	ListTables(ctx context.Context) ([]string, error)
 	// GetTableDDLInfo 返回指定表的列定义
@@ -65,7 +67,7 @@ type Reader interface {
 	GetPrimaryKey(ctx context.Context, table string) (string, error)
 	// ReadPage 分页读取数据：有主键时按主键分页，无主键时 pkCol 为空、offset/limit 用 LIMIT
 	// 返回列名切片和行数据切片
-	ReadPage(ctx context.Context, table, pkCol string, offset, limit int) (cols []string, rows [][]interface{}, err error)
+	ReadPage(ctx context.Context, table, pkCol string, offset, limit int64) (cols []string, rows [][]interface{}, err error)
 	// GetSequences 返回所有 AUTO_INCREMENT 列信息
 	GetSequences(ctx context.Context) ([]SequenceInfo, error)
 	// GetIndexes 返回所有索引信息（不含主键）
