@@ -45,3 +45,52 @@ export const runFullMigration = (req: FullMigrationRequest) =>
 export const listMigrations = () => api.get<MigrationHistory[]>('/migration')
 
 export const getMigration = (id: number) => api.get<MigrationHistory>(`/migration/${id}`)
+
+// ===== 数据迁移 =====
+
+export interface SupportedPair {
+  source: string
+  target: string
+}
+
+export interface StartDataMigrationRequest {
+  src_conn_id: number
+  dst_conn_id: number
+  migrate_mode: 'all' | 'include' | 'exclude'
+  table_filter?: string
+  page_size?: number
+  max_parallel?: number
+}
+
+export interface DataMigrationJob {
+  id: number
+  job_id: string
+  src_conn_id: number
+  dst_conn_id: number
+  src_db_type: string
+  dst_db_type: string
+  migrate_mode: string
+  table_filter: string
+  page_size: number
+  max_parallel: number
+  status: 'running' | 'done' | 'failed' | 'cancelled'
+  summary: string
+  created_at: string
+  finished_at?: string
+}
+
+export const getSupportedPairs = () =>
+  api.get<SupportedPair[]>('/migration/data-migrate/supported-pairs')
+
+export const startDataMigration = (data: StartDataMigrationRequest) =>
+  api.post<{ job_id: string }>('/migration/data-migrate', data)
+
+export const cancelDataMigration = (jobID: string) =>
+  api.post<void>(`/migration/data-migrate/${jobID}/cancel`)
+
+export const listDataMigrationJobs = () =>
+  api.get<DataMigrationJob[]>('/migration/data-migrate/jobs')
+
+// createDataMigrateEventSource 创建 SSE 连接，返回 EventSource 实例
+export const createDataMigrateEventSource = (jobID: string): EventSource =>
+  new EventSource(`/api/migration/data-migrate/stream?jobID=${jobID}`)
