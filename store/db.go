@@ -38,7 +38,7 @@ func Init(cfg *config.Config) {
 	if err != nil {
 		log.Fatalf("failed to open sqlite: %v", err)
 	}
-	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}); err != nil {
 		log.Fatalf("failed to migrate: %v", err)
 	}
 }
