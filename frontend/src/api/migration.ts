@@ -97,3 +97,31 @@ export const createDataMigrateEventSource = (jobID: string): EventSource => {
   const token = localStorage.getItem('token') ?? ''
   return new EventSource(`/api/migration/data-migrate/stream?jobID=${jobID}&token=${encodeURIComponent(token)}`)
 }
+
+// ===== 迁移报告 =====
+
+export interface ObjectResult {
+  name: string
+  ddl: string
+  error: string
+}
+
+export interface CategoryReport {
+  total: number
+  success: number
+  failed: number
+  items: ObjectResult[]
+}
+
+export interface MigrationReport {
+  tables: CategoryReport
+  data: CategoryReport
+  views: CategoryReport
+  indexes: CategoryReport
+  constraints: CategoryReport
+  sequences: CategoryReport
+  triggers: CategoryReport
+}
+
+export const getDataMigrationReport = (jobID: string) =>
+  api.get<MigrationReport>(`/migration/data-migrate/${jobID}/report`)
