@@ -239,8 +239,8 @@ const logContainer = ref<HTMLElement | null>(null)
 let currentEventSource: EventSource | null = null
 
 const dataMigrate = reactive({
-  srcConnId: null as number | null,
-  dstConnId: null as number | null,
+  srcConnId: undefined as number | undefined,
+  dstConnId: undefined as number | undefined,
   mode: 'all' as 'all' | 'include' | 'exclude',
   filter: '',
   pageSize: 10000,
@@ -260,8 +260,8 @@ const pgConnections = computed(() =>
 )
 
 const canStartMigration = computed(() =>
-  dataMigrate.srcConnId !== null &&
-  dataMigrate.dstConnId !== null &&
+  dataMigrate.srcConnId !== undefined &&
+  dataMigrate.dstConnId !== undefined &&
   !dataMigrate.unsupportedMsg &&
   !dataMigrate.running
 )
