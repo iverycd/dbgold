@@ -38,7 +38,8 @@ func (m *mockReader) ReadPage(_ context.Context, t, _ string, _, _ int64) ([]str
 func (m *mockReader) GetSequences(_ context.Context) ([]source.SequenceInfo, error) { return nil, nil }
 func (m *mockReader) GetIndexes(_ context.Context) ([]source.IndexInfo, error)      { return nil, nil }
 func (m *mockReader) GetForeignKeys(_ context.Context) ([]source.FKInfo, error)     { return nil, nil }
-func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)         { return nil, nil }
+func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)          { return nil, nil }
+func (m *mockReader) GetTriggerCount(_ context.Context) (int, error)                { return 2, nil }
 
 // mockWriter 实现 target.Writer 接口，用于测试
 type mockWriter struct {

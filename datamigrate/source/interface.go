@@ -76,4 +76,6 @@ type Reader interface {
 	GetForeignKeys(ctx context.Context) ([]FKInfo, error)
 	// GetViews 返回所有视图信息
 	GetViews(ctx context.Context) ([]ViewInfo, error)
+	// GetTriggerCount 返回源库触发器总数，失败时返回 0 和 error
+	GetTriggerCount(ctx context.Context) (int, error)
 }

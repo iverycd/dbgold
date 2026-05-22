@@ -270,3 +270,16 @@ func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 	}
 	return views, rows.Err()
 }
+
+// GetTriggerCount 查询 information_schema.TRIGGERS 返回触发器总数
+func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?`,
+		r.dbName,
+	).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
