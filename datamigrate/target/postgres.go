@@ -67,11 +67,12 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 
 func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
 	seqName := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
-	ddl := fmt.Sprintf(
-		`CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d;
-		 ALTER TABLE %s ALTER COLUMN %s SET DEFAULT nextval('%s');`,
-		seqName, seq.StartValue, seq.TableName, seq.ColumnName, seqName)
-	_, err := w.db.ExecContext(ctx, ddl)
+	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", seqName, seq.StartValue)
+	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
+		return err
+	}
+	alterSQL := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT nextval('%s')", seq.TableName, seq.ColumnName, seqName)
+	_, err := w.db.ExecContext(ctx, alterSQL)
 	return err
 }
 
