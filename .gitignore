@@ -2,3 +2,5 @@ dbgold
 dbgold.db
 *.db
 .env
+.idea
+docs

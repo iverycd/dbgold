@@ -12,6 +12,7 @@
         row-key="key"
         :pagination="false"
         size="small"
+        :expandable="({ rowExpandable: (r: ReportRow) => !r.isTrigger && r.failed > 0 } as any)"
       >
         <template #columns>
           <a-table-column title="对象类型" data-index="label" :width="120" />
@@ -41,7 +42,7 @@
         </template>
 
         <template #expand-row="{ record }">
-          <div v-if="!record.isTrigger && record.failed > 0" class="failure-list">
+          <div class="failure-list">
             <div
               v-for="item in record.items"
               :key="item.name"
