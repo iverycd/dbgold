@@ -39,14 +39,14 @@ func (d *Driver) Close() error {
 	return nil
 }
 
-func (d *Driver) GenerateDiffSQL(r *diff.Result) ([]string, error) {
-	return migrate.SQLServerGenerateDiffSQL(r, false)
+func (d *Driver) GenerateDiffSQL(r *diff.Result, lowerCase bool) ([]string, error) {
+	return migrate.SQLServerGenerateDiffSQL(r, lowerCase)
 }
 
-func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error) {
-	return migrate.SQLServerGenerateFullMigrationSQL(src, dst, false)
+func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema, lowerCase bool) ([]string, error) {
+	return migrate.SQLServerGenerateFullMigrationSQL(src, dst, lowerCase)
 }
 
-func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error) {
-	return migrate.SQLServerGenerateSelectiveSQL(objects, false)
+func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects, lowerCase bool) ([]string, error) {
+	return migrate.SQLServerGenerateSelectiveSQL(objects, lowerCase)
 }

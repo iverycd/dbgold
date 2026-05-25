@@ -11,7 +11,7 @@ type Driver interface {
 	Close() error
 	ExtractSchema(dbName string) (*schema.Schema, error)
 	ExtractFullObjects(dbName string) (*schema.FullSchema, error)
-	GenerateDiffSQL(d *diff.Result) ([]string, error)
-	GenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error)
-	GenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error)
+	GenerateDiffSQL(d *diff.Result, lowerCase bool) ([]string, error)
+	GenerateFullMigrationSQL(src, dst *schema.FullSchema, lowerCase bool) ([]string, error)
+	GenerateSelectiveSQL(objects *schema.SelectedObjects, lowerCase bool) ([]string, error)
 }
