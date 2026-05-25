@@ -209,12 +209,29 @@ func TestMySQLGenerateDiffSQL_LowerCase_ModifyAndDrop(t *testing.T) {
 	}
 	sqls, err := migrate.MySQLGenerateDiffSQL(r, true)
 	require.NoError(t, err)
+	// DROP TABLE
 	assert.Contains(t, findSQL(sqls, "DROP TABLE"), "`oldtable`")
-	assert.Contains(t, findSQL(sqls, "DROP COLUMN"), "`oldcol`")
-	assert.Contains(t, findSQL(sqls, "MODIFY COLUMN"), "`score`")
-	assert.Contains(t, findSQL(sqls, "CREATE"), "`idx_score`")
+	// DROP COLUMN: table name and column name both lowercased
+	dropCol := findSQL(sqls, "DROP COLUMN")
+	assert.Contains(t, dropCol, "`userorder`")
+	assert.Contains(t, dropCol, "`oldcol`")
+	// MODIFY COLUMN: table name, column name lowercased
+	modifyCol := findSQL(sqls, "MODIFY COLUMN")
+	assert.Contains(t, modifyCol, "`userorder`")
+	assert.Contains(t, modifyCol, "`score`")
+	// CREATE INDEX: index name, table name, column name lowercased
+	createIdx := findSQL(sqls, "CREATE INDEX")
+	assert.Contains(t, createIdx, "`idx_score`")
+	assert.Contains(t, createIdx, "`userorder`")
+	assert.Contains(t, createIdx, "`score`")
+	// DROP INDEX
 	assert.Contains(t, findSQL(sqls, "DROP INDEX"), "`idx_old`")
-	assert.Contains(t, findSQL(sqls, "FOREIGN KEY"), "`fk_user`")
+	// ADD CONSTRAINT (FK): constraint name, column names, ref table, ref columns lowercased
+	addFK := findSQL(sqls, "ADD CONSTRAINT")
+	assert.Contains(t, addFK, "`fk_user`")
+	assert.Contains(t, addFK, "`userid`")
+	assert.Contains(t, addFK, "`usertable`")
+	assert.Contains(t, addFK, "`id`")
+	// DROP FOREIGN KEY
 	assert.Contains(t, findSQL(sqls, "DROP FOREIGN KEY"), "`fk_old`")
-	assert.Contains(t, findSQL(sqls, "REFERENCES"), "`usertable`")
 }

@@ -132,6 +132,7 @@ func mysqlCreateIndex(table string, idx schema.Index, lowerCase bool) string {
 	if idx.Unique {
 		unique = "UNIQUE "
 	}
+	// table is always non-empty in practice; this branch exists for symmetry with other drivers
 	if table == "" {
 		return fmt.Sprintf("CREATE %sINDEX `%s` (%s)", unique, normName(idx.Name, lowerCase), strings.Join(cols, ", "))
 	}
