@@ -40,13 +40,13 @@ func (d *Driver) Close() error {
 }
 
 func (d *Driver) GenerateDiffSQL(r *diff.Result) ([]string, error) {
-	return migrate.MySQLGenerateDiffSQL(r)
+	return migrate.MySQLGenerateDiffSQL(r, false)
 }
 
 func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error) {
-	return migrate.MySQLGenerateFullMigrationSQL(src, dst)
+	return migrate.MySQLGenerateFullMigrationSQL(src, dst, false)
 }
 
 func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error) {
-	return migrate.MySQLGenerateSelectiveSQL(objects)
+	return migrate.MySQLGenerateSelectiveSQL(objects, false)
 }

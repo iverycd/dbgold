@@ -221,14 +221,14 @@ func GetMigration(c *gin.Context) {
 func generateDiffSQLByType(dbType string, r *diff.Result) ([]string, error) {
 	switch dbType {
 	case "mysql":
-		return migrate.MySQLGenerateDiffSQL(r)
+		return migrate.MySQLGenerateDiffSQL(r, false)
 	case "postgres":
-		return migrate.PostgresGenerateDiffSQL(r)
+		return migrate.PostgresGenerateDiffSQL(r, false)
 	case "oracle":
-		return migrate.OracleGenerateDiffSQL(r)
+		return migrate.OracleGenerateDiffSQL(r, false)
 	case "sqlserver":
-		return migrate.SQLServerGenerateDiffSQL(r)
+		return migrate.SQLServerGenerateDiffSQL(r, false)
 	default:
-		return migrate.MySQLGenerateDiffSQL(r)
+		return migrate.MySQLGenerateDiffSQL(r, false)
 	}
 }
