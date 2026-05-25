@@ -147,8 +147,12 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 			colDef += " NOT NULL"
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
-			escapedDefault := strings.ReplaceAll(*col.Default, "'", "''")
-			colDef += fmt.Sprintf(" DEFAULT '%s'", escapedDefault)
+			def := *col.Default
+			if isFunctionDefault(def) {
+				colDef += fmt.Sprintf(" DEFAULT %s", pgFunctionDefault(def))
+			} else {
+				colDef += fmt.Sprintf(" DEFAULT '%s'", strings.ReplaceAll(def, "'", "''"))
+			}
 		}
 		cols = append(cols, "  "+colDef)
 	}
@@ -304,5 +308,42 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 				report.Views.Success++
 			}
 		}
+	}
+}
+
+// isFunctionDefault 判断默认值是否为函数或关键字（不应加引号）
+func isFunctionDefault(def string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(def))
+	keywords := []string{
+		"CURRENT_TIMESTAMP", "NOW()", "CURRENT_DATE", "CURRENT_TIME",
+		"NULL", "TRUE", "FALSE",
+	}
+	for _, kw := range keywords {
+		if upper == kw {
+			return true
+		}
+	}
+	// 以括号结尾的视为函数调用
+	return strings.HasSuffix(upper, ")")
+}
+
+// pgFunctionDefault 将 MySQL 函数默认值映射到 PostgreSQL 等价形式
+func pgFunctionDefault(def string) string {
+	upper := strings.ToUpper(strings.TrimSpace(def))
+	switch upper {
+	case "CURRENT_TIMESTAMP", "NOW()":
+		return "CURRENT_TIMESTAMP"
+	case "CURRENT_DATE":
+		return "CURRENT_DATE"
+	case "CURRENT_TIME":
+		return "CURRENT_TIME"
+	case "NULL":
+		return "NULL"
+	case "TRUE":
+		return "TRUE"
+	case "FALSE":
+		return "FALSE"
+	default:
+		return def
 	}
 }
