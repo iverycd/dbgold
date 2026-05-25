@@ -15,8 +15,9 @@ type DataMigrationJob struct {
 	MaxParallel int        `json:"max_parallel"`
 	Status      string     `json:"status"` // running / done / failed / cancelled
 	Summary     string     `json:"summary"`
-	CreatedAt   time.Time  `json:"created_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	LowerCaseNames bool       `json:"lower_case_names"`
 }
 
 func CreateDataMigrationJob(j *DataMigrationJob) error {

@@ -15,10 +15,11 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
-	PageSize    int
-	MaxParallel int
-	Mode        string
-	Filter      string
+	PageSize       int
+	MaxParallel    int
+	Mode           string
+	Filter         string
+	LowerCaseNames bool
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -33,6 +34,14 @@ type Migrator struct {
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
 	return &Migrator{reader: reader, writer: writer, job: job, cfg: cfg, log: NewLogger(job.LogCh)}
+}
+
+// objName 根据 LowerCaseNames 配置决定是否将对象名转为小写
+func (m *Migrator) objName(s string) string {
+	if m.cfg.LowerCaseNames {
+		return strings.ToLower(s)
+	}
+	return s
 }
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
@@ -142,7 +151,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 	var cols []string
 	for _, col := range info.Columns {
 		pgType := typemap.MySQLToPG(col)
-		colDef := fmt.Sprintf(`"%s" %s`, col.Name, pgType)
+		colDef := fmt.Sprintf(`"%s" %s`, m.objName(col.Name), pgType)
 		if !col.IsNullable {
 			colDef += " NOT NULL"
 		}
@@ -156,8 +165,9 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 		}
 		cols = append(cols, "  "+colDef)
 	}
+	tblName := m.objName(table)
 	ddl := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\";\nCREATE TABLE \"%s\" (\n%s\n);",
-		table, table, strings.Join(cols, ",\n"))
+		tblName, tblName, strings.Join(cols, ",\n"))
 	return ddl, nil
 }
 
@@ -220,17 +230,20 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			if ctx.Err() != nil {
 				return
 			}
-			ddl := SequenceDDL(seq)
-			if err := m.writer.CreateSequence(ctx, seq); err != nil {
-				m.log.Errorf("创建序列失败 [%s.%s]: %v", seq.TableName, seq.ColumnName, err)
+			seqCopy := seq
+			seqCopy.TableName = m.objName(seq.TableName)
+			seqCopy.ColumnName = m.objName(seq.ColumnName)
+			ddl := SequenceDDL(seqCopy)
+			if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
+				m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 				report.Sequences.Failed++
 				report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
-					Name:  fmt.Sprintf("%s.%s", seq.TableName, seq.ColumnName),
+					Name:  fmt.Sprintf("%s.%s", seqCopy.TableName, seqCopy.ColumnName),
 					DDL:   ddl,
 					Error: err.Error(),
 				})
 			} else {
-				m.log.Indexf("创建序列 seq_%s_%s ... OK", seq.TableName, seq.ColumnName)
+				m.log.Indexf("创建序列 seq_%s_%s ... OK", seqCopy.TableName, seqCopy.ColumnName)
 				report.Sequences.Success++
 			}
 		}
@@ -245,17 +258,23 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			if ctx.Err() != nil {
 				return
 			}
-			ddl := IndexDDL(idx)
-			if err := m.writer.CreateIndex(ctx, idx); err != nil {
-				m.log.Errorf("创建索引失败 [%s]: %v", idx.IndexName, err)
+			idxCopy := idx
+			idxCopy.TableName = m.objName(idx.TableName)
+			idxCopy.IndexName = m.objName(idx.IndexName)
+			for i, c := range idxCopy.Columns {
+				idxCopy.Columns[i] = m.objName(c)
+			}
+			ddl := IndexDDL(idxCopy)
+			if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
+				m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
 				report.Indexes.Failed++
 				report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
-					Name:  idx.IndexName,
+					Name:  idxCopy.IndexName,
 					DDL:   ddl,
 					Error: err.Error(),
 				})
 			} else {
-				m.log.Indexf("创建索引 %s ... OK", idx.IndexName)
+				m.log.Indexf("创建索引 %s ... OK", idxCopy.IndexName)
 				report.Indexes.Success++
 			}
 		}
@@ -270,17 +289,27 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			if ctx.Err() != nil {
 				return
 			}
-			ddl := FKDDL(fk)
-			if err := m.writer.CreateForeignKey(ctx, fk); err != nil {
-				m.log.Errorf("创建外键失败 [%s]: %v", fk.ConstraintName, err)
+			fkCopy := fk
+			fkCopy.TableName = m.objName(fk.TableName)
+			fkCopy.ConstraintName = m.objName(fk.ConstraintName)
+			for i, c := range fkCopy.Columns {
+				fkCopy.Columns[i] = m.objName(c)
+			}
+			fkCopy.RefTable = m.objName(fk.RefTable)
+			for i, c := range fkCopy.RefColumns {
+				fkCopy.RefColumns[i] = m.objName(c)
+			}
+			ddl := FKDDL(fkCopy)
+			if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
+				m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
 				report.Constraints.Failed++
 				report.Constraints.Items = append(report.Constraints.Items, ObjectResult{
-					Name:  fk.ConstraintName,
+					Name:  fkCopy.ConstraintName,
 					DDL:   ddl,
 					Error: err.Error(),
 				})
 			} else {
-				m.log.Indexf("创建外键 %s ... OK", fk.ConstraintName)
+				m.log.Indexf("创建外键 %s ... OK", fkCopy.ConstraintName)
 				report.Constraints.Success++
 			}
 		}

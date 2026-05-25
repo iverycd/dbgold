@@ -34,12 +34,13 @@ func GetSupportedPairs(c *gin.Context) {
 }
 
 type startDataMigrationRequest struct {
-	SrcConnID   uint   `json:"src_conn_id" binding:"required"`
-	DstConnID   uint   `json:"dst_conn_id" binding:"required"`
-	MigrateMode string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
-	TableFilter string `json:"table_filter"`
-	PageSize    int    `json:"page_size"`
-	MaxParallel int    `json:"max_parallel"`
+	SrcConnID      uint   `json:"src_conn_id" binding:"required"`
+	DstConnID      uint   `json:"dst_conn_id" binding:"required"`
+	MigrateMode    string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
+	TableFilter    string `json:"table_filter"`
+	PageSize       int    `json:"page_size"`
+	MaxParallel    int    `json:"max_parallel"`
+	LowerCaseNames bool   `json:"lower_case_names"`
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -88,16 +89,17 @@ func StartDataMigration(c *gin.Context) {
 
 	// 持久化任务记录
 	dbJob := &store.DataMigrationJob{
-		JobID:       jobID,
-		SrcConnID:   req.SrcConnID,
-		DstConnID:   req.DstConnID,
-		SrcDBType:   srcConn.DBType,
-		DstDBType:   dstConn.DBType,
-		MigrateMode: req.MigrateMode,
-		TableFilter: req.TableFilter,
-		PageSize:    req.PageSize,
-		MaxParallel: req.MaxParallel,
-		Status:      "running",
+		JobID:          jobID,
+		SrcConnID:      req.SrcConnID,
+		DstConnID:      req.DstConnID,
+		SrcDBType:      srcConn.DBType,
+		DstDBType:      dstConn.DBType,
+		MigrateMode:    req.MigrateMode,
+		TableFilter:    req.TableFilter,
+		PageSize:       req.PageSize,
+		MaxParallel:    req.MaxParallel,
+		LowerCaseNames: req.LowerCaseNames,
+		Status:         "running",
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
 		cancel()
@@ -131,10 +133,11 @@ func StartDataMigration(c *gin.Context) {
 		defer writer.Close()
 
 		cfg := datamigrate.Config{
-			PageSize:    req.PageSize,
-			MaxParallel: req.MaxParallel,
-			Mode:        req.MigrateMode,
-			Filter:      req.TableFilter,
+			PageSize:       req.PageSize,
+			MaxParallel:    req.MaxParallel,
+			Mode:           req.MigrateMode,
+			Filter:         req.TableFilter,
+			LowerCaseNames: req.LowerCaseNames,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)
