@@ -19,6 +19,7 @@
               </a-card>
             </a-col>
           </a-row>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
           <a-button
             type="primary"
             :loading="diffLoading"
@@ -36,6 +37,7 @@
           <a-card title="目标数据库（将为此库生成完整建表 SQL）">
             <connection-select v-model:connection-id="fullDst.connId" v-model:database="fullDst.dbName" />
           </a-card>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
           <a-button
             type="primary"
             :loading="fullLoading"
@@ -124,6 +126,11 @@
                     <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" />
                   </a-form-item>
                 </a-col>
+                <a-col :span="24">
+                  <a-form-item>
+                    <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写（表名、列名等统一转为小写）</a-checkbox>
+                  </a-form-item>
+                </a-col>
               </a-row>
             </a-collapse-item>
           </a-collapse>
@@ -196,6 +203,7 @@ const diffSrc = reactive({ connId: undefined as number | undefined, dbName: '' }
 const diffDst = reactive({ connId: undefined as number | undefined, dbName: '' })
 const diffLoading = ref(false)
 const diffSqls = ref<string[]>([])
+const schemaMigrateLowerCase = ref(true)
 
 const fullDst = reactive({ connId: undefined as number | undefined, dbName: '' })
 const fullLoading = ref(false)
@@ -211,6 +219,7 @@ async function handleDiffMigration() {
       src_database: diffSrc.dbName,
       dst_connection_id: diffDst.connId,
       dst_database: diffDst.dbName,
+      lower_case_names: schemaMigrateLowerCase.value,
     })
     diffSqls.value = res.data.sql_statements
     Message.success(`已生成 ${diffSqls.value.length} 条 SQL`)
@@ -229,6 +238,7 @@ async function handleFullMigration() {
     const res = await runFullMigration({
       dst_connection_id: fullDst.connId,
       dst_database: fullDst.dbName,
+      lower_case_names: schemaMigrateLowerCase.value,
     })
     fullSqls.value = res.data.sql_statements
     Message.success(`已生成 ${fullSqls.value.length} 条 SQL`)
@@ -252,6 +262,7 @@ const dataMigrate = reactive({
   filter: '',
   pageSize: 10000,
   maxParallel: 5,
+  lowerCaseNames: true,
   running: false,
   finished: false,
   logs: [] as string[],
@@ -308,6 +319,7 @@ async function startDataMigration() {
       table_filter: dataMigrate.filter,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
+      lower_case_names: dataMigrate.lowerCaseNames,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)

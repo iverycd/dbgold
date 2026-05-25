@@ -27,6 +27,7 @@ export interface DiffMigrationRequest {
   dst_database?: string
   dst_schema?: Schema
   db_type?: string
+  lower_case_names?: boolean
 }
 
 export interface FullMigrationRequest {
@@ -34,6 +35,7 @@ export interface FullMigrationRequest {
   src_database?: string
   dst_connection_id: number
   dst_database: string
+  lower_case_names?: boolean
 }
 
 export const runDiffMigration = (req: DiffMigrationRequest) =>
@@ -60,6 +62,7 @@ export interface StartDataMigrationRequest {
   table_filter?: string
   page_size?: number
   max_parallel?: number
+  lower_case_names?: boolean
 }
 
 export interface DataMigrationJob {
