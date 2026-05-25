@@ -261,9 +261,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			idxCopy := idx
 			idxCopy.TableName = m.objName(idx.TableName)
 			idxCopy.IndexName = m.objName(idx.IndexName)
-			for i, c := range idxCopy.Columns {
-				idxCopy.Columns[i] = m.objName(c)
+			cols := make([]string, len(idx.Columns))
+			for i, c := range idx.Columns {
+				cols[i] = m.objName(c)
 			}
+			idxCopy.Columns = cols
 			ddl := IndexDDL(idxCopy)
 			if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
 				m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
@@ -292,13 +294,17 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			fkCopy := fk
 			fkCopy.TableName = m.objName(fk.TableName)
 			fkCopy.ConstraintName = m.objName(fk.ConstraintName)
-			for i, c := range fkCopy.Columns {
-				fkCopy.Columns[i] = m.objName(c)
+			fkCols := make([]string, len(fk.Columns))
+			for i, c := range fk.Columns {
+				fkCols[i] = m.objName(c)
 			}
+			fkCopy.Columns = fkCols
 			fkCopy.RefTable = m.objName(fk.RefTable)
-			for i, c := range fkCopy.RefColumns {
-				fkCopy.RefColumns[i] = m.objName(c)
+			refCols := make([]string, len(fk.RefColumns))
+			for i, c := range fk.RefColumns {
+				refCols[i] = m.objName(c)
 			}
+			fkCopy.RefColumns = refCols
 			ddl := FKDDL(fkCopy)
 			if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
 				m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
