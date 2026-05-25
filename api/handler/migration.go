@@ -21,6 +21,7 @@ type diffMigrationRequest struct {
 	DstDatabase     string         `json:"dst_database"`
 	DstSchema       *schema.Schema `json:"dst_schema"`
 	DBType          string         `json:"db_type"` // dialect when both sides are inline
+	LowerCaseNames  bool           `json:"lower_case_names"`
 }
 
 type fullMigrationRequest struct {
@@ -28,12 +29,14 @@ type fullMigrationRequest struct {
 	SrcDatabase     string `json:"src_database"`
 	DstConnectionID uint   `json:"dst_connection_id" binding:"required"`
 	DstDatabase     string `json:"dst_database" binding:"required"`
+	LowerCaseNames  bool   `json:"lower_case_names"`
 }
 
 type selectiveMigrationRequest struct {
-	ConnectionID uint                    `json:"connection_id" binding:"required"`
-	Database     string                  `json:"database" binding:"required"`
-	Objects      *schema.SelectedObjects `json:"objects" binding:"required"`
+	ConnectionID   uint                    `json:"connection_id" binding:"required"`
+	Database       string                  `json:"database" binding:"required"`
+	Objects        *schema.SelectedObjects `json:"objects" binding:"required"`
+	LowerCaseNames bool                    `json:"lower_case_names"`
 }
 
 func RunDiffMigration(c *gin.Context) {
@@ -73,7 +76,7 @@ func RunDiffMigration(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
-		sqls, err = d.GenerateDiffSQL(diffResult)
+		sqls, err = d.GenerateDiffSQL(diffResult, body.LowerCaseNames)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -83,7 +86,7 @@ func RunDiffMigration(c *gin.Context) {
 		if dbType == "" {
 			dbType = "mysql"
 		}
-		sqls, err = generateDiffSQLByType(dbType, diffResult)
+		sqls, err = generateDiffSQLByType(dbType, diffResult, body.LowerCaseNames)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -133,7 +136,7 @@ func RunFullMigration(c *gin.Context) {
 		return
 	}
 
-	sqls, err := dstDriver.GenerateFullMigrationSQL(nil, dstFull)
+	sqls, err := dstDriver.GenerateFullMigrationSQL(nil, dstFull, body.LowerCaseNames)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -176,7 +179,7 @@ func RunSelectiveMigration(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	sqls, err := d.GenerateSelectiveSQL(body.Objects)
+	sqls, err := d.GenerateSelectiveSQL(body.Objects, body.LowerCaseNames)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -218,17 +221,17 @@ func GetMigration(c *gin.Context) {
 	c.JSON(http.StatusOK, m)
 }
 
-func generateDiffSQLByType(dbType string, r *diff.Result) ([]string, error) {
+func generateDiffSQLByType(dbType string, r *diff.Result, lowerCase bool) ([]string, error) {
 	switch dbType {
 	case "mysql":
-		return migrate.MySQLGenerateDiffSQL(r, false)
+		return migrate.MySQLGenerateDiffSQL(r, lowerCase)
 	case "postgres":
-		return migrate.PostgresGenerateDiffSQL(r, false)
+		return migrate.PostgresGenerateDiffSQL(r, lowerCase)
 	case "oracle":
-		return migrate.OracleGenerateDiffSQL(r, false)
+		return migrate.OracleGenerateDiffSQL(r, lowerCase)
 	case "sqlserver":
-		return migrate.SQLServerGenerateDiffSQL(r, false)
+		return migrate.SQLServerGenerateDiffSQL(r, lowerCase)
 	default:
-		return migrate.MySQLGenerateDiffSQL(r, false)
+		return migrate.MySQLGenerateDiffSQL(r, lowerCase)
 	}
 }
