@@ -7,50 +7,57 @@ import (
 	"strings"
 )
 
-func PostgresGenerateDiffSQL(r *diff.Result) ([]string, error) {
+func n(s string, lower bool) string {
+	if lower {
+		return strings.ToLower(s)
+	}
+	return s
+}
+
+func PostgresGenerateDiffSQL(r *diff.Result, lowerCase bool) ([]string, error) {
 	var sqls []string
 	for _, t := range r.AddedTables {
-		sqls = append(sqls, postgresCreateTable(t))
+		sqls = append(sqls, postgresCreateTable(t, lowerCase))
 	}
 	for _, t := range r.DroppedTables {
-		sqls = append(sqls, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, t.Name))
+		sqls = append(sqls, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, n(t.Name, lowerCase)))
 	}
 	for _, td := range r.ModifiedTables {
 		for _, col := range td.AddedColumns {
-			sqls = append(sqls, postgresAddColumn(td.TableName, col))
+			sqls = append(sqls, postgresAddColumn(n(td.TableName, lowerCase), col, lowerCase))
 		}
 		for _, col := range td.DroppedColumns {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" DROP COLUMN "%s"`, td.TableName, col.Name))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" DROP COLUMN "%s"`, n(td.TableName, lowerCase), n(col.Name, lowerCase)))
 		}
 		for _, cd := range td.ModifiedColumns {
-			sqls = append(sqls, postgresModifyColumn(td.TableName, cd)...)
+			sqls = append(sqls, postgresModifyColumn(n(td.TableName, lowerCase), cd, lowerCase)...)
 		}
 		for _, idx := range td.AddedIndexes {
-			sqls = append(sqls, postgresCreateIndex(td.TableName, idx))
+			sqls = append(sqls, postgresCreateIndex(n(td.TableName, lowerCase), idx, lowerCase))
 		}
 		for _, idx := range td.DroppedIndexes {
-			sqls = append(sqls, fmt.Sprintf(`DROP INDEX "%s"`, idx.Name))
+			sqls = append(sqls, fmt.Sprintf(`DROP INDEX "%s"`, n(idx.Name, lowerCase)))
 		}
 		for _, fk := range td.AddedForeignKeys {
-			sqls = append(sqls, postgresAddForeignKey(td.TableName, fk))
+			sqls = append(sqls, postgresAddForeignKey(n(td.TableName, lowerCase), fk, lowerCase))
 		}
 		for _, fk := range td.DroppedForeignKeys {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" DROP CONSTRAINT "%s"`, td.TableName, fk.Name))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" DROP CONSTRAINT "%s"`, n(td.TableName, lowerCase), n(fk.Name, lowerCase)))
 		}
 	}
 	return sqls, nil
 }
 
-func PostgresGenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, error) {
+func PostgresGenerateFullMigrationSQL(src, dst *schema.FullSchema, lowerCase bool) ([]string, error) {
 	var sqls []string
 	for _, seq := range dst.Sequences {
-		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, seq.Name, seq.Start, seq.Increment))
+		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, n(seq.Name, lowerCase), seq.Start, seq.Increment))
 	}
 	for _, t := range dst.Tables {
-		sqls = append(sqls, postgresCreateTable(t))
+		sqls = append(sqls, postgresCreateTable(t, lowerCase))
 	}
 	for _, v := range dst.Views {
-		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, v.Name, v.Def))
+		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, n(v.Name, lowerCase), v.Def))
 	}
 	for _, tr := range dst.Triggers {
 		sqls = append(sqls, tr.Body)
@@ -58,16 +65,16 @@ func PostgresGenerateFullMigrationSQL(src, dst *schema.FullSchema) ([]string, er
 	return sqls, nil
 }
 
-func PostgresGenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, error) {
+func PostgresGenerateSelectiveSQL(objects *schema.SelectedObjects, lowerCase bool) ([]string, error) {
 	var sqls []string
 	for _, seq := range objects.Sequences {
-		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, seq.Name, seq.Start, seq.Increment))
+		sqls = append(sqls, fmt.Sprintf(`CREATE SEQUENCE "%s" START %d INCREMENT BY %d`, n(seq.Name, lowerCase), seq.Start, seq.Increment))
 	}
 	for _, t := range objects.Tables {
-		sqls = append(sqls, postgresCreateTable(t))
+		sqls = append(sqls, postgresCreateTable(t, lowerCase))
 	}
 	for _, v := range objects.Views {
-		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, v.Name, v.Def))
+		sqls = append(sqls, fmt.Sprintf(`CREATE OR REPLACE VIEW "%s" AS %s`, n(v.Name, lowerCase), v.Def))
 	}
 	for _, tr := range objects.Triggers {
 		sqls = append(sqls, tr.Body)
@@ -75,23 +82,23 @@ func PostgresGenerateSelectiveSQL(objects *schema.SelectedObjects) ([]string, er
 	return sqls, nil
 }
 
-func postgresCreateTable(t schema.Table) string {
+func postgresCreateTable(t schema.Table, lowerCase bool) string {
 	var lines []string
 	var pkCols []string
 	for _, col := range t.Columns {
-		lines = append(lines, "  "+postgresColumnDef(col))
+		lines = append(lines, "  "+postgresColumnDef(col, lowerCase))
 		if col.PrimaryKey {
-			pkCols = append(pkCols, fmt.Sprintf(`"%s"`, col.Name))
+			pkCols = append(pkCols, fmt.Sprintf(`"%s"`, n(col.Name, lowerCase)))
 		}
 	}
 	if len(pkCols) > 0 {
 		lines = append(lines, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
 	}
-	return fmt.Sprintf("CREATE TABLE \"%s\" (\n%s\n)", t.Name, strings.Join(lines, ",\n"))
+	return fmt.Sprintf("CREATE TABLE \"%s\" (\n%s\n)", n(t.Name, lowerCase), strings.Join(lines, ",\n"))
 }
 
-func postgresColumnDef(col schema.Column) string {
-	def := fmt.Sprintf(`"%s" %s`, col.Name, col.Type)
+func postgresColumnDef(col schema.Column, lowerCase bool) string {
+	def := fmt.Sprintf(`"%s" %s`, n(col.Name, lowerCase), col.Type)
 	if !col.Nullable {
 		def += " NOT NULL"
 	}
@@ -101,8 +108,8 @@ func postgresColumnDef(col schema.Column) string {
 	return def
 }
 
-func postgresAddColumn(table string, col schema.Column) string {
-	def := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" %s`, table, col.Name, col.Type)
+func postgresAddColumn(table string, col schema.Column, lowerCase bool) string {
+	def := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" %s`, table, n(col.Name, lowerCase), col.Type)
 	if !col.Nullable {
 		def += " NOT NULL"
 	}
@@ -112,54 +119,55 @@ func postgresAddColumn(table string, col schema.Column) string {
 	return def
 }
 
-func postgresModifyColumn(table string, cd diff.ColumnDiff) []string {
+func postgresModifyColumn(table string, cd diff.ColumnDiff, lowerCase bool) []string {
 	var sqls []string
+	colName := n(cd.Column.Name, lowerCase)
 	if cd.TypeChanged {
-		sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" TYPE %s`, table, cd.Column.Name, cd.Column.Type))
+		sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" TYPE %s`, table, colName, cd.Column.Type))
 	}
 	if cd.NullableChanged {
 		if cd.Column.Nullable {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" DROP NOT NULL`, table, cd.Column.Name))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" DROP NOT NULL`, table, colName))
 		} else {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" SET NOT NULL`, table, cd.Column.Name))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" SET NOT NULL`, table, colName))
 		}
 	}
 	if cd.DefaultChanged {
 		if cd.Column.Default != nil {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" SET DEFAULT %s`, table, cd.Column.Name, *cd.Column.Default))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" SET DEFAULT %s`, table, colName, *cd.Column.Default))
 		} else {
-			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" DROP DEFAULT`, table, cd.Column.Name))
+			sqls = append(sqls, fmt.Sprintf(`ALTER TABLE "%s" ALTER COLUMN "%s" DROP DEFAULT`, table, colName))
 		}
 	}
 	return sqls
 }
 
-func postgresCreateIndex(table string, idx schema.Index) string {
+func postgresCreateIndex(table string, idx schema.Index, lowerCase bool) string {
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = fmt.Sprintf(`"%s"`, c)
+		cols[i] = fmt.Sprintf(`"%s"`, n(c, lowerCase))
 	}
 	unique := ""
 	if idx.Unique {
 		unique = "UNIQUE "
 	}
 	if table == "" {
-		return fmt.Sprintf(`CREATE %sINDEX "%s" (%s)`, unique, idx.Name, strings.Join(cols, ", "))
+		return fmt.Sprintf(`CREATE %sINDEX "%s" (%s)`, unique, n(idx.Name, lowerCase), strings.Join(cols, ", "))
 	}
-	return fmt.Sprintf(`CREATE %sINDEX "%s" ON "%s" (%s)`, unique, idx.Name, table, strings.Join(cols, ", "))
+	return fmt.Sprintf(`CREATE %sINDEX "%s" ON "%s" (%s)`, unique, n(idx.Name, lowerCase), table, strings.Join(cols, ", "))
 }
 
-func postgresAddForeignKey(table string, fk schema.ForeignKey) string {
+func postgresAddForeignKey(table string, fk schema.ForeignKey, lowerCase bool) string {
 	cols := make([]string, len(fk.Columns))
 	for i, c := range fk.Columns {
-		cols[i] = fmt.Sprintf(`"%s"`, c)
+		cols[i] = fmt.Sprintf(`"%s"`, n(c, lowerCase))
 	}
 	refCols := make([]string, len(fk.RefColumns))
 	for i, c := range fk.RefColumns {
-		refCols[i] = fmt.Sprintf(`"%s"`, c)
+		refCols[i] = fmt.Sprintf(`"%s"`, n(c, lowerCase))
 	}
 	s := fmt.Sprintf(`ALTER TABLE "%s" ADD CONSTRAINT "%s" FOREIGN KEY (%s) REFERENCES "%s"(%s)`,
-		table, fk.Name, strings.Join(cols, ", "), fk.RefTable, strings.Join(refCols, ", "))
+		table, n(fk.Name, lowerCase), strings.Join(cols, ", "), n(fk.RefTable, lowerCase), strings.Join(refCols, ", "))
 	if fk.OnDelete != "" {
 		s += " ON DELETE " + fk.OnDelete
 	}
