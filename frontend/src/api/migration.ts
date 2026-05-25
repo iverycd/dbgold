@@ -119,6 +119,7 @@ export interface CategoryReport {
 export interface MigrationReport {
   tables: CategoryReport
   data: CategoryReport
+  primaryKeys: CategoryReport
   views: CategoryReport
   indexes: CategoryReport
   constraints: CategoryReport

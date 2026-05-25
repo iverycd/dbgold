@@ -230,6 +230,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 	if err != nil {
 		m.log.Errorf("获取主键信息失败: %v", err)
 	} else {
+		report.PrimaryKeys.Total = len(pks)
 		for _, pk := range pks {
 			if ctx.Err() != nil {
 				return
@@ -241,10 +242,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 				cols[i] = m.objName(c)
 			}
 			pkCopy.Columns = cols
+			ddl := IndexDDL(pkCopy)
 			if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
 				m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
+				report.PrimaryKeys.Failed++
+				report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkCopy.TableName, DDL: ddl, Error: err.Error()})
 			} else {
 				m.log.Indexf("创建主键 %s ... OK", pkCopy.TableName)
+				report.PrimaryKeys.Success++
 			}
 		}
 	}

@@ -99,6 +99,7 @@ const tableRows = computed<ReportRow[]>(() => {
   return [
     { key: 'tables', label: '表', ...r.tables, isTrigger: false },
     { key: 'data', label: '数据写入', ...r.data, isTrigger: false },
+    { key: 'primaryKeys', label: '主键', ...r.primaryKeys, isTrigger: false },
     { key: 'views', label: '视图', ...r.views, isTrigger: false },
     { key: 'indexes', label: '索引', ...r.indexes, isTrigger: false },
     { key: 'constraints', label: '外键', ...r.constraints, isTrigger: false },

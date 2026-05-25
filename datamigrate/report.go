@@ -26,6 +26,7 @@ type CategoryReport struct {
 type MigrationReport struct {
 	Tables      CategoryReport `json:"tables"`
 	Data        CategoryReport `json:"data"`
+	PrimaryKeys CategoryReport `json:"primaryKeys"`
 	Views       CategoryReport `json:"views"`
 	Indexes     CategoryReport `json:"indexes"`
 	Constraints CategoryReport `json:"constraints"`
@@ -41,6 +42,7 @@ func newMigrationReport() MigrationReport {
 	return MigrationReport{
 		Tables:      newCategoryReport(),
 		Data:        newCategoryReport(),
+		PrimaryKeys: newCategoryReport(),
 		Views:       newCategoryReport(),
 		Indexes:     newCategoryReport(),
 		Constraints: newCategoryReport(),
