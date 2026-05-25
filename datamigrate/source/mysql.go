@@ -94,26 +94,72 @@ func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*Table
 	return info, rows.Err()
 }
 
-func (r *MySQLReader) GetPrimaryKey(ctx context.Context, table string) (string, error) {
-	row := r.db.QueryRowContext(ctx,
+func (r *MySQLReader) GetPrimaryKey(ctx context.Context, table string) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
 		`SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
 		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
-		 ORDER BY ORDINAL_POSITION LIMIT 1`, r.dbName, table)
-	var pk string
-	err := row.Scan(&pk)
-	if err == sql.ErrNoRows {
-		return "", nil
+		 ORDER BY ORDINAL_POSITION`, r.dbName, table)
+	if err != nil {
+		return nil, err
 	}
-	return pk, err
+	defer rows.Close()
+	var pks []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil, err
+		}
+		pks = append(pks, col)
+	}
+	return pks, rows.Err()
 }
 
-func (r *MySQLReader) ReadPage(ctx context.Context, table, pkCol string, offset, limit int64) ([]string, [][]interface{}, error) {
+func (r *MySQLReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT TABLE_NAME, COLUMN_NAME
+		 FROM information_schema.KEY_COLUMN_USAGE
+		 WHERE TABLE_SCHEMA = ? AND CONSTRAINT_NAME = 'PRIMARY'
+		 ORDER BY TABLE_NAME, ORDINAL_POSITION`, r.dbName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pkMap := map[string]*IndexInfo{}
+	var order []string
+	for rows.Next() {
+		var table, col string
+		if err := rows.Scan(&table, &col); err != nil {
+			return nil, err
+		}
+		if _, ok := pkMap[table]; !ok {
+			pkMap[table] = &IndexInfo{
+				TableName: table,
+				IndexName: "PRIMARY",
+				IsPrimary: true,
+				IsUnique:  true,
+			}
+			order = append(order, table)
+		}
+		pkMap[table].Columns = append(pkMap[table].Columns, col)
+	}
+	result := make([]IndexInfo, 0, len(order))
+	for _, k := range order {
+		result = append(result, *pkMap[k])
+	}
+	return result, rows.Err()
+}
+
+func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, [][]interface{}, error) {
 	var query string
-	if pkCol != "" {
+	if len(pkCols) > 0 {
+		pkList := strings.Join(pkCols, ", ")
+		joinConds := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			joinConds[i] = fmt.Sprintf("temp.%s = t.%s", col, col)
+		}
 		query = fmt.Sprintf(
-			`SELECT t.* FROM (SELECT %s FROM %s ORDER BY %s LIMIT %d, %d) temp
-			 LEFT JOIN %s t ON temp.%s = t.%s`,
-			pkCol, table, pkCol, offset, limit, table, pkCol, pkCol)
+			`SELECT t.* FROM (SELECT %s FROM %s ORDER BY %s LIMIT %d, %d) temp LEFT JOIN %s t ON %s`,
+			pkList, table, pkList, offset, limit, table, strings.Join(joinConds, " AND "))
 	} else {
 		query = fmt.Sprintf(`SELECT * FROM %s LIMIT %d, %d`, table, offset, limit)
 	}

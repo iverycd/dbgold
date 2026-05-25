@@ -16,21 +16,21 @@ import (
 type mockReader struct {
 	tables       []string
 	ddl          map[string]*source.TableDDLInfo
-	pk           map[string]string
+	pk           map[string][]string
 	rows         map[string][][]interface{}
 	triggerCount int
 }
 
-func (m *mockReader) DBType() string { return "mysql" }
-func (m *mockReader) Close() error   { return nil }
+func (m *mockReader) DBType() string                                 { return "mysql" }
+func (m *mockReader) Close() error                                   { return nil }
 func (m *mockReader) ListTables(_ context.Context) ([]string, error) { return m.tables, nil }
 func (m *mockReader) GetTableDDLInfo(_ context.Context, t string) (*source.TableDDLInfo, error) {
 	return m.ddl[t], nil
 }
-func (m *mockReader) GetPrimaryKey(_ context.Context, t string) (string, error) {
+func (m *mockReader) GetPrimaryKey(_ context.Context, t string) ([]string, error) {
 	return m.pk[t], nil
 }
-func (m *mockReader) ReadPage(_ context.Context, t, _ string, offset, _ int64) ([]string, [][]interface{}, error) {
+func (m *mockReader) ReadPage(_ context.Context, t string, _ []string, offset, _ int64) ([]string, [][]interface{}, error) {
 	if offset > 0 {
 		return []string{"id"}, nil, nil
 	}
@@ -41,6 +41,7 @@ func (m *mockReader) ReadPage(_ context.Context, t, _ string, offset, _ int64) (
 	return []string{"id"}, rows, nil
 }
 func (m *mockReader) GetSequences(_ context.Context) ([]source.SequenceInfo, error) { return nil, nil }
+func (m *mockReader) GetPrimaryKeys(_ context.Context) ([]source.IndexInfo, error)  { return nil, nil }
 func (m *mockReader) GetIndexes(_ context.Context) ([]source.IndexInfo, error)      { return nil, nil }
 func (m *mockReader) GetForeignKeys(_ context.Context) ([]source.FKInfo, error)     { return nil, nil }
 func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)         { return nil, nil }
@@ -103,7 +104,7 @@ func TestMigratorRun_AllTables(t *testing.T) {
 				{Name: "name", DataType: "varchar", Length: 100, IsNullable: true},
 			}},
 		},
-		pk:           map[string]string{"users": "id"},
+		pk:           map[string][]string{"users": {"id"}},
 		rows:         map[string][][]interface{}{"users": {{1, "Alice"}, {2, "Bob"}}},
 		triggerCount: 3,
 	}
@@ -138,7 +139,7 @@ func TestMigratorRun_TableCreationFailed(t *testing.T) {
 				{Name: "id", DataType: "int", IsNullable: false},
 			}},
 		},
-		pk: map[string]string{},
+		pk: map[string][]string{},
 	}
 	writer := &mockWriter{createTableFail: true}
 	m, job := newTestMigrator(reader, writer)
@@ -162,7 +163,7 @@ func TestMigratorRun_DataWriteFailed(t *testing.T) {
 				{Name: "id", DataType: "int", IsNullable: false},
 			}},
 		},
-		pk:   map[string]string{"users": "id"},
+		pk:   map[string][]string{"users": {"id"}},
 		rows: map[string][][]interface{}{"users": {{1}, {2}}},
 	}
 	writer := &mockWriter{copyDataFail: true}
@@ -182,7 +183,7 @@ func TestMigratorRun_DataWriteFailed(t *testing.T) {
 func TestMigratorRun_ContextCancelled(t *testing.T) {
 	reader := &mockReader{tables: []string{"users"}, ddl: map[string]*source.TableDDLInfo{
 		"users": {TableName: "users"},
-	}, pk: map[string]string{}}
+	}, pk: map[string][]string{}}
 	writer := &mockWriter{}
 	m, job := newTestMigrator(reader, writer)
 

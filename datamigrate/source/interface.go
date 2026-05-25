@@ -29,22 +29,22 @@ type SequenceInfo struct {
 
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
-	TableName  string
-	IndexName  string
-	Columns    []string
-	IsUnique   bool
-	IsPrimary  bool
+	TableName string
+	IndexName string
+	Columns   []string
+	IsUnique  bool
+	IsPrimary bool
 }
 
 // FKInfo 表示一个外键约束
 type FKInfo struct {
-	TableName        string
-	ConstraintName   string
-	Columns          []string
-	RefTable         string
-	RefColumns       []string
-	OnDelete         string
-	OnUpdate         string
+	TableName      string
+	ConstraintName string
+	Columns        []string
+	RefTable       string
+	RefColumns     []string
+	OnDelete       string
+	OnUpdate       string
 }
 
 // ViewInfo 表示一个视图
@@ -63,11 +63,12 @@ type Reader interface {
 	ListTables(ctx context.Context) ([]string, error)
 	// GetTableDDLInfo 返回指定表的列定义
 	GetTableDDLInfo(ctx context.Context, table string) (*TableDDLInfo, error)
-	// GetPrimaryKey 返回主键列名，无主键返回空串
-	GetPrimaryKey(ctx context.Context, table string) (string, error)
-	// ReadPage 分页读取数据：有主键时按主键分页，无主键时 pkCol 为空、offset/limit 用 LIMIT
-	// 返回列名切片和行数据切片
-	ReadPage(ctx context.Context, table, pkCol string, offset, limit int64) (cols []string, rows [][]interface{}, err error)
+	// GetPrimaryKey 返回主键列名列表，无主键返回空切片
+	GetPrimaryKey(ctx context.Context, table string) ([]string, error)
+	// GetPrimaryKeys 返回所有表的主键信息（IsPrimary=true），用于数据写入完毕后统一创建主键
+	GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error)
+	// ReadPage 分页读取数据：pkCols 为主键列名列表，空则用 LIMIT/OFFSET
+	ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) (cols []string, rows [][]interface{}, err error)
 	// GetSequences 返回所有 AUTO_INCREMENT 列信息
 	GetSequences(ctx context.Context) ([]SequenceInfo, error)
 	// GetIndexes 返回所有索引信息（不含主键）

@@ -173,7 +173,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 
 // migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）
 func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
-	pk, err := m.reader.GetPrimaryKey(ctx, table)
+	pks, err := m.reader.GetPrimaryKey(ctx, table)
 	if err != nil {
 		m.log.Errorf("获取主键失败 [%s]: %v", table, err)
 		return false, err.Error()
@@ -189,7 +189,7 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 			}
 			return false, firstErr
 		}
-		cols, rows, err := m.reader.ReadPage(ctx, table, pk, offset, int64(m.cfg.PageSize))
+		cols, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
 			return false, err.Error()
@@ -224,8 +224,31 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 	return true, ""
 }
 
-// createPostDDL 串行创建序列、索引、外键、视图，并填充 report
+// createPostDDL 串行创建主键、序列、索引、外键、视图，并填充 report
 func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
+	pks, err := m.reader.GetPrimaryKeys(ctx)
+	if err != nil {
+		m.log.Errorf("获取主键信息失败: %v", err)
+	} else {
+		for _, pk := range pks {
+			if ctx.Err() != nil {
+				return
+			}
+			pkCopy := pk
+			pkCopy.TableName = m.objName(pk.TableName)
+			cols := make([]string, len(pk.Columns))
+			for i, c := range pk.Columns {
+				cols[i] = m.objName(c)
+			}
+			pkCopy.Columns = cols
+			if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
+				m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
+			} else {
+				m.log.Indexf("创建主键 %s ... OK", pkCopy.TableName)
+			}
+		}
+	}
+
 	seqs, err := m.reader.GetSequences(ctx)
 	if err != nil {
 		m.log.Errorf("获取序列信息失败: %v", err)
