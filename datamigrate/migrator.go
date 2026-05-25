@@ -197,7 +197,12 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 		if len(rows) == 0 {
 			break
 		}
-		if err := m.writer.CopyData(ctx, table, cols, rows); err != nil {
+		dstTable := m.objName(table)
+		dstCols := make([]string, len(cols))
+		for i, c := range cols {
+			dstCols[i] = m.objName(c)
+		}
+		if err := m.writer.CopyData(ctx, dstTable, dstCols, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
 			if !hasError {
 				firstErr = err.Error()

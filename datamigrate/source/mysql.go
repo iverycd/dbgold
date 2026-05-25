@@ -4,6 +4,7 @@ package source
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -124,6 +125,15 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table, pkCol string, offset,
 	if err != nil {
 		return nil, nil, err
 	}
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	// 预计算每列的类型名（大写），用于后续按类型分支处理
+	colTypeName := make([]string, len(colTypes))
+	for i, ct := range colTypes {
+		colTypeName[i] = strings.ToUpper(ct.DatabaseTypeName())
+	}
 	var result [][]interface{}
 	for rows.Next() {
 		vals := make([]interface{}, len(cols))
@@ -134,9 +144,22 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table, pkCol string, offset,
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, nil, err
 		}
-		// 清理 MySQL 返回的 []byte 中的 \x00 字符
 		for i, v := range vals {
-			if b, ok := v.([]byte); ok {
+			b, ok := v.([]byte)
+			if !ok {
+				continue
+			}
+			dt := colTypeName[i]
+			switch {
+			case strings.Contains(dt, "BLOB") || strings.Contains(dt, "BINARY"):
+				// 二进制列保持 []byte，pq 正确写入 bytea
+			case dt == "BIT":
+				// MySQL BIT 转 16 进制后截掉首字符，得到 "0"/"1"，符合 PG bit(1) 格式
+				vals[i] = hex.EncodeToString(b)[1:]
+			case dt == "GEOMETRY":
+				// GIS 类型：16 进制字符串，去掉 golang 多出的前 8 个 0
+				vals[i] = hex.EncodeToString(b)[8:]
+			default:
 				vals[i] = strings.ReplaceAll(string(b), "\x00", "")
 			}
 		}

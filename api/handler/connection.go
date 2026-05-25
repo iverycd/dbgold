@@ -23,7 +23,7 @@ type connectionRequest struct {
 func buildDSN(c *store.Connection) string {
 	switch c.DBType {
 	case "mysql":
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
+		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
 			c.Username, c.Password, c.Host, c.Port, c.Database)
 	case "postgres":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
