@@ -166,7 +166,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 		cols = append(cols, "  "+colDef)
 	}
 	tblName := m.objName(table)
-	ddl := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\";\nCREATE TABLE \"%s\" (\n%s\n);",
+	ddl := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\" CASCADE;\nCREATE TABLE \"%s\" (\n%s\n);",
 		tblName, tblName, strings.Join(cols, ",\n"))
 	return ddl, nil
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -273,8 +274,14 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
+	// 在 MySQL 端做基础清理：去反引号、去 schema 前缀、去 convert/using utf8mb4
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT TABLE_NAME, VIEW_DEFINITION
+		`SELECT table_name,
+		        replace(replace(replace(replace(VIEW_DEFINITION,
+		            '`+"`"+`',''),
+		            concat(table_schema,'.'),''),
+		            'convert(',''),
+		            'using utf8mb4)','') AS view_def
 		 FROM information_schema.VIEWS
 		 WHERE TABLE_SCHEMA = ?`, r.dbName)
 	if err != nil {
@@ -287,11 +294,238 @@ func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 		if err := rows.Scan(&v.ViewName, &v.Definition); err != nil {
 			return nil, err
 		}
-		// 清理 MySQL 特定语法：去掉反引号
-		v.Definition = strings.ReplaceAll(v.Definition, "`", "\"")
+		v.Definition = transformViewDef(v.Definition)
 		views = append(views, v)
 	}
 	return views, rows.Err()
+}
+
+// transformViewDef 将 MySQL 视图定义改写为 PostgreSQL 兼容语法
+func transformViewDef(def string) string {
+	// 1. 处理 MySQL FROM 子句中的嵌套括号和隐式 CROSS JOIN 语法
+	def = rewriteFromParen(def)
+	// ifnull → coalesce
+	def = regexp.MustCompile(`(?i)\bifnull\s*\(`).ReplaceAllString(def, "coalesce(")
+	// isnull(x) → (x IS NULL)
+	def = regexp.MustCompile(`(?i)\bisnull\s*\(([^)]+)\)`).ReplaceAllString(def, "($1 IS NULL)")
+	// group_concat(x separator 'sep') → string_agg(x, 'sep')
+	def = regexp.MustCompile(`(?i)\bgroup_concat\s*\((.+?)\s+separator\s+('[^']*')\s*\)`).ReplaceAllString(def, "string_agg($1, $2)")
+	def = regexp.MustCompile(`(?i)\bgroup_concat\s*\(`).ReplaceAllString(def, "string_agg(")
+	// date_format → to_char，替换常见格式符
+	def = regexp.MustCompile(`(?i)\bdate_format\s*\(`).ReplaceAllString(def, "to_char(")
+	def = strings.NewReplacer("%Y", "YYYY", "%m", "MM", "%d", "DD", "%H", "HH24", "%i", "MI", "%s", "SS").Replace(def)
+	// if(cond, a, b) → CASE WHEN cond THEN a ELSE b END
+	def = regexp.MustCompile(`(?i)\bif\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)`).ReplaceAllString(def, "CASE WHEN $1 THEN $2 ELSE $3 END")
+	// 去掉 CHARSET 子句
+	def = regexp.MustCompile(`(?i)\s+charset\s+\w+`).ReplaceAllString(def, "")
+	return def
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func stripOuterParens(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 || s[0] != '(' {
+		return s
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				if i == len(s)-1 {
+					return strings.TrimSpace(s[1 : len(s)-1])
+				}
+				return s
+			}
+		}
+	}
+	return s
+}
+
+func fullyStripOuterParens(s string) string {
+	for {
+		stripped := stripOuterParens(s)
+		if stripped == s {
+			return s
+		}
+		s = stripped
+	}
+}
+
+type joinPart struct {
+	raw      string
+	joinType string
+}
+
+func splitTopLevelJoin(s string) []joinPart {
+	upper := strings.ToUpper(s)
+	depth := 0
+	start := 0
+	var parts []joinPart
+	pendingJoinType := ""
+	i := 0
+	for i < len(s) {
+		ch := s[i]
+		if ch == '(' {
+			depth++
+			i++
+			continue
+		}
+		if ch == ')' {
+			depth--
+			i++
+			continue
+		}
+		if depth == 0 && i+4 <= len(upper) && upper[i:i+4] == "JOIN" {
+			if i > 0 && isWordChar(s[i-1]) {
+				i++
+				continue
+			}
+			if i+4 < len(s) && isWordChar(s[i+4]) {
+				i++
+				continue
+			}
+			seg := strings.TrimSpace(s[start:i])
+			jt := ""
+			for _, q := range []string{"LEFT OUTER", "RIGHT OUTER", "FULL OUTER", "LEFT", "RIGHT", "INNER", "CROSS", "FULL"} {
+				segUpper := strings.ToUpper(seg)
+				if strings.HasSuffix(segUpper, " "+q) || segUpper == q {
+					seg = strings.TrimSpace(seg[:len(seg)-len(q)])
+					jt = q
+					break
+				}
+			}
+			parts = append(parts, joinPart{raw: seg, joinType: pendingJoinType})
+			pendingJoinType = jt
+			i += 4
+			start = i
+			continue
+		}
+		i++
+	}
+	parts = append(parts, joinPart{raw: strings.TrimSpace(s[start:]), joinType: pendingJoinType})
+	return parts
+}
+
+func findTopLevelKeyword(s, kw string) int {
+	upper := strings.ToUpper(s)
+	kwUpper := strings.ToUpper(kw)
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 && i+len(kw) <= len(s) && upper[i:i+len(kwUpper)] == kwUpper {
+			if i > 0 && isWordChar(s[i-1]) {
+				continue
+			}
+			if i+len(kw) < len(s) && isWordChar(s[i+len(kw)]) {
+				continue
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+func buildFromClause(parts []joinPart) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	var resolveSegment func(seg string) string
+	resolveSegment = func(seg string) string {
+		seg = strings.TrimSpace(seg)
+		stripped := stripOuterParens(seg)
+		if stripped == seg {
+			return seg
+		}
+		subParts := splitTopLevelJoin(stripped)
+		return buildFromClause(subParts)
+	}
+	result := resolveSegment(parts[0].raw)
+	for _, p := range parts[1:] {
+		raw := strings.TrimSpace(p.raw)
+		jt := p.joinType
+		if jt == "" {
+			jt = "INNER"
+		}
+		strippedRaw := stripOuterParens(raw)
+		if strippedRaw != raw {
+			sub := resolveSegment(raw)
+			result += " " + sub
+			continue
+		}
+		onIdx := findTopLevelKeyword(raw, "ON")
+		usingIdx := findTopLevelKeyword(raw, "USING")
+		switch {
+		case onIdx >= 0:
+			tableRef := strings.TrimSpace(raw[:onIdx])
+			onExpr := strings.TrimSpace(raw[onIdx+2:])
+			result += " " + jt + " JOIN " + tableRef + " ON " + onExpr
+		case usingIdx >= 0:
+			tableRef := strings.TrimSpace(raw[:usingIdx])
+			usingExpr := strings.TrimSpace(raw[usingIdx+5:])
+			result += " " + jt + " JOIN " + tableRef + " USING " + usingExpr
+		default:
+			result += " CROSS JOIN " + resolveSegment(raw)
+		}
+	}
+	return result
+}
+
+func rewriteFromParen(def string) string {
+	reFindFrom := regexp.MustCompile(`(?i)\bFROM\s*\(`)
+	reStartsWithSelect := regexp.MustCompile(`(?i)^SELECT\b`)
+	pos := 0
+	for pos < len(def) {
+		loc := reFindFrom.FindStringIndex(def[pos:])
+		if loc == nil {
+			return def
+		}
+		absFromStart := pos + loc[0]
+		openIdx := pos + loc[1] - 1
+		depth := 0
+		closeIdx := -1
+		for i := openIdx; i < len(def); i++ {
+			switch def[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					closeIdx = i
+				}
+			}
+			if closeIdx >= 0 {
+				break
+			}
+		}
+		if closeIdx < 0 {
+			return def
+		}
+		inner := def[openIdx+1 : closeIdx]
+		trimmed := strings.TrimSpace(fullyStripOuterParens(inner))
+		if reStartsWithSelect.MatchString(trimmed) {
+			pos = closeIdx + 1
+			continue
+		}
+		parts := splitTopLevelJoin(trimmed)
+		rewritten := buildFromClause(parts)
+		before := def[:absFromStart]
+		after := def[closeIdx+1:]
+		def = before + "FROM " + rewritten + after
+		pos = absFromStart
+	}
+	return def
 }
 
 // GetTriggerCount 查询 information_schema.TRIGGERS 返回触发器总数
