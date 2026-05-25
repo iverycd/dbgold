@@ -128,3 +128,66 @@ func TestPostgresGenerateDiffSQL_LowerCaseFalse(t *testing.T) {
 	assert.Contains(t, sqls[0], `CREATE TABLE "Orders"`)
 	assert.Contains(t, sqls[0], `"ID"`)
 }
+
+func TestPostgresGenerateDiffSQL_LowerCase_ModifyAndDrop(t *testing.T) {
+	r := &diff.Result{
+		DroppedTables: []schema.Table{
+			{Name: "OldTable"},
+		},
+		ModifiedTables: []diff.TableDiff{
+			{
+				TableName: "UserOrder",
+				DroppedColumns: []schema.Column{
+					{Name: "OldCol"},
+				},
+				ModifiedColumns: []diff.ColumnDiff{
+					{
+						Column:      schema.Column{Name: "Score", Type: "BIGINT", Nullable: false},
+						TypeChanged: true,
+					},
+				},
+				AddedIndexes: []schema.Index{
+					{Name: "IDX_Score", Columns: []string{"Score"}, Unique: false},
+				},
+				DroppedIndexes: []schema.Index{
+					{Name: "IDX_Old"},
+				},
+				AddedForeignKeys: []schema.ForeignKey{
+					{Name: "FK_User", Columns: []string{"UserID"}, RefTable: "UserTable", RefColumns: []string{"ID"}},
+				},
+				DroppedForeignKeys: []schema.ForeignKey{
+					{Name: "FK_Old"},
+				},
+			},
+		},
+	}
+	sqls, err := migrate.PostgresGenerateDiffSQL(r, true)
+	require.NoError(t, err)
+	assert.Contains(t, sqls[0], `DROP TABLE IF EXISTS "oldtable"`)
+	assert.Contains(t, findSQL(sqls, "DROP COLUMN"), `"oldcol"`)
+	assert.Contains(t, findSQL(sqls, "ALTER COLUMN"), `"score"`)
+	assert.Contains(t, findSQL(sqls, "CREATE"), `"idx_score"`)
+	assert.Contains(t, findSQL(sqls, "DROP INDEX"), `"idx_old"`)
+	assert.Contains(t, findSQL(sqls, "FOREIGN KEY"), `"fk_user"`)
+	assert.Contains(t, findSQL(sqls, "DROP CONSTRAINT"), `"fk_old"`)
+	assert.Contains(t, findSQL(sqls, "REFERENCES"), `"usertable"`)
+}
+
+func TestPostgresGenerateFullMigrationSQL_LowerCase(t *testing.T) {
+	def := "view body"
+	dst := &schema.FullSchema{
+		Schema: schema.Schema{
+			Tables: []schema.Table{
+				{Name: "Orders", Columns: []schema.Column{{Name: "ID", Type: "SERIAL"}}},
+			},
+		},
+		Sequences: []schema.Sequence{{Name: "SEQ_ORDER", Start: 1, Increment: 1}},
+		Views:     []schema.View{{Name: "V_Orders", Def: def}},
+	}
+	sqls, err := migrate.PostgresGenerateFullMigrationSQL(nil, dst, true)
+	require.NoError(t, err)
+	assert.Contains(t, findSQL(sqls, "SEQUENCE"), `"seq_order"`)
+	assert.Contains(t, findSQL(sqls, "TABLE"), `"orders"`)
+	assert.Contains(t, findSQL(sqls, "VIEW"), `"v_orders"`)
+}
+
