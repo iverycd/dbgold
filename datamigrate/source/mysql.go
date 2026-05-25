@@ -295,6 +295,14 @@ func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 			return nil, err
 		}
 		v.Definition = transformViewDef(v.Definition)
+		if v.ViewName == "view_portal_myitem" {
+			v.Definition = regexp.MustCompile(`(?i)\(portal_item\.DISABLED\s*=\s*0\)`).
+				ReplaceAllString(v.Definition, "(portal_item.DISABLED = '0')")
+		}
+		if v.ViewName == "view_cns_jxkh_rule_item" {
+			v.Definition = regexp.MustCompile(`(?i)\(b\.ISUSED\s*=\s*1\)`).
+				ReplaceAllString(v.Definition, "(b.ISUSED = '1')")
+		}
 		views = append(views, v)
 	}
 	return views, rows.Err()

@@ -335,16 +335,18 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := m.writer.CreateView(ctx, v); err != nil {
-				m.log.Errorf("创建视图失败 [%s]: %v", v.ViewName, err)
+			vCopy := v
+			vCopy.ViewName = m.objName(v.ViewName)
+			if err := m.writer.CreateView(ctx, vCopy); err != nil {
+				m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
 				report.Views.Failed++
 				report.Views.Items = append(report.Views.Items, ObjectResult{
-					Name:  v.ViewName,
-					DDL:   v.Definition,
+					Name:  vCopy.ViewName,
+					DDL:   vCopy.Definition,
 					Error: err.Error(),
 				})
 			} else {
-				m.log.DDLf("创建视图 %s ... OK", v.ViewName)
+				m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
 				report.Views.Success++
 			}
 		}
