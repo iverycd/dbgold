@@ -152,6 +152,10 @@ func StartDataMigration(c *gin.Context) {
 		status := "done"
 		if ctx.Err() != nil {
 			status = "cancelled"
+		} else if report.Tables.Failed+report.Data.Failed+report.PrimaryKeys.Failed+
+			report.Views.Failed+report.Indexes.Failed+report.Constraints.Failed+
+			report.Sequences.Failed > 0 {
+			status = "failed"
 		}
 		updateJobStatus(dbJob, status, "")
 	}()

@@ -20,6 +20,16 @@ type connectionRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+type updateConnectionRequest struct {
+	Name     string `json:"name" binding:"required"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver"`
+	Host     string `json:"host" binding:"required"`
+	Port     int    `json:"port" binding:"required,min=1,max=65535"`
+	Database string `json:"database" binding:"required"`
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password"`
+}
+
 func buildDSN(c *store.Connection) string {
 	switch c.DBType {
 	case "mysql":
@@ -71,7 +81,7 @@ func UpdateConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	var body connectionRequest
+	var body updateConnectionRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -79,7 +89,10 @@ func UpdateConnection(c *gin.Context) {
 	updates := map[string]any{
 		"name": body.Name, "db_type": body.DBType,
 		"host": body.Host, "port": body.Port,
-		"database": body.Database, "username": body.Username, "password": body.Password,
+		"database": body.Database, "username": body.Username,
+	}
+	if body.Password != "" {
+		updates["password"] = body.Password
 	}
 	if err := store.UpdateConnection(uint(id), updates); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

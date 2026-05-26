@@ -12,7 +12,7 @@
         row-key="key"
         :pagination="false"
         size="small"
-        :expandable="({ rowExpandable: (r: ReportRow) => !r.isTrigger && r.failed > 0 } as any)"
+        :expandable="{ rowExpandable: (record) => record.failed > 0 && record.items.length > 0 }"
       >
         <template #columns>
           <a-table-column title="对象类型" data-index="label" :width="120" />

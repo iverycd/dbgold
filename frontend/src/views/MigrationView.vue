@@ -51,7 +51,7 @@
       </a-tab-pane>
 
       <a-tab-pane key="data-migrate" title="数据迁移">
-        <div style="margin-top: 12px">
+        <a-form :model="dataMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
           <a-row :gutter="16" style="margin-bottom: 16px">
             <a-col :span="11">
@@ -175,7 +175,7 @@
             <a-divider>迁移报告</a-divider>
             <MigrationReportPanel :jobID="dataMigrate.currentJobId" />
           </div>
-        </div>
+        </a-form>
       </a-tab-pane>
     </a-tabs>
   </div>
