@@ -59,6 +59,7 @@
                 <a-select
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择 MySQL 连接"
+                  style="width: 280px"
                   @change="checkPairSupport"
                 >
                   <a-option
@@ -68,6 +69,13 @@
                     :label="c.name"
                   />
                 </a-select>
+                <div v-if="selectedSrc" class="conn-info">
+                  <span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">数据库：</span><span>{{ selectedSrc.database }}</span>
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">账号：</span><span>{{ selectedSrc.username }}</span>
+                </div>
               </a-form-item>
             </a-col>
             <a-col :span="2" style="text-align:center;padding-top:4px;font-size:20px">→</a-col>
@@ -76,6 +84,7 @@
                 <a-select
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择 PostgreSQL 连接"
+                  style="width: 280px"
                   @change="checkPairSupport"
                 >
                   <a-option
@@ -85,6 +94,13 @@
                     :label="c.name"
                   />
                 </a-select>
+                <div v-if="selectedDst" class="conn-info">
+                  <span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">数据库：</span><span>{{ selectedDst.database }}</span>
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">账号：</span><span>{{ selectedDst.username }}</span>
+                </div>
               </a-form-item>
             </a-col>
           </a-row>
@@ -276,6 +292,12 @@ const mysqlConnections = computed(() =>
 const pgConnections = computed(() =>
   connections.value.filter((c) => c.db_type === 'postgres')
 )
+const selectedSrc = computed(() =>
+  connections.value.find((c) => c.id === dataMigrate.srcConnId)
+)
+const selectedDst = computed(() =>
+  connections.value.find((c) => c.id === dataMigrate.dstConnId)
+)
 
 const canStartMigration = computed(() =>
   dataMigrate.srcConnId !== undefined &&
@@ -404,4 +426,12 @@ onMounted(async () => {
 .log-error { color: #f47174; }
 .log-warn  { color: #e5c07b; }
 .log-done  { color: #98c379; }
+.conn-info {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+.conn-label {
+  color: var(--color-text-4);
+}
 </style>

@@ -65,6 +65,15 @@ export interface StartDataMigrationRequest {
   lower_case_names?: boolean
 }
 
+export interface ConnSnapshot {
+  id: number
+  name: string
+  host: string
+  port: number
+  database: string
+  username: string
+}
+
 export interface DataMigrationJob {
   id: number
   job_id: string
@@ -80,6 +89,8 @@ export interface DataMigrationJob {
   summary: string
   created_at: string
   finished_at?: string
+  src_conn?: ConnSnapshot
+  dst_conn?: ConnSnapshot
 }
 
 export const getSupportedPairs = () =>

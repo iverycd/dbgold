@@ -84,8 +84,34 @@
                 </span>
               </template>
             </a-table-column>
-            <a-table-column title="源库类型" data-index="src_db_type" :width="90" />
-            <a-table-column title="目标库类型" data-index="dst_db_type" :width="100" />
+            <a-table-column title="源库" :width="180">
+              <template #cell="{ record }">
+                <div>
+                  <a-tag size="small" style="margin-right: 4px">{{ record.src_db_type }}</a-tag>
+                  <span v-if="record.src_conn">{{ record.src_conn.name }}</span>
+                  <span v-else style="color: #86909c">已删除</span>
+                </div>
+                <div v-if="record.src_conn" class="conn-detail">
+                  <span class="conn-label">数据库：</span>{{ record.src_conn.database }}
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">账号：</span>{{ record.src_conn.username }}
+                </div>
+              </template>
+            </a-table-column>
+            <a-table-column title="目标库" :width="180">
+              <template #cell="{ record }">
+                <div>
+                  <a-tag size="small" style="margin-right: 4px">{{ record.dst_db_type }}</a-tag>
+                  <span v-if="record.dst_conn">{{ record.dst_conn.name }}</span>
+                  <span v-else style="color: #86909c">已删除</span>
+                </div>
+                <div v-if="record.dst_conn" class="conn-detail">
+                  <span class="conn-label">数据库：</span>{{ record.dst_conn.database }}
+                  <a-divider direction="vertical" />
+                  <span class="conn-label">账号：</span>{{ record.dst_conn.username }}
+                </div>
+              </template>
+            </a-table-column>
             <a-table-column title="迁移模式" :width="90">
               <template #cell="{ record }">
                 <a-tag>{{ record.migrate_mode }}</a-tag>
@@ -127,6 +153,26 @@
           title="迁移报告"
           :width="800"
         >
+          <div v-if="reportJob" class="report-conn-info">
+            <div class="report-conn-row">
+              <span class="report-conn-label">源库</span>
+              <a-tag size="small">{{ reportJob.src_db_type }}</a-tag>
+              <template v-if="reportJob.src_conn">
+                <span>{{ reportJob.src_conn.name }} · {{ reportJob.src_conn.host }}:{{ reportJob.src_conn.port }}</span>
+                <span class="report-conn-sub">数据库：{{ reportJob.src_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.src_conn.username }}</span>
+              </template>
+              <span v-else style="color: #86909c">已删除</span>
+            </div>
+            <div class="report-conn-row">
+              <span class="report-conn-label">目标库</span>
+              <a-tag size="small">{{ reportJob.dst_db_type }}</a-tag>
+              <template v-if="reportJob.dst_conn">
+                <span>{{ reportJob.dst_conn.name }} · {{ reportJob.dst_conn.host }}:{{ reportJob.dst_conn.port }}</span>
+                <span class="report-conn-sub">数据库：{{ reportJob.dst_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.dst_conn.username }}</span>
+              </template>
+              <span v-else style="color: #86909c">已删除</span>
+            </div>
+          </div>
           <MigrationReportPanel v-if="reportJobId" :jobID="reportJobId" />
         </a-drawer>
       </a-tab-pane>
@@ -150,6 +196,7 @@ const dataJobs = ref<DataMigrationJob[]>([])
 const dataJobsLoading = ref(false)
 const reportDrawerVisible = ref(false)
 const reportJobId = ref('')
+const reportJob = ref<DataMigrationJob | null>(null)
 
 async function loadHistory() {
   loading.value = true
@@ -187,6 +234,7 @@ function viewDDLDetail(record: MigrationHistory) {
 
 function viewReport(record: DataMigrationJob) {
   reportJobId.value = record.job_id
+  reportJob.value = record
   reportDrawerVisible.value = true
 }
 
@@ -207,3 +255,36 @@ onMounted(() => {
   loadDataJobs()
 })
 </script>
+
+<style scoped>
+.conn-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+.conn-label {
+  color: var(--color-text-4);
+}
+.report-conn-info {
+  padding: 12px 0 16px;
+  border-bottom: 1px solid var(--color-border-2);
+  margin-bottom: 4px;
+}
+.report-conn-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.report-conn-label {
+  font-weight: 600;
+  min-width: 36px;
+  color: var(--color-text-2);
+}
+.report-conn-sub {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+</style>

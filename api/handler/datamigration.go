@@ -230,9 +230,9 @@ func CancelDataMigration(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "已发送取消信号"})
 }
 
-// ListDataMigrationJobs 返回历史任务列表
+// ListDataMigrationJobs 返回历史任务列表（含连接快照信息）
 func ListDataMigrationJobs(c *gin.Context) {
-	jobs, err := store.ListDataMigrationJobs()
+	jobs, err := store.ListDataMigrationJobsWithConn()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
