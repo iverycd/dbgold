@@ -4,3 +4,5 @@ dbgold.db
 .env
 .idea
 docs
+.claude
+CLAUDE.md
