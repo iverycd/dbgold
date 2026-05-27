@@ -37,6 +37,7 @@ func NewRouter() *gin.Engine {
 		authed.PUT("/connections/:id", handler.UpdateConnection)
 		authed.DELETE("/connections/:id", handler.DeleteConnection)
 		authed.POST("/connections/:id/test", handler.TestConnection)
+		authed.GET("/connections/:id/databases", handler.ListConnectionDatabases)
 
 		authed.POST("/schema/extract", handler.ExtractSchema)
 		authed.POST("/schema/extract-full", handler.ExtractFullSchema)

@@ -34,3 +34,6 @@ export const deleteConnection = (id: number) =>
 
 export const testConnection = (id: number) =>
   api.post<{ message: string }>(`/connections/${id}/test`)
+
+export const listConnectionDatabases = (id: number) =>
+  api.get<string[]>(`/connections/${id}/databases`)

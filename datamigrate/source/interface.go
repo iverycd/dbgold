@@ -81,4 +81,6 @@ type Reader interface {
 	GetTriggerCount(ctx context.Context) (int, error)
 	// CountRows 返回指定表的行数
 	CountRows(ctx context.Context, table string) (int64, error)
+	// ListDatabases 返回该连接下所有可迁移的数据库/schema 名称列表（排除系统库）
+	ListDatabases(ctx context.Context) ([]string, error)
 }

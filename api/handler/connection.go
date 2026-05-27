@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"dbgold/datamigrate/source"
 	"dbgold/driver"
 	"dbgold/store"
 	"fmt"
@@ -139,4 +140,36 @@ func TestConnection(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "connection successful"})
+}
+
+func ListConnectionDatabases(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	conn, err := store.GetConnection(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return
+	}
+	var reader source.Reader
+	switch conn.DBType {
+	case "mysql":
+		reader, err = source.NewMySQL(buildDSN(conn), conn.Database)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer reader.Close()
+	dbs, err := reader.ListDatabases(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dbs)
 }

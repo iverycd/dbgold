@@ -34,6 +34,26 @@ func NewMySQL(dsn, dbName string) (*MySQLReader, error) {
 func (r *MySQLReader) Close() error   { return r.db.Close() }
 func (r *MySQLReader) DBType() string { return "mysql" }
 
+func (r *MySQLReader) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
+		 WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys')
+		 ORDER BY SCHEMA_NAME`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var dbs []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		dbs = append(dbs, name)
+	}
+	return dbs, rows.Err()
+}
+
 func (r *MySQLReader) ListTables(ctx context.Context) ([]string, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT TABLE_NAME FROM information_schema.TABLES

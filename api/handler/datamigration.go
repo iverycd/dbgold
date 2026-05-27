@@ -45,6 +45,7 @@ type startDataMigrationRequest struct {
 	CharInLength   bool   `json:"char_in_length"`
 	UseNvarchar2   bool   `json:"use_nvarchar2"`
 	Distributed    bool   `json:"distributed"`
+	SrcDatabase    string `json:"src_database"` // 可选，覆盖连接中的默认数据库
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -92,6 +93,10 @@ func StartDataMigration(c *gin.Context) {
 	job := datamigrate.Registry.Register(jobID, cancel)
 
 	// 持久化任务记录
+	srcConnDatabase := srcConn.Database
+	if req.SrcDatabase != "" {
+		srcConnDatabase = req.SrcDatabase
+	}
 	dbJob := &store.DataMigrationJob{
 		JobID:           jobID,
 		SrcConnID:       req.SrcConnID,
@@ -109,7 +114,7 @@ func StartDataMigration(c *gin.Context) {
 		SrcConnName:     srcConn.Name,
 		SrcConnHost:     srcConn.Host,
 		SrcConnPort:     srcConn.Port,
-		SrcConnDatabase: srcConn.Database,
+		SrcConnDatabase: srcConnDatabase,
 		SrcConnUsername: srcConn.Username,
 		DstConnName:     dstConn.Name,
 		DstConnHost:     dstConn.Host,
@@ -126,13 +131,19 @@ func StartDataMigration(c *gin.Context) {
 	srcDSN := buildDSN(srcConn)
 	dstDSN := buildDSN(dstConn)
 
+	// 若请求中指定了源库数据库，覆盖连接默认值
+	if req.SrcDatabase != "" {
+		srcDSN = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
+			srcConn.Username, srcConn.Password, srcConn.Host, srcConn.Port, srcConnDatabase)
+	}
+
 	go func() {
 		defer func() {
 			close(job.LogCh)
 			datamigrate.Registry.Remove(jobID)
 		}()
 
-		reader, err := source.NewMySQL(srcDSN, srcConn.Database)
+		reader, err := source.NewMySQL(srcDSN, srcConnDatabase)
 		if err != nil {
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", err)
 			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", err))

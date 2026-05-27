@@ -60,7 +60,7 @@
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择 MySQL 连接"
                   style="width: 280px"
-                  @change="checkPairSupport"
+                  @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
                 >
                   <a-option
                     v-for="c in mysqlConnections"
@@ -72,10 +72,22 @@
                 <div v-if="selectedSrc" class="conn-info">
                   <span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
                   <a-divider direction="vertical" />
-                  <span class="conn-label">数据库：</span><span>{{ selectedSrc.database }}</span>
-                  <a-divider direction="vertical" />
                   <span class="conn-label">账号：</span><span>{{ selectedSrc.username }}</span>
                 </div>
+                <a-select
+                  v-if="dataMigrate.srcDatabases.length > 0"
+                  v-model="dataMigrate.srcDatabase"
+                  placeholder="选择要迁移的数据库"
+                  style="width: 280px; margin-top: 8px"
+                  allow-search
+                >
+                  <a-option
+                    v-for="db in dataMigrate.srcDatabases"
+                    :key="db"
+                    :value="db"
+                    :label="db"
+                  />
+                </a-select>
               </a-form-item>
             </a-col>
             <a-col :span="2" style="text-align:center;padding-top:4px;font-size:20px">→</a-col>
@@ -219,7 +231,7 @@ import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
-import { listConnections, type Connection } from '@/api/connections'
+import { listConnections, listConnectionDatabases, type Connection } from '@/api/connections'
 import {
   getSupportedPairs,
   startDataMigration as apiStartMigration,
@@ -289,6 +301,8 @@ let currentEventSource: EventSource | null = null
 const dataMigrate = reactive({
   srcConnId: undefined as number | undefined,
   dstConnId: undefined as number | undefined,
+  srcDatabase: '',
+  srcDatabases: [] as string[],
   mode: 'all' as 'all' | 'include' | 'exclude',
   filter: '',
   pageSize: 10000,
@@ -320,6 +334,7 @@ const selectedDst = computed(() =>
 const canStartMigration = computed(() =>
   dataMigrate.srcConnId !== undefined &&
   dataMigrate.dstConnId !== undefined &&
+  dataMigrate.srcDatabase !== '' &&
   !dataMigrate.unsupportedMsg &&
   !dataMigrate.running
 )
@@ -338,6 +353,17 @@ function checkPairSupport() {
   dataMigrate.unsupportedMsg = supported
     ? ''
     : `当前不支持 ${src.db_type} → ${dst.db_type} 的数据迁移`
+}
+
+async function loadSrcDatabases(connId: number) {
+  dataMigrate.srcDatabase = ''
+  dataMigrate.srcDatabases = []
+  try {
+    const res = await listConnectionDatabases(connId)
+    dataMigrate.srcDatabases = res.data ?? []
+  } catch {
+    // 不支持列库时静默忽略，用户仍可迁移连接默认数据库
+  }
 }
 
 function getLogClass(line: string): string {
@@ -363,6 +389,7 @@ async function startDataMigration() {
       char_in_length: dataMigrate.charInLength,
       use_nvarchar2: dataMigrate.useNvarchar2,
       distributed: dataMigrate.distributed,
+      src_database: dataMigrate.srcDatabase,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)

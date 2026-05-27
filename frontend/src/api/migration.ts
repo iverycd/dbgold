@@ -65,6 +65,8 @@ export interface StartDataMigrationRequest {
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean
+  distributed?: boolean
+  src_database?: string
 }
 
 export interface ConnSnapshot {
