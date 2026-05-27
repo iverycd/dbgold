@@ -44,6 +44,7 @@ type startDataMigrationRequest struct {
 	LowerCaseNames bool   `json:"lower_case_names"`
 	CharInLength   bool   `json:"char_in_length"`
 	UseNvarchar2   bool   `json:"use_nvarchar2"`
+	Distributed    bool   `json:"distributed"`
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -161,6 +162,7 @@ func StartDataMigration(c *gin.Context) {
 			LowerCaseNames: req.LowerCaseNames,
 			CharInLength:   req.CharInLength,
 			UseNvarchar2:   req.UseNvarchar2,
+			Distributed:    req.Distributed,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

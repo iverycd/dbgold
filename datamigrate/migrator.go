@@ -22,6 +22,7 @@ type Config struct {
 	LowerCaseNames bool
 	CharInLength   bool
 	UseNvarchar2   bool
+	Distributed    bool // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -280,6 +281,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 			}
 			pkCopy.Columns = cols
 			ddl := IndexDDL(pkCopy)
+			if m.cfg.Distributed {
+				if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
+					m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
+				}
+			}
 			if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
 				m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
 				report.PrimaryKeys.Failed++

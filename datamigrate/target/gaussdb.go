@@ -117,3 +117,10 @@ func (w *GaussDBWriter) CountRows(ctx context.Context, table string) (int64, err
 	err := w.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count)
 	return count, err
 }
+
+// AlterDistribute 将表的分布列设置为指定列，适用于 GaussDB 分布式版
+func (w *GaussDBWriter) AlterDistribute(ctx context.Context, table string, cols []string) error {
+	ddl := fmt.Sprintf("ALTER TABLE %s DISTRIBUTE BY hash (%s);", table, strings.Join(cols, ", "))
+	_, err := w.db.ExecContext(ctx, ddl)
+	return err
+}

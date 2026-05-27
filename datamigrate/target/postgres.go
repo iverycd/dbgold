@@ -116,3 +116,7 @@ func (w *PostgresWriter) CountRows(ctx context.Context, table string) (int64, er
 	err := w.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count)
 	return count, err
 }
+
+func (w *PostgresWriter) AlterDistribute(_ context.Context, _ string, _ []string) error {
+	return nil
+}

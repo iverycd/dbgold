@@ -157,6 +157,11 @@
                     <a-checkbox v-model="dataMigrate.useNvarchar2">使用 nvarchar2 类型（将 char/varchar 转为 nvarchar2，适用于 GaussDB 等）</a-checkbox>
                   </a-form-item>
                 </a-col>
+                <a-col :span="24">
+                  <a-form-item>
+                    <a-checkbox v-model="dataMigrate.distributed">分布式模式（建主键前先执行 DISTRIBUTE BY hash，适用于 GaussDB 分布式版）</a-checkbox>
+                  </a-form-item>
+                </a-col>
               </a-row>
             </a-collapse-item>
           </a-collapse>
@@ -291,6 +296,7 @@ const dataMigrate = reactive({
   lowerCaseNames: true,
   charInLength: false,
   useNvarchar2: false,
+  distributed: false,
   running: false,
   finished: false,
   logs: [] as string[],
@@ -356,6 +362,7 @@ async function startDataMigration() {
       lower_case_names: dataMigrate.lowerCaseNames,
       char_in_length: dataMigrate.charInLength,
       use_nvarchar2: dataMigrate.useNvarchar2,
+      distributed: dataMigrate.distributed,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)
