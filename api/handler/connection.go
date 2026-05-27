@@ -12,7 +12,7 @@ import (
 
 type connectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database" binding:"required"`
@@ -22,7 +22,7 @@ type connectionRequest struct {
 
 type updateConnectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database" binding:"required"`
@@ -44,6 +44,9 @@ func buildDSN(c *store.Connection) string {
 	case "sqlserver":
 		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
 			c.Username, c.Password, c.Host, c.Port, c.Database)
+	case "gaussdb":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
 	}
 	return ""
 }

@@ -50,6 +50,7 @@
             <a-option value="postgres">PostgreSQL</a-option>
             <a-option value="oracle">Oracle</a-option>
             <a-option value="sqlserver">SQL Server</a-option>
+            <a-option value="gaussdb">GaussDB</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -168,8 +169,9 @@ async function handleTest(conn: Connection) {
   try {
     await testConnection(conn.id)
     Message.success('连接成功')
-  } catch {
-    Message.error('连接失败')
+  } catch (e: any) {
+    const detail = e?.response?.data?.error
+    Message.error(detail ? `连接失败：${detail}` : '连接失败')
   } finally {
     testingId.value = null
   }

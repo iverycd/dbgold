@@ -63,6 +63,8 @@ export interface StartDataMigrationRequest {
   page_size?: number
   max_parallel?: number
   lower_case_names?: boolean
+  char_in_length?: boolean
+  use_nvarchar2?: boolean
 }
 
 export interface ConnSnapshot {

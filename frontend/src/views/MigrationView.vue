@@ -80,7 +80,7 @@
             </a-col>
             <a-col :span="2" style="text-align:center;padding-top:4px;font-size:20px">→</a-col>
             <a-col :span="11">
-              <a-form-item label="目标库（PostgreSQL）">
+              <a-form-item label="目标库（PostgreSQL / GaussDB）">
                 <a-select
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择 PostgreSQL 连接"
@@ -145,6 +145,16 @@
                 <a-col :span="24">
                   <a-form-item>
                     <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写（表名、列名等统一转为小写）</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24">
+                  <a-form-item>
+                    <a-checkbox v-model="dataMigrate.charInLength">char 长度单位（将 char/varchar 长度标注为 CHAR 单位，如 varchar(100 char)）</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24">
+                  <a-form-item>
+                    <a-checkbox v-model="dataMigrate.useNvarchar2">使用 nvarchar2 类型（将 char/varchar 转为 nvarchar2，适用于 GaussDB 等）</a-checkbox>
                   </a-form-item>
                 </a-col>
               </a-row>
@@ -279,6 +289,8 @@ const dataMigrate = reactive({
   pageSize: 10000,
   maxParallel: 5,
   lowerCaseNames: true,
+  charInLength: false,
+  useNvarchar2: false,
   running: false,
   finished: false,
   logs: [] as string[],
@@ -290,7 +302,7 @@ const mysqlConnections = computed(() =>
   connections.value.filter((c) => c.db_type === 'mysql')
 )
 const pgConnections = computed(() =>
-  connections.value.filter((c) => c.db_type === 'postgres')
+  connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb')
 )
 const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)
@@ -342,6 +354,8 @@ async function startDataMigration() {
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       lower_case_names: dataMigrate.lowerCaseNames,
+      char_in_length: dataMigrate.charInLength,
+      use_nvarchar2: dataMigrate.useNvarchar2,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)

@@ -26,6 +26,7 @@ type SupportedPair struct {
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "postgres"},
+	{Source: "mysql", Target: "gaussdb"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -41,6 +42,8 @@ type startDataMigrationRequest struct {
 	PageSize       int    `json:"page_size"`
 	MaxParallel    int    `json:"max_parallel"`
 	LowerCaseNames bool   `json:"lower_case_names"`
+	CharInLength   bool   `json:"char_in_length"`
+	UseNvarchar2   bool   `json:"use_nvarchar2"`
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -99,6 +102,8 @@ func StartDataMigration(c *gin.Context) {
 		PageSize:        req.PageSize,
 		MaxParallel:     req.MaxParallel,
 		LowerCaseNames:  req.LowerCaseNames,
+		CharInLength:    req.CharInLength,
+		UseNvarchar2:    req.UseNvarchar2,
 		Status:          "running",
 		SrcConnName:     srcConn.Name,
 		SrcConnHost:     srcConn.Host,
@@ -134,10 +139,16 @@ func StartDataMigration(c *gin.Context) {
 		}
 		defer reader.Close()
 
-		writer, err := target.NewPostgres(dstDSN)
-		if err != nil {
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", err)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", err))
+		var writer target.Writer
+		var writerErr error
+		if dstConn.DBType == "gaussdb" {
+			writer, writerErr = target.NewGaussDB(dstDSN)
+		} else {
+			writer, writerErr = target.NewPostgres(dstDSN)
+		}
+		if writerErr != nil {
+			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
+			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
 			return
 		}
 		defer writer.Close()
@@ -148,6 +159,8 @@ func StartDataMigration(c *gin.Context) {
 			Mode:           req.MigrateMode,
 			Filter:         req.TableFilter,
 			LowerCaseNames: req.LowerCaseNames,
+			CharInLength:   req.CharInLength,
+			UseNvarchar2:   req.UseNvarchar2,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

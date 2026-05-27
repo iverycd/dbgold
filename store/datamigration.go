@@ -33,6 +33,8 @@ type DataMigrationJob struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	LowerCaseNames bool       `json:"lower_case_names"`
+	CharInLength   bool       `json:"char_in_length"`
+	UseNvarchar2   bool       `json:"use_nvarchar2"`
 	// 连接快照（迁移启动时写入，不随连接修改而变化）
 	SrcConnName     string `json:"src_conn_name"`
 	SrcConnHost     string `json:"src_conn_host"`

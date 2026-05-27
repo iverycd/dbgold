@@ -20,6 +20,8 @@ type Config struct {
 	Mode           string
 	Filter         string
 	LowerCaseNames bool
+	CharInLength   bool
+	UseNvarchar2   bool
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -185,7 +187,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 	}
 	var cols []string
 	for _, col := range info.Columns {
-		pgType := typemap.MySQLToPG(col)
+		pgType := typemap.MySQLToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
 		colDef := fmt.Sprintf(`"%s" %s`, m.objName(col.Name), pgType)
 		if !col.IsNullable {
 			colDef += " NOT NULL"
