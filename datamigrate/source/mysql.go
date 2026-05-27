@@ -594,3 +594,10 @@ func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
 	}
 	return count, nil
 }
+
+// CountRows 返回指定表的行数
+func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
+	return count, err
+}

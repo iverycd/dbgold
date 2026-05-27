@@ -109,3 +109,10 @@ func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) e
 	_, err := w.db.ExecContext(ctx, ddl)
 	return err
 }
+
+// CountRows 返回指定表的行数
+func (w *PostgresWriter) CountRows(ctx context.Context, table string) (int64, error) {
+	var count int64
+	err := w.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count)
+	return count, err
+}

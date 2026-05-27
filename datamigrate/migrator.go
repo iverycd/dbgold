@@ -136,6 +136,41 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
 	m.createPostDDL(ctx, &report)
 
+	// Phase 4: 行数对比（并发，仅对数据迁移成功的表）
+	m.log.Info("=== Phase 4: 行数对比 ===")
+	var successTables []string
+	for _, table := range tables {
+		if !tablesFailed[table] {
+			successTables = append(successTables, table)
+		}
+	}
+	rowCounts := make([]TableRowCount, len(successTables))
+	var rcWg sync.WaitGroup
+	rcSem := make(chan struct{}, m.cfg.MaxParallel)
+	for i, table := range successTables {
+		rcWg.Add(1)
+		rcSem <- struct{}{}
+		go func(idx int, tbl string) {
+			defer rcWg.Done()
+			defer func() { <-rcSem }()
+			dstTable := m.objName(tbl)
+			srcCount, srcErr := m.reader.CountRows(ctx, tbl)
+			dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
+			rc := TableRowCount{Table: dstTable}
+			if srcErr == nil && dstErr == nil {
+				rc.Src = srcCount
+				rc.Dst = dstCount
+				rc.Match = srcCount == dstCount
+				if !rc.Match {
+					m.log.Warnf("行数不一致 [%s]: 源=%d 目标=%d", tbl, srcCount, dstCount)
+				}
+			}
+			rowCounts[idx] = rc
+		}(i, table)
+	}
+	rcWg.Wait()
+	report.RowCounts = rowCounts
+
 	elapsed := time.Since(start).Round(time.Second)
 	m.log.Donef("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",
 		report.Data.Success, report.Tables.Failed+report.Data.Failed, elapsed)

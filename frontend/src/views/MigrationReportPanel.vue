@@ -7,63 +7,117 @@
     <a-alert v-else-if="fetchError" type="error" :content="fetchError" />
 
     <template v-else-if="report">
-      <a-table
-        :data="tableRows"
-        row-key="key"
-        :pagination="false"
-        size="small"
-        :expandable="{ rowExpandable: (record) => record.failed > 0 && record.items.length > 0 }"
-      >
-        <template #columns>
-          <a-table-column title="对象类型" data-index="label" :width="120" />
-          <a-table-column title="总数" data-index="total" :width="80" />
-          <a-table-column title="成功" :width="80">
-            <template #cell="{ record }">
-              <span v-if="record.isTrigger">—</span>
-              <span v-else>{{ record.success }}</span>
-            </template>
-          </a-table-column>
-          <a-table-column title="失败" :width="80">
-            <template #cell="{ record }">
-              <span v-if="record.isTrigger">—</span>
-              <span v-else :style="record.failed > 0 ? 'color: #f53f3f' : ''">{{ record.failed }}</span>
-            </template>
-          </a-table-column>
-          <a-table-column title="状态">
-            <template #cell="{ record }">
-              <span v-if="record.isTrigger" style="color: #86909c">
-                ⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）
-              </span>
-              <a-tag v-else-if="record.failed > 0" color="orange">⚠ 部分失败</a-tag>
-              <a-tag v-else-if="record.total === 0" color="gray">无对象</a-tag>
-              <a-tag v-else color="green">✓ 全部成功</a-tag>
-            </template>
-          </a-table-column>
-        </template>
-
-        <template #expand-row="{ record }">
-          <div class="failure-list">
-            <div
-              v-for="item in record.items"
-              :key="item.name"
-              class="failure-item"
-            >
-              <div class="failure-name">{{ item.name }}</div>
-              <div class="failure-error">失败原因：{{ item.error }}</div>
-              <div class="failure-ddl">
-                <template v-if="item.ddl">
-                  <div class="ddl-header">
-                    <span>DDL：</span>
-                    <a-button size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
-                  </div>
-                  <pre class="ddl-code">{{ item.ddl }}</pre>
+      <a-tabs default-active-key="overview">
+        <!-- ===== 迁移概览 ===== -->
+        <a-tab-pane key="overview" title="迁移概览">
+          <a-table
+            :data="tableRows"
+            row-key="key"
+            :pagination="false"
+            size="small"
+            :expandable="{ rowExpandable: (record) => record.failed > 0 && record.items.length > 0 }"
+          >
+            <template #columns>
+              <a-table-column title="对象类型" data-index="label" :width="120" />
+              <a-table-column title="总数" data-index="total" :width="80" />
+              <a-table-column title="成功" :width="80">
+                <template #cell="{ record }">
+                  <span v-if="record.isTrigger">—</span>
+                  <span v-else>{{ record.success }}</span>
                 </template>
-                <span v-else style="color: #86909c">DDL：—</span>
+              </a-table-column>
+              <a-table-column title="失败" :width="80">
+                <template #cell="{ record }">
+                  <span v-if="record.isTrigger">—</span>
+                  <span v-else :style="record.failed > 0 ? 'color: #f53f3f' : ''">{{ record.failed }}</span>
+                </template>
+              </a-table-column>
+              <a-table-column title="状态">
+                <template #cell="{ record }">
+                  <span v-if="record.isTrigger" style="color: #86909c">
+                    ⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）
+                  </span>
+                  <a-tag v-else-if="record.failed > 0" color="orange">⚠ 部分失败</a-tag>
+                  <a-tag v-else-if="record.total === 0" color="gray">无对象</a-tag>
+                  <a-tag v-else color="green">✓ 全部成功</a-tag>
+                </template>
+              </a-table-column>
+            </template>
+
+            <template #expand-row="{ record }">
+              <div class="failure-list">
+                <div
+                  v-for="item in record.items"
+                  :key="item.name"
+                  class="failure-item"
+                >
+                  <div class="failure-name">{{ item.name }}</div>
+                  <div class="failure-error">失败原因：{{ item.error }}</div>
+                  <div class="failure-ddl">
+                    <template v-if="item.ddl">
+                      <div class="ddl-header">
+                        <span>DDL：</span>
+                        <a-button size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
+                      </div>
+                      <pre class="ddl-code">{{ item.ddl }}</pre>
+                    </template>
+                    <span v-else style="color: #86909c">DDL：—</span>
+                  </div>
+                </div>
               </div>
+            </template>
+          </a-table>
+        </a-tab-pane>
+
+        <!-- ===== 行数对比 ===== -->
+        <a-tab-pane v-if="hasRowCounts" key="rowcount">
+          <template #title>
+            行数对比
+            <a-badge
+              v-if="mismatchedRows.length > 0"
+              :count="mismatchedRows.length"
+              style="margin-left: 6px"
+            />
+          </template>
+
+          <a-table
+            :data="allRowCounts"
+            :pagination="{ pageSize: 50 }"
+            size="small"
+            row-key="table"
+          >
+            <template #columns>
+              <a-table-column title="表名" data-index="table" />
+              <a-table-column title="源行数" data-index="src" :width="120" />
+              <a-table-column title="目标行数" data-index="dst" :width="120" />
+              <a-table-column title="状态" :width="100">
+                <template #cell="{ record }">
+                  <a-tag v-if="record.match" color="green">✓ 一致</a-tag>
+                  <a-tag v-else color="orange">⚠ 不一致</a-tag>
+                </template>
+              </a-table-column>
+            </template>
+          </a-table>
+
+          <template v-if="mismatchedRows.length > 0">
+            <div style="color: #ff7d00; margin: 16px 0 8px">
+              ⚠ {{ mismatchedRows.length }} 张表行数不一致
             </div>
-          </div>
-        </template>
-      </a-table>
+            <a-table :data="mismatchedRows" :pagination="false" size="small" row-key="table">
+              <template #columns>
+                <a-table-column title="表名" data-index="table" />
+                <a-table-column title="源行数" data-index="src" :width="120" />
+                <a-table-column title="目标行数" data-index="dst" :width="120" />
+                <a-table-column title="差异" :width="100">
+                  <template #cell="{ record }">
+                    <span style="color: #ff7d00">{{ record.dst - record.src }}</span>
+                  </template>
+                </a-table-column>
+              </template>
+            </a-table>
+          </template>
+        </a-tab-pane>
+      </a-tabs>
     </template>
   </div>
 </template>
@@ -75,6 +129,7 @@ import {
   getDataMigrationReport,
   type MigrationReport,
   type ObjectResult,
+  type TableRowCount,
 } from '@/api/migration'
 
 const props = defineProps<{ jobID: string }>()
@@ -115,6 +170,12 @@ const tableRows = computed<ReportRow[]>(() => {
     },
   ]
 })
+
+const hasRowCounts = computed(() => (report.value?.rowCounts?.length ?? 0) > 0)
+const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? [])
+const mismatchedRows = computed<TableRowCount[]>(() =>
+  report.value?.rowCounts?.filter((r) => !r.match) ?? []
+)
 
 async function loadReport() {
   loading.value = true

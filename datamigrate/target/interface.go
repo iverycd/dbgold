@@ -21,6 +21,8 @@ type Writer interface {
 	CreateForeignKey(ctx context.Context, fk source.FKInfo) error
 	// CreateView 创建视图
 	CreateView(ctx context.Context, view source.ViewInfo) error
+	// CountRows 返回指定表的行数
+	CountRows(ctx context.Context, table string) (int64, error)
 	// Close 关闭目标库连接
 	Close() error
 }

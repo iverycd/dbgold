@@ -24,14 +24,23 @@ type CategoryReport struct {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
-	Tables      CategoryReport `json:"tables"`
-	Data        CategoryReport `json:"data"`
-	PrimaryKeys CategoryReport `json:"primaryKeys"`
-	Views       CategoryReport `json:"views"`
-	Indexes     CategoryReport `json:"indexes"`
-	Constraints CategoryReport `json:"constraints"`
-	Sequences   CategoryReport `json:"sequences"`
-	Triggers    CategoryReport `json:"triggers"`
+	Tables      CategoryReport  `json:"tables"`
+	Data        CategoryReport  `json:"data"`
+	PrimaryKeys CategoryReport  `json:"primaryKeys"`
+	Views       CategoryReport  `json:"views"`
+	Indexes     CategoryReport  `json:"indexes"`
+	Constraints CategoryReport  `json:"constraints"`
+	Sequences   CategoryReport  `json:"sequences"`
+	Triggers    CategoryReport  `json:"triggers"`
+	RowCounts   []TableRowCount `json:"rowCounts"`
+}
+
+// TableRowCount 记录单张表的源/目标行数对比
+type TableRowCount struct {
+	Table string `json:"table"`
+	Src   int64  `json:"src"`
+	Dst   int64  `json:"dst"`
+	Match bool   `json:"match"`
 }
 
 func newCategoryReport() CategoryReport {
@@ -48,6 +57,7 @@ func newMigrationReport() MigrationReport {
 		Constraints: newCategoryReport(),
 		Sequences:   newCategoryReport(),
 		Triggers:    newCategoryReport(),
+		RowCounts:   []TableRowCount{},
 	}
 }
 

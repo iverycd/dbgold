@@ -127,6 +127,13 @@ export interface CategoryReport {
   items: ObjectResult[]
 }
 
+export interface TableRowCount {
+  table: string
+  src: number
+  dst: number
+  match: boolean
+}
+
 export interface MigrationReport {
   tables: CategoryReport
   data: CategoryReport
@@ -136,6 +143,7 @@ export interface MigrationReport {
   constraints: CategoryReport
   sequences: CategoryReport
   triggers: CategoryReport
+  rowCounts: TableRowCount[]
 }
 
 export const getDataMigrationReport = (jobID: string) =>

@@ -79,4 +79,6 @@ type Reader interface {
 	GetViews(ctx context.Context) ([]ViewInfo, error)
 	// GetTriggerCount 返回源库触发器总数，失败时返回 0 和 error
 	GetTriggerCount(ctx context.Context) (int, error)
+	// CountRows 返回指定表的行数
+	CountRows(ctx context.Context, table string) (int64, error)
 }

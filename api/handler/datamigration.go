@@ -89,17 +89,27 @@ func StartDataMigration(c *gin.Context) {
 
 	// 持久化任务记录
 	dbJob := &store.DataMigrationJob{
-		JobID:          jobID,
-		SrcConnID:      req.SrcConnID,
-		DstConnID:      req.DstConnID,
-		SrcDBType:      srcConn.DBType,
-		DstDBType:      dstConn.DBType,
-		MigrateMode:    req.MigrateMode,
-		TableFilter:    req.TableFilter,
-		PageSize:       req.PageSize,
-		MaxParallel:    req.MaxParallel,
-		LowerCaseNames: req.LowerCaseNames,
-		Status:         "running",
+		JobID:           jobID,
+		SrcConnID:       req.SrcConnID,
+		DstConnID:       req.DstConnID,
+		SrcDBType:       srcConn.DBType,
+		DstDBType:       dstConn.DBType,
+		MigrateMode:     req.MigrateMode,
+		TableFilter:     req.TableFilter,
+		PageSize:        req.PageSize,
+		MaxParallel:     req.MaxParallel,
+		LowerCaseNames:  req.LowerCaseNames,
+		Status:          "running",
+		SrcConnName:     srcConn.Name,
+		SrcConnHost:     srcConn.Host,
+		SrcConnPort:     srcConn.Port,
+		SrcConnDatabase: srcConn.Database,
+		SrcConnUsername: srcConn.Username,
+		DstConnName:     dstConn.Name,
+		DstConnHost:     dstConn.Host,
+		DstConnPort:     dstConn.Port,
+		DstConnDatabase: dstConn.Database,
+		DstConnUsername: dstConn.Username,
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
 		cancel()

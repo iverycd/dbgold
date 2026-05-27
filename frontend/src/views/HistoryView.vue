@@ -152,6 +152,7 @@
           v-model:visible="reportDrawerVisible"
           title="迁移报告"
           :width="800"
+          @close="reportJobId = ''"
         >
           <div v-if="reportJob" class="report-conn-info">
             <div class="report-conn-row">
