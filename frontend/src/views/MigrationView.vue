@@ -5,82 +5,69 @@
       <a-tab-pane key="data-migrate" title="数据迁移">
         <a-form :model="dataMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
-          <a-row :gutter="16" style="margin-bottom: 16px">
+          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
             <a-col :span="11">
-              <a-form-item label="源库（MySQL）">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="orange" size="small">MySQL</a-tag>
+                  <span class="conn-card-title">源库</span>
+                </div>
                 <a-select
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择 MySQL 连接"
-                  style="width: 280px"
+                  style="width: 100%; margin-top: 10px"
                   @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
                 >
-                  <a-option
-                    v-for="c in mysqlConnections"
-                    :key="c.id"
-                    :value="c.id"
-                    :label="c.name"
-                  />
+                  <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id" :label="c.name" />
                 </a-select>
-                <div v-if="selectedSrc" class="conn-info">
-                  <span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
-                  <a-divider direction="vertical" />
-                  <span class="conn-label">账号：</span><span>{{ selectedSrc.username }}</span>
+                <div v-if="selectedSrc" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedSrc.username }}</span>
                 </div>
                 <a-select
                   v-if="dataMigrate.srcDatabases.length > 0"
                   v-model="dataMigrate.srcDatabase"
                   placeholder="选择要迁移的数据库"
-                  style="width: 280px; margin-top: 8px"
+                  style="width: 100%; margin-top: 10px"
                   allow-search
                 >
-                  <a-option
-                    v-for="db in dataMigrate.srcDatabases"
-                    :key="db"
-                    :value="db"
-                    :label="db"
-                  />
+                  <a-option v-for="db in dataMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
-              </a-form-item>
+              </a-card>
             </a-col>
-            <a-col :span="2" style="text-align:center;padding-top:4px;font-size:20px">→</a-col>
+            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+            </a-col>
             <a-col :span="11">
-              <a-form-item label="目标库（PostgreSQL / GaussDB）">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="blue" size="small">PG / GaussDB</a-tag>
+                  <span class="conn-card-title">目标库</span>
+                </div>
                 <a-select
                   v-model="dataMigrate.dstConnId"
-                  placeholder="选择 PostgreSQL 连接"
-                  style="width: 280px"
+                  placeholder="选择 PostgreSQL / GaussDB 连接"
+                  style="width: 100%; margin-top: 10px"
                   @change="(val: number) => { checkPairSupport(); loadDstSchemas(val) }"
                 >
-                  <a-option
-                    v-for="c in pgConnections"
-                    :key="c.id"
-                    :value="c.id"
-                    :label="c.name"
-                  />
+                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name" />
                 </a-select>
-                <div v-if="selectedDst" class="conn-info">
-                  <span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
-                  <a-divider direction="vertical" />
-                  <span class="conn-label">数据库：</span><span>{{ selectedDst.database }}</span>
-                  <a-divider direction="vertical" />
-                  <span class="conn-label">账号：</span><span>{{ selectedDst.username }}</span>
+                <div v-if="selectedDst" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
                 <a-select
                   v-if="dataMigrate.dstSchemas.length > 0"
                   v-model="dataMigrate.dstSchema"
                   placeholder="选择目标 Schema（默认不指定）"
-                  style="width: 280px; margin-top: 8px"
+                  style="width: 100%; margin-top: 10px"
                   allow-clear
                   allow-search
                 >
-                  <a-option
-                    v-for="s in dataMigrate.dstSchemas"
-                    :key="s"
-                    :value="s"
-                    :label="s"
-                  />
+                  <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
-              </a-form-item>
+              </a-card>
             </a-col>
           </a-row>
 
@@ -577,12 +564,33 @@ onUnmounted(() => {
 .log-error { color: #f47174; }
 .log-warn  { color: #e5c07b; }
 .log-done  { color: #98c379; }
-.conn-info {
-  margin-top: 4px;
+.conn-card {
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  height: 100%;
+}
+.conn-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.conn-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+.conn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+}
+.conn-meta-item {
   font-size: 12px;
   color: var(--color-text-3);
 }
-.conn-label {
+.conn-meta-label {
   color: var(--color-text-4);
+  margin-right: 3px;
 }
 </style>
