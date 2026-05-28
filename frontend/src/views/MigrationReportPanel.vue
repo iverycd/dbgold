@@ -7,6 +7,12 @@
     <a-alert v-else-if="fetchError" type="error" :content="fetchError" />
 
     <template v-else-if="report">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+        <a-button size="small" @click="exportReport">
+          <template #icon><icon-download /></template>
+          导出报告
+        </a-button>
+      </div>
       <a-tabs default-active-key="overview">
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
@@ -194,6 +200,83 @@ async function loadReport() {
   } finally {
     loading.value = false
   }
+}
+
+function exportReport() {
+  if (!report.value) return
+  const r = report.value
+  const lines: string[] = []
+
+  lines.push('数据迁移报告')
+  lines.push(`Job ID: ${props.jobID}`)
+  lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
+  lines.push('')
+
+  lines.push('=== 迁移概览 ===')
+  const categories = [
+    { label: '表', cat: r.tables, isTrigger: false },
+    { label: '数据写入', cat: r.data, isTrigger: false },
+    { label: '主键', cat: r.primaryKeys, isTrigger: false },
+    { label: '视图', cat: r.views, isTrigger: false },
+    { label: '索引', cat: r.indexes, isTrigger: false },
+    { label: '外键', cat: r.constraints, isTrigger: false },
+    { label: '序列', cat: r.sequences, isTrigger: false },
+    { label: '触发器', cat: r.triggers, isTrigger: true },
+  ]
+  for (const { label, cat, isTrigger } of categories) {
+    if (isTrigger) {
+      const totalStr = cat.total === -1 ? '获取失败' : String(cat.total)
+      lines.push(`${label.padEnd(6)}总计 ${totalStr}  （未迁移）`)
+    } else {
+      lines.push(`${label.padEnd(6)}总计 ${cat.total}  成功 ${cat.success}  失败 ${cat.failed}`)
+    }
+  }
+  lines.push('')
+
+  const failedCategories = categories.filter(({ cat }) => cat.failed > 0 && cat.items.length > 0)
+  if (failedCategories.length > 0) {
+    lines.push('=== 失败对象详情 ===')
+    for (const { label, cat } of failedCategories) {
+      lines.push('')
+      lines.push(`【${label}】`)
+      for (const item of cat.items) {
+        lines.push(`  ● ${item.name}`)
+        lines.push(`    失败原因：${item.error}`)
+        if (item.ddl) {
+          lines.push('    DDL：')
+          for (const ddlLine of item.ddl.split('\n')) {
+            lines.push(`      ${ddlLine}`)
+          }
+        } else {
+          lines.push('    DDL：（无）')
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (r.rowCounts && r.rowCounts.length > 0) {
+    lines.push('=== 行数对比 ===')
+    const mismatched = r.rowCounts.filter((rc) => !rc.match)
+    if (mismatched.length > 0) {
+      lines.push(`\n不一致的表（${mismatched.length} 张）：`)
+      for (const rc of mismatched) {
+        lines.push(`  ${rc.table}：源 ${rc.src} 行 → 目标 ${rc.dst} 行（差 ${rc.dst - rc.src}）`)
+      }
+    }
+    lines.push(`\n全部表（${r.rowCounts.length} 张）：`)
+    for (const rc of r.rowCounts) {
+      lines.push(`  ${rc.table}：${rc.src} / ${rc.dst}  ${rc.match ? '✓' : '✗'}`)
+    }
+  }
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `migration-report-${props.jobID.slice(0, 8)}.txt`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 async function copyDDL(ddl: string) {
