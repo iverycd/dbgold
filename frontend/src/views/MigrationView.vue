@@ -2,54 +2,6 @@
   <div>
     <h2>迁移 SQL 生成</h2>
     <a-tabs v-model:active-key="activeTab">
-      <a-tab-pane key="diff" title="Diff 迁移">
-        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
-          <a-row :gutter="24">
-            <a-col :span="11">
-              <a-card title="源">
-                <connection-select v-model:connection-id="diffSrc.connId" v-model:database="diffSrc.dbName" />
-              </a-card>
-            </a-col>
-            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
-              <icon-arrow-right style="font-size: 24px; color: #165dff" />
-            </a-col>
-            <a-col :span="11">
-              <a-card title="目标">
-                <connection-select v-model:connection-id="diffDst.connId" v-model:database="diffDst.dbName" />
-              </a-card>
-            </a-col>
-          </a-row>
-          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
-          <a-button
-            type="primary"
-            :loading="diffLoading"
-            :disabled="!(diffSrc.connId && diffSrc.dbName && diffDst.connId && diffDst.dbName)"
-            @click="handleDiffMigration"
-          >
-            生成迁移 SQL
-          </a-button>
-          <sql-preview :sqls="diffSqls" />
-        </a-space>
-      </a-tab-pane>
-
-      <a-tab-pane key="full" title="全量迁移">
-        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
-          <a-card title="目标数据库（将为此库生成完整建表 SQL）">
-            <connection-select v-model:connection-id="fullDst.connId" v-model:database="fullDst.dbName" />
-          </a-card>
-          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
-          <a-button
-            type="primary"
-            :loading="fullLoading"
-            :disabled="!(fullDst.connId && fullDst.dbName)"
-            @click="handleFullMigration"
-          >
-            生成全量 SQL
-          </a-button>
-          <sql-preview :sqls="fullSqls" />
-        </a-space>
-      </a-tab-pane>
-
       <a-tab-pane key="data-migrate" title="数据迁移">
         <a-form :model="dataMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
@@ -234,13 +186,62 @@
           </div>
         </a-form>
       </a-tab-pane>
+
+      <a-tab-pane key="diff" title="Diff 迁移">
+        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
+          <a-row :gutter="24">
+            <a-col :span="11">
+              <a-card title="源">
+                <connection-select v-model:connection-id="diffSrc.connId" v-model:database="diffSrc.dbName" />
+              </a-card>
+            </a-col>
+            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+              <icon-arrow-right style="font-size: 24px; color: #165dff" />
+            </a-col>
+            <a-col :span="11">
+              <a-card title="目标">
+                <connection-select v-model:connection-id="diffDst.connId" v-model:database="diffDst.dbName" />
+              </a-card>
+            </a-col>
+          </a-row>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
+          <a-button
+            type="primary"
+            :loading="diffLoading"
+            :disabled="!(diffSrc.connId && diffSrc.dbName && diffDst.connId && diffDst.dbName)"
+            @click="handleDiffMigration"
+          >
+            生成迁移 SQL
+          </a-button>
+          <sql-preview :sqls="diffSqls" />
+        </a-space>
+      </a-tab-pane>
+
+      <a-tab-pane key="full" title="全量迁移">
+        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
+          <a-card title="目标数据库（将为此库生成完整建表 SQL）">
+            <connection-select v-model:connection-id="fullDst.connId" v-model:database="fullDst.dbName" />
+          </a-card>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
+          <a-button
+            type="primary"
+            :loading="fullLoading"
+            :disabled="!(fullDst.connId && fullDst.dbName)"
+            @click="handleFullMigration"
+          >
+            生成全量 SQL
+          </a-button>
+          <sql-preview :sqls="fullSqls" />
+        </a-space>
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted } from 'vue'
-import { Message } from '@arco-design/web-vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
+import { Message, Modal } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
@@ -254,7 +255,7 @@ import {
   type SupportedPair,
 } from '@/api/migration'
 
-const activeTab = ref('diff')
+const activeTab = ref('data-migrate')
 
 const diffSrc = reactive({ connId: undefined as number | undefined, dbName: '' })
 const diffDst = reactive({ connId: undefined as number | undefined, dbName: '' })
@@ -481,13 +482,42 @@ function copyLogs() {
   navigator.clipboard.writeText(dataMigrate.logs.join('\n'))
 }
 
+function handleBeforeUnload(e: BeforeUnloadEvent) {
+  if (dataMigrate.running) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
+
+onBeforeRouteLeave(() => {
+  if (!dataMigrate.running) return true
+  return new Promise<boolean>((resolve) => {
+    Modal.confirm({
+      title: '迁移正在进行中',
+      content: '离开页面后迁移将继续在后台运行，但您将无法在此页面查看进度。确定要离开吗？',
+      okText: '确定离开',
+      cancelText: '留在此页',
+      maskClosable: false,
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    })
+  })
+})
+
 onMounted(async () => {
+  window.addEventListener('beforeunload', handleBeforeUnload)
   const [connsRes, pairsRes] = await Promise.all([
     listConnections(),
     getSupportedPairs(),
   ])
   connections.value = connsRes.data
   supportedPairs.value = pairsRes.data
+})
+
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  currentEventSource?.close()
+  currentEventSource = null
 })
 </script>
 
