@@ -136,7 +136,7 @@
               <a-input
                 v-model="dataMigrate.filter"
                 placeholder="逗号分隔表名，支持 * 通配符，如：*_log,tmp_*"
-                style="margin-top: 8px"
+                style="margin-top: 8px; max-width: 400px"
                 @input="validateTableFilter"
               />
               <div v-if="tableFilterError" style="color: rgb(var(--danger-6)); font-size: 12px; margin-top: 4px">
@@ -155,37 +155,37 @@
           </a-form-item>
 
           <!-- 高级设置 -->
-          <a-collapse style="margin-bottom: 16px">
+          <a-collapse :default-active-key="['advanced']" style="margin-bottom: 16px; max-width: 560px">
             <a-collapse-item key="advanced" header="高级设置">
               <a-row :gutter="16">
                 <a-col :span="12">
                   <a-form-item label="每页行数 (pageSize)">
-                    <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" />
+                    <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 140px" />
                   </a-form-item>
                 </a-col>
                 <a-col :span="12">
                   <a-form-item label="最大并发数 (maxParallel)">
-                    <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" />
+                    <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" style="width: 140px" />
                   </a-form-item>
                 </a-col>
-                <a-col :span="24">
-                  <a-form-item>
-                    <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写（表名、列名等统一转为小写）</a-checkbox>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写</a-checkbox>
                   </a-form-item>
                 </a-col>
-                <a-col :span="24">
-                  <a-form-item>
-                    <a-checkbox v-model="dataMigrate.charInLength">char 长度单位（将 char/varchar 长度标注为 CHAR 单位，如 varchar(100 char)）</a-checkbox>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="dataMigrate.charInLength">char 长度单位（CHAR）</a-checkbox>
                   </a-form-item>
                 </a-col>
-                <a-col :span="24">
-                  <a-form-item>
-                    <a-checkbox v-model="dataMigrate.useNvarchar2">使用 nvarchar2 类型（将 char/varchar 转为 nvarchar2，适用于 GaussDB 等）</a-checkbox>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="dataMigrate.useNvarchar2">使用 nvarchar2</a-checkbox>
                   </a-form-item>
                 </a-col>
-                <a-col :span="24">
-                  <a-form-item>
-                    <a-checkbox v-model="dataMigrate.distributed">分布式模式（建主键前先执行 DISTRIBUTE BY hash，适用于 GaussDB 分布式版）</a-checkbox>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="dataMigrate.distributed">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
                   </a-form-item>
                 </a-col>
               </a-row>
