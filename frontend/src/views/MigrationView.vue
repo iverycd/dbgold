@@ -132,12 +132,17 @@
               <a-radio value="exclude">排除指定表</a-radio>
               <a-radio value="include">仅迁移指定表</a-radio>
             </a-radio-group>
-            <a-input
-              v-if="dataMigrate.mode !== 'all'"
-              v-model="dataMigrate.filter"
-              placeholder="逗号分隔表名，支持 * 通配符，如：*_log,tmp_*"
-              style="margin-top: 8px"
-            />
+            <template v-if="dataMigrate.mode !== 'all'">
+              <a-input
+                v-model="dataMigrate.filter"
+                placeholder="逗号分隔表名，支持 * 通配符，如：*_log,tmp_*"
+                style="margin-top: 8px"
+                @input="validateTableFilter"
+              />
+              <div v-if="tableFilterError" style="color: rgb(var(--danger-6)); font-size: 12px; margin-top: 4px">
+                {{ tableFilterError }}
+              </div>
+            </template>
           </a-form-item>
 
           <!-- 高级设置 -->
@@ -318,6 +323,25 @@ const dataMigrate = reactive({
   currentJobId: '',
 })
 
+const tableFilterError = ref('')
+
+function validateTableFilter(): boolean {
+  if (!dataMigrate.filter || dataMigrate.mode === 'all') {
+    tableFilterError.value = ''
+    return true
+  }
+  const parts = dataMigrate.filter.split(',')
+  for (const part of parts) {
+    const trimmed = part.trim()
+    if (trimmed && !/^[a-zA-Z0-9_*%\-]+$/.test(trimmed)) {
+      tableFilterError.value = '表名只能包含字母、数字、下划线和通配符 *，分隔符只能使用英文逗号'
+      return false
+    }
+  }
+  tableFilterError.value = ''
+  return true
+}
+
 const mysqlConnections = computed(() =>
   connections.value.filter((c) => c.db_type === 'mysql')
 )
@@ -374,6 +398,7 @@ function getLogClass(line: string): string {
 }
 
 async function startDataMigration() {
+  if (!validateTableFilter()) return
   dataMigrate.running = true
   dataMigrate.finished = false
   dataMigrate.logs = []
