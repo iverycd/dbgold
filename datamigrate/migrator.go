@@ -137,7 +137,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 
 	// Phase 3: Post-DDL（串行）
 	m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
-	m.createPostDDL(ctx, &report)
+	m.createPostDDL(ctx, &report, tables, allTables)
 
 	// Phase 4: 行数对比（并发，仅对数据迁移成功的表）
 	m.log.Info("=== Phase 4: 行数对比 ===")
@@ -262,14 +262,37 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 	return true, ""
 }
 
-// createPostDDL 串行创建主键、序列、索引、外键、视图，并填充 report
-func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
+// createPostDDL 串行创建主键、序列、索引、外键、视图，并填充 report。
+// tables 为本次迁移的表列表，allTables 为源库全部表列表（用于 exclude 模式推算被排除的表）。
+func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, tables []string, allTables []string) {
+	// tableSet: 本次要迁移的表集合
+	tableSet := make(map[string]bool, len(tables))
+	for _, t := range tables {
+		tableSet[t] = true
+	}
+	// excludedSet: 被排除的表（仅 mode=exclude 时非空，用于过滤外键的 RefTable）
+	var excludedSet map[string]bool
+	if m.cfg.Mode == "exclude" {
+		excludedSet = make(map[string]bool)
+		for _, t := range allTables {
+			if !tableSet[t] {
+				excludedSet[t] = true
+			}
+		}
+	}
+
 	pks, err := m.reader.GetPrimaryKeys(ctx)
 	if err != nil {
 		m.log.Errorf("获取主键信息失败: %v", err)
 	} else {
-		report.PrimaryKeys.Total = len(pks)
+		filtered := make([]source.IndexInfo, 0, len(pks))
 		for _, pk := range pks {
+			if tableSet[pk.TableName] {
+				filtered = append(filtered, pk)
+			}
+		}
+		report.PrimaryKeys.Total = len(filtered)
+		for _, pk := range filtered {
 			if ctx.Err() != nil {
 				return
 			}
@@ -301,8 +324,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 	if err != nil {
 		m.log.Errorf("获取序列信息失败: %v", err)
 	} else {
-		report.Sequences.Total = len(seqs)
+		filtered := make([]source.SequenceInfo, 0, len(seqs))
 		for _, seq := range seqs {
+			if tableSet[seq.TableName] {
+				filtered = append(filtered, seq)
+			}
+		}
+		report.Sequences.Total = len(filtered)
+		for _, seq := range filtered {
 			if ctx.Err() != nil {
 				return
 			}
@@ -329,8 +358,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 	if err != nil {
 		m.log.Errorf("获取索引信息失败: %v", err)
 	} else {
-		report.Indexes.Total = len(indexes)
+		filtered := make([]source.IndexInfo, 0, len(indexes))
 		for _, idx := range indexes {
+			if tableSet[idx.TableName] {
+				filtered = append(filtered, idx)
+			}
+		}
+		report.Indexes.Total = len(filtered)
+		for _, idx := range filtered {
 			if ctx.Err() != nil {
 				return
 			}
@@ -358,67 +393,80 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport) {
 		}
 	}
 
-	fks, err := m.reader.GetForeignKeys(ctx)
-	if err != nil {
-		m.log.Errorf("获取外键信息失败: %v", err)
-	} else {
-		report.Constraints.Total = len(fks)
-		for _, fk := range fks {
-			if ctx.Err() != nil {
-				return
+	// include 模式：跳过外键（引用表可能不在迁移范围内）
+	if m.cfg.Mode != "include" {
+		fks, err := m.reader.GetForeignKeys(ctx)
+		if err != nil {
+			m.log.Errorf("获取外键信息失败: %v", err)
+		} else {
+			filtered := make([]source.FKInfo, 0, len(fks))
+			for _, fk := range fks {
+				if excludedSet[fk.TableName] || excludedSet[fk.RefTable] {
+					continue
+				}
+				filtered = append(filtered, fk)
 			}
-			fkCopy := fk
-			fkCopy.TableName = m.objName(fk.TableName)
-			fkCopy.ConstraintName = m.objName(fk.ConstraintName)
-			fkCols := make([]string, len(fk.Columns))
-			for i, c := range fk.Columns {
-				fkCols[i] = m.objName(c)
-			}
-			fkCopy.Columns = fkCols
-			fkCopy.RefTable = m.objName(fk.RefTable)
-			refCols := make([]string, len(fk.RefColumns))
-			for i, c := range fk.RefColumns {
-				refCols[i] = m.objName(c)
-			}
-			fkCopy.RefColumns = refCols
-			ddl := FKDDL(fkCopy)
-			if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
-				m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
-				report.Constraints.Failed++
-				report.Constraints.Items = append(report.Constraints.Items, ObjectResult{
-					Name:  fkCopy.ConstraintName,
-					DDL:   ddl,
-					Error: err.Error(),
-				})
-			} else {
-				m.log.Indexf("创建外键 %s ... OK", fkCopy.ConstraintName)
-				report.Constraints.Success++
+			report.Constraints.Total = len(filtered)
+			for _, fk := range filtered {
+				if ctx.Err() != nil {
+					return
+				}
+				fkCopy := fk
+				fkCopy.TableName = m.objName(fk.TableName)
+				fkCopy.ConstraintName = m.objName(fk.ConstraintName)
+				fkCols := make([]string, len(fk.Columns))
+				for i, c := range fk.Columns {
+					fkCols[i] = m.objName(c)
+				}
+				fkCopy.Columns = fkCols
+				fkCopy.RefTable = m.objName(fk.RefTable)
+				refCols := make([]string, len(fk.RefColumns))
+				for i, c := range fk.RefColumns {
+					refCols[i] = m.objName(c)
+				}
+				fkCopy.RefColumns = refCols
+				ddl := FKDDL(fkCopy)
+				if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
+					m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
+					report.Constraints.Failed++
+					report.Constraints.Items = append(report.Constraints.Items, ObjectResult{
+						Name:  fkCopy.ConstraintName,
+						DDL:   ddl,
+						Error: err.Error(),
+					})
+				} else {
+					m.log.Indexf("创建外键 %s ... OK", fkCopy.ConstraintName)
+					report.Constraints.Success++
+				}
 			}
 		}
 	}
 
-	views, err := m.reader.GetViews(ctx)
-	if err != nil {
-		m.log.Errorf("获取视图信息失败: %v", err)
-	} else {
-		report.Views.Total = len(views)
-		for _, v := range views {
-			if ctx.Err() != nil {
-				return
-			}
-			vCopy := v
-			vCopy.ViewName = m.objName(v.ViewName)
-			if err := m.writer.CreateView(ctx, vCopy); err != nil {
-				m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
-				report.Views.Failed++
-				report.Views.Items = append(report.Views.Items, ObjectResult{
-					Name:  vCopy.ViewName,
-					DDL:   vCopy.Definition,
-					Error: err.Error(),
-				})
-			} else {
-				m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
-				report.Views.Success++
+	// include 模式：跳过视图（依赖表可能不在迁移范围内）
+	if m.cfg.Mode != "include" {
+		views, err := m.reader.GetViews(ctx)
+		if err != nil {
+			m.log.Errorf("获取视图信息失败: %v", err)
+		} else {
+			report.Views.Total = len(views)
+			for _, v := range views {
+				if ctx.Err() != nil {
+					return
+				}
+				vCopy := v
+				vCopy.ViewName = m.objName(v.ViewName)
+				if err := m.writer.CreateView(ctx, vCopy); err != nil {
+					m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
+					report.Views.Failed++
+					report.Views.Items = append(report.Views.Items, ObjectResult{
+						Name:  vCopy.ViewName,
+						DDL:   vCopy.Definition,
+						Error: err.Error(),
+					})
+				} else {
+					m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
+					report.Views.Success++
+				}
 			}
 		}
 	}

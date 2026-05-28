@@ -36,7 +36,8 @@
     <a-modal
       v-model:visible="modalVisible"
       :title="editingId ? '编辑连接' : '新建连接'"
-      @ok="handleSubmit"
+      :mask-closable="false"
+      @before-ok="handleSubmit"
       @cancel="modalVisible = false"
       :ok-loading="submitting"
     >
@@ -143,9 +144,12 @@ function openEdit(conn: Connection) {
   modalVisible.value = true
 }
 
-async function handleSubmit() {
+async function handleSubmit(done: (closed: boolean) => void) {
   const valid = await formRef.value?.validate()
-  if (valid) return
+  if (valid) {
+    done(false)
+    return
+  }
   submitting.value = true
   try {
     if (editingId.value) {
@@ -155,10 +159,11 @@ async function handleSubmit() {
       await createConnection(form)
       Message.success('创建成功')
     }
-    modalVisible.value = false
+    done(true)
     await loadConnections()
   } catch {
     Message.error('操作失败')
+    done(false)
   } finally {
     submitting.value = false
   }

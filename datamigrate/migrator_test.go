@@ -46,6 +46,8 @@ func (m *mockReader) GetIndexes(_ context.Context) ([]source.IndexInfo, error)  
 func (m *mockReader) GetForeignKeys(_ context.Context) ([]source.FKInfo, error)     { return nil, nil }
 func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)         { return nil, nil }
 func (m *mockReader) GetTriggerCount(_ context.Context) (int, error)                { return m.triggerCount, nil }
+func (m *mockReader) CountRows(_ context.Context, _ string) (int64, error)          { return 0, nil }
+func (m *mockReader) ListDatabases(_ context.Context) ([]string, error)             { return nil, nil }
 
 // mockWriter 实现 target.Writer 接口，用于测试
 type mockWriter struct {
@@ -75,6 +77,8 @@ func (m *mockWriter) CreateSequence(_ context.Context, _ source.SequenceInfo) er
 func (m *mockWriter) CreateIndex(_ context.Context, _ source.IndexInfo) error       { return nil }
 func (m *mockWriter) CreateForeignKey(_ context.Context, _ source.FKInfo) error     { return nil }
 func (m *mockWriter) CreateView(_ context.Context, _ source.ViewInfo) error         { return nil }
+func (m *mockWriter) AlterDistribute(_ context.Context, _ string, _ []string) error { return nil }
+func (m *mockWriter) CountRows(_ context.Context, _ string) (int64, error)          { return 0, nil }
 
 func newTestMigrator(reader source.Reader, writer target.Writer) (*Migrator, *Job) {
 	_, cancel := context.WithCancel(context.Background())
