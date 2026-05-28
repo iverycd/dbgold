@@ -144,6 +144,12 @@
             </a-collapse-item>
           </a-collapse>
 
+          <!-- 目标表删除重建警告 -->
+          <a-alert type="warning" style="margin-bottom: 16px">
+            <template #title>注意：迁移前目标表将被删除重建</template>
+            迁移开始时会对目标库中同名表执行 <strong>DROP TABLE IF EXISTS ... CASCADE</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
+          </a-alert>
+
           <!-- 操作按钮 -->
           <a-space style="margin-bottom: 16px">
             <a-button
