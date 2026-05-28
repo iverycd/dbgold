@@ -145,6 +145,15 @@
             </template>
           </a-form-item>
 
+          <!-- 迁移内容 -->
+          <a-form-item label="迁移内容" style="margin-bottom: 16px">
+            <a-radio-group v-model="dataMigrate.content">
+              <a-radio value="both">表结构 + 数据行</a-radio>
+              <a-radio value="schema_only">仅创建表结构</a-radio>
+              <a-radio value="data_only">仅迁移数据行</a-radio>
+            </a-radio-group>
+          </a-form-item>
+
           <!-- 高级设置 -->
           <a-collapse style="margin-bottom: 16px">
             <a-collapse-item key="advanced" header="高级设置">
@@ -310,6 +319,7 @@ const dataMigrate = reactive({
   srcDatabases: [] as string[],
   mode: 'all' as 'all' | 'include' | 'exclude',
   filter: '',
+  content: 'both' as 'both' | 'schema_only' | 'data_only',
   pageSize: 10000,
   maxParallel: 5,
   lowerCaseNames: true,
@@ -408,6 +418,7 @@ async function startDataMigration() {
       dst_conn_id: dataMigrate.dstConnId!,
       migrate_mode: dataMigrate.mode,
       table_filter: dataMigrate.filter,
+      migrate_content: dataMigrate.content,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       lower_case_names: dataMigrate.lowerCaseNames,

@@ -60,6 +60,7 @@ export interface StartDataMigrationRequest {
   dst_conn_id: number
   migrate_mode: 'all' | 'include' | 'exclude'
   table_filter?: string
+  migrate_content?: 'both' | 'schema_only' | 'data_only'
   page_size?: number
   max_parallel?: number
   lower_case_names?: boolean

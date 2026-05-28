@@ -19,6 +19,7 @@ type Config struct {
 	MaxParallel    int
 	Mode           string
 	Filter         string
+	Content        string // "both" | "schema_only" | "data_only"，默认 "both"
 	LowerCaseNames bool
 	CharInLength   bool
 	UseNvarchar2   bool
@@ -75,104 +76,123 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 
 	report.Tables.Total = len(tables)
 
+	skipSchema := m.cfg.Content == "data_only"
+	skipData := m.cfg.Content == "schema_only"
+
 	// Phase 1: 建表 DDL（串行）
-	m.log.Info("=== Phase 1: 创建表结构 ===")
 	tablesFailed := map[string]bool{}
-	for _, table := range tables {
-		if ctx.Err() != nil {
-			m.log.Warn("任务已取消")
-			return report
+	if skipSchema {
+		m.log.Info("=== Phase 1: 跳过创建表结构（仅迁移数据行模式）===")
+	} else {
+		m.log.Info("=== Phase 1: 创建表结构 ===")
+		for _, table := range tables {
+			if ctx.Err() != nil {
+				m.log.Warn("任务已取消")
+				return report
+			}
+			ddl, err := m.buildCreateTableDDL(ctx, table)
+			if err != nil {
+				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
+				tablesFailed[table] = true
+				report.Tables.Failed++
+				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: "", Error: err.Error()})
+				continue
+			}
+			if err := m.writer.CreateTable(ctx, ddl); err != nil {
+				m.log.Errorf("创建表失败 [%s]: %v", table, err)
+				tablesFailed[table] = true
+				report.Tables.Failed++
+				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: ddl, Error: err.Error()})
+				continue
+			}
+			m.log.DDLf("创建表 %s ... OK", table)
+			report.Tables.Success++
 		}
-		ddl, err := m.buildCreateTableDDL(ctx, table)
-		if err != nil {
-			m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
-			tablesFailed[table] = true
-			report.Tables.Failed++
-			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: "", Error: err.Error()})
-			continue
-		}
-		if err := m.writer.CreateTable(ctx, ddl); err != nil {
-			m.log.Errorf("创建表失败 [%s]: %v", table, err)
-			tablesFailed[table] = true
-			report.Tables.Failed++
-			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: ddl, Error: err.Error()})
-			continue
-		}
-		m.log.DDLf("创建表 %s ... OK", table)
-		report.Tables.Success++
 	}
 
 	// Phase 2: 迁移数据（并发）
-	m.log.Info("=== Phase 2: 迁移数据 ===")
 	report.Data.Total = len(tables) - len(tablesFailed)
-	sem := make(chan struct{}, m.cfg.MaxParallel)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	if skipData {
+		m.log.Info("=== Phase 2: 跳过迁移数据（仅创建表结构模式）===")
+	} else {
+		m.log.Info("=== Phase 2: 迁移数据 ===")
+		sem := make(chan struct{}, m.cfg.MaxParallel)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
 
-	for _, table := range tables {
-		if tablesFailed[table] {
-			continue
-		}
-		if ctx.Err() != nil {
-			m.log.Warn("任务已取消")
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(tbl string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			ok, firstErr := m.migrateTableData(ctx, tbl)
-			mu.Lock()
-			if ok {
-				report.Data.Success++
-			} else {
-				report.Data.Failed++
-				report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
+		for _, table := range tables {
+			if tablesFailed[table] {
+				continue
 			}
-			mu.Unlock()
-		}(table)
+			if ctx.Err() != nil {
+				m.log.Warn("任务已取消")
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(tbl string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				ok, firstErr := m.migrateTableData(ctx, tbl)
+				mu.Lock()
+				if ok {
+					report.Data.Success++
+				} else {
+					report.Data.Failed++
+					report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
+				}
+				mu.Unlock()
+			}(table)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 
 	// Phase 3: Post-DDL（串行）
-	m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
-	m.createPostDDL(ctx, &report, tables, allTables)
+	if skipSchema {
+		m.log.Info("=== Phase 3: 跳过创建序列、索引、外键、视图（仅迁移数据行模式）===")
+	} else {
+		m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
+		m.createPostDDL(ctx, &report, tables, allTables)
+	}
 
 	// Phase 4: 行数对比（并发，仅对数据迁移成功的表）
-	m.log.Info("=== Phase 4: 行数对比 ===")
-	var successTables []string
-	for _, table := range tables {
-		if !tablesFailed[table] {
-			successTables = append(successTables, table)
-		}
-	}
-	rowCounts := make([]TableRowCount, len(successTables))
-	var rcWg sync.WaitGroup
-	rcSem := make(chan struct{}, m.cfg.MaxParallel)
-	for i, table := range successTables {
-		rcWg.Add(1)
-		rcSem <- struct{}{}
-		go func(idx int, tbl string) {
-			defer rcWg.Done()
-			defer func() { <-rcSem }()
-			dstTable := m.objName(tbl)
-			srcCount, srcErr := m.reader.CountRows(ctx, tbl)
-			dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
-			rc := TableRowCount{Table: dstTable}
-			if srcErr == nil && dstErr == nil {
-				rc.Src = srcCount
-				rc.Dst = dstCount
-				rc.Match = srcCount == dstCount
-				if !rc.Match {
-					m.log.Warnf("行数不一致 [%s]: 源=%d 目标=%d", tbl, srcCount, dstCount)
-				}
+	if skipData {
+		m.log.Info("=== Phase 4: 跳过行数对比（未迁移数据）===")
+	} else {
+		m.log.Info("=== Phase 4: 行数对比 ===")
+		var successTables []string
+		for _, table := range tables {
+			if !tablesFailed[table] {
+				successTables = append(successTables, table)
 			}
-			rowCounts[idx] = rc
-		}(i, table)
+		}
+		rowCounts := make([]TableRowCount, len(successTables))
+		var rcWg sync.WaitGroup
+		rcSem := make(chan struct{}, m.cfg.MaxParallel)
+		for i, table := range successTables {
+			rcWg.Add(1)
+			rcSem <- struct{}{}
+			go func(idx int, tbl string) {
+				defer rcWg.Done()
+				defer func() { <-rcSem }()
+				dstTable := m.objName(tbl)
+				srcCount, srcErr := m.reader.CountRows(ctx, tbl)
+				dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
+				rc := TableRowCount{Table: dstTable}
+				if srcErr == nil && dstErr == nil {
+					rc.Src = srcCount
+					rc.Dst = dstCount
+					rc.Match = srcCount == dstCount
+					if !rc.Match {
+						m.log.Warnf("行数不一致 [%s]: 源=%d 目标=%d", tbl, srcCount, dstCount)
+					}
+				}
+				rowCounts[idx] = rc
+			}(i, table)
+		}
+		rcWg.Wait()
+		report.RowCounts = rowCounts
 	}
-	rcWg.Wait()
-	report.RowCounts = rowCounts
 
 	elapsed := time.Since(start).Round(time.Second)
 	m.log.Donef("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",

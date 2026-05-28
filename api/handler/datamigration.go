@@ -39,6 +39,7 @@ type startDataMigrationRequest struct {
 	DstConnID      uint   `json:"dst_conn_id" binding:"required"`
 	MigrateMode    string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
 	TableFilter    string `json:"table_filter"`
+	MigrateContent string `json:"migrate_content"` // "both" | "schema_only" | "data_only"，空值默认 "both"
 	PageSize       int    `json:"page_size"`
 	MaxParallel    int    `json:"max_parallel"`
 	LowerCaseNames bool   `json:"lower_case_names"`
@@ -60,6 +61,9 @@ func StartDataMigration(c *gin.Context) {
 	}
 	if req.MaxParallel <= 0 {
 		req.MaxParallel = 5
+	}
+	if req.MigrateContent == "" {
+		req.MigrateContent = "both"
 	}
 
 	srcConn, err := store.GetConnection(req.SrcConnID)
@@ -170,6 +174,7 @@ func StartDataMigration(c *gin.Context) {
 			MaxParallel:    req.MaxParallel,
 			Mode:           req.MigrateMode,
 			Filter:         req.TableFilter,
+			Content:        req.MigrateContent,
 			LowerCaseNames: req.LowerCaseNames,
 			CharInLength:   req.CharInLength,
 			UseNvarchar2:   req.UseNvarchar2,
