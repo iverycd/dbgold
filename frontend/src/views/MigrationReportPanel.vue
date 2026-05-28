@@ -1,5 +1,5 @@
 <template>
-  <div class="migration-report-panel">
+  <div v-if="!noReport" class="migration-report-panel">
     <div v-if="loading" style="text-align: center; padding: 24px">
       <a-spin />
     </div>
@@ -137,6 +137,7 @@ const props = defineProps<{ jobID: string }>()
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
 const fetchError = ref('')
+const noReport = ref(false)
 
 interface ReportRow {
   key: string
@@ -180,11 +181,16 @@ const mismatchedRows = computed<TableRowCount[]>(() =>
 async function loadReport() {
   loading.value = true
   fetchError.value = ''
+  noReport.value = false
   try {
     const res = await getDataMigrationReport(props.jobID)
     report.value = res.data
-  } catch {
-    fetchError.value = '暂无报告数据'
+  } catch (e: any) {
+    if (e?.response?.status === 404) {
+      noReport.value = true
+    } else {
+      fetchError.value = '暂无报告数据'
+    }
   } finally {
     loading.value = false
   }

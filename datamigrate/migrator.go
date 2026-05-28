@@ -23,7 +23,8 @@ type Config struct {
 	LowerCaseNames bool
 	CharInLength   bool
 	UseNvarchar2   bool
-	Distributed    bool // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
+	Distributed    bool   // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
+	TargetSchema   string // 目标库 schema，为空时使用连接默认 search_path
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -224,8 +225,14 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 		cols = append(cols, "  "+colDef)
 	}
 	tblName := m.objName(table)
-	ddl := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\" CASCADE;\nCREATE TABLE \"%s\" (\n%s\n);",
-		tblName, tblName, strings.Join(cols, ",\n"))
+	var qualifiedName string
+	if m.cfg.TargetSchema != "" {
+		qualifiedName = fmt.Sprintf(`"%s"."%s"`, m.cfg.TargetSchema, tblName)
+	} else {
+		qualifiedName = fmt.Sprintf(`"%s"`, tblName)
+	}
+	ddl := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;\nCREATE TABLE %s (\n%s\n);",
+		qualifiedName, qualifiedName, strings.Join(cols, ",\n"))
 	return ddl, nil
 }
 

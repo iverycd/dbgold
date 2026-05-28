@@ -37,3 +37,6 @@ export const testConnection = (id: number) =>
 
 export const listConnectionDatabases = (id: number) =>
   api.get<string[]>(`/connections/${id}/databases`)
+
+export const listConnectionSchemas = (id: number) =>
+  api.get<string[]>(`/connections/${id}/schemas`)

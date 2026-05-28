@@ -170,6 +170,7 @@
               <template v-if="reportJob.dst_conn">
                 <span>{{ reportJob.dst_conn.name }} · {{ reportJob.dst_conn.host }}:{{ reportJob.dst_conn.port }}</span>
                 <span class="report-conn-sub">数据库：{{ reportJob.dst_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.dst_conn.username }}</span>
+                <span v-if="reportJob.dst_schema" class="report-schema-badge">Schema：{{ reportJob.dst_schema }}</span>
               </template>
               <span v-else style="color: #86909c">已删除</span>
             </div>
@@ -287,5 +288,16 @@ onMounted(() => {
   margin-left: 4px;
   font-size: 12px;
   color: var(--color-text-3);
+}
+.report-schema-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  background: #e8f3ff;
+  color: #165dff;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #bedaff;
 }
 </style>

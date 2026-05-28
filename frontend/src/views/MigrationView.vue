@@ -49,7 +49,7 @@
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择 PostgreSQL 连接"
                   style="width: 280px"
-                  @change="checkPairSupport"
+                  @change="(val: number) => { checkPairSupport(); loadDstSchemas(val) }"
                 >
                   <a-option
                     v-for="c in pgConnections"
@@ -65,6 +65,21 @@
                   <a-divider direction="vertical" />
                   <span class="conn-label">账号：</span><span>{{ selectedDst.username }}</span>
                 </div>
+                <a-select
+                  v-if="dataMigrate.dstSchemas.length > 0"
+                  v-model="dataMigrate.dstSchema"
+                  placeholder="选择目标 Schema（默认不指定）"
+                  style="width: 280px; margin-top: 8px"
+                  allow-clear
+                  allow-search
+                >
+                  <a-option
+                    v-for="s in dataMigrate.dstSchemas"
+                    :key="s"
+                    :value="s"
+                    :label="s"
+                  />
+                </a-select>
               </a-form-item>
             </a-col>
           </a-row>
@@ -252,7 +267,7 @@ import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
-import { listConnections, listConnectionDatabases, type Connection } from '@/api/connections'
+import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
 import {
   getSupportedPairs,
   startDataMigration as apiStartMigration,
@@ -324,6 +339,8 @@ const dataMigrate = reactive({
   dstConnId: undefined as number | undefined,
   srcDatabase: '',
   srcDatabases: [] as string[],
+  dstSchema: '',
+  dstSchemas: [] as string[],
   mode: 'all' as 'all' | 'include' | 'exclude',
   filter: '',
   content: 'both' as 'both' | 'schema_only' | 'data_only',
@@ -407,6 +424,19 @@ async function loadSrcDatabases(connId: number) {
   }
 }
 
+async function loadDstSchemas(connId: number) {
+  dataMigrate.dstSchema = ''
+  dataMigrate.dstSchemas = []
+  const dst = connections.value.find((c) => c.id === connId)
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb')) return
+  try {
+    const res = await listConnectionSchemas(connId)
+    dataMigrate.dstSchemas = res.data ?? []
+  } catch {
+    // 列 schema 失败时静默忽略
+  }
+}
+
 function getLogClass(line: string): string {
   if (line.includes('[ERROR]')) return 'log-error'
   if (line.includes('[WARN]')) return 'log-warn'
@@ -433,6 +463,7 @@ async function startDataMigration() {
       use_nvarchar2: dataMigrate.useNvarchar2,
       distributed: dataMigrate.distributed,
       src_database: dataMigrate.srcDatabase,
+      target_schema: dataMigrate.dstSchema || undefined,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)

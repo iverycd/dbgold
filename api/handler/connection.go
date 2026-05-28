@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"dbgold/datamigrate/source"
 	"dbgold/driver"
 	"dbgold/store"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 )
 
 type connectionRequest struct {
@@ -172,4 +174,61 @@ func ListConnectionDatabases(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, dbs)
+}
+
+func ListConnectionSchemas(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	conn, err := store.GetConnection(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return
+	}
+	if conn.DBType != "postgres" && conn.DBType != "gaussdb" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
+		return
+	}
+
+	driverName := "postgres"
+	if conn.DBType == "gaussdb" {
+		driverName = "opengauss"
+	}
+	db, err := sql.Open(driverName, buildDSN(conn))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(c.Request.Context(),
+		`SELECT schema_name FROM information_schema.schemata
+		 WHERE schema_name NOT IN (
+		   'information_schema','pg_catalog','pg_toast',
+		   'cstore','dbe_perf','snapshot','blockchain','db4ai','prvt_ilm','sys',
+		   'dbe_ilm_admin','sqladvisor','dbe_pldebugger','dbe_pldeveloper','dbe_sql_util',
+		   'pkg_util','dbe_scheduler','pkg_service','dbe_raw','dbe_utility','dbe_output',
+		   'dbe_xml','dbe_xmldom','dbe_xmlparser','dbe_describe','dbe_stats','dbe_profiler',
+		   'dbe_heat_map','dbe_ilm','dbe_compression','dbe_xmlgen','resource_manager',
+		   'dbe_file','dbe_random','dbe_application_info','dbe_sql','dbe_lob','dbe_task',
+		   'dbe_match','dbe_session'
+		 )
+		 ORDER BY schema_name`)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			continue
+		}
+		schemas = append(schemas, s)
+	}
+	c.JSON(http.StatusOK, schemas)
 }

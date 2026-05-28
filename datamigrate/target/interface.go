@@ -25,6 +25,8 @@ type Writer interface {
 	CountRows(ctx context.Context, table string) (int64, error)
 	// AlterDistribute 在分布式数据库中将表的分布列设置为指定列（非分布式实现返回 nil）
 	AlterDistribute(ctx context.Context, table string, cols []string) error
+	// SchemaExists 检查指定 schema 是否存在于目标库
+	SchemaExists(ctx context.Context, schema string) (bool, error)
 	// Close 关闭目标库连接
 	Close() error
 }

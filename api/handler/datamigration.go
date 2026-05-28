@@ -46,7 +46,8 @@ type startDataMigrationRequest struct {
 	CharInLength   bool   `json:"char_in_length"`
 	UseNvarchar2   bool   `json:"use_nvarchar2"`
 	Distributed    bool   `json:"distributed"`
-	SrcDatabase    string `json:"src_database"` // 可选，覆盖连接中的默认数据库
+	SrcDatabase    string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
+	TargetSchema   string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -114,6 +115,7 @@ func StartDataMigration(c *gin.Context) {
 		LowerCaseNames:  req.LowerCaseNames,
 		CharInLength:    req.CharInLength,
 		UseNvarchar2:    req.UseNvarchar2,
+		DstSchema:       req.TargetSchema,
 		Status:          "running",
 		SrcConnName:     srcConn.Name,
 		SrcConnHost:     srcConn.Host,
@@ -158,9 +160,9 @@ func StartDataMigration(c *gin.Context) {
 		var writer target.Writer
 		var writerErr error
 		if dstConn.DBType == "gaussdb" {
-			writer, writerErr = target.NewGaussDB(dstDSN)
+			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema)
 		} else {
-			writer, writerErr = target.NewPostgres(dstDSN)
+			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema)
 		}
 		if writerErr != nil {
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
@@ -168,6 +170,21 @@ func StartDataMigration(c *gin.Context) {
 			return
 		}
 		defer writer.Close()
+
+		if req.TargetSchema != "" {
+			exists, err := writer.SchemaExists(ctx, req.TargetSchema)
+			if err != nil {
+				job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
+				updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
+				return
+			}
+			if !exists {
+				msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema)
+				job.LogCh <- "[ERROR] " + msg
+				updateJobStatus(dbJob, "failed", msg)
+				return
+			}
+		}
 
 		cfg := datamigrate.Config{
 			PageSize:       req.PageSize,
@@ -179,6 +196,7 @@ func StartDataMigration(c *gin.Context) {
 			CharInLength:   req.CharInLength,
 			UseNvarchar2:   req.UseNvarchar2,
 			Distributed:    req.Distributed,
+			TargetSchema:   req.TargetSchema,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

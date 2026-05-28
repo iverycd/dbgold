@@ -68,6 +68,7 @@ export interface StartDataMigrationRequest {
   use_nvarchar2?: boolean
   distributed?: boolean
   src_database?: string
+  target_schema?: string
 }
 
 export interface ConnSnapshot {
@@ -94,6 +95,7 @@ export interface DataMigrationJob {
   summary: string
   created_at: string
   finished_at?: string
+  dst_schema?: string
   src_conn?: ConnSnapshot
   dst_conn?: ConnSnapshot
 }
