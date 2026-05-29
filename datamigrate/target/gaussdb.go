@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"dbgold/datamigrate/source"
 	_ "gitee.com/opengauss/openGauss-connector-go-pq"
@@ -26,6 +27,10 @@ func NewGaussDB(dsn, schema string) (*GaussDBWriter, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 连接池配置：迁移并发写入需要足够的连接复用，避免每次写入重建连接
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(time.Hour)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}

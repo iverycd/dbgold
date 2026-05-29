@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -25,6 +26,10 @@ func NewMySQL(dsn, dbName string) (*MySQLReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 连接池配置：迁移并发读取需要足够的连接复用，避免每次查询重建连接
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(time.Hour)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}

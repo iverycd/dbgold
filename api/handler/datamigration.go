@@ -59,10 +59,10 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 	if req.PageSize <= 0 {
-		req.PageSize = 10000
+		req.PageSize = 20000
 	}
 	if req.MaxParallel <= 0 {
-		req.MaxParallel = 5
+		req.MaxParallel = 10
 	}
 	if req.IntraTableParallel <= 0 {
 		req.IntraTableParallel = 1
