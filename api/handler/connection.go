@@ -204,8 +204,7 @@ func ListConnectionSchemas(c *gin.Context) {
 	defer db.Close()
 
 	rows, err := db.QueryContext(c.Request.Context(),
-		`SELECT schema_name FROM information_schema.schemata
-		 WHERE schema_name NOT IN (
+		`SELECT nspname FROM pg_namespace WHERE nspname NOT IN (
 		   'information_schema','pg_catalog','pg_toast',
 		   'cstore','dbe_perf','snapshot','blockchain','db4ai','prvt_ilm','sys',
 		   'dbe_ilm_admin','sqladvisor','dbe_pldebugger','dbe_pldeveloper','dbe_sql_util',
@@ -214,8 +213,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		   'dbe_heat_map','dbe_ilm','dbe_compression','dbe_xmlgen','resource_manager',
 		   'dbe_file','dbe_random','dbe_application_info','dbe_sql','dbe_lob','dbe_task',
 		   'dbe_match','dbe_session'
-		 )
-		 ORDER BY schema_name`)
+		 )`)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return

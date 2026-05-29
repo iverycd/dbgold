@@ -144,7 +144,7 @@ func (w *PostgresWriter) AlterDistribute(_ context.Context, _ string, _ []string
 func (w *PostgresWriter) SchemaExists(ctx context.Context, schema string) (bool, error) {
 	var exists bool
 	err := w.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`,
+		`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1)`,
 		schema,
 	).Scan(&exists)
 	return exists, err

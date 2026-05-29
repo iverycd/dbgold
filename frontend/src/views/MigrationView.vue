@@ -58,15 +58,18 @@
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
                 <a-select
-                  v-if="dataMigrate.dstSchemas.length > 0"
+                  v-if="dataMigrate.dstConnId"
                   v-model="dataMigrate.dstSchema"
-                  placeholder="选择目标 Schema（默认不指定）"
+                  placeholder="请选择目标 Schema"
                   style="width: 100%; margin-top: 10px"
-                  allow-clear
                   allow-search
                 >
                   <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
+                <div v-if="dataMigrate.dstConnId" class="schema-permission-tip">
+                  <icon-info-circle style="flex-shrink:0" />
+                  请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。
+                </div>
               </a-card>
             </a-col>
           </a-row>
@@ -433,6 +436,10 @@ function getLogClass(line: string): string {
 
 async function startDataMigration() {
   if (!validateTableFilter()) return
+  if (dataMigrate.dstConnId && !dataMigrate.dstSchema) {
+    Message.error('请选择目标 Schema')
+    return
+  }
   dataMigrate.running = true
   dataMigrate.finished = false
   dataMigrate.logs = []
@@ -592,5 +599,18 @@ onUnmounted(() => {
 .conn-meta-label {
   color: var(--color-text-4);
   margin-right: 3px;
+}
+.schema-permission-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 7px 10px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #7d5a00;
+  line-height: 1.5;
 }
 </style>
