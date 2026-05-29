@@ -63,6 +63,7 @@ export interface StartDataMigrationRequest {
   migrate_content?: 'both' | 'schema_only' | 'data_only'
   page_size?: number
   max_parallel?: number
+  intra_table_parallel?: number
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean
@@ -91,6 +92,7 @@ export interface DataMigrationJob {
   table_filter: string
   page_size: number
   max_parallel: number
+  intra_table_parallel?: number
   status: 'running' | 'done' | 'failed' | 'cancelled'
   summary: string
   created_at: string

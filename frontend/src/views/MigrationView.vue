@@ -126,6 +126,11 @@
                   </a-form-item>
                 </a-col>
                 <a-col :span="12">
+                  <a-form-item label="表内分页并发数">
+                    <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 140px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="12">
                   <a-form-item style="margin-bottom: 4px">
                     <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写</a-checkbox>
                   </a-form-item>
@@ -336,6 +341,7 @@ const dataMigrate = reactive({
   content: 'both' as 'both' | 'schema_only' | 'data_only',
   pageSize: 10000,
   maxParallel: 5,
+  intraTableParallel: 1,
   lowerCaseNames: true,
   charInLength: false,
   useNvarchar2: false,
@@ -452,6 +458,7 @@ async function startDataMigration() {
       migrate_content: dataMigrate.content,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
+      intra_table_parallel: dataMigrate.intraTableParallel,
       lower_case_names: dataMigrate.lowerCaseNames,
       char_in_length: dataMigrate.charInLength,
       use_nvarchar2: dataMigrate.useNvarchar2,

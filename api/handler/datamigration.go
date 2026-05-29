@@ -35,19 +35,20 @@ func GetSupportedPairs(c *gin.Context) {
 }
 
 type startDataMigrationRequest struct {
-	SrcConnID      uint   `json:"src_conn_id" binding:"required"`
-	DstConnID      uint   `json:"dst_conn_id" binding:"required"`
-	MigrateMode    string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
-	TableFilter    string `json:"table_filter"`
-	MigrateContent string `json:"migrate_content"` // "both" | "schema_only" | "data_only"，空值默认 "both"
-	PageSize       int    `json:"page_size"`
-	MaxParallel    int    `json:"max_parallel"`
-	LowerCaseNames bool   `json:"lower_case_names"`
-	CharInLength   bool   `json:"char_in_length"`
-	UseNvarchar2   bool   `json:"use_nvarchar2"`
-	Distributed    bool   `json:"distributed"`
-	SrcDatabase    string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
-	TargetSchema   string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
+	SrcConnID          uint   `json:"src_conn_id" binding:"required"`
+	DstConnID          uint   `json:"dst_conn_id" binding:"required"`
+	MigrateMode        string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
+	TableFilter        string `json:"table_filter"`
+	MigrateContent     string `json:"migrate_content"` // "both" | "schema_only" | "data_only"，空值默认 "both"
+	PageSize           int    `json:"page_size"`
+	MaxParallel        int    `json:"max_parallel"`
+	IntraTableParallel int    `json:"intra_table_parallel"`
+	LowerCaseNames     bool   `json:"lower_case_names"`
+	CharInLength       bool   `json:"char_in_length"`
+	UseNvarchar2       bool   `json:"use_nvarchar2"`
+	Distributed        bool   `json:"distributed"`
+	SrcDatabase        string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
+	TargetSchema       string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -62,6 +63,9 @@ func StartDataMigration(c *gin.Context) {
 	}
 	if req.MaxParallel <= 0 {
 		req.MaxParallel = 5
+	}
+	if req.IntraTableParallel <= 0 {
+		req.IntraTableParallel = 1
 	}
 	if req.MigrateContent == "" {
 		req.MigrateContent = "both"
@@ -103,30 +107,31 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
-		JobID:           jobID,
-		SrcConnID:       req.SrcConnID,
-		DstConnID:       req.DstConnID,
-		SrcDBType:       srcConn.DBType,
-		DstDBType:       dstConn.DBType,
-		MigrateMode:     req.MigrateMode,
-		TableFilter:     req.TableFilter,
-		PageSize:        req.PageSize,
-		MaxParallel:     req.MaxParallel,
-		LowerCaseNames:  req.LowerCaseNames,
-		CharInLength:    req.CharInLength,
-		UseNvarchar2:    req.UseNvarchar2,
-		DstSchema:       req.TargetSchema,
-		Status:          "running",
-		SrcConnName:     srcConn.Name,
-		SrcConnHost:     srcConn.Host,
-		SrcConnPort:     srcConn.Port,
-		SrcConnDatabase: srcConnDatabase,
-		SrcConnUsername: srcConn.Username,
-		DstConnName:     dstConn.Name,
-		DstConnHost:     dstConn.Host,
-		DstConnPort:     dstConn.Port,
-		DstConnDatabase: dstConn.Database,
-		DstConnUsername: dstConn.Username,
+		JobID:              jobID,
+		SrcConnID:          req.SrcConnID,
+		DstConnID:          req.DstConnID,
+		SrcDBType:          srcConn.DBType,
+		DstDBType:          dstConn.DBType,
+		MigrateMode:        req.MigrateMode,
+		TableFilter:        req.TableFilter,
+		PageSize:           req.PageSize,
+		MaxParallel:        req.MaxParallel,
+		IntraTableParallel: req.IntraTableParallel,
+		LowerCaseNames:     req.LowerCaseNames,
+		CharInLength:       req.CharInLength,
+		UseNvarchar2:       req.UseNvarchar2,
+		DstSchema:          req.TargetSchema,
+		Status:             "running",
+		SrcConnName:        srcConn.Name,
+		SrcConnHost:        srcConn.Host,
+		SrcConnPort:        srcConn.Port,
+		SrcConnDatabase:    srcConnDatabase,
+		SrcConnUsername:    srcConn.Username,
+		DstConnName:        dstConn.Name,
+		DstConnHost:        dstConn.Host,
+		DstConnPort:        dstConn.Port,
+		DstConnDatabase:    dstConn.Database,
+		DstConnUsername:    dstConn.Username,
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
 		cancel()
@@ -187,16 +192,17 @@ func StartDataMigration(c *gin.Context) {
 		}
 
 		cfg := datamigrate.Config{
-			PageSize:       req.PageSize,
-			MaxParallel:    req.MaxParallel,
-			Mode:           req.MigrateMode,
-			Filter:         req.TableFilter,
-			Content:        req.MigrateContent,
-			LowerCaseNames: req.LowerCaseNames,
-			CharInLength:   req.CharInLength,
-			UseNvarchar2:   req.UseNvarchar2,
-			Distributed:    req.Distributed,
-			TargetSchema:   req.TargetSchema,
+			PageSize:           req.PageSize,
+			MaxParallel:        req.MaxParallel,
+			Mode:               req.MigrateMode,
+			Filter:             req.TableFilter,
+			Content:            req.MigrateContent,
+			LowerCaseNames:     req.LowerCaseNames,
+			CharInLength:       req.CharInLength,
+			UseNvarchar2:       req.UseNvarchar2,
+			Distributed:        req.Distributed,
+			TargetSchema:       req.TargetSchema,
+			IntraTableParallel: req.IntraTableParallel,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

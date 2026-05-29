@@ -18,24 +18,25 @@ type DataMigrationJobWithConn struct {
 }
 
 type DataMigrationJob struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	JobID          string     `gorm:"uniqueIndex;not null" json:"job_id"`
-	SrcConnID      uint       `json:"src_conn_id"`
-	DstConnID      uint       `json:"dst_conn_id"`
-	SrcDBType      string     `json:"src_db_type"`
-	DstDBType      string     `json:"dst_db_type"`
-	MigrateMode    string     `json:"migrate_mode"` // all / exclude / include
-	TableFilter    string     `json:"table_filter"`
-	PageSize       int        `json:"page_size"`
-	MaxParallel    int        `json:"max_parallel"`
-	Status         string     `json:"status"` // running / done / failed / cancelled
-	Summary        string     `json:"summary"`
-	CreatedAt      time.Time  `json:"created_at"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	LowerCaseNames bool       `json:"lower_case_names"`
-	CharInLength   bool       `json:"char_in_length"`
-	UseNvarchar2   bool       `json:"use_nvarchar2"`
-	DstSchema      string     `json:"dst_schema"` // 目标 schema，为空时使用连接默认 search_path
+	ID                 uint       `gorm:"primaryKey" json:"id"`
+	JobID              string     `gorm:"uniqueIndex;not null" json:"job_id"`
+	SrcConnID          uint       `json:"src_conn_id"`
+	DstConnID          uint       `json:"dst_conn_id"`
+	SrcDBType          string     `json:"src_db_type"`
+	DstDBType          string     `json:"dst_db_type"`
+	MigrateMode        string     `json:"migrate_mode"` // all / exclude / include
+	TableFilter        string     `json:"table_filter"`
+	PageSize           int        `json:"page_size"`
+	MaxParallel        int        `json:"max_parallel"`
+	IntraTableParallel int        `json:"intra_table_parallel"`
+	Status             string     `json:"status"` // running / done / failed / cancelled
+	Summary            string     `json:"summary"`
+	CreatedAt          time.Time  `json:"created_at"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+	LowerCaseNames     bool       `json:"lower_case_names"`
+	CharInLength       bool       `json:"char_in_length"`
+	UseNvarchar2       bool       `json:"use_nvarchar2"`
+	DstSchema          string     `json:"dst_schema"` // 目标 schema，为空时使用连接默认 search_path
 	// 连接快照（迁移启动时写入，不随连接修改而变化）
 	SrcConnName     string `json:"src_conn_name"`
 	SrcConnHost     string `json:"src_conn_host"`

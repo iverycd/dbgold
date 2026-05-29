@@ -1,7 +1,10 @@
 // datamigrate/logger.go
 package datamigrate
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	PrefixInfo  = "[INFO] "
@@ -40,8 +43,9 @@ func (l *Logger) Errorf(format string, args ...interface{}) { l.Error(fmt.Sprint
 func (l *Logger) Donef(format string, args ...interface{})  { l.Done(fmt.Sprintf(format, args...)) }
 
 func (l *Logger) send(msg string) {
+	ts := time.Now().Format("15:04:05.000")
 	select {
-	case l.ch <- msg:
+	case l.ch <- ts + " " + msg:
 	default:
 	}
 }

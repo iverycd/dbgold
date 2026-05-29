@@ -15,16 +15,17 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
-	PageSize       int
-	MaxParallel    int
-	Mode           string
-	Filter         string
-	Content        string // "both" | "schema_only" | "data_only"，默认 "both"
-	LowerCaseNames bool
-	CharInLength   bool
-	UseNvarchar2   bool
-	Distributed    bool   // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
-	TargetSchema   string // 目标库 schema，为空时使用连接默认 search_path
+	PageSize           int
+	MaxParallel        int
+	IntraTableParallel int // 单表内部分页并发数，<=1 表示串行
+	Mode               string
+	Filter             string
+	Content            string // "both" | "schema_only" | "data_only"，默认 "both"
+	LowerCaseNames     bool
+	CharInLength       bool
+	UseNvarchar2       bool
+	Distributed        bool   // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
+	TargetSchema       string // 目标库 schema，为空时使用连接默认 search_path
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -72,8 +73,8 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		return report
 	}
 	tables := FilterTables(allTables, m.cfg.Mode, m.cfg.Filter)
-	m.log.Infof("开始迁移任务，共 %d 张表，pageSize=%d，maxParallel=%d",
-		len(tables), m.cfg.PageSize, m.cfg.MaxParallel)
+	m.log.Infof("开始迁移任务，共 %d 张表，pageSize=%d，maxParallel=%d，intraTableParallel=%d",
+		len(tables), m.cfg.PageSize, m.cfg.MaxParallel, m.cfg.IntraTableParallel)
 
 	report.Tables.Total = len(tables)
 
@@ -243,6 +244,14 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 		m.log.Errorf("获取主键失败 [%s]: %v", table, err)
 		return false, err.Error()
 	}
+	if m.cfg.IntraTableParallel <= 1 {
+		return m.migrateTableDataSerial(ctx, table, pks)
+	}
+	return m.migrateTableDataParallel(ctx, table, pks)
+}
+
+// migrateTableDataSerial 串行分页迁移单张表
+func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks []string) (bool, string) {
 	var offset int64
 	pageNum := 0
 	firstErr := ""
@@ -282,6 +291,104 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 			break
 		}
 		offset += int64(m.cfg.PageSize)
+	}
+	if hasError {
+		return false, firstErr
+	}
+	return true, ""
+}
+
+// migrateTableDataParallel 并发分页迁移单张表
+func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, pks []string) (bool, string) {
+	totalRows, err := m.reader.CountRows(ctx, table)
+	if err != nil {
+		m.log.Errorf("获取行数失败 [%s]: %v", table, err)
+		return false, err.Error()
+	}
+	if totalRows == 0 {
+		m.log.Dataf("迁移 %s: 空表，跳过", table)
+		return true, ""
+	}
+
+	pageSize := int64(m.cfg.PageSize)
+	totalPages := (totalRows + pageSize - 1) / pageSize
+	dstTable := m.objName(table)
+
+	// 先读第一页以获取列名
+	cols, firstRows, err := m.reader.ReadPage(ctx, table, pks, 0, pageSize)
+	if err != nil {
+		m.log.Errorf("读取数据失败 [%s] 第 1 页: %v", table, err)
+		return false, err.Error()
+	}
+	dstCols := make([]string, len(cols))
+	for i, c := range cols {
+		dstCols[i] = m.objName(c)
+	}
+
+	var mu sync.Mutex
+	firstErr := ""
+	hasError := false
+
+	writePage := func(pageNum int, rows [][]interface{}) {
+		if err := m.writer.CopyData(ctx, dstTable, dstCols, rows); err != nil {
+			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
+			mu.Lock()
+			if !hasError {
+				firstErr = err.Error()
+				hasError = true
+			}
+			mu.Unlock()
+		} else {
+			m.log.Dataf("迁移 %s: 第 %d 页 (%d 行) ... OK", table, pageNum, len(rows))
+		}
+	}
+
+	sem := make(chan struct{}, m.cfg.IntraTableParallel)
+	var wg sync.WaitGroup
+
+	// 第 1 页已读取，直接并发写入
+	wg.Add(1)
+	sem <- struct{}{}
+	go func() {
+		defer wg.Done()
+		defer func() { <-sem }()
+		writePage(1, firstRows)
+	}()
+
+	// 第 2 页起并发读取 + 写入
+	for page := int64(1); page < totalPages; page++ {
+		if ctx.Err() != nil {
+			break
+		}
+		offset := page * pageSize
+		pageNum := int(page) + 1
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(off int64, pn int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_, rows, err := m.reader.ReadPage(ctx, table, pks, off, pageSize)
+			if err != nil {
+				m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pn, err)
+				mu.Lock()
+				if !hasError {
+					firstErr = err.Error()
+					hasError = true
+				}
+				mu.Unlock()
+				return
+			}
+			if len(rows) == 0 {
+				return
+			}
+			writePage(pn, rows)
+		}(offset, pageNum)
+	}
+
+	wg.Wait()
+
+	if ctx.Err() != nil && firstErr == "" {
+		return false, "任务已取消"
 	}
 	if hasError {
 		return false, firstErr
