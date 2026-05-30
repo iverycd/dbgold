@@ -12,6 +12,31 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// ConnPoolConfig 连接池配置，零值表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=1h）
+type ConnPoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+func (c ConnPoolConfig) applyTo(db *sql.DB) {
+	maxOpen := c.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 50
+	}
+	maxIdle := c.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = 25
+	}
+	lifetime := c.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = time.Hour
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(lifetime)
+}
+
 // PostgresWriter 实现 Writer 接口，写入到 PostgreSQL 数据库
 type PostgresWriter struct {
 	db     *sql.DB
@@ -21,15 +46,12 @@ type PostgresWriter struct {
 // NewPostgres 创建并连接 PostgreSQL Writer
 // dsn 格式：host=... port=... user=... password=... dbname=... sslmode=disable
 // schema 为空时使用连接默认 search_path
-func NewPostgres(dsn, schema string) (*PostgresWriter, error) {
+func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresWriter, error) {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
 	}
-	// 连接池配置：迁移并发写入需要足够的连接复用，避免每次写入重建连接
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(time.Hour)
+	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}

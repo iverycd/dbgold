@@ -49,6 +49,13 @@ type startDataMigrationRequest struct {
 	Distributed        bool   `json:"distributed"`
 	SrcDatabase        string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
 	TargetSchema       string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
+	// 连接池配置，0 表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=3600s）
+	SrcMaxOpenConns    int `json:"src_max_open_conns"`
+	SrcMaxIdleConns    int `json:"src_max_idle_conns"`
+	SrcConnMaxLifetime int `json:"src_conn_max_lifetime"` // 秒
+	DstMaxOpenConns    int `json:"dst_max_open_conns"`
+	DstMaxIdleConns    int `json:"dst_max_idle_conns"`
+	DstConnMaxLifetime int `json:"dst_conn_max_lifetime"` // 秒
 }
 
 // StartDataMigration 创建并启动迁移任务，立即返回 jobID
@@ -154,7 +161,11 @@ func StartDataMigration(c *gin.Context) {
 			datamigrate.Registry.Remove(jobID)
 		}()
 
-		reader, err := source.NewMySQL(srcDSN, srcConnDatabase)
+		reader, err := source.NewMySQL(srcDSN, srcConnDatabase, source.ConnPoolConfig{
+			MaxOpenConns:    req.SrcMaxOpenConns,
+			MaxIdleConns:    req.SrcMaxIdleConns,
+			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
+		})
 		if err != nil {
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", err)
 			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", err))
@@ -162,12 +173,17 @@ func StartDataMigration(c *gin.Context) {
 		}
 		defer reader.Close()
 
+		dstPool := target.ConnPoolConfig{
+			MaxOpenConns:    req.DstMaxOpenConns,
+			MaxIdleConns:    req.DstMaxIdleConns,
+			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
+		}
 		var writer target.Writer
 		var writerErr error
 		if dstConn.DBType == "gaussdb" {
-			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema)
+			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, dstPool)
 		} else {
-			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema)
+			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, dstPool)
 		}
 		if writerErr != nil {
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)

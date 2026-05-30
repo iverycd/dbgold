@@ -13,6 +13,31 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+// ConnPoolConfig 连接池配置，零值表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=1h）
+type ConnPoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+func (c ConnPoolConfig) applyTo(db *sql.DB) {
+	maxOpen := c.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 50
+	}
+	maxIdle := c.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = 25
+	}
+	lifetime := c.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = time.Hour
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(lifetime)
+}
+
 // MySQLReader 实现 Reader 接口，连接到 MySQL 数据库
 type MySQLReader struct {
 	db     *sql.DB
@@ -21,15 +46,12 @@ type MySQLReader struct {
 
 // NewMySQL 创建并连接 MySQL Reader
 // dsn 格式：user:password@tcp(host:port)/dbname?parseTime=true
-func NewMySQL(dsn, dbName string) (*MySQLReader, error) {
+func NewMySQL(dsn, dbName string, pool ConnPoolConfig) (*MySQLReader, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
-	// 连接池配置：迁移并发读取需要足够的连接复用，避免每次查询重建连接
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(time.Hour)
+	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}

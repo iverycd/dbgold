@@ -158,7 +158,7 @@ func ListConnectionDatabases(c *gin.Context) {
 	var reader source.Reader
 	switch conn.DBType {
 	case "mysql":
-		reader, err = source.NewMySQL(buildDSN(conn), conn.Database)
+		reader, err = source.NewMySQL(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
 		return

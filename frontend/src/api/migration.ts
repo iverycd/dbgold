@@ -70,6 +70,12 @@ export interface StartDataMigrationRequest {
   distributed?: boolean
   src_database?: string
   target_schema?: string
+  src_max_open_conns?: number
+  src_max_idle_conns?: number
+  src_conn_max_lifetime?: number
+  dst_max_open_conns?: number
+  dst_max_idle_conns?: number
+  dst_conn_max_lifetime?: number
 }
 
 export interface ConnSnapshot {

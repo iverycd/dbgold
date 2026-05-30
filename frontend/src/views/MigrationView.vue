@@ -151,6 +151,45 @@
                   </a-form-item>
                 </a-col>
               </a-row>
+              <a-divider style="margin: 12px 0 8px">连接池配置（0 表示使用默认值）</a-divider>
+              <a-row :gutter="16">
+                <a-col :span="24" style="margin-bottom: 8px">
+                  <span style="font-size: 12px; color: var(--color-text-3)">源库连接池</span>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="最大连接数">
+                    <a-input-number v-model="dataMigrate.srcMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="最大空闲连接数">
+                    <a-input-number v-model="dataMigrate.srcMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="连接生命周期（秒）">
+                    <a-input-number v-model="dataMigrate.srcConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24" style="margin-bottom: 8px">
+                  <span style="font-size: 12px; color: var(--color-text-3)">目标库连接池</span>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="最大连接数">
+                    <a-input-number v-model="dataMigrate.dstMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="最大空闲连接数">
+                    <a-input-number v-model="dataMigrate.dstMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="8">
+                  <a-form-item label="连接生命周期（秒）">
+                    <a-input-number v-model="dataMigrate.dstConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 120px" />
+                  </a-form-item>
+                </a-col>
+              </a-row>
             </a-collapse-item>
           </a-collapse>
 
@@ -346,6 +385,12 @@ const dataMigrate = reactive({
   charInLength: false,
   useNvarchar2: false,
   distributed: false,
+  srcMaxOpenConns: 50,
+  srcMaxIdleConns: 25,
+  srcConnMaxLifetime: 3600,
+  dstMaxOpenConns: 50,
+  dstMaxIdleConns: 25,
+  dstConnMaxLifetime: 3600,
   running: false,
   finished: false,
   logs: [] as string[],
@@ -465,6 +510,12 @@ async function startDataMigration() {
       distributed: dataMigrate.distributed,
       src_database: dataMigrate.srcDatabase,
       target_schema: dataMigrate.dstSchema || undefined,
+      src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
+      src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
+      src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,
+      dst_max_open_conns: dataMigrate.dstMaxOpenConns || undefined,
+      dst_max_idle_conns: dataMigrate.dstMaxIdleConns || undefined,
+      dst_conn_max_lifetime: dataMigrate.dstConnMaxLifetime || undefined,
     })
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)
