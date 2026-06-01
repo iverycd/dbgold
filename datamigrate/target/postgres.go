@@ -109,30 +109,40 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 }
 
 func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	seqName := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
+	seqBase := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
+	var quotedSeq string  // 带引号的序列名，用于 DDL
+	var nextvalArg string // nextval() 的参数，带 schema 前缀
 	if w.schema != "" {
-		seqName = fmt.Sprintf("%s.seq_%s_%s", w.schema, seq.TableName, seq.ColumnName)
+		quotedSeq = fmt.Sprintf(`"%s"."%s"`, w.schema, seqBase)
+		nextvalArg = fmt.Sprintf(`%s."%s"`, w.schema, seqBase)
+	} else {
+		quotedSeq = fmt.Sprintf(`"%s"`, seqBase)
+		nextvalArg = fmt.Sprintf(`"%s"`, seqBase)
 	}
-	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", seqName, seq.StartValue)
+	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
 	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
 		return err
 	}
-	alterSQL := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT nextval('%s')",
-		w.qualifiedTable(seq.TableName), seq.ColumnName, seqName)
+	alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" SET DEFAULT nextval('%s')`,
+		w.qualifiedTable(seq.TableName), seq.ColumnName, nextvalArg)
 	_, err := w.db.ExecContext(ctx, alterSQL)
 	return err
 }
 
 func (w *PostgresWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	cols := strings.Join(idx.Columns, ", ")
+	quotedCols := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
+		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+	}
+	cols := strings.Join(quotedCols, ", ")
 	var ddl string
 	if idx.IsPrimary {
 		ddl = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", w.qualifiedTable(idx.TableName), cols)
 	} else if idx.IsUnique {
-		ddl = fmt.Sprintf("CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s);",
+		ddl = fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
 			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
 	} else {
-		ddl = fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
+		ddl = fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
 			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
 	}
 	_, err := w.db.ExecContext(ctx, ddl)
@@ -140,12 +150,20 @@ func (w *PostgresWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) 
 }
 
 func (w *PostgresWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {
+	quotedCols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+	}
+	quotedRefCols := make([]string, len(fk.RefColumns))
+	for i, c := range fk.RefColumns {
+		quotedRefCols[i] = fmt.Sprintf(`"%s"`, c)
+	}
 	ddl := fmt.Sprintf(
-		"ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s ON UPDATE %s;",
+		`ALTER TABLE %s ADD CONSTRAINT "%s" FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s ON UPDATE %s;`,
 		w.qualifiedTable(fk.TableName), fk.ConstraintName,
-		strings.Join(fk.Columns, ", "),
+		strings.Join(quotedCols, ", "),
 		w.qualifiedTable(fk.RefTable),
-		strings.Join(fk.RefColumns, ", "),
+		strings.Join(quotedRefCols, ", "),
 		fk.OnDelete, fk.OnUpdate)
 	_, err := w.db.ExecContext(ctx, ddl)
 	return err

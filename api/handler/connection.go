@@ -45,8 +45,9 @@ func buildDSN(c *store.Connection) string {
 		return fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
 			c.Username, c.Password, c.Host, c.Port, c.Database)
 	case "sqlserver":
-		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
-			c.Username, c.Password, c.Host, c.Port, c.Database)
+		// 使用 key=value 格式，避免密码含 @ 或 host 含 \ 破坏 URL 解析
+		return fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
+			c.Host, c.Port, c.Database, c.Username, c.Password)
 	case "gaussdb":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
@@ -138,6 +139,7 @@ func TestConnection(c *gin.Context) {
 	}
 	defer d.Close()
 	if err := d.Connect(buildDSN(conn)); err != nil {
+		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -159,17 +161,21 @@ func ListConnectionDatabases(c *gin.Context) {
 	switch conn.DBType {
 	case "mysql":
 		reader, err = source.NewMySQL(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+	case "sqlserver":
+		reader, err = source.NewSQLServer(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
 		return
 	}
 	if err != nil {
+		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 	defer reader.Close()
 	dbs, err := reader.ListDatabases(c.Request.Context())
 	if err != nil {
+		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -198,6 +204,7 @@ func ListConnectionSchemas(c *gin.Context) {
 	}
 	db, err := sql.Open(driverName, buildDSN(conn))
 	if err != nil {
+		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -215,6 +222,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		   'dbe_match','dbe_session'
 		 )`)
 	if err != nil {
+		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}

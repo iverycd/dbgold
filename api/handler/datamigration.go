@@ -27,6 +27,8 @@ type SupportedPair struct {
 var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "postgres"},
 	{Source: "mysql", Target: "gaussdb"},
+	{Source: "sqlserver", Target: "postgres"},
+	{Source: "sqlserver", Target: "gaussdb"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -151,8 +153,14 @@ func StartDataMigration(c *gin.Context) {
 
 	// 若请求中指定了源库数据库，覆盖连接默认值
 	if req.SrcDatabase != "" {
-		srcDSN = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
-			srcConn.Username, srcConn.Password, srcConn.Host, srcConn.Port, srcConnDatabase)
+		switch srcConn.DBType {
+		case "mysql":
+			srcDSN = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
+				srcConn.Username, srcConn.Password, srcConn.Host, srcConn.Port, srcConnDatabase)
+		case "sqlserver":
+			srcDSN = fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
+				srcConn.Host, srcConn.Port, srcConnDatabase, srcConn.Username, srcConn.Password)
+		}
 	}
 
 	go func() {
@@ -161,14 +169,22 @@ func StartDataMigration(c *gin.Context) {
 			datamigrate.Registry.Remove(jobID)
 		}()
 
-		reader, err := source.NewMySQL(srcDSN, srcConnDatabase, source.ConnPoolConfig{
+		srcPool := source.ConnPoolConfig{
 			MaxOpenConns:    req.SrcMaxOpenConns,
 			MaxIdleConns:    req.SrcMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
-		})
-		if err != nil {
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", err)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", err))
+		}
+		var reader source.Reader
+		var readerErr error
+		switch srcConn.DBType {
+		case "sqlserver":
+			reader, readerErr = source.NewSQLServer(srcDSN, srcConnDatabase, srcPool)
+		default: // mysql
+			reader, readerErr = source.NewMySQL(srcDSN, srcConnDatabase, srcPool)
+		}
+		if readerErr != nil {
+			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
+			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
 			return
 		}
 		defer reader.Close()

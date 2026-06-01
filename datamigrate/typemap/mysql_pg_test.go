@@ -1,9 +1,9 @@
 package typemap
 
 import (
-	"testing"
 	"dbgold/datamigrate/source"
 	"github.com/stretchr/testify/assert"
+	
 )
 
 func TestMySQLToPG(t *testing.T) {
@@ -43,7 +43,7 @@ func TestMySQLToPG(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.col.DataType, func(t *testing.T) {
-			assert.Equal(t, c.expected, MySQLToPG(c.col))
+			assert.Equal(t, c.expected, MySQLToPG(c.col, false, false))
 		})
 	}
 }

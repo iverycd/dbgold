@@ -9,16 +9,16 @@
             <a-col :span="11">
               <a-card class="conn-card" :body-style="{ padding: '16px' }">
                 <div class="conn-card-header">
-                  <a-tag color="orange" size="small">MySQL</a-tag>
+                  <a-tag color="orange" size="small">源库</a-tag>
                   <span class="conn-card-title">源库</span>
                 </div>
                 <a-select
                   v-model="dataMigrate.srcConnId"
-                  placeholder="选择 MySQL 连接"
+                  placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
                   @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
                 >
-                  <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id" :label="c.name" />
+                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name" />
                 </a-select>
                 <div v-if="selectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
@@ -380,7 +380,7 @@ const dataMigrate = reactive({
   content: 'both' as 'both' | 'schema_only' | 'data_only',
   pageSize: 20000,
   maxParallel: 10,
-  intraTableParallel: 1,
+  intraTableParallel: 8,
   lowerCaseNames: true,
   charInLength: false,
   useNvarchar2: false,
@@ -417,8 +417,8 @@ function validateTableFilter(): boolean {
   return true
 }
 
-const mysqlConnections = computed(() =>
-  connections.value.filter((c) => c.db_type === 'mysql')
+const srcConnections = computed(() =>
+  connections.value.filter((c) => c.db_type === 'mysql' || c.db_type === 'sqlserver')
 )
 const pgConnections = computed(() =>
   connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb')

@@ -79,6 +79,7 @@ func (m *mockWriter) CreateForeignKey(_ context.Context, _ source.FKInfo) error 
 func (m *mockWriter) CreateView(_ context.Context, _ source.ViewInfo) error         { return nil }
 func (m *mockWriter) AlterDistribute(_ context.Context, _ string, _ []string) error { return nil }
 func (m *mockWriter) CountRows(_ context.Context, _ string) (int64, error)          { return 0, nil }
+func (m *mockWriter) SchemaExists(_ context.Context, _ string) (bool, error)        { return true, nil }
 
 func newTestMigrator(reader source.Reader, writer target.Writer) (*Migrator, *Job) {
 	_, cancel := context.WithCancel(context.Background())

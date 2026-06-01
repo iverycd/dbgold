@@ -202,6 +202,16 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	return report
 }
 
+// mapColumnType 根据源库类型分发类型映射
+func (m *Migrator) mapColumnType(col source.ColumnInfo) string {
+	switch m.reader.DBType() {
+	case "sqlserver":
+		return typemap.SQLServerToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
+	default: // mysql
+		return typemap.MySQLToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
+	}
+}
+
 // buildCreateTableDDL 根据源库列信息生成目标库建表 DDL
 func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (string, error) {
 	info, err := m.reader.GetTableDDLInfo(ctx, table)
@@ -210,13 +220,17 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 	}
 	var cols []string
 	for _, col := range info.Columns {
-		pgType := typemap.MySQLToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
+		pgType := m.mapColumnType(col)
 		colDef := fmt.Sprintf(`"%s" %s`, m.objName(col.Name), pgType)
 		if !col.IsNullable {
 			colDef += " NOT NULL"
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
 			def := *col.Default
+			// SQL Server 默认值带额外括号，如 ((0))、(getdate())、(N'')，先剥离
+			if m.reader.DBType() == "sqlserver" {
+				def = stripSQLServerDefault(def)
+			}
 			if isFunctionDefault(def) {
 				colDef += fmt.Sprintf(" DEFAULT %s", pgFunctionDefault(def))
 			} else {
@@ -589,12 +603,17 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				vCopy := v
 				vCopy.ViewName = m.objName(v.ViewName)
+				// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
+				viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
+				if m.cfg.TargetSchema != "" {
+					viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
+				}
 				if err := m.writer.CreateView(ctx, vCopy); err != nil {
 					m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
 					report.Views.Failed++
 					report.Views.Items = append(report.Views.Items, ObjectResult{
 						Name:  vCopy.ViewName,
-						DDL:   vCopy.Definition,
+						DDL:   viewDDL,
 						Error: err.Error(),
 					})
 				} else {
@@ -622,11 +641,11 @@ func isFunctionDefault(def string) bool {
 	return strings.HasSuffix(upper, ")")
 }
 
-// pgFunctionDefault 将 MySQL 函数默认值映射到 PostgreSQL 等价形式
+// pgFunctionDefault 将函数默认值映射到 PostgreSQL 等价形式（兼容 MySQL 和 SQL Server）
 func pgFunctionDefault(def string) string {
 	upper := strings.ToUpper(strings.TrimSpace(def))
 	switch upper {
-	case "CURRENT_TIMESTAMP", "NOW()":
+	case "CURRENT_TIMESTAMP", "NOW()", "GETDATE()":
 		return "CURRENT_TIMESTAMP"
 	case "CURRENT_DATE":
 		return "CURRENT_DATE"
@@ -638,7 +657,46 @@ func pgFunctionDefault(def string) string {
 		return "TRUE"
 	case "FALSE":
 		return "FALSE"
+	case "NEWID()":
+		return "gen_random_uuid()"
 	default:
 		return def
 	}
+}
+
+// stripSQLServerDefault 剥离 SQL Server 默认值的外层括号。
+// SQL Server 默认值通常带额外括号，如 ((0)) → 0，(getdate()) → getdate()，(N'abc') → abc。
+func stripSQLServerDefault(def string) string {
+	def = strings.TrimSpace(def)
+	// 循环剥离最外层括号（只要整体被括号包围）
+	for strings.HasPrefix(def, "(") && strings.HasSuffix(def, ")") {
+		inner := def[1 : len(def)-1]
+		if isBalancedParens(inner) {
+			def = strings.TrimSpace(inner)
+		} else {
+			break
+		}
+	}
+	// 去掉 N'...' 前缀（SQL Server Unicode 字符串字面量）
+	if strings.HasPrefix(def, "N'") && strings.HasSuffix(def, "'") {
+		def = def[1:] // 去掉 N，保留 '...'
+	}
+	return def
+}
+
+// isBalancedParens 检查字符串中括号是否平衡
+func isBalancedParens(s string) bool {
+	depth := 0
+	for _, ch := range s {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }

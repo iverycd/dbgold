@@ -2,7 +2,8 @@ package store
 
 import (
 	"dbgold/config"
-	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"gorm.io/driver/sqlite"
@@ -36,9 +37,11 @@ func Init(cfg *config.Config) {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(cfg.SQLitePath), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to open sqlite: %v", err)
+		slog.Error("failed to open sqlite", "err", err)
+		os.Exit(1)
 	}
 	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}); err != nil {
-		log.Fatalf("failed to migrate: %v", err)
+		slog.Error("failed to migrate", "err", err)
+		os.Exit(1)
 	}
 }
