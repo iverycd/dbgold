@@ -29,6 +29,8 @@ var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "gaussdb"},
 	{Source: "sqlserver", Target: "postgres"},
 	{Source: "sqlserver", Target: "gaussdb"},
+	{Source: "dameng", Target: "postgres"},
+	{Source: "dameng", Target: "gaussdb"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -179,6 +181,8 @@ func StartDataMigration(c *gin.Context) {
 		switch srcConn.DBType {
 		case "sqlserver":
 			reader, readerErr = source.NewSQLServer(srcDSN, srcConnDatabase, srcPool)
+		case "dameng":
+			reader, readerErr = source.NewDaMeng(srcDSN, srcConnDatabase, srcPool)
 		default: // mysql
 			reader, readerErr = source.NewMySQL(srcDSN, srcConnDatabase, srcPool)
 		}

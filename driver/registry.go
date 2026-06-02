@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"dbgold/driver/dameng"
 	"dbgold/driver/gaussdb"
 	"dbgold/driver/mysql"
 	"dbgold/driver/oracle"
@@ -21,6 +22,8 @@ func NewDriver(dbType string) (Driver, error) {
 		return sqlserver.New(), nil
 	case "gaussdb":
 		return gaussdb.New(), nil
+	case "dameng":
+		return dameng.New(), nil
 	default:
 		return nil, fmt.Errorf("unsupported db type: %s", dbType)
 	}

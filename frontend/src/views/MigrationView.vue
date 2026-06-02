@@ -418,7 +418,9 @@ function validateTableFilter(): boolean {
 }
 
 const srcConnections = computed(() =>
-  connections.value.filter((c) => c.db_type === 'mysql' || c.db_type === 'sqlserver')
+  connections.value.filter(
+    (c) => c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng'
+  )
 )
 const pgConnections = computed(() =>
   connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb')

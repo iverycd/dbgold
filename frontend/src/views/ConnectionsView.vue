@@ -52,6 +52,7 @@
             <a-option value="oracle">Oracle</a-option>
             <a-option value="sqlserver">SQL Server</a-option>
             <a-option value="gaussdb">GaussDB</a-option>
+            <a-option value="dameng">DaMeng（达梦）</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -81,7 +82,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   listConnections,
@@ -111,6 +112,21 @@ const defaultForm = () => ({
 })
 
 const form = reactive(defaultForm())
+
+const defaultPortMap: Record<string, number> = {
+  mysql: 3306,
+  postgres: 5432,
+  oracle: 1521,
+  sqlserver: 1433,
+  gaussdb: 5432,
+  dameng: 5236,
+}
+
+watch(() => form.db_type, (newType) => {
+  if (editingId.value === null) {
+    form.port = defaultPortMap[newType] ?? 3306
+  }
+})
 
 async function loadConnections() {
   loading.value = true
