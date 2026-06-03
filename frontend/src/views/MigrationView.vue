@@ -18,7 +18,9 @@
                   style="width: 100%; margin-top: 10px"
                   @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
                 >
-                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name" />
+                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag color="orange" size="small" style="margin-right:6px">{{ c.db_type }}</a-tag>{{ c.name }}
+                  </a-option>
                 </a-select>
                 <div v-if="selectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
@@ -41,16 +43,18 @@
             <a-col :span="11">
               <a-card class="conn-card" :body-style="{ padding: '16px' }">
                 <div class="conn-card-header">
-                  <a-tag color="blue" size="small">PG / GaussDB</a-tag>
+                  <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">目标库</span>
                 </div>
                 <a-select
                   v-model="dataMigrate.dstConnId"
-                  placeholder="选择 PostgreSQL / GaussDB 连接"
+                  placeholder="选择目标库连接"
                   style="width: 100%; margin-top: 10px"
                   @change="(val: number) => { checkPairSupport(); loadDstSchemas(val) }"
                 >
-                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name" />
+                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag color="blue" size="small" style="margin-right:6px">{{ c.db_type }}</a-tag>{{ c.name }}
+                  </a-option>
                 </a-select>
                 <div v-if="selectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>

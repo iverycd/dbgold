@@ -118,7 +118,8 @@ body {
   border-right: none !important;
 }
 .arco-menu-item {
-  color: #94A3B8 !important;
+  background: transparent !important;
+  color: var(--sidebar-text) !important;
   border-radius: var(--radius-sm) !important;
   margin: 2px 8px !important;
   transition: all 150ms ease !important;
@@ -325,11 +326,14 @@ body {
 
 /* ─── Tag ─── */
 .arco-tag {
+  font-family: var(--font-sans) !important;
+  border-radius: var(--radius-sm) !important;
+}
+/* 无色 tag 才覆盖为主题色，有 color prop 的 tag 保留 Arco 原色 */
+.arco-tag:not([class*="arco-tag-"]):not(.arco-tag-blue):not(.arco-tag-orange):not(.arco-tag-green):not(.arco-tag-red):not(.arco-tag-arcoblue):not(.arco-tag-purple):not(.arco-tag-pinkpurple):not(.arco-tag-magenta):not(.arco-tag-gold):not(.arco-tag-lime):not(.arco-tag-cyan) {
   background: var(--bg-surface2) !important;
   border: 1px solid var(--border) !important;
   color: var(--fg-secondary) !important;
-  font-family: var(--font-sans) !important;
-  border-radius: var(--radius-sm) !important;
 }
 
 /* ─── Avatar ─── */
