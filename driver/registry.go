@@ -22,6 +22,8 @@ func NewDriver(dbType string) (Driver, error) {
 		return sqlserver.New(), nil
 	case "gaussdb":
 		return gaussdb.New(), nil
+	case "seabox":
+		return postgres.New(), nil
 	case "dameng":
 		return dameng.New(), nil
 	default:

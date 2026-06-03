@@ -53,6 +53,7 @@
             <a-option value="sqlserver">SQL Server</a-option>
             <a-option value="gaussdb">GaussDB</a-option>
             <a-option value="dameng">DaMeng（达梦）</a-option>
+            <a-option value="seabox">SeaBox</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -120,6 +121,7 @@ const defaultPortMap: Record<string, number> = {
   sqlserver: 1433,
   gaussdb: 5432,
   dameng: 5236,
+  seabox: 5432,
 }
 
 watch(() => form.db_type, (newType) => {

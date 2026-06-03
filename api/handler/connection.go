@@ -15,7 +15,7 @@ import (
 
 type connectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database" binding:"required"`
@@ -25,7 +25,7 @@ type connectionRequest struct {
 
 type updateConnectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database" binding:"required"`
@@ -49,6 +49,9 @@ func buildDSN(c *store.Connection) string {
 		return fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
 			c.Host, c.Port, c.Database, c.Username, c.Password)
 	case "gaussdb":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
+	case "seabox":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "dameng":
@@ -198,7 +201,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
-	if conn.DBType != "postgres" && conn.DBType != "gaussdb" {
+	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
 		return
 	}
@@ -207,6 +210,7 @@ func ListConnectionSchemas(c *gin.Context) {
 	if conn.DBType == "gaussdb" {
 		driverName = "opengauss"
 	}
+	// seabox 使用标准 postgres 驱动
 	db, err := sql.Open(driverName, buildDSN(conn))
 	if err != nil {
 		c.Error(err)

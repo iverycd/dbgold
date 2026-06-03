@@ -423,7 +423,7 @@ const srcConnections = computed(() =>
   )
 )
 const pgConnections = computed(() =>
-  connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb')
+  connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox')
 )
 const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)

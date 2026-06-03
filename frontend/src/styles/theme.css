@@ -1,0 +1,386 @@
+/* DBGold Silver-Gray Theme — Dark Sidebar + Light Content */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap');
+
+/* ─── 设计 Token ─── */
+:root {
+  --bg-base:       #F1F5F9;
+  --bg-surface:    #FFFFFF;
+  --bg-surface2:   #F8FAFC;
+  --bg-muted:      #F1F5F9;
+  --border:        #E2E8F0;
+  --border-strong: #CBD5E1;
+  --accent:        #22C55E;
+  --accent-dim:    rgba(34, 197, 94, 0.12);
+  --accent-glow:   rgba(34, 197, 94, 0.30);
+  --accent-indigo: #4F46E5;
+  --accent-indigo-dim: rgba(79, 70, 229, 0.08);
+  --fg-primary:    #0F172A;
+  --fg-secondary:  #334155;
+  --fg-muted:      #64748B;
+  --destructive:   #DC2626;
+  --sidebar-bg:    #1E293B;
+  --sidebar-text:  #CBD5E1;
+  --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:     'Fira Code', 'JetBrains Mono', monospace;
+  --radius-sm:     6px;
+  --radius-md:     10px;
+  --radius-lg:     16px;
+  --shadow-sm:     0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md:     0 4px 12px rgba(15, 23, 42, 0.10), 0 2px 4px rgba(15, 23, 42, 0.06);
+  --shadow-lg:     0 20px 40px rgba(15, 23, 42, 0.10), 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+/* ─── 全局 body ─── */
+body {
+  background-color: var(--bg-base) !important;
+  font-family: var(--font-sans) !important;
+  color: var(--fg-primary) !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Arco Design 颜色 Token 覆盖（浅色系）─── */
+:root, .arco-body {
+  /* 背景层次 */
+  --color-bg-1: #FFFFFF;
+  --color-bg-2: #F8FAFC;
+  --color-bg-3: #F1F5F9;
+  --color-bg-4: #E9EEF5;
+  --color-bg-5: #E2E8F0;
+  --color-bg-white: #FFFFFF;
+
+  /* 文字层次 — 全部深色，确保 WCAG AA+ */
+  --color-text-1: #0F172A;
+  --color-text-2: #1E293B;
+  --color-text-3: #334155;
+  --color-text-4: #64748B;
+
+  /* 边框 */
+  --color-border: #E2E8F0;
+  --color-border-1: #F1F5F9;
+  --color-border-2: #E2E8F0;
+  --color-border-3: #CBD5E1;
+  --color-border-4: #94A3B8;
+
+  /* 主色 (accent 绿) */
+  --color-primary-1: #f0fdf4;
+  --color-primary-2: #dcfce7;
+  --color-primary-3: #bbf7d0;
+  --color-primary-4: #4ade80;
+  --color-primary-5: #22C55E;
+  --color-primary-6: #16a34a;
+  --color-primary-7: #15803d;
+  --color-primary-light-1: rgba(34,197,94,0.08);
+  --color-primary-light-2: rgba(34,197,94,0.12);
+  --color-primary-light-3: rgba(34,197,94,0.18);
+  --color-primary-light-4: rgba(34,197,94,0.25);
+
+  /* 危险色 */
+  --color-danger-6: #DC2626;
+  --color-danger-light-1: rgba(220,38,38,0.08);
+
+  /* 填充 */
+  --color-fill-1: rgba(15,23,42,0.03);
+  --color-fill-2: rgba(15,23,42,0.05);
+  --color-fill-3: rgba(15,23,42,0.08);
+  --color-fill-4: rgba(15,23,42,0.12);
+
+  /* 遮罩 */
+  --color-mask-bg: rgba(15, 23, 42, 0.50);
+}
+
+/* ─── Layout ─── */
+.arco-layout {
+  background: var(--bg-base) !important;
+}
+.arco-layout-content {
+  background: var(--bg-base) !important;
+}
+.arco-layout-header {
+  background: var(--bg-surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+/* ─── Sider（保留深色）─── */
+.arco-layout-sider {
+  background: var(--sidebar-bg) !important;
+  border-right: 1px solid rgba(255,255,255,0.06) !important;
+}
+.arco-layout-sider-children {
+  background: var(--sidebar-bg) !important;
+}
+
+/* ─── Menu（侧边栏深色）─── */
+.arco-menu {
+  background: transparent !important;
+  border-right: none !important;
+}
+.arco-menu-item {
+  color: #94A3B8 !important;
+  border-radius: var(--radius-sm) !important;
+  margin: 2px 8px !important;
+  transition: all 150ms ease !important;
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
+}
+.arco-menu-item:hover {
+  background: rgba(255,255,255,0.06) !important;
+  color: #E2E8F0 !important;
+}
+.arco-menu-item.arco-menu-selected {
+  background: rgba(34, 197, 94, 0.15) !important;
+  color: #22C55E !important;
+  font-weight: 500 !important;
+  box-shadow: inset 3px 0 0 #22C55E !important;
+}
+.arco-menu-item-icon {
+  color: inherit !important;
+}
+
+/* ─── Input ─── */
+.arco-input-wrapper,
+.arco-input-password {
+  background: var(--bg-surface) !important;
+  border-color: var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  color: var(--fg-primary) !important;
+  box-shadow: var(--shadow-sm) !important;
+  transition: border-color 200ms ease, box-shadow 200ms ease !important;
+}
+.arco-input-wrapper:hover,
+.arco-input-password:hover {
+  border-color: var(--border-strong) !important;
+}
+.arco-input-wrapper:focus-within,
+.arco-input-password:focus-within {
+  border-color: #22C55E !important;
+  box-shadow: 0 0 0 3px rgba(34,197,94,0.12) !important;
+}
+.arco-input {
+  background: transparent !important;
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+}
+.arco-input::placeholder {
+  color: var(--fg-muted) !important;
+}
+
+/* ─── Button ─── */
+.arco-btn-primary {
+  background: #22C55E !important;
+  border-color: #22C55E !important;
+  color: #FFFFFF !important;
+  font-weight: 600 !important;
+  font-family: var(--font-sans) !important;
+  box-shadow: 0 2px 8px rgba(34,197,94,0.25) !important;
+  transition: all 150ms ease !important;
+}
+.arco-btn-primary:hover {
+  background: #16a34a !important;
+  border-color: #16a34a !important;
+  box-shadow: 0 4px 12px rgba(34,197,94,0.35) !important;
+}
+.arco-btn-primary:active {
+  transform: scale(0.97) !important;
+  background: #15803d !important;
+}
+.arco-btn-secondary,
+.arco-btn-outline {
+  background: var(--bg-surface) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--fg-secondary) !important;
+  font-family: var(--font-sans) !important;
+}
+.arco-btn-secondary:hover,
+.arco-btn-outline:hover {
+  border-color: #22C55E !important;
+  color: #22C55E !important;
+  background: rgba(34,197,94,0.04) !important;
+}
+
+/* ─── Card ─── */
+.arco-card {
+  background: var(--bg-surface) !important;
+  border-color: var(--border) !important;
+  color: var(--fg-primary) !important;
+  box-shadow: var(--shadow-sm) !important;
+  border-radius: var(--radius-md) !important;
+}
+.arco-card-header {
+  background: var(--bg-surface) !important;
+  border-bottom-color: var(--border) !important;
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 600 !important;
+}
+.arco-card-body {
+  color: var(--fg-primary) !important;
+}
+
+/* ─── Table ─── */
+.arco-table {
+  background: var(--bg-surface) !important;
+  color: var(--fg-primary) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+.arco-table-th {
+  background: var(--bg-surface2) !important;
+  color: var(--fg-secondary) !important;
+  border-bottom: 1px solid var(--border-strong) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 600 !important;
+  font-size: 12px !important;
+  letter-spacing: 0.5px !important;
+  text-transform: uppercase !important;
+}
+.arco-table-tr:hover .arco-table-td {
+  background: rgba(79,70,229,0.03) !important;
+}
+.arco-table-td {
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+}
+
+/* ─── Modal ─── */
+.arco-modal {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+.arco-modal-header {
+  background: var(--bg-surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 600 !important;
+}
+.arco-modal-footer {
+  border-top: 1px solid var(--border) !important;
+  background: var(--bg-surface2) !important;
+}
+.arco-modal-body {
+  color: var(--fg-primary) !important;
+}
+
+/* ─── Drawer ─── */
+.arco-drawer {
+  background: var(--bg-surface) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+.arco-drawer-header {
+  background: var(--bg-surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 600 !important;
+}
+.arco-drawer-body {
+  background: var(--bg-surface) !important;
+  color: var(--fg-primary) !important;
+}
+
+/* ─── Select / Dropdown ─── */
+.arco-select-dropdown {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-md) !important;
+  border-radius: var(--radius-md) !important;
+}
+.arco-select-option {
+  color: var(--fg-primary) !important;
+  font-family: var(--font-sans) !important;
+}
+.arco-select-option:hover {
+  background: var(--bg-surface2) !important;
+}
+.arco-select-option.arco-select-option-selected {
+  background: rgba(34,197,94,0.08) !important;
+  color: #16a34a !important;
+  font-weight: 500 !important;
+}
+.arco-select-view {
+  background: var(--bg-surface) !important;
+  border-color: var(--border) !important;
+  color: var(--fg-primary) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+.arco-select-view:hover {
+  border-color: var(--border-strong) !important;
+}
+
+/* ─── Form ─── */
+.arco-form-label-text {
+  color: var(--fg-secondary) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 500 !important;
+}
+.arco-form-message {
+  font-family: var(--font-sans) !important;
+}
+
+/* ─── Tag ─── */
+.arco-tag {
+  background: var(--bg-surface2) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--fg-secondary) !important;
+  font-family: var(--font-sans) !important;
+  border-radius: var(--radius-sm) !important;
+}
+
+/* ─── Avatar ─── */
+.arco-avatar {
+  background: #22C55E !important;
+  color: #FFFFFF !important;
+  font-weight: 700 !important;
+  font-family: var(--font-sans) !important;
+}
+
+/* ─── Tabs ─── */
+.arco-tabs-nav-tab {
+  color: var(--fg-muted) !important;
+  font-family: var(--font-sans) !important;
+}
+.arco-tabs-nav-tab-active {
+  color: #22C55E !important;
+  font-weight: 600 !important;
+}
+.arco-tabs-nav-ink-bar {
+  background: #22C55E !important;
+}
+
+/* ─── Pagination ─── */
+.arco-pagination-item {
+  color: var(--fg-secondary) !important;
+  border-color: var(--border) !important;
+  background: var(--bg-surface) !important;
+}
+.arco-pagination-item:hover {
+  border-color: #22C55E !important;
+  color: #22C55E !important;
+}
+.arco-pagination-item-active {
+  background: #22C55E !important;
+  border-color: #22C55E !important;
+  color: #FFFFFF !important;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-surface2);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}

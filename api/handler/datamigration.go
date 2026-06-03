@@ -27,10 +27,13 @@ type SupportedPair struct {
 var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "postgres"},
 	{Source: "mysql", Target: "gaussdb"},
+	{Source: "mysql", Target: "seabox"},
 	{Source: "sqlserver", Target: "postgres"},
 	{Source: "sqlserver", Target: "gaussdb"},
+	{Source: "sqlserver", Target: "seabox"},
 	{Source: "dameng", Target: "postgres"},
 	{Source: "dameng", Target: "gaussdb"},
+	{Source: "dameng", Target: "seabox"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
