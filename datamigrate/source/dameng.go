@@ -384,8 +384,12 @@ func (r *DaMengReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 
 func (r *DaMengReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT VIEW_NAME, TEXT FROM ALL_VIEWS WHERE OWNER = ?`,
-		r.schema)
+		`SELECT VIEW_NAME,
+		        lower(DBMS_METADATA.GET_DDL('VIEW', UPPER(VIEW_NAME), UPPER(?))) AS view_ddl
+		 FROM ALL_VIEWS
+		 WHERE OWNER = UPPER(?)
+		 ORDER BY VIEW_NAME`,
+		r.schema, r.schema)
 	if err != nil {
 		return nil, err
 	}
@@ -405,15 +409,26 @@ func (r *DaMengReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 // transformDaMengViewDef 将达梦视图定义转换为 PostgreSQL 兼容语法：
 // 1. 剥离 CREATE [OR REPLACE] VIEW ... AS 头部，只保留 SELECT 体
 // 2. 去掉表别名上的双引号（"A".col → A.col），避免 PG 大小写敏感问题
+// 3. 函数名转换：ifnull → coalesce，nvl → coalesce
 func transformDaMengViewDef(def string) string {
 	// 剥离 CREATE [OR REPLACE] VIEW <name> AS
-	reHeader := regexp.MustCompile(`(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+\S+\s+AS\s+`)
+	// 视图名可能带 schema 前缀，如 "admin"."view_name"，用非贪婪 .*? 匹配
+	reHeader := regexp.MustCompile(`(?is)^\s*create\s+(or\s+replace\s+)?view\s+.*?\bas\b\s+`)
 	def = reHeader.ReplaceAllString(def, "")
 	def = strings.TrimSpace(def)
+	// 去掉结尾分号
+	def = strings.TrimRight(def, "; \t\n\r")
 
 	// "ALIAS".col → ALIAS.col（别名带双引号时 PG 区分大小写，去掉引号让 PG 折叠为小写）
 	reQuotedAlias := regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*)"\."`)
 	def = reQuotedAlias.ReplaceAllString(def, `$1."`)
+
+	// ifnull(x, y) → coalesce(x, y)
+	def = strings.ReplaceAll(def, "ifnull(", "coalesce(")
+	// isnull(x, y) → coalesce(x, y)
+	def = strings.ReplaceAll(def, "isnull(", "coalesce(")
+	// nvl(x, y) → coalesce(x, y)
+	def = strings.ReplaceAll(def, "nvl(", "coalesce(")
 
 	return def
 }
