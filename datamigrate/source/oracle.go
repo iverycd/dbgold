@@ -475,7 +475,7 @@ func (r *OracleReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 
 func (r *OracleReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT lower(VIEW_NAME) VIEW_NAME, lower(TEXT) TEXT FROM ALL_VIEWS
+		`SELECT lower(VIEW_NAME) VIEW_NAME, TEXT FROM ALL_VIEWS
 		 WHERE OWNER = :1
 		 ORDER BY VIEW_NAME`,
 		r.owner)
@@ -489,7 +489,7 @@ func (r *OracleReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 		if err := rows.Scan(&v.ViewName, &v.Definition); err != nil {
 			return nil, err
 		}
-		v.Definition = transformOracleViewDef(v.Definition)
+		v.Definition = transformOracleViewDef(strings.ToLower(v.Definition))
 		views = append(views, v)
 	}
 	return views, rows.Err()
@@ -504,6 +504,14 @@ func transformOracleViewDef(def string) string {
 	// 去掉表别名双引号（"ALIAS".col → ALIAS.col）
 	reQuotedAlias := regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*)"\."`)
 	def = reQuotedAlias.ReplaceAllString(def, `$1."`)
+
+	// Oracle 伪列 rowid → ctid::text（PostgreSQL 最接近的行标识符）
+	reRowid := regexp.MustCompile(`(?i)\browid\b`)
+	def = reRowid.ReplaceAllString(def, "ctid::text")
+
+	// FROM DUAL / , DUAL → 去掉（PostgreSQL 不需要 DUAL 表）
+	reDual := regexp.MustCompile(`(?i),?\s*from\s+(?:\w+\.)?dual\b`)
+	def = reDual.ReplaceAllString(def, "")
 
 	// NVL(x, y) → COALESCE(x, y)（大小写不敏感）
 	reNVL := regexp.MustCompile(`(?i)\bnvl\s*\(`)
