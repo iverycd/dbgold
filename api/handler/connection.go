@@ -228,7 +228,9 @@ func ListConnectionSchemas(c *gin.Context) {
 		   'dbe_xml','dbe_xmldom','dbe_xmlparser','dbe_describe','dbe_stats','dbe_profiler',
 		   'dbe_heat_map','dbe_ilm','dbe_compression','dbe_xmlgen','resource_manager',
 		   'dbe_file','dbe_random','dbe_application_info','dbe_sql','dbe_lob','dbe_task',
-		   'dbe_match','dbe_session'
+		   'dbe_match','dbe_session',
+		   'pg_aoseg','pg_bitmapindex','sc_toolkit','stat_perf',
+		   '_seaboxts_catalog','_seaboxts_internal','seaboxts_information','sdaudit'
 		 )`)
 	if err != nil {
 		c.Error(err)

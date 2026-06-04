@@ -476,7 +476,7 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
