@@ -77,38 +77,57 @@
           :pagination="{ pageSize: 20 }"
         >
           <template #columns>
-            <a-table-column title="Job ID" :width="120">
+            <a-table-column title="Job ID" :width="100">
               <template #cell="{ record }">
-                <span style="font-family: monospace; font-size: 12px">
-                  {{ record.job_id.slice(0, 8) }}...
-                </span>
+                <a-tooltip :content="record.job_id" mini>
+                  <span style="font-family: monospace; font-size: 12px; cursor: default">
+                    {{ record.job_id.slice(0, 6) }}…
+                  </span>
+                </a-tooltip>
               </template>
             </a-table-column>
-            <a-table-column title="源库" :width="180">
+            <a-table-column title="源库" :width="220">
               <template #cell="{ record }">
-                <div>
-                  <a-tag :color="getDbTypeColor(record.src_db_type)" size="small" style="margin-right: 4px">{{ getDbTypeLabel(record.src_db_type) }}</a-tag>
-                  <span v-if="record.src_conn">{{ record.src_conn.name }}</span>
-                  <span v-else style="color: #86909c">已删除</span>
+                <div class="history-conn-cell">
+                  <a-tag :color="getDbTypeColor(record.src_db_type)" size="small">{{ getDbTypeLabel(record.src_db_type) }}</a-tag>
+                  <a-tooltip v-if="record.src_conn" :content="record.src_conn.name" mini>
+                    <span class="conn-name">{{ record.src_conn.name }}</span>
+                  </a-tooltip>
+                  <span v-else class="conn-deleted">已删除</span>
                 </div>
                 <div v-if="record.src_conn" class="conn-detail">
-                  <span class="conn-label">数据库：</span>{{ record.src_conn.database }}
-                  <a-divider direction="vertical" />
-                  <span class="conn-label">账号：</span>{{ record.src_conn.username }}
+                  <span class="conn-label">库</span>
+                  <a-tooltip :content="record.src_conn.database" mini>
+                    <span class="conn-detail-val">{{ record.src_conn.database }}</span>
+                  </a-tooltip>
+                  <span class="conn-detail-sep">·</span>
+                  <span class="conn-label">账号</span>
+                  <span class="conn-detail-val">{{ record.src_conn.username }}</span>
                 </div>
               </template>
             </a-table-column>
-            <a-table-column title="目标库" :width="180">
+            <a-table-column title="目标库" :width="220">
               <template #cell="{ record }">
-                <div>
-                  <a-tag :color="getDbTypeColor(record.dst_db_type)" size="small" style="margin-right: 4px">{{ getDbTypeLabel(record.dst_db_type) }}</a-tag>
-                  <span v-if="record.dst_conn">{{ record.dst_conn.name }}</span>
-                  <span v-else style="color: #86909c">已删除</span>
+                <div class="history-conn-cell">
+                  <a-tag :color="getDbTypeColor(record.dst_db_type)" size="small">{{ getDbTypeLabel(record.dst_db_type) }}</a-tag>
+                  <a-tooltip v-if="record.dst_conn" :content="record.dst_conn.name" mini>
+                    <span class="conn-name">{{ record.dst_conn.name }}</span>
+                  </a-tooltip>
+                  <span v-else class="conn-deleted">已删除</span>
                 </div>
                 <div v-if="record.dst_conn" class="conn-detail">
-                  <span class="conn-label">数据库：</span>{{ record.dst_conn.database }}
-                  <a-divider direction="vertical" />
-                  <span class="conn-label">账号：</span>{{ record.dst_conn.username }}
+                  <span class="conn-label">库</span>
+                  <a-tooltip :content="record.dst_conn.database" mini>
+                    <span class="conn-detail-val">{{ record.dst_conn.database }}</span>
+                  </a-tooltip>
+                  <span class="conn-detail-sep">·</span>
+                  <span class="conn-label">账号</span>
+                  <span class="conn-detail-val">{{ record.dst_conn.username }}</span>
+                  <template v-if="record.dst_schema">
+                    <span class="conn-detail-sep">·</span>
+                    <span class="conn-label">Schema</span>
+                    <span class="conn-detail-val schema-val">{{ record.dst_schema }}</span>
+                  </template>
                 </div>
               </template>
             </a-table-column>
@@ -260,13 +279,53 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.conn-detail {
-  margin-top: 2px;
+.history-conn-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.conn-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 130px;
+  cursor: default;
+}
+.conn-deleted {
   font-size: 12px;
-  color: var(--color-text-3);
+  color: #86909c;
+}
+.conn-detail {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 0;
 }
 .conn-label {
-  color: var(--color-text-4);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.conn-detail-val {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 72px;
+  cursor: default;
+}
+.schema-val {
+  color: #165dff;
+  max-width: 80px;
+}
+.conn-detail-sep {
+  color: var(--border-strong);
+  flex-shrink: 0;
 }
 .report-conn-info {
   padding: 12px 0 16px;
