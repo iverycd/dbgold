@@ -87,7 +87,7 @@
             <a-table-column title="源库" :width="180">
               <template #cell="{ record }">
                 <div>
-                  <a-tag size="small" style="margin-right: 4px">{{ record.src_db_type }}</a-tag>
+                  <a-tag :color="getDbTypeColor(record.src_db_type)" size="small" style="margin-right: 4px">{{ getDbTypeLabel(record.src_db_type) }}</a-tag>
                   <span v-if="record.src_conn">{{ record.src_conn.name }}</span>
                   <span v-else style="color: #86909c">已删除</span>
                 </div>
@@ -101,7 +101,7 @@
             <a-table-column title="目标库" :width="180">
               <template #cell="{ record }">
                 <div>
-                  <a-tag size="small" style="margin-right: 4px">{{ record.dst_db_type }}</a-tag>
+                  <a-tag :color="getDbTypeColor(record.dst_db_type)" size="small" style="margin-right: 4px">{{ getDbTypeLabel(record.dst_db_type) }}</a-tag>
                   <span v-if="record.dst_conn">{{ record.dst_conn.name }}</span>
                   <span v-else style="color: #86909c">已删除</span>
                 </div>
@@ -157,7 +157,7 @@
           <div v-if="reportJob" class="report-conn-info">
             <div class="report-conn-row">
               <span class="report-conn-label">源库</span>
-              <a-tag size="small">{{ reportJob.src_db_type }}</a-tag>
+              <a-tag :color="getDbTypeColor(reportJob.src_db_type)" size="small">{{ getDbTypeLabel(reportJob.src_db_type) }}</a-tag>
               <template v-if="reportJob.src_conn">
                 <span>{{ reportJob.src_conn.name }} · {{ reportJob.src_conn.host }}:{{ reportJob.src_conn.port }}</span>
                 <span class="report-conn-sub">数据库：{{ reportJob.src_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.src_conn.username }}</span>
@@ -166,7 +166,7 @@
             </div>
             <div class="report-conn-row">
               <span class="report-conn-label">目标库</span>
-              <a-tag size="small">{{ reportJob.dst_db_type }}</a-tag>
+              <a-tag :color="getDbTypeColor(reportJob.dst_db_type)" size="small">{{ getDbTypeLabel(reportJob.dst_db_type) }}</a-tag>
               <template v-if="reportJob.dst_conn">
                 <span>{{ reportJob.dst_conn.name }} · {{ reportJob.dst_conn.host }}:{{ reportJob.dst_conn.port }}</span>
                 <span class="report-conn-sub">数据库：{{ reportJob.dst_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.dst_conn.username }}</span>
@@ -188,6 +188,7 @@ import { Message } from '@arco-design/web-vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { listMigrations, listDataMigrationJobs, type MigrationHistory, type DataMigrationJob } from '@/api/migration'
+import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 
 const history = ref<MigrationHistory[]>([])
 const loading = ref(false)

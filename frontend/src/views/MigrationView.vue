@@ -19,7 +19,7 @@
                   @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
                 >
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag color="orange" size="small" style="margin-right:6px">{{ c.db_type }}</a-tag>{{ c.name }}
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="selectedSrc" class="conn-meta">
@@ -53,7 +53,7 @@
                   @change="(val: number) => { checkPairSupport(); loadDstSchemas(val) }"
                 >
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag color="blue" size="small" style="margin-right:6px">{{ c.db_type }}</a-tag>{{ c.name }}
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="selectedDst" class="conn-meta">
@@ -303,6 +303,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
+import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'

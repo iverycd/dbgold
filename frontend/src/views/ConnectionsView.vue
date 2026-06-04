@@ -13,7 +13,7 @@
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="db_type" :width="100">
           <template #cell="{ record }">
-            <a-tag>{{ record.db_type }}</a-tag>
+            <a-tag :color="getDbTypeColor(record.db_type)" size="small">{{ getDbTypeLabel(record.db_type) }}</a-tag>
           </template>
         </a-table-column>
         <a-table-column title="主机" data-index="host" />
@@ -93,6 +93,7 @@ import {
   testConnection,
   type Connection,
 } from '@/api/connections'
+import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 
 const connections = ref<Connection[]>([])
 const loading = ref(false)

@@ -2,8 +2,8 @@
   <a-layout class="app-layout">
     <a-layout-sider class="sider" :width="220" breakpoint="lg" :collapsed-width="0">
       <div class="logo">
-        <span class="logo-text">DBGold</span>
-        <span class="logo-dot">.</span>
+        <span class="logo-title">DBGold</span>
+        <span class="logo-subtitle">基础设施研发部</span>
       </div>
 
       <a-menu
@@ -114,29 +114,34 @@ function handleLogout() {
 }
 
 .logo {
-  height: 64px;
+  height: 80px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 1px;
+  flex-direction: column;
+  gap: 3px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   flex-shrink: 0;
 }
-.logo-text {
+.logo-title {
   font-family: 'Fira Code', monospace;
   font-size: 20px;
   font-weight: 700;
-  color: #F1F5F9;
   letter-spacing: 1px;
-  text-shadow: 0 0 16px rgba(34, 197, 94, 0.3);
+  background: linear-gradient(90deg,
+    #f59e0b, #ef4444, #ec4899,
+    #8b5cf6, #3b82f6, #06b6d4, #22C55E
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
-.logo-dot {
-  font-family: 'Fira Code', monospace;
-  font-size: 24px;
-  font-weight: 700;
-  color: #22C55E;
-  text-shadow: 0 0 10px rgba(34, 197, 94, 0.7);
-  line-height: 1;
+.logo-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(203, 213, 225, 0.82);
+  letter-spacing: 0.5px;
 }
 
 .nav-menu {
