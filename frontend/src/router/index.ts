@@ -6,6 +6,7 @@ import SchemaView from '@/views/SchemaView.vue'
 import DiffView from '@/views/DiffView.vue'
 import MigrationView from '@/views/MigrationView.vue'
 import HistoryView from '@/views/HistoryView.vue'
+import LoginHistoryView from '@/views/LoginHistoryView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -17,13 +18,18 @@ const router = createRouter({
     { path: '/diff', component: DiffView },
     { path: '/migration', component: MigrationView },
     { path: '/history', component: HistoryView },
+    { path: '/login-history', component: LoginHistoryView, meta: { adminOnly: true } },
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.token) {
     return '/login'
+  }
+  if (to.meta.adminOnly) {
+    if (!auth.user) await auth.fetchMe()
+    if (auth.user?.role !== 'admin') return '/connections'
   }
 })
 

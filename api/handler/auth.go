@@ -29,10 +29,12 @@ func Login(c *gin.Context) {
 
 	user, err := store.GetUserByUsername(body.Username)
 	if err != nil || !user.Enabled {
+		store.CreateLoginHistory(body.Username, c.ClientIP(), false)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(body.Password)); err != nil {
+		store.CreateLoginHistory(body.Username, c.ClientIP(), false)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
@@ -49,6 +51,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sign token"})
 		return
 	}
+	store.CreateLoginHistory(body.Username, c.ClientIP(), true)
 	c.JSON(http.StatusOK, gin.H{"token": token, "user": gin.H{
 		"id": user.ID, "username": user.Username, "role": user.Role,
 	}})

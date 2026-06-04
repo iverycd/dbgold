@@ -32,6 +32,10 @@
           <template #icon><icon-history /></template>
           迁移历史
         </a-menu-item>
+        <a-menu-item v-if="auth.user?.role === 'admin'" key="/login-history">
+          <template #icon><icon-user /></template>
+          登录历史
+        </a-menu-item>
       </a-menu>
     </a-layout-sider>
 
@@ -84,6 +88,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/diff': 'Schema 对比',
   '/migration': '迁移生成',
   '/history': '迁移历史',
+  '/login-history': '登录历史',
 }
 
 const currentRoute = computed(() => route.path)

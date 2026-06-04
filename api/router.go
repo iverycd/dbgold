@@ -70,6 +70,7 @@ func NewRouter() *gin.Engine {
 		admin.GET("/users", handler.ListUsers)
 		admin.POST("/users", handler.CreateUser)
 		admin.PUT("/users/:id", handler.UpdateUser)
+		admin.GET("/login-history", handler.ListLoginHistory)
 	}
 
 	return r

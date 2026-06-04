@@ -33,6 +33,14 @@ type Connection struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type LoginHistory struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Username  string    `gorm:"not null;index" json:"username"`
+	ClientIP  string    `gorm:"not null" json:"client_ip"`
+	Success   bool      `gorm:"not null" json:"success"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func Init(cfg *config.Config) {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(cfg.SQLitePath), &gorm.Config{})
@@ -40,7 +48,7 @@ func Init(cfg *config.Config) {
 		slog.Error("failed to open sqlite", "err", err)
 		os.Exit(1)
 	}
-	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}, &LoginHistory{}); err != nil {
 		slog.Error("failed to migrate", "err", err)
 		os.Exit(1)
 	}
