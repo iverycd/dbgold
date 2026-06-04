@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -34,6 +35,9 @@ var supportedPairs = []SupportedPair{
 	{Source: "dameng", Target: "postgres"},
 	{Source: "dameng", Target: "gaussdb"},
 	{Source: "dameng", Target: "seabox"},
+	{Source: "oracle", Target: "postgres"},
+	{Source: "oracle", Target: "gaussdb"},
+	{Source: "oracle", Target: "seabox"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -157,6 +161,7 @@ func StartDataMigration(c *gin.Context) {
 	dstDSN := buildDSN(dstConn)
 
 	// 若请求中指定了源库数据库，覆盖连接默认值
+	// 注意：Oracle 的 SrcDatabase 是 schema/owner 名，不是 service name，不能用来重建 DSN
 	if req.SrcDatabase != "" {
 		switch srcConn.DBType {
 		case "mysql":
@@ -186,10 +191,13 @@ func StartDataMigration(c *gin.Context) {
 			reader, readerErr = source.NewSQLServer(srcDSN, srcConnDatabase, srcPool)
 		case "dameng":
 			reader, readerErr = source.NewDaMeng(srcDSN, srcConnDatabase, srcPool)
+		case "oracle":
+			reader, readerErr = source.NewOracle(srcDSN, srcConnDatabase, srcPool)
 		default: // mysql
 			reader, readerErr = source.NewMySQL(srcDSN, srcConnDatabase, srcPool)
 		}
 		if readerErr != nil {
+			slog.Warn("连接源库失败", "job_id", jobID, "db_type", srcConn.DBType, "err", readerErr)
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
 			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
 			return
@@ -209,6 +217,7 @@ func StartDataMigration(c *gin.Context) {
 			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, dstPool)
 		}
 		if writerErr != nil {
+			slog.Warn("连接目标库失败", "job_id", jobID, "db_type", dstConn.DBType, "err", writerErr)
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
 			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
 			return
@@ -295,7 +304,21 @@ func StreamDataMigration(c *gin.Context) {
 	}
 	job := datamigrate.Registry.Get(jobID)
 	if job == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+		// goroutine 可能已退出（如连接失败），从数据库读取 summary 通过 SSE 推给前端
+		dbJob, dbErr := store.GetDataMigrationJob(jobID)
+		if dbErr != nil || dbJob == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+			return
+		}
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		if dbJob.Summary != "" {
+			c.SSEvent("message", "[ERROR] "+dbJob.Summary)
+		}
+		c.SSEvent("message", "[STREAM_END]")
+		c.Writer.Flush()
 		return
 	}
 

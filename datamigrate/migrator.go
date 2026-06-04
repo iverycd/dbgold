@@ -209,6 +209,8 @@ func (m *Migrator) mapColumnType(col source.ColumnInfo) string {
 		return typemap.SQLServerToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
 	case "dameng":
 		return typemap.DaMengToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
+	case "oracle":
+		return typemap.OracleToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
 	default: // mysql
 		return typemap.MySQLToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
 	}

@@ -424,7 +424,7 @@ function validateTableFilter(): boolean {
 
 const srcConnections = computed(() =>
   connections.value.filter(
-    (c) => c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng'
+    (c) => c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle'
   )
 )
 const pgConnections = computed(() =>
@@ -551,6 +551,7 @@ function connectSSE(jobID: string) {
     })
   })
   currentEventSource.onerror = () => {
+    dataMigrate.logs.push('[ERROR] 日志流连接中断，请查看历史任务获取详情')
     dataMigrate.running = false
     dataMigrate.finished = true
     currentEventSource?.close()

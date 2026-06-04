@@ -171,6 +171,8 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewSQLServer(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "dameng":
 		reader, err = source.NewDaMeng(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+	case "oracle":
+		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
 		return
