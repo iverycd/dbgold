@@ -119,7 +119,7 @@ function handleLogout() {
 }
 
 .logo {
-  height: 80px;
+  height: 92px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -130,9 +130,9 @@ function handleLogout() {
 }
 .logo-title {
   font-family: 'Fira Code', monospace;
-  font-size: 20px;
+  font-size: 26px;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 2px;
   background: linear-gradient(90deg,
     #f59e0b, #ef4444, #ec4899,
     #8b5cf6, #3b82f6, #06b6d4, #22C55E
@@ -143,10 +143,10 @@ function handleLogout() {
 }
 .logo-subtitle {
   font-family: 'Inter', sans-serif;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 500;
   color: rgba(203, 213, 225, 0.82);
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
 }
 
 .nav-menu {
