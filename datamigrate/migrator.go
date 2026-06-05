@@ -4,6 +4,7 @@ package datamigrate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,8 @@ type Config struct {
 	UseNvarchar2       bool
 	Distributed        bool   // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
 	TargetSchema       string // 目标库 schema，为空时使用连接默认 search_path
+	ChangeOwner        bool   // 迁移后将表/视图/序列的 owner 改为 TargetSchema
+	TargetDBType       string // "postgres" | "gaussdb" | "seabox"
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -48,6 +51,20 @@ func (m *Migrator) objName(s string) string {
 		return strings.ToLower(s)
 	}
 	return s
+}
+
+var reGenRandomUUID = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
+
+// adjustViewUUID 将视图定义中的中间形式 gen_random_uuid() 替换为目标库对应函数。
+func adjustViewUUID(def, targetDBType string) string {
+	switch targetDBType {
+	case "gaussdb":
+		return reGenRandomUUID.ReplaceAllString(def, "uuid()")
+	case "seabox":
+		return reGenRandomUUID.ReplaceAllString(def, "sys_guid()")
+	default:
+		return def
+	}
 }
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
@@ -109,6 +126,11 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 			}
 			m.log.DDLf("创建表 %s ... OK", table)
 			report.Tables.Success++
+			if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+				if err := m.writer.ChangeOwner(ctx, "TABLE", m.objName(table), m.cfg.TargetSchema); err != nil {
+					m.log.Warnf("修改表 owner 失败 [%s]: %v", table, err)
+				}
+			}
 		}
 	}
 
@@ -238,6 +260,10 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 			// Oracle 默认值可能带多余单引号，如 ''0'' → 0，或 '''abc''' → 'abc'
 			if m.reader.DBType() == "oracle" {
 				def = stripOracleDefault(def)
+			}
+			// MySQL 8.0 表达式默认值在 information_schema 中以括号包裹，如 (' ') 或 (0)
+			if m.reader.DBType() == "mysql" {
+				def = stripMySQLExprDefault(def)
 			}
 			if isFunctionDefault(def) {
 				colDef += fmt.Sprintf(" DEFAULT %s", pgFunctionDefault(def))
@@ -506,6 +532,12 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			} else {
 				m.log.Indexf("创建序列 seq_%s_%s ... OK", seqCopy.TableName, seqCopy.ColumnName)
 				report.Sequences.Success++
+				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+					seqObj := fmt.Sprintf("seq_%s_%s", seqCopy.TableName, seqCopy.ColumnName)
+					if err := m.writer.ChangeOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
+						m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
+					}
+				}
 			}
 		}
 	}
@@ -611,6 +643,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				vCopy := v
 				vCopy.ViewName = m.objName(v.ViewName)
+				vCopy.Definition = adjustViewUUID(v.Definition, m.cfg.TargetDBType)
 				// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
 				viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
 				if m.cfg.TargetSchema != "" {
@@ -627,6 +660,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				} else {
 					m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
 					report.Views.Success++
+					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+						if err := m.writer.ChangeOwner(ctx, "VIEW", vCopy.ViewName, m.cfg.TargetSchema); err != nil {
+							m.log.Warnf("修改视图 owner 失败 [%s]: %v", vCopy.ViewName, err)
+						}
+					}
 				}
 			}
 		}
@@ -666,6 +704,8 @@ func pgFunctionDefault(def string) string {
 	case "FALSE":
 		return "FALSE"
 	case "NEWID()":
+		return "gen_random_uuid()"
+	case "UUID()":
 		return "gen_random_uuid()"
 	default:
 		return def
@@ -735,4 +775,24 @@ func isBalancedParens(s string) bool {
 		}
 	}
 	return depth == 0
+}
+
+// stripMySQLExprDefault 剥离 MySQL 8.0 在 information_schema 中给表达式默认值加的外层括号。
+// MySQL 8.0 将 DEFAULT ' ' 存储为 (' ')，DEFAULT 0 存储为 (0)。
+// 剥括号后若内部是 SQL 字符串字面量（如 ' '），再去掉引号返回裸值，
+// 让上层的 DEFAULT '%s' 路径正确拼出 DEFAULT ' '。
+func stripMySQLExprDefault(def string) string {
+	def = strings.TrimSpace(def)
+	if strings.HasPrefix(def, "(") && strings.HasSuffix(def, ")") {
+		inner := strings.TrimSpace(def[1 : len(def)-1])
+		if isBalancedParens(inner) {
+			def = inner
+		}
+	}
+	// 内部是 SQL 字符串字面量 'value'，提取裸值交由上层统一处理
+	if len(def) >= 2 && strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") {
+		inner := def[1 : len(def)-1]
+		return strings.ReplaceAll(inner, "''", "'")
+	}
+	return def
 }

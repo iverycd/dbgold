@@ -21,7 +21,7 @@
             row-key="key"
             :pagination="false"
             size="small"
-            :expandable="{ rowExpandable: (record) => record.failed > 0 && record.items.length > 0 }"
+            :expandable="{ icon: (_, record) => record.failed > 0 && record.items?.length > 0 ? undefined : null }"
           >
             <template #columns>
               <a-table-column title="对象类型" data-index="label" :width="120" />

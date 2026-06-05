@@ -27,6 +27,9 @@ type Writer interface {
 	AlterDistribute(ctx context.Context, table string, cols []string) error
 	// SchemaExists 检查指定 schema 是否存在于目标库
 	SchemaExists(ctx context.Context, schema string) (bool, error)
+	// ChangeOwner 将对象 owner 改为指定角色
+	// objType: "TABLE" | "VIEW" | "SEQUENCE"；name 不含 schema 前缀
+	ChangeOwner(ctx context.Context, objType, name, owner string) error
 	// Close 关闭目标库连接
 	Close() error
 }

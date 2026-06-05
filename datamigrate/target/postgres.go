@@ -171,8 +171,23 @@ func (w *PostgresWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo)
 
 func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
 	ddl := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", w.qualifiedTable(view.ViewName), view.Definition)
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+	if w.schema == "" {
+		_, err := w.db.ExecContext(ctx, ddl)
+		return err
+	}
+	// 视图定义中的非限定表名需要能解析到目标 schema，用 SET LOCAL 避免影响其他连接
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, ddl); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CountRows 返回指定表的行数
@@ -193,4 +208,10 @@ func (w *PostgresWriter) SchemaExists(ctx context.Context, schema string) (bool,
 		schema,
 	).Scan(&exists)
 	return exists, err
+}
+
+func (w *PostgresWriter) ChangeOwner(ctx context.Context, objType, name, owner string) error {
+	_, err := w.db.ExecContext(ctx,
+		fmt.Sprintf(`ALTER %s %s OWNER TO "%s"`, objType, w.qualifiedTable(name), owner))
+	return err
 }

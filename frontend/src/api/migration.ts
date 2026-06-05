@@ -68,6 +68,7 @@ export interface StartDataMigrationRequest {
   char_in_length?: boolean
   use_nvarchar2?: boolean
   distributed?: boolean
+  change_owner?: boolean
   src_database?: string
   target_schema?: string
   src_max_open_conns?: number

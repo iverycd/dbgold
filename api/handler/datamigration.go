@@ -58,6 +58,7 @@ type startDataMigrationRequest struct {
 	CharInLength       bool   `json:"char_in_length"`
 	UseNvarchar2       bool   `json:"use_nvarchar2"`
 	Distributed        bool   `json:"distributed"`
+	ChangeOwner        *bool  `json:"change_owner"`  // nil 时默认 true
 	SrcDatabase        string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
 	TargetSchema       string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
 	// 连接池配置，0 表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=3600s）
@@ -88,6 +89,7 @@ func StartDataMigration(c *gin.Context) {
 	if req.MigrateContent == "" {
 		req.MigrateContent = "both"
 	}
+	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
 
 	srcConn, err := store.GetConnection(req.SrcConnID)
 	if err != nil {
@@ -139,6 +141,7 @@ func StartDataMigration(c *gin.Context) {
 		CharInLength:       req.CharInLength,
 		UseNvarchar2:       req.UseNvarchar2,
 		DstSchema:          req.TargetSchema,
+		ChangeOwner:        changeOwner,
 		Status:             "running",
 		SrcConnName:        srcConn.Name,
 		SrcConnHost:        srcConn.Host,
@@ -250,7 +253,9 @@ func StartDataMigration(c *gin.Context) {
 			UseNvarchar2:       req.UseNvarchar2,
 			Distributed:        req.Distributed,
 			TargetSchema:       req.TargetSchema,
+			ChangeOwner:        changeOwner,
 			IntraTableParallel: req.IntraTableParallel,
+			TargetDBType:       dstConn.DBType,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

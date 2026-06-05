@@ -419,6 +419,8 @@ func transformViewDef(def string) string {
 	def = regexp.MustCompile(`(?i)\bif\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)`).ReplaceAllString(def, "CASE WHEN $1 THEN $2 ELSE $3 END")
 	// 去掉 CHARSET 子句
 	def = regexp.MustCompile(`(?i)\s+charset\s+\w+`).ReplaceAllString(def, "")
+	// uuid() → gen_random_uuid()
+	def = regexp.MustCompile(`(?i)\buuid\s*\(\s*\)`).ReplaceAllString(def, "gen_random_uuid()")
 	return def
 }
 

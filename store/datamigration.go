@@ -36,6 +36,7 @@ type DataMigrationJob struct {
 	LowerCaseNames     bool       `json:"lower_case_names"`
 	CharInLength       bool       `json:"char_in_length"`
 	UseNvarchar2       bool       `json:"use_nvarchar2"`
+	ChangeOwner        bool       `json:"change_owner"`
 	DstSchema          string     `json:"dst_schema"` // 目标 schema，为空时使用连接默认 search_path
 	// 连接快照（迁移启动时写入，不随连接修改而变化）
 	SrcConnName     string `json:"src_conn_name"`

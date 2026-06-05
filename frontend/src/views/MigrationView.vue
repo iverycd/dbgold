@@ -16,7 +16,7 @@
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
-                  @change="(val: number) => { checkPairSupport(); loadSrcDatabases(val) }"
+                  @change="(val) => { checkPairSupport(); loadSrcDatabases(val as number) }"
                 >
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
@@ -50,7 +50,7 @@
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择目标库连接"
                   style="width: 100%; margin-top: 10px"
-                  @change="(val: number) => { checkPairSupport(); loadDstSchemas(val) }"
+                  @change="(val) => { checkPairSupport(); loadDstSchemas(val as number) }"
                 >
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
@@ -152,6 +152,11 @@
                 <a-col :span="12">
                   <a-form-item style="margin-bottom: 4px">
                     <a-checkbox v-model="dataMigrate.distributed">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="dataMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
                   </a-form-item>
                 </a-col>
               </a-row>
@@ -390,6 +395,7 @@ const dataMigrate = reactive({
   charInLength: false,
   useNvarchar2: false,
   distributed: false,
+  changeOwner: true,
   srcMaxOpenConns: 50,
   srcMaxIdleConns: 25,
   srcConnMaxLifetime: 3600,
@@ -515,6 +521,7 @@ async function startDataMigration() {
       char_in_length: dataMigrate.charInLength,
       use_nvarchar2: dataMigrate.useNvarchar2,
       distributed: dataMigrate.distributed,
+      change_owner: dataMigrate.changeOwner,
       src_database: dataMigrate.srcDatabase,
       target_schema: dataMigrate.dstSchema || undefined,
       src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
