@@ -681,7 +681,7 @@ func pgFunctionDefault(def string) string {
 func stripOracleDefault(def string) string {
 	def = strings.TrimSpace(def)
 	// 连续两个单引号包裹：''value'' → value（用于数字或裸值）
-	if strings.HasPrefix(def, "''") && strings.HasSuffix(def, "''") {
+	if len(def) >= 4 && strings.HasPrefix(def, "''") && strings.HasSuffix(def, "''") {
 		inner := def[2 : len(def)-2]
 		// 确保内部没有单引号（否则是字符串默认值，不做处理）
 		if !strings.Contains(inner, "'") {
@@ -689,8 +689,13 @@ func stripOracleDefault(def string) string {
 		}
 	}
 	// 三层单引号：'''value''' → 'value'（字符串默认值）
-	if strings.HasPrefix(def, "'''") && strings.HasSuffix(def, "'''") {
+	if len(def) >= 6 && strings.HasPrefix(def, "'''") && strings.HasSuffix(def, "'''") {
 		return def[2 : len(def)-2]
+	}
+	// 单层单引号：'value' → value（Oracle 直接存储 SQL 字面量，外层格式化会补引号）
+	if len(def) >= 2 && strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") {
+		inner := def[1 : len(def)-1]
+		return strings.ReplaceAll(inner, "''", "'")
 	}
 	return def
 }
