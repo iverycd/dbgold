@@ -235,6 +235,10 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 			if m.reader.DBType() == "sqlserver" {
 				def = stripSQLServerDefault(def)
 			}
+			// Oracle 默认值可能带多余单引号，如 ''0'' → 0，或 '''abc''' → 'abc'
+			if m.reader.DBType() == "oracle" {
+				def = stripOracleDefault(def)
+			}
 			if isFunctionDefault(def) {
 				colDef += fmt.Sprintf(" DEFAULT %s", pgFunctionDefault(def))
 			} else {
@@ -668,7 +672,30 @@ func pgFunctionDefault(def string) string {
 	}
 }
 
-// stripSQLServerDefault 剥离 SQL Server 默认值的外层括号。
+// stripOracleDefault 清理 Oracle 默认值中多余的单引号。
+// Oracle 在 ALL_TAB_COLUMNS.DATA_DEFAULT 里原样保存 SQL 字面量，如：
+//
+//	''0''   → 0      (bigint 列的数字默认值)
+//	'''abc''' → 'abc' (字符串默认值，外层再包一层引号)
+//	NULL    → 保持不变
+func stripOracleDefault(def string) string {
+	def = strings.TrimSpace(def)
+	// 连续两个单引号包裹：''value'' → value（用于数字或裸值）
+	if strings.HasPrefix(def, "''") && strings.HasSuffix(def, "''") {
+		inner := def[2 : len(def)-2]
+		// 确保内部没有单引号（否则是字符串默认值，不做处理）
+		if !strings.Contains(inner, "'") {
+			return strings.TrimSpace(inner)
+		}
+	}
+	// 三层单引号：'''value''' → 'value'（字符串默认值）
+	if strings.HasPrefix(def, "'''") && strings.HasSuffix(def, "'''") {
+		return def[2 : len(def)-2]
+	}
+	return def
+}
+
+// SQL Server 默认值通常带额外括号，如 ((0)) → 0，(getdate()) → getdate()，(N'abc') → abc
 // SQL Server 默认值通常带额外括号，如 ((0)) → 0，(getdate()) → getdate()，(N'abc') → abc。
 func stripSQLServerDefault(def string) string {
 	def = strings.TrimSpace(def)
