@@ -62,8 +62,8 @@
                   <div class="failure-ddl">
                     <template v-if="item.ddl">
                       <div class="ddl-header">
-                        <span>DDL：</span>
                         <a-button size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
+                        <span>DDL：</span>
                       </div>
                       <pre class="ddl-code">{{ item.ddl }}</pre>
                     </template>
@@ -317,8 +317,9 @@ onMounted(loadReport)
 }
 .ddl-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
+  gap: 8px;
   margin-bottom: 4px;
 }
 .ddl-code {
