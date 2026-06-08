@@ -421,6 +421,8 @@ func transformViewDef(def string) string {
 	def = regexp.MustCompile(`(?i)\s+charset\s+\w+`).ReplaceAllString(def, "")
 	// uuid() → gen_random_uuid()
 	def = regexp.MustCompile(`(?i)\buuid\s*\(\s*\)`).ReplaceAllString(def, "gen_random_uuid()")
+	// CONVERT(expr, type) → expr（MySQL 类型转换，PostgreSQL 直接用原值）
+	def = regexp.MustCompile(`(?i)\bCONVERT\s*\(\s*([^,]+?)\s*,\s*\w+(?:\s*\(\s*[\d\s,]*\s*\))?\s*\)`).ReplaceAllString(def, "$1")
 	return def
 }
 
