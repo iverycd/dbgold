@@ -265,8 +265,11 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (strin
 			if m.reader.DBType() == "mysql" {
 				def = stripMySQLExprDefault(def)
 			}
-			if isFunctionDefault(def) {
-				colDef += fmt.Sprintf(" DEFAULT %s", pgFunctionDefault(def))
+			// MySQL 位串字面量 b'0' / b'1' → PostgreSQL B'0' / B'1'
+			if regexp.MustCompile(`(?i)^b'[01]+'$`).MatchString(def) {
+				colDef += fmt.Sprintf(" DEFAULT B'%s'", def[2:len(def)-1])
+			} else if isFunctionDefault(def) {
+				colDef += fmt.Sprintf(" DEFAULT %s", m.pgFunctionDefault(def))
 			} else {
 				colDef += fmt.Sprintf(" DEFAULT '%s'", strings.ReplaceAll(def, "'", "''"))
 			}
@@ -644,6 +647,24 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				vCopy := v
 				vCopy.ViewName = m.objName(v.ViewName)
 				vCopy.Definition = adjustViewUUID(v.Definition, m.cfg.TargetDBType)
+				if v.ViewName == "view_cg_allkaipingbiao" {
+					vCopy.Definition = `select cg_projectinfo.projectno AS ProjectNO,cg_projectinfo.projectname AS ProjectName,cg_projectinfo.projectguid AS ProjectGuid,cg_projectinfo.xiaqucode AS XiaQuCode,cg_biaoduaninfo.BIAODUANNO AS BiaoDuanNO,cg_biaoduaninfo.BIAODUANNAME AS BiaoDuanName,cg_biaoduaninfo.ZHAOBIAOFANGSHI AS ZhaoBiaoFangShi,cg_biaoduaninfo.TOUZIGUSUAN AS TouZiGuSuan,cg_biaoduaninfo.ROWGUID AS ROWGUID,cg_biaoduaninfo.BDSECONDTYPE AS BDSecondType,cg_projectinfo.sbr_date AS SBR_Date,cg_biaoduaninfo.SBR_UNITGUID AS SBR_UnitGuid,cg_biaoduaninfo.ZHAOBIAOTYPE AS ZhaoBiaoType,cg_biaoduaninfo.FABAODATE AS FaBaoDate,cg_biaoduaninfo.SBR_NAME AS SBR_Name,cg_biaoduaninfo.SBR_CODE AS SBR_Code,cg_biaoduaninfo.SBR_UNITNAME AS SBR_UnitName,cg_biaoduaninfo.SBR_TEL AS SBR_Tel,cg_biaoduaninfo.SBR_MOBLIE AS SBR_Moblie,cg_biaoduaninfo.SBR_IDCARD AS SBR_IDCard,cg_projectinfo.projectjiaoyitype AS ProjectJiaoYiType,cg_projectinfo.jianshedanweiguid AS JianSheDanWeiGuid,cg_projectinfo.jianshedanwei AS JianSheDanWei,cg_biaoduaninfo.row_id AS Row_ID,cg_biaoduaninfo.SHR_CODE AS SHR_Code,cg_biaoduaninfo.SHR_NAME AS SHR_Name,cg_biaoduaninfo.SHR_DATE AS SHR_Date,cg_biaoduaninfo.PROJECTFENLEI AS ProjectFenLei,cg_biaoduaninfo.FABAOCONTENT AS FaBaoContent,cg_biaoduaninfo.DAILIGUID AS DaiLiGuid,cg_biaoduaninfo.BDJIANZHUMIANJI AS BDJianZhuMianJi,cg_biaoduaninfo.DAILINAME AS DaiLiName,cg_biaoduaninfo.FABUNUM AS FaBuNum,cg_biaoduaninfo.ZBPINGWEIISSELECTED AS ZbPingWeiIsSelected,cg_biaoduaninfo.ISLIUBIAO AS IsLiuBiao,cg_biaoduaninfo.FABAOISSELECTED AS FaBaoIsSelected,cg_biaoduaninfo.KAIBIAOISSELECTED AS KaiBiaoIsSelected,mtr_project.projectguid AS Expr1,mtr_project.showkaibiao AS ShowKaiBiao,mtr_project.showpingbiao AS ShowPingBiao,cg_biaoduaninfo.BIAODUANGUID AS BiaoDuanGuid,cg_biaoduaninfo.ORGGUID AS OrgGuid,mtr_project.showusedate AS ShowUseDate,cg_biaoduaninfo.PINGBIAOISSELECTED AS PingBiaoIsSelected FROM cg_biaoduaninfo INNER JOIN cg_projectinfo ON ((cg_biaoduaninfo.PROJECTGUID = cg_projectinfo.projectguid )) INNER JOIN mtr_project ON ((cg_projectinfo.projectguid = mtr_project.projectguid))`
+				}
+				if v.ViewName == "view_cg_kaipingbiao" {
+					vCopy.Definition = `select cg_projectinfo.projectno AS ProjectNO,cg_projectinfo.projectname AS ProjectName,cg_projectinfo.projectguid AS ProjectGuid,cg_projectinfo.xiaqucode AS XiaQuCode,cg_biaoduaninfo.BIAODUANNO AS BiaoDuanNO,cg_biaoduaninfo.BIAODUANNAME AS BiaoDuanName,cg_biaoduaninfo.ZHAOBIAOFANGSHI AS ZhaoBiaoFangShi,cg_biaoduaninfo.TOUZIGUSUAN AS TouZiGuSuan,cg_biaoduaninfo.ROWGUID AS ROWGUID,cg_biaoduaninfo.BDSECONDTYPE AS BDSecondType,cg_projectinfo.sbr_date AS SBR_Date,cg_biaoduaninfo.SBR_UNITGUID AS SBR_UnitGuid,cg_biaoduaninfo.ZHAOBIAOTYPE AS ZhaoBiaoType,cg_biaoduaninfo.FABAODATE AS FaBaoDate,cg_biaoduaninfo.SBR_NAME AS SBR_Name,cg_biaoduaninfo.SBR_CODE AS SBR_Code,cg_biaoduaninfo.SBR_UNITNAME AS SBR_UnitName,cg_biaoduaninfo.SBR_TEL AS SBR_Tel,cg_biaoduaninfo.SBR_MOBLIE AS SBR_Moblie,cg_biaoduaninfo.SBR_IDCARD AS SBR_IDCard,cg_projectinfo.projectjiaoyitype AS ProjectJiaoYiType,cg_projectinfo.jianshedanweiguid AS JianSheDanWeiGuid,cg_projectinfo.jianshedanwei AS JianSheDanWei,cg_biaoduaninfo.row_id AS Row_ID,cg_biaoduaninfo.SHR_CODE AS SHR_Code,cg_biaoduaninfo.SHR_NAME AS SHR_Name,cg_biaoduaninfo.SHR_DATE AS SHR_Date,cg_biaoduaninfo.PROJECTFENLEI AS ProjectFenLei,cg_biaoduaninfo.FABAOCONTENT AS FaBaoContent,cg_biaoduaninfo.DAILIGUID AS DaiLiGuid,cg_biaoduaninfo.BDJIANZHUMIANJI AS BDJianZhuMianJi,cg_biaoduaninfo.DAILINAME AS DaiLiName,cg_biaoduaninfo.FABUNUM AS FaBuNum,cg_biaoduaninfo.KAIBIAOISSELECTED AS KaiBiaoIsSelected,mtr_project.showkaibiao AS ShowKaiBiao,mtr_project.showpingbiao AS ShowPingBiao,cg_biaoduaninfo.BIAODUANGUID AS BiaoDuanGuid,cg_biaoduaninfo.ORGGUID AS OrgGuid,mtr_project.showusedate AS ShowUseDate,cg_biaoduaninfo.PINGBIAOISSELECTED AS PingBiaoIsSelected FROM cg_biaoduaninfo INNER JOIN cg_projectinfo ON ((cg_biaoduaninfo.PROJECTGUID = cg_projectinfo.projectguid )) INNER JOIN mtr_project ON ((cg_projectinfo.projectguid = mtr_project.projectguid))`
+				}
+				if v.ViewName == "view_huiyuanhistorychange" {
+					vCopy.Definition = `select huiyuan_histroyofchange.danweiguid AS DanWeiGuid,huiyuan_histroyofchange.pguid AS PGuid,huiyuan_histroyofchange.pname AS PName,huiyuan_histroyofchange.beforeinfo AS BeforeInfo,huiyuan_histroyofchange.changercode AS ChangerCode,huiyuan_histroyofchange.afterinfo AS AfterInfo,huiyuan_histroyofchange.changename AS ChangeName,huiyuan_histroyofchange.belongxiaqucode AS BelongXiaQuCode,huiyuan_histroyofchange.operateusername AS OperateUserName,huiyuan_histroyofchange.operatedate AS OperateDate,huiyuan_histroyofchange.row_id AS Row_ID,huiyuan_histroyofchange.danweitype AS DanWeiType,huiyuan_histroyofchange.changetype AS ChangeType,huiyuan_histroyofchange.changedate AS ChangeDate,huiyuan_histroyofchange.xiaqucode AS XiaQuCode,huiyuan_histroyofchange.viewurl AS ViewUrl,huiyuan_histroyofchange.status AS STATUS,huiyuan_histroyofchange.infoguid AS InfoGuid,huiyuan_histroyofchange.copystatus AS CopyStatus,huiyuan_histroyofchange.changecontent AS ChangeContent,huiyuan_histroyofchange.tableid AS TableID,huiyuan_histroyofchange.fieldid AS FieldID,table_struct.bak2 AS Bak2,table_struct.bak1 AS Bak1,table_struct.bak3 AS Bak3,huiyuan_histroyofchange.rowguid AS ROWGUID FROM huiyuan_histroyofchange INNER JOIN table_struct ON (((huiyuan_histroyofchange.fieldid = table_struct.fieldid::varchar) and (huiyuan_histroyofchange.tableid = table_struct.tableid::varchar)))`
+				}
+				if v.ViewName == "view_pwprojectinfo" {
+					vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib.pw_name AS pwname, pw_lib.shengfenzh AS shengfenzh, pw_lib.mobile AS mobile, pw_lib.operateusername AS operateusername, pw_lib.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '可以参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib ON yytz_project_pw.pingweiguid = pw_lib.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib.pw_name, pw_lib.shengfenzh, pw_lib.mobile, pw_lib.operateusername, pw_lib.danweiguid`
+				}
+				if v.ViewName == "view_pwprojectinfo_history" {
+					vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib_history.pw_name AS pwname, pw_lib_history.shengfenzh AS shengfenzh, pw_lib_history.mobile AS mobile, pw_lib_history.operateusername AS operateusername, pw_lib_history.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '确认参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib_history ON yytz_project_pw.pingweiguid = pw_lib_history.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib_history.pw_name, pw_lib_history.shengfenzh, pw_lib_history.mobile, pw_lib_history.operateusername, pw_lib_history.danweiguid`
+				}
+				if v.ViewName == "view_sys_changdinew" {
+					vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
+				}
 				// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
 				viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
 				if m.cfg.TargetSchema != "" {
@@ -687,8 +708,8 @@ func isFunctionDefault(def string) bool {
 	return strings.HasSuffix(upper, ")")
 }
 
-// pgFunctionDefault 将函数默认值映射到 PostgreSQL 等价形式（兼容 MySQL 和 SQL Server）
-func pgFunctionDefault(def string) string {
+// pgFunctionDefault 将函数默认值映射到目标库等价形式（兼容 MySQL 和 SQL Server）
+func (m *Migrator) pgFunctionDefault(def string) string {
 	upper := strings.ToUpper(strings.TrimSpace(def))
 	switch upper {
 	case "CURRENT_TIMESTAMP", "NOW()", "GETDATE()":
@@ -703,10 +724,15 @@ func pgFunctionDefault(def string) string {
 		return "TRUE"
 	case "FALSE":
 		return "FALSE"
-	case "NEWID()":
-		return "gen_random_uuid()"
-	case "UUID()":
-		return "gen_random_uuid()"
+	case "NEWID()", "UUID()":
+		switch m.cfg.TargetDBType {
+		case "gaussdb":
+			return "uuid()"
+		case "seabox":
+			return "sys_guid()"
+		default:
+			return "gen_random_uuid()"
+		}
 	default:
 		return def
 	}

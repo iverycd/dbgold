@@ -246,6 +246,41 @@
           <!-- 迁移报告 -->
           <div v-if="dataMigrate.finished && dataMigrate.currentJobId" style="margin-top: 16px">
             <a-divider>迁移报告</a-divider>
+
+            <!-- 连接信息摘要条 -->
+            <div v-if="selectedSrc && selectedDst" class="report-conn-bar">
+              <div class="report-conn-side">
+                <a-tag :color="getDbTypeColor(selectedSrc.db_type)" size="small" class="report-conn-type-tag">
+                  {{ getDbTypeLabel(selectedSrc.db_type) }}
+                </a-tag>
+                <span class="report-conn-name">{{ selectedSrc.name }}</span>
+                <span class="report-conn-detail">
+                  <span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}
+                </span>
+                <span v-if="dataMigrate.srcDatabase" class="report-conn-detail">
+                  <span class="conn-meta-label">库</span>{{ dataMigrate.srcDatabase }}
+                </span>
+              </div>
+
+              <icon-arrow-right class="report-conn-arrow" />
+
+              <div class="report-conn-side">
+                <a-tag :color="getDbTypeColor(selectedDst.db_type)" size="small" class="report-conn-type-tag">
+                  {{ getDbTypeLabel(selectedDst.db_type) }}
+                </a-tag>
+                <span class="report-conn-name">{{ selectedDst.name }}</span>
+                <span class="report-conn-detail">
+                  <span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}
+                </span>
+                <span class="report-conn-detail">
+                  <span class="conn-meta-label">库</span>{{ selectedDst.database }}
+                </span>
+                <span v-if="dataMigrate.dstSchema" class="report-conn-detail">
+                  <span class="conn-meta-label">Schema</span>{{ dataMigrate.dstSchema }}
+                </span>
+              </div>
+            </div>
+
             <MigrationReportPanel :jobID="dataMigrate.currentJobId" />
           </div>
         </a-form>
@@ -685,5 +720,46 @@ onUnmounted(() => {
   font-size: 12px;
   color: #7d5a00;
   line-height: 1.5;
+}
+.report-conn-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  background: var(--color-fill-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.report-conn-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+.report-conn-type-tag {
+  flex-shrink: 0;
+}
+.report-conn-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+.report-conn-detail {
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+.report-conn-arrow {
+  font-size: 18px;
+  color: #165dff;
+  flex-shrink: 0;
 }
 </style>
