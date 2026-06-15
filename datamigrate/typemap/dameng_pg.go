@@ -11,6 +11,7 @@ func init() {
 	Register("dameng", "postgres", DaMengToPG)
 	Register("dameng", "gaussdb", DaMengToPG)
 	Register("dameng", "seabox", DaMengToPG)
+	Register("dameng", "highgo", DaMengToPG)
 }
 
 // DaMengToPG 将达梦列的数据类型转换为 PostgreSQL 类型字符串。

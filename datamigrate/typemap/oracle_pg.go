@@ -11,6 +11,7 @@ func init() {
 	Register("oracle", "postgres", OracleToPG)
 	Register("oracle", "gaussdb", OracleToPG)
 	Register("oracle", "seabox", OracleToPG)
+	Register("oracle", "highgo", OracleToPG)
 }
 
 // OracleToPG 将 Oracle 列的数据类型转换为 PostgreSQL 类型字符串。

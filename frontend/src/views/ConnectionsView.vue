@@ -54,6 +54,7 @@
             <a-option value="gaussdb">GaussDB</a-option>
             <a-option value="dameng">DaMeng（达梦）</a-option>
             <a-option value="seabox">SeaBox</a-option>
+            <a-option value="highgo">HighGo（瀚高）</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -68,7 +69,7 @@
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item label="数据库名" field="database" :rules="[{ required: true }]">
+        <a-form-item label="数据库名" field="database" :rules="[{ required: form.db_type !== 'mysql', message: '请输入数据库名' }]">
           <a-input v-model="form.database" placeholder="数据库名" />
         </a-form-item>
         <a-form-item label="用户名" field="username" :rules="[{ required: true }]">
@@ -123,6 +124,7 @@ const defaultPortMap: Record<string, number> = {
   gaussdb: 5432,
   dameng: 5236,
   seabox: 5432,
+  highgo: 5866,
 }
 
 watch(() => form.db_type, (newType) => {

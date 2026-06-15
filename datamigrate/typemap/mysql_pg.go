@@ -11,6 +11,7 @@ func init() {
 	Register("mysql", "postgres", MySQLToPG)
 	Register("mysql", "gaussdb", MySQLToPG)
 	Register("mysql", "seabox", MySQLToPG)
+	Register("mysql", "highgo", MySQLToPG)
 }
 
 // MySQLToPG 将 MySQL 列的数据类型转换为 PostgreSQL 类型字符串。

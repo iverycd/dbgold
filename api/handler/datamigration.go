@@ -39,6 +39,10 @@ var supportedPairs = []SupportedPair{
 	{Source: "oracle", Target: "postgres"},
 	{Source: "oracle", Target: "gaussdb"},
 	{Source: "oracle", Target: "seabox"},
+	{Source: "mysql", Target: "highgo"},
+	{Source: "sqlserver", Target: "highgo"},
+	{Source: "dameng", Target: "highgo"},
+	{Source: "oracle", Target: "highgo"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -220,6 +224,8 @@ func StartDataMigration(c *gin.Context) {
 			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, dstPool)
 		case "dameng":
 			writer, writerErr = target.NewDaMeng(dstDSN, req.TargetSchema, dstPool)
+		case "highgo":
+			writer, writerErr = target.NewHighGo(dstDSN, req.TargetSchema, dstPool)
 		default:
 			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, dstPool)
 		}

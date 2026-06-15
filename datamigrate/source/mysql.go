@@ -404,6 +404,8 @@ func transformViewDef(def string) string {
 	def = regexp.MustCompile(`(?i)\bifnull\s*\(`).ReplaceAllString(def, "coalesce(")
 	// isnull(x) → (x IS NULL)
 	def = regexp.MustCompile(`(?i)\bisnull\s*\(([^)]+)\)`).ReplaceAllString(def, "($1 IS NULL)")
+	// to_days(x) → (x::date - '0001-01-01'::date + 366)，与 MySQL TO_DAYS 语义一致
+	def = regexp.MustCompile(`(?i)\bto_days\s*\(([^)]+)\)`).ReplaceAllString(def, "(($1)::date - '0001-01-01'::date + 366)")
 	// group_concat(x separator 'sep') → string_agg(x, 'sep')
 	def = regexp.MustCompile(`(?i)\bgroup_concat\s*\((.+?)\s+separator\s+('[^']*')\s*\)`).ReplaceAllString(def, "string_agg($1, $2)")
 	def = regexp.MustCompile(`(?i)\bgroup_concat\s*\(`).ReplaceAllString(def, "string_agg(")
