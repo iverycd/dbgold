@@ -7,16 +7,27 @@ import (
 	"fmt"
 	"strings"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/valueconv"
 	_ "gitee.com/opengauss/openGauss-connector-go-pq"
 )
 
 // GaussDBWriter 实现 Writer 接口，写入到 GaussDB 数据库
 // GaussDB 与 PostgreSQL 语法完全兼容，仅驱动不同
 type GaussDBWriter struct {
-	db     *sql.DB
-	schema string
+	db        *sql.DB
+	schema    string
+	srcType   string
+	valueConv valueconv.ValueConverter
+	dia       dialect.Dialect
 }
+
+// SetSourceType 由 Migrator 注入源库类型(reader.DBType())。
+func (w *GaussDBWriter) SetSourceType(srcType string) { w.srcType = srcType }
+
+// Dialect 返回 GaussDB 方言。
+func (w *GaussDBWriter) Dialect() dialect.Dialect { return w.dia }
 
 // NewGaussDB 创建并连接 GaussDB Writer
 // dsn 格式：host=... port=... user=... password=... dbname=... sslmode=disable
@@ -30,7 +41,7 @@ func NewGaussDB(dsn, schema string, pool ConnPoolConfig) (*GaussDBWriter, error)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	return &GaussDBWriter{db: db, schema: schema}, nil
+	return &GaussDBWriter{db: db, schema: schema, valueConv: valueconv.NewPostgres(), dia: dialect.NewPostgres("gaussdb")}, nil
 }
 
 // qualifiedTable 返回带 schema 前缀的表名，schema 为空时直接返回表名
@@ -49,8 +60,9 @@ func (w *GaussDBWriter) CreateTable(ctx context.Context, ddl string) error {
 	return err
 }
 
-// CopyData 使用 GaussDB COPY 协议批量写入行数据
-func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []string, rows [][]interface{}) error {
+// CopyData 使用 GaussDB COPY 协议批量写入行数据。
+// 写入前经 ValueConverter 把 Reader 输出的中立值落地为 COPY 协议能接受的形态。
+func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -73,7 +85,8 @@ func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []strin
 	defer stmt.Close()
 
 	for _, row := range rows {
-		if _, err := stmt.ExecContext(ctx, row...); err != nil {
+		conv := w.convertRow(row, colTypes)
+		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
 	}
@@ -83,72 +96,47 @@ func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []strin
 	return tx.Commit()
 }
 
+// convertRow 对一行的每个值按列类型经 ValueConverter 落地。
+func (w *GaussDBWriter) convertRow(row []interface{}, colTypes []string) []interface{} {
+	if w.valueConv == nil {
+		return row
+	}
+	out := make([]interface{}, len(row))
+	for i, v := range row {
+		dt := ""
+		if i < len(colTypes) {
+			dt = colTypes[i]
+		}
+		out[i] = w.valueConv.Convert(v, w.srcType, dt)
+	}
+	return out
+}
+
+func (w *GaussDBWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
+	for _, s := range stmts {
+		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (w *GaussDBWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	seqBase := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
-	var quotedSeq string
-	var nextvalArg string
-	if w.schema != "" {
-		quotedSeq = fmt.Sprintf(`"%s"."%s"`, w.schema, seqBase)
-		nextvalArg = fmt.Sprintf(`%s."%s"`, w.schema, seqBase)
-	} else {
-		quotedSeq = fmt.Sprintf(`"%s"`, seqBase)
-		nextvalArg = fmt.Sprintf(`"%s"`, seqBase)
-	}
-	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
-	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
-		return err
-	}
-	alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" SET DEFAULT nextval('%s')`,
-		w.qualifiedTable(seq.TableName), seq.ColumnName, nextvalArg)
-	_, err := w.db.ExecContext(ctx, alterSQL)
-	return err
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq))
 }
 
 func (w *GaussDBWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	quotedCols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	cols := strings.Join(quotedCols, ", ")
-	var ddl string
-	if idx.IsPrimary {
-		ddl = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", w.qualifiedTable(idx.TableName), cols)
-	} else if idx.IsUnique {
-		ddl = fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
-	} else {
-		ddl = fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
-	}
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
 }
 
 func (w *GaussDBWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {
-	quotedCols := make([]string, len(fk.Columns))
-	for i, c := range fk.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	quotedRefCols := make([]string, len(fk.RefColumns))
-	for i, c := range fk.RefColumns {
-		quotedRefCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	ddl := fmt.Sprintf(
-		`ALTER TABLE %s ADD CONSTRAINT "%s" FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s ON UPDATE %s;`,
-		w.qualifiedTable(fk.TableName), fk.ConstraintName,
-		strings.Join(quotedCols, ", "),
-		w.qualifiedTable(fk.RefTable),
-		strings.Join(quotedRefCols, ", "),
-		fk.OnDelete, fk.OnUpdate)
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
 func (w *GaussDBWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
-	ddl := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", w.qualifiedTable(view.ViewName), view.Definition)
+	stmts := w.dia.ViewStatements(w.schema, view)
 	if w.schema == "" {
-		_, err := w.db.ExecContext(ctx, ddl)
-		return err
+		return w.execStatements(ctx, stmts)
 	}
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -158,8 +146,10 @@ func (w *GaussDBWriter) CreateView(ctx context.Context, view source.ViewInfo) er
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, ddl); err != nil {
-		return err
+	for _, s := range stmts {
+		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

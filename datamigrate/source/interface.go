@@ -67,8 +67,9 @@ type Reader interface {
 	GetPrimaryKey(ctx context.Context, table string) ([]string, error)
 	// GetPrimaryKeys 返回所有表的主键信息（IsPrimary=true），用于数据写入完毕后统一创建主键
 	GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error)
-	// ReadPage 分页读取数据：pkCols 为主键列名列表，空则用 LIMIT/OFFSET
-	ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) (cols []string, rows [][]interface{}, err error)
+	// ReadPage 分页读取数据：pkCols 为主键列名列表，空则用 LIMIT/OFFSET。
+	// colTypes 为每列的 DatabaseTypeName（大写），供目标侧 ValueConverter 落地中立值使用。
+	ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) (cols []string, colTypes []string, rows [][]interface{}, err error)
 	// GetSequences 返回所有 AUTO_INCREMENT 列信息
 	GetSequences(ctx context.Context) ([]SequenceInfo, error)
 	// GetIndexes 返回所有索引信息（不含主键）

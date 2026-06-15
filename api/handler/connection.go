@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 
+	_ "gitee.com/chunanyong/dm"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
 )
@@ -203,6 +204,13 @@ func ListConnectionSchemas(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
+
+	// 达梦的 schema 即数据库用户,单独走 ALL_USERS 查询
+	if conn.DBType == "dameng" {
+		listDaMengSchemas(c, conn)
+		return
+	}
+
 	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
 		return
@@ -234,6 +242,42 @@ func ListConnectionSchemas(c *gin.Context) {
 		   'pg_aoseg','pg_bitmapindex','sc_toolkit','stat_perf',
 		   '_seaboxts_catalog','_seaboxts_internal','seaboxts_information','sdaudit'
 		 )`)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			continue
+		}
+		schemas = append(schemas, s)
+	}
+	c.JSON(http.StatusOK, schemas)
+}
+
+// listDaMengSchemas 列出达梦可作为目标的 schema(即数据库用户),
+// 过滤掉达梦内置系统用户。
+func listDaMengSchemas(c *gin.Context, conn *store.Connection) {
+	db, err := sql.Open("dm", buildDSN(conn))
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(c.Request.Context(),
+		`SELECT USERNAME FROM ALL_USERS
+		 WHERE USERNAME NOT IN (
+		   'SYS','SYSDBA','SYSAUDITOR','SYSSSO','SYSDBO',
+		   'CTISYS','SYSUSERS'
+		 )
+		 ORDER BY USERNAME`)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})

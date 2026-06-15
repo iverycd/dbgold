@@ -4,7 +4,6 @@ package source
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -196,7 +195,7 @@ func (r *MySQLReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) {
 	return result, rows.Err()
 }
 
-func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, [][]interface{}, error) {
+func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
 	var query string
 	if len(pkCols) > 0 {
 		pkList := strings.Join(pkCols, ", ")
@@ -212,16 +211,16 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 	}
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// 预计算每列的类型名（大写），用于后续按类型分支处理
 	colTypeName := make([]string, len(colTypes))
@@ -236,7 +235,7 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for i, v := range vals {
 			b, ok := v.([]byte)
@@ -246,20 +245,16 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 			dt := colTypeName[i]
 			switch {
 			case strings.Contains(dt, "BLOB") || strings.Contains(dt, "BINARY"):
-				// 二进制列保持 []byte，pq 正确写入 bytea
-			case dt == "BIT":
-				// MySQL BIT 转 16 进制后截掉首字符，得到 "0"/"1"，符合 PG bit(1) 格式
-				vals[i] = hex.EncodeToString(b)[1:]
-			case dt == "GEOMETRY":
-				// GIS 类型：16 进制字符串，去掉 golang 多出的前 8 个 0
-				vals[i] = hex.EncodeToString(b)[8:]
+				// 二进制列保持 []byte（中立值），由目标 ValueConverter 落地
+			case dt == "BIT" || dt == "GEOMETRY":
+				// 中立值：保持原始 []byte，PG 专属的 hex 文本化移到 PostgresValueConverter
 			default:
 				vals[i] = strings.ReplaceAll(string(b), "\x00", "")
 			}
 		}
 		result = append(result, vals)
 	}
-	return cols, result, rows.Err()
+	return cols, colTypeName, result, rows.Err()
 }
 
 func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {

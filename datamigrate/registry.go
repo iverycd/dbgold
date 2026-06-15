@@ -8,7 +8,7 @@ import (
 
 // Job 表示一个运行中的迁移任务
 type Job struct {
-	LogCh  chan string      // SSE 日志 channel（buffered，容量 512）
+	LogCh  chan string // SSE 日志 channel（buffered，容量 512）
 	Cancel context.CancelFunc
 }
 

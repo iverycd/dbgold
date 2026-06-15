@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+// PostgreSQL/GaussDB/SeaBox 语法兼容,共用 SQLServerToPG。
+func init() {
+	Register("sqlserver", "postgres", SQLServerToPG)
+	Register("sqlserver", "gaussdb", SQLServerToPG)
+	Register("sqlserver", "seabox", SQLServerToPG)
+}
+
 // SQLServerToPG 将 SQL Server 列的数据类型转换为 PostgreSQL 类型字符串。
 // charInLength=true 时 char/varchar 长度单位使用 CHAR，useNvarchar2=true 时转为 nvarchar2（优先级更高）。
 func SQLServerToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {

@@ -2,6 +2,8 @@ package target
 
 import (
 	"context"
+
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 )
 
@@ -9,10 +11,14 @@ import (
 type Writer interface {
 	// DBType 返回数据库类型标识，如 "postgres"
 	DBType() string
+	// Dialect 返回该目标库的方言(SQL 生成),供 Migrator 生成报告 DDL 并保证与执行同源
+	Dialect() dialect.Dialect
 	// CreateTable 在目标库执行建表 DDL（先 DROP IF EXISTS，再 CREATE）
 	CreateTable(ctx context.Context, ddl string) error
-	// CopyData 使用批量协议写入一批行数据
-	CopyData(ctx context.Context, table string, cols []string, rows [][]interface{}) error
+	// CopyData 使用批量协议写入一批行数据。
+	// colTypes 为每列的 DatabaseTypeName（大写），Writer 用它经 ValueConverter
+	// 把 Reader 输出的中立值落地成目标驱动能接受的形态。
+	CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error
 	// CreateSequence 创建序列并绑定到列的默认值
 	CreateSequence(ctx context.Context, seq source.SequenceInfo) error
 	// CreateIndex 创建索引或唯一约束

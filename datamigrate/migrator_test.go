@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
 	"github.com/stretchr/testify/assert"
@@ -30,15 +31,15 @@ func (m *mockReader) GetTableDDLInfo(_ context.Context, t string) (*source.Table
 func (m *mockReader) GetPrimaryKey(_ context.Context, t string) ([]string, error) {
 	return m.pk[t], nil
 }
-func (m *mockReader) ReadPage(_ context.Context, t string, _ []string, offset, _ int64) ([]string, [][]interface{}, error) {
+func (m *mockReader) ReadPage(_ context.Context, t string, _ []string, offset, _ int64) ([]string, []string, [][]interface{}, error) {
 	if offset > 0 {
-		return []string{"id"}, nil, nil
+		return []string{"id"}, []string{"INT"}, nil, nil
 	}
 	rows := m.rows[t]
 	if len(rows) == 0 {
-		return []string{"id"}, nil, nil
+		return []string{"id"}, []string{"INT"}, nil, nil
 	}
-	return []string{"id"}, rows, nil
+	return []string{"id"}, []string{"INT"}, rows, nil
 }
 func (m *mockReader) GetSequences(_ context.Context) ([]source.SequenceInfo, error) { return nil, nil }
 func (m *mockReader) GetPrimaryKeys(_ context.Context) ([]source.IndexInfo, error)  { return nil, nil }
@@ -57,8 +58,9 @@ type mockWriter struct {
 	copyDataFail    bool
 }
 
-func (m *mockWriter) DBType() string { return "postgres" }
-func (m *mockWriter) Close() error   { return nil }
+func (m *mockWriter) DBType() string           { return "postgres" }
+func (m *mockWriter) Dialect() dialect.Dialect { return dialect.NewPostgres("postgres") }
+func (m *mockWriter) Close() error             { return nil }
 func (m *mockWriter) CreateTable(_ context.Context, ddl string) error {
 	if m.createTableFail {
 		return fmt.Errorf("create table failed")
@@ -66,7 +68,7 @@ func (m *mockWriter) CreateTable(_ context.Context, ddl string) error {
 	m.created = append(m.created, ddl)
 	return nil
 }
-func (m *mockWriter) CopyData(_ context.Context, table string, _ []string, _ [][]interface{}) error {
+func (m *mockWriter) CopyData(_ context.Context, table string, _ []string, _ []string, _ [][]interface{}) error {
 	if m.copyDataFail {
 		return fmt.Errorf("copy data failed")
 	}
@@ -80,6 +82,7 @@ func (m *mockWriter) CreateView(_ context.Context, _ source.ViewInfo) error     
 func (m *mockWriter) AlterDistribute(_ context.Context, _ string, _ []string) error { return nil }
 func (m *mockWriter) CountRows(_ context.Context, _ string) (int64, error)          { return 0, nil }
 func (m *mockWriter) SchemaExists(_ context.Context, _ string) (bool, error)        { return true, nil }
+func (m *mockWriter) ChangeOwner(_ context.Context, _, _, _ string) error           { return nil }
 
 func newTestMigrator(reader source.Reader, writer target.Writer) (*Migrator, *Job) {
 	_, cancel := context.WithCancel(context.Background())

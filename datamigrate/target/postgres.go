@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/valueconv"
 	_ "github.com/lib/pq"
 )
 
@@ -39,9 +41,18 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 
 // PostgresWriter 实现 Writer 接口，写入到 PostgreSQL 数据库
 type PostgresWriter struct {
-	db     *sql.DB
-	schema string
+	db        *sql.DB
+	schema    string
+	srcType   string                   // 源库类型，用于 ValueConverter 落地中立值
+	valueConv valueconv.ValueConverter // 把 Reader 中立值落地为 PG 形态
+	dia       dialect.Dialect          // SQL 生成方言
 }
+
+// SetSourceType 由 Migrator 注入源库类型(reader.DBType())。
+func (w *PostgresWriter) SetSourceType(srcType string) { w.srcType = srcType }
+
+// Dialect 返回 PostgreSQL 方言。
+func (w *PostgresWriter) Dialect() dialect.Dialect { return w.dia }
 
 // NewPostgres 创建并连接 PostgreSQL Writer
 // dsn 格式：host=... port=... user=... password=... dbname=... sslmode=disable
@@ -55,7 +66,7 @@ func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresWriter, erro
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	return &PostgresWriter{db: db, schema: schema}, nil
+	return &PostgresWriter{db: db, schema: schema, valueConv: valueconv.NewPostgres(), dia: dialect.NewPostgres("postgres")}, nil
 }
 
 // qualifiedTable 返回带 schema 前缀的表名，schema 为空时直接返回表名
@@ -74,8 +85,9 @@ func (w *PostgresWriter) CreateTable(ctx context.Context, ddl string) error {
 	return err
 }
 
-// CopyData 使用 PostgreSQL COPY 协议批量写入行数据
-func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []string, rows [][]interface{}) error {
+// CopyData 使用 PostgreSQL COPY 协议批量写入行数据。
+// 写入前经 ValueConverter 把 Reader 输出的中立值落地为 pq COPY 协议能接受的形态。
+func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -98,7 +110,8 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 	defer stmt.Close()
 
 	for _, row := range rows {
-		if _, err := stmt.ExecContext(ctx, row...); err != nil {
+		conv := w.convertRow(row, colTypes)
+		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
 	}
@@ -108,72 +121,47 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 	return tx.Commit()
 }
 
+// convertRow 对一行的每个值按列类型经 ValueConverter 落地。
+func (w *PostgresWriter) convertRow(row []interface{}, colTypes []string) []interface{} {
+	if w.valueConv == nil {
+		return row
+	}
+	out := make([]interface{}, len(row))
+	for i, v := range row {
+		dt := ""
+		if i < len(colTypes) {
+			dt = colTypes[i]
+		}
+		out[i] = w.valueConv.Convert(v, w.srcType, dt)
+	}
+	return out
+}
+
+func (w *PostgresWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
+	for _, s := range stmts {
+		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	seqBase := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
-	var quotedSeq string  // 带引号的序列名，用于 DDL
-	var nextvalArg string // nextval() 的参数，带 schema 前缀
-	if w.schema != "" {
-		quotedSeq = fmt.Sprintf(`"%s"."%s"`, w.schema, seqBase)
-		nextvalArg = fmt.Sprintf(`%s."%s"`, w.schema, seqBase)
-	} else {
-		quotedSeq = fmt.Sprintf(`"%s"`, seqBase)
-		nextvalArg = fmt.Sprintf(`"%s"`, seqBase)
-	}
-	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
-	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
-		return err
-	}
-	alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" SET DEFAULT nextval('%s')`,
-		w.qualifiedTable(seq.TableName), seq.ColumnName, nextvalArg)
-	_, err := w.db.ExecContext(ctx, alterSQL)
-	return err
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq))
 }
 
 func (w *PostgresWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	quotedCols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	cols := strings.Join(quotedCols, ", ")
-	var ddl string
-	if idx.IsPrimary {
-		ddl = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", w.qualifiedTable(idx.TableName), cols)
-	} else if idx.IsUnique {
-		ddl = fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
-	} else {
-		ddl = fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, w.qualifiedTable(idx.TableName), cols)
-	}
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
 }
 
 func (w *PostgresWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {
-	quotedCols := make([]string, len(fk.Columns))
-	for i, c := range fk.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	quotedRefCols := make([]string, len(fk.RefColumns))
-	for i, c := range fk.RefColumns {
-		quotedRefCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	ddl := fmt.Sprintf(
-		`ALTER TABLE %s ADD CONSTRAINT "%s" FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s ON UPDATE %s;`,
-		w.qualifiedTable(fk.TableName), fk.ConstraintName,
-		strings.Join(quotedCols, ", "),
-		w.qualifiedTable(fk.RefTable),
-		strings.Join(quotedRefCols, ", "),
-		fk.OnDelete, fk.OnUpdate)
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
 func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
-	ddl := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s;", w.qualifiedTable(view.ViewName), view.Definition)
+	stmts := w.dia.ViewStatements(w.schema, view)
 	if w.schema == "" {
-		_, err := w.db.ExecContext(ctx, ddl)
-		return err
+		return w.execStatements(ctx, stmts)
 	}
 	// 视图定义中的非限定表名需要能解析到目标 schema，用 SET LOCAL 避免影响其他连接
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -184,8 +172,10 @@ func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) e
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, ddl); err != nil {
-		return err
+	for _, s := range stmts {
+		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

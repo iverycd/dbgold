@@ -29,6 +29,7 @@ var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "postgres"},
 	{Source: "mysql", Target: "gaussdb"},
 	{Source: "mysql", Target: "seabox"},
+	{Source: "mysql", Target: "dameng"},
 	{Source: "sqlserver", Target: "postgres"},
 	{Source: "sqlserver", Target: "gaussdb"},
 	{Source: "sqlserver", Target: "seabox"},
@@ -214,9 +215,12 @@ func StartDataMigration(c *gin.Context) {
 		}
 		var writer target.Writer
 		var writerErr error
-		if dstConn.DBType == "gaussdb" {
+		switch dstConn.DBType {
+		case "gaussdb":
 			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, dstPool)
-		} else {
+		case "dameng":
+			writer, writerErr = target.NewDaMeng(dstDSN, req.TargetSchema, dstPool)
+		default:
 			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, dstPool)
 		}
 		if writerErr != nil {

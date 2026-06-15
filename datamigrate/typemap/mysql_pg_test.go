@@ -1,9 +1,10 @@
 package typemap
 
 import (
+	"testing"
+
 	"dbgold/datamigrate/source"
 	"github.com/stretchr/testify/assert"
-	
 )
 
 func TestMySQLToPG(t *testing.T) {

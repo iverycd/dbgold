@@ -4,14 +4,13 @@ package datamigrate
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
-	"dbgold/datamigrate/typemap"
 )
 
 // Config 迁移任务配置
@@ -40,8 +39,17 @@ type Migrator struct {
 	log    *Logger
 }
 
+// sourceTypeSetter 由 Writer 可选实现,用于接收源库类型以驱动 ValueConverter。
+type sourceTypeSetter interface {
+	SetSourceType(srcType string)
+}
+
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	// 若 Writer 支持,注入源库类型供其 ValueConverter 落地中立值
+	if s, ok := writer.(sourceTypeSetter); ok {
+		s.SetSourceType(reader.DBType())
+	}
 	return &Migrator{reader: reader, writer: writer, job: job, cfg: cfg, log: NewLogger(job.LogCh)}
 }
 
@@ -51,20 +59,6 @@ func (m *Migrator) objName(s string) string {
 		return strings.ToLower(s)
 	}
 	return s
-}
-
-var reGenRandomUUID = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
-
-// adjustViewUUID 将视图定义中的中间形式 gen_random_uuid() 替换为目标库对应函数。
-func adjustViewUUID(def, targetDBType string) string {
-	switch targetDBType {
-	case "gaussdb":
-		return reGenRandomUUID.ReplaceAllString(def, "uuid()")
-	case "seabox":
-		return reGenRandomUUID.ReplaceAllString(def, "sys_guid()")
-	default:
-		return def
-	}
 }
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
@@ -224,68 +218,18 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	return report
 }
 
-// mapColumnType 根据源库类型分发类型映射
-func (m *Migrator) mapColumnType(col source.ColumnInfo) string {
-	switch m.reader.DBType() {
-	case "sqlserver":
-		return typemap.SQLServerToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
-	case "dameng":
-		return typemap.DaMengToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
-	case "oracle":
-		return typemap.OracleToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
-	default: // mysql
-		return typemap.MySQLToPG(col, m.cfg.CharInLength, m.cfg.UseNvarchar2)
-	}
-}
-
-// buildCreateTableDDL 根据源库列信息生成目标库建表 DDL
+// buildCreateTableDDL 通过目标方言生成建表 DDL。
 func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (string, error) {
 	info, err := m.reader.GetTableDDLInfo(ctx, table)
 	if err != nil {
 		return "", err
 	}
-	var cols []string
-	for _, col := range info.Columns {
-		pgType := m.mapColumnType(col)
-		colDef := fmt.Sprintf(`"%s" %s`, m.objName(col.Name), pgType)
-		if !col.IsNullable {
-			colDef += " NOT NULL"
-		}
-		if col.Default != nil && col.Extra != "auto_increment" {
-			def := *col.Default
-			// SQL Server 默认值带额外括号，如 ((0))、(getdate())、(N'')，先剥离
-			if m.reader.DBType() == "sqlserver" {
-				def = stripSQLServerDefault(def)
-			}
-			// Oracle 默认值可能带多余单引号，如 ''0'' → 0，或 '''abc''' → 'abc'
-			if m.reader.DBType() == "oracle" {
-				def = stripOracleDefault(def)
-			}
-			// MySQL 8.0 表达式默认值在 information_schema 中以括号包裹，如 (' ') 或 (0)
-			if m.reader.DBType() == "mysql" {
-				def = stripMySQLExprDefault(def)
-			}
-			// MySQL 位串字面量 b'0' / b'1' → PostgreSQL B'0' / B'1'
-			if regexp.MustCompile(`(?i)^b'[01]+'$`).MatchString(def) {
-				colDef += fmt.Sprintf(" DEFAULT B'%s'", def[2:len(def)-1])
-			} else if isFunctionDefault(def) {
-				colDef += fmt.Sprintf(" DEFAULT %s", m.pgFunctionDefault(def))
-			} else {
-				colDef += fmt.Sprintf(" DEFAULT '%s'", strings.ReplaceAll(def, "'", "''"))
-			}
-		}
-		cols = append(cols, "  "+colDef)
+	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
+	stmts, err := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, info, m.reader.DBType(), opt, m.objName)
+	if err != nil {
+		return "", err
 	}
-	tblName := m.objName(table)
-	var qualifiedName string
-	if m.cfg.TargetSchema != "" {
-		qualifiedName = fmt.Sprintf(`"%s"."%s"`, m.cfg.TargetSchema, tblName)
-	} else {
-		qualifiedName = fmt.Sprintf(`"%s"`, tblName)
-	}
-	ddl := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;\nCREATE TABLE %s (\n%s\n);",
-		qualifiedName, qualifiedName, strings.Join(cols, ",\n"))
-	return ddl, nil
+	return dialect.JoinSQL(stmts), nil
 }
 
 // migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）
@@ -314,7 +258,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 			}
 			return false, firstErr
 		}
-		cols, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
+		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
 			return false, err.Error()
@@ -327,7 +271,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		for i, c := range cols {
 			dstCols[i] = m.objName(c)
 		}
-		if err := m.writer.CopyData(ctx, dstTable, dstCols, rows); err != nil {
+		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
 			if !hasError {
 				firstErr = err.Error()
@@ -366,7 +310,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	dstTable := m.objName(table)
 
 	// 先读第一页以获取列名
-	cols, firstRows, err := m.reader.ReadPage(ctx, table, pks, 0, pageSize)
+	cols, colTypes, firstRows, err := m.reader.ReadPage(ctx, table, pks, 0, pageSize)
 	if err != nil {
 		m.log.Errorf("读取数据失败 [%s] 第 1 页: %v", table, err)
 		return false, err.Error()
@@ -381,7 +325,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	hasError := false
 
 	writePage := func(pageNum int, rows [][]interface{}) {
-		if err := m.writer.CopyData(ctx, dstTable, dstCols, rows); err != nil {
+		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
 			mu.Lock()
 			if !hasError {
@@ -418,7 +362,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 		go func(off int64, pn int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			_, rows, err := m.reader.ReadPage(ctx, table, pks, off, pageSize)
+			_, _, rows, err := m.reader.ReadPage(ctx, table, pks, off, pageSize)
 			if err != nil {
 				m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pn, err)
 				mu.Lock()
@@ -488,7 +432,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				cols[i] = m.objName(c)
 			}
 			pkCopy.Columns = cols
-			ddl := IndexDDL(pkCopy)
+			ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
 			if m.cfg.Distributed {
 				if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
 					m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
@@ -523,7 +467,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			seqCopy := seq
 			seqCopy.TableName = m.objName(seq.TableName)
 			seqCopy.ColumnName = m.objName(seq.ColumnName)
-			ddl := SequenceDDL(seqCopy)
+			ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy))
 			if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
 				m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 				report.Sequences.Failed++
@@ -568,7 +512,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				cols[i] = m.objName(c)
 			}
 			idxCopy.Columns = cols
-			ddl := IndexDDL(idxCopy)
+			ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
 			if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
 				m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
 				report.Indexes.Failed++
@@ -616,7 +560,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					refCols[i] = m.objName(c)
 				}
 				fkCopy.RefColumns = refCols
-				ddl := FKDDL(fkCopy)
+				ddl := dialect.JoinSQL(m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, fkCopy))
 				if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
 					m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
 					report.Constraints.Failed++
@@ -646,7 +590,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				vCopy := v
 				vCopy.ViewName = m.objName(v.ViewName)
-				vCopy.Definition = adjustViewUUID(v.Definition, m.cfg.TargetDBType)
+				vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
 				if v.ViewName == "view_cg_allkaipingbiao" {
 					vCopy.Definition = `select cg_projectinfo.projectno AS ProjectNO,cg_projectinfo.projectname AS ProjectName,cg_projectinfo.projectguid AS ProjectGuid,cg_projectinfo.xiaqucode AS XiaQuCode,cg_biaoduaninfo.BIAODUANNO AS BiaoDuanNO,cg_biaoduaninfo.BIAODUANNAME AS BiaoDuanName,cg_biaoduaninfo.ZHAOBIAOFANGSHI AS ZhaoBiaoFangShi,cg_biaoduaninfo.TOUZIGUSUAN AS TouZiGuSuan,cg_biaoduaninfo.ROWGUID AS ROWGUID,cg_biaoduaninfo.BDSECONDTYPE AS BDSecondType,cg_projectinfo.sbr_date AS SBR_Date,cg_biaoduaninfo.SBR_UNITGUID AS SBR_UnitGuid,cg_biaoduaninfo.ZHAOBIAOTYPE AS ZhaoBiaoType,cg_biaoduaninfo.FABAODATE AS FaBaoDate,cg_biaoduaninfo.SBR_NAME AS SBR_Name,cg_biaoduaninfo.SBR_CODE AS SBR_Code,cg_biaoduaninfo.SBR_UNITNAME AS SBR_UnitName,cg_biaoduaninfo.SBR_TEL AS SBR_Tel,cg_biaoduaninfo.SBR_MOBLIE AS SBR_Moblie,cg_biaoduaninfo.SBR_IDCARD AS SBR_IDCard,cg_projectinfo.projectjiaoyitype AS ProjectJiaoYiType,cg_projectinfo.jianshedanweiguid AS JianSheDanWeiGuid,cg_projectinfo.jianshedanwei AS JianSheDanWei,cg_biaoduaninfo.row_id AS Row_ID,cg_biaoduaninfo.SHR_CODE AS SHR_Code,cg_biaoduaninfo.SHR_NAME AS SHR_Name,cg_biaoduaninfo.SHR_DATE AS SHR_Date,cg_biaoduaninfo.PROJECTFENLEI AS ProjectFenLei,cg_biaoduaninfo.FABAOCONTENT AS FaBaoContent,cg_biaoduaninfo.DAILIGUID AS DaiLiGuid,cg_biaoduaninfo.BDJIANZHUMIANJI AS BDJianZhuMianJi,cg_biaoduaninfo.DAILINAME AS DaiLiName,cg_biaoduaninfo.FABUNUM AS FaBuNum,cg_biaoduaninfo.ZBPINGWEIISSELECTED AS ZbPingWeiIsSelected,cg_biaoduaninfo.ISLIUBIAO AS IsLiuBiao,cg_biaoduaninfo.FABAOISSELECTED AS FaBaoIsSelected,cg_biaoduaninfo.KAIBIAOISSELECTED AS KaiBiaoIsSelected,mtr_project.projectguid AS Expr1,mtr_project.showkaibiao AS ShowKaiBiao,mtr_project.showpingbiao AS ShowPingBiao,cg_biaoduaninfo.BIAODUANGUID AS BiaoDuanGuid,cg_biaoduaninfo.ORGGUID AS OrgGuid,mtr_project.showusedate AS ShowUseDate,cg_biaoduaninfo.PINGBIAOISSELECTED AS PingBiaoIsSelected FROM cg_biaoduaninfo INNER JOIN cg_projectinfo ON ((cg_biaoduaninfo.PROJECTGUID = cg_projectinfo.projectguid )) INNER JOIN mtr_project ON ((cg_projectinfo.projectguid = mtr_project.projectguid))`
 				}
@@ -690,135 +634,4 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			}
 		}
 	}
-}
-
-// isFunctionDefault 判断默认值是否为函数或关键字（不应加引号）
-func isFunctionDefault(def string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(def))
-	keywords := []string{
-		"CURRENT_TIMESTAMP", "NOW()", "CURRENT_DATE", "CURRENT_TIME",
-		"NULL", "TRUE", "FALSE",
-	}
-	for _, kw := range keywords {
-		if upper == kw {
-			return true
-		}
-	}
-	// 以括号结尾的视为函数调用
-	return strings.HasSuffix(upper, ")")
-}
-
-// pgFunctionDefault 将函数默认值映射到目标库等价形式（兼容 MySQL 和 SQL Server）
-func (m *Migrator) pgFunctionDefault(def string) string {
-	upper := strings.ToUpper(strings.TrimSpace(def))
-	switch upper {
-	case "CURRENT_TIMESTAMP", "NOW()", "GETDATE()":
-		return "CURRENT_TIMESTAMP"
-	case "CURRENT_DATE":
-		return "CURRENT_DATE"
-	case "CURRENT_TIME":
-		return "CURRENT_TIME"
-	case "NULL":
-		return "NULL"
-	case "TRUE":
-		return "TRUE"
-	case "FALSE":
-		return "FALSE"
-	case "NEWID()", "UUID()":
-		switch m.cfg.TargetDBType {
-		case "gaussdb":
-			return "uuid()"
-		case "seabox":
-			return "sys_guid()"
-		default:
-			return "gen_random_uuid()"
-		}
-	default:
-		return def
-	}
-}
-
-// stripOracleDefault 清理 Oracle 默认值中多余的单引号。
-// Oracle 在 ALL_TAB_COLUMNS.DATA_DEFAULT 里原样保存 SQL 字面量，如：
-//
-//	''0''   → 0      (bigint 列的数字默认值)
-//	'''abc''' → 'abc' (字符串默认值，外层再包一层引号)
-//	NULL    → 保持不变
-func stripOracleDefault(def string) string {
-	def = strings.TrimSpace(def)
-	// 连续两个单引号包裹：''value'' → value（用于数字或裸值）
-	if len(def) >= 4 && strings.HasPrefix(def, "''") && strings.HasSuffix(def, "''") {
-		inner := def[2 : len(def)-2]
-		// 确保内部没有单引号（否则是字符串默认值，不做处理）
-		if !strings.Contains(inner, "'") {
-			return strings.TrimSpace(inner)
-		}
-	}
-	// 三层单引号：'''value''' → 'value'（字符串默认值）
-	if len(def) >= 6 && strings.HasPrefix(def, "'''") && strings.HasSuffix(def, "'''") {
-		return def[2 : len(def)-2]
-	}
-	// 单层单引号：'value' → value（Oracle 直接存储 SQL 字面量，外层格式化会补引号）
-	if len(def) >= 2 && strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") {
-		inner := def[1 : len(def)-1]
-		return strings.ReplaceAll(inner, "''", "'")
-	}
-	return def
-}
-
-// SQL Server 默认值通常带额外括号，如 ((0)) → 0，(getdate()) → getdate()，(N'abc') → abc
-// SQL Server 默认值通常带额外括号，如 ((0)) → 0，(getdate()) → getdate()，(N'abc') → abc。
-func stripSQLServerDefault(def string) string {
-	def = strings.TrimSpace(def)
-	// 循环剥离最外层括号（只要整体被括号包围）
-	for strings.HasPrefix(def, "(") && strings.HasSuffix(def, ")") {
-		inner := def[1 : len(def)-1]
-		if isBalancedParens(inner) {
-			def = strings.TrimSpace(inner)
-		} else {
-			break
-		}
-	}
-	// 去掉 N'...' 前缀（SQL Server Unicode 字符串字面量）
-	if strings.HasPrefix(def, "N'") && strings.HasSuffix(def, "'") {
-		def = def[1:] // 去掉 N，保留 '...'
-	}
-	return def
-}
-
-// isBalancedParens 检查字符串中括号是否平衡
-func isBalancedParens(s string) bool {
-	depth := 0
-	for _, ch := range s {
-		switch ch {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth < 0 {
-				return false
-			}
-		}
-	}
-	return depth == 0
-}
-
-// stripMySQLExprDefault 剥离 MySQL 8.0 在 information_schema 中给表达式默认值加的外层括号。
-// MySQL 8.0 将 DEFAULT ' ' 存储为 (' ')，DEFAULT 0 存储为 (0)。
-// 剥括号后若内部是 SQL 字符串字面量（如 ' '），再去掉引号返回裸值，
-// 让上层的 DEFAULT '%s' 路径正确拼出 DEFAULT ' '。
-func stripMySQLExprDefault(def string) string {
-	def = strings.TrimSpace(def)
-	if strings.HasPrefix(def, "(") && strings.HasSuffix(def, ")") {
-		inner := strings.TrimSpace(def[1 : len(def)-1])
-		if isBalancedParens(inner) {
-			def = inner
-		}
-	}
-	// 内部是 SQL 字符串字面量 'value'，提取裸值交由上层统一处理
-	if len(def) >= 2 && strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") {
-		inner := def[1 : len(def)-1]
-		return strings.ReplaceAll(inner, "''", "'")
-	}
-	return def
 }

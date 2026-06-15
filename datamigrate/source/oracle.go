@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	_ "github.com/sijms/go-ora/v2"
 )
@@ -194,7 +193,7 @@ func (r *OracleReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) 
 	return result, rows.Err()
 }
 
-func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, [][]interface{}, error) {
+func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
 	var query string
 	if r.version >= 12 {
 		// 12c+ 支持 OFFSET...FETCH NEXT 语法
@@ -233,17 +232,17 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// 11g 分页时去掉末尾追加的 RNCOLUMN 伪列
@@ -270,7 +269,7 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		// 截断 RNCOLUMN
 		vals = vals[:len(cols)]
@@ -284,22 +283,19 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 			}
 			dt := colTypeName[i]
 			switch dt {
-			case "DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE":
-				if t, ok := v.(time.Time); ok {
-					vals[i] = t.Format("2006-01-02 15:04:05.999999")
-				}
 			case "CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2", "CLOB", "NCLOB", "LONG":
 				if b, ok := v.([]byte); ok {
 					vals[i] = strings.ReplaceAll(string(b), "\x00", "")
 				} else if s, ok := v.(string); ok {
 					vals[i] = strings.ReplaceAll(s, "\x00", "")
 				}
+				// DATE/TIMESTAMP 保持 time.Time(中立值),由目标 ValueConverter 格式化;
 				// BLOB, RAW, LONG RAW: 保持 []byte
 			}
 		}
 		result = append(result, vals)
 	}
-	return cols, result, rows.Err()
+	return cols, colTypeName, result, rows.Err()
 }
 
 func (r *OracleReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {

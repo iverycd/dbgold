@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	_ "gitee.com/chunanyong/dm"
 )
@@ -183,7 +182,7 @@ func (r *DaMengReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) 
 	return result, rows.Err()
 }
 
-func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, [][]interface{}, error) {
+func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
 	var query string
 	if len(pkCols) > 0 {
 		pkList := make([]string, len(pkCols))
@@ -201,16 +200,16 @@ func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []stri
 	}
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	colTypeName := make([]string, len(colTypes))
 	for i, ct := range colTypes {
@@ -224,7 +223,7 @@ func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []stri
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for i, v := range vals {
 			if v == nil {
@@ -232,26 +231,19 @@ func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []stri
 			}
 			dt := colTypeName[i]
 			switch dt {
-			case "DATE", "DATETIME", "TIMESTAMP":
-				if t, ok := v.(time.Time); ok {
-					vals[i] = t.Format("2006-01-02 15:04:05.999999")
-				}
-			case "TIME":
-				if t, ok := v.(time.Time); ok {
-					vals[i] = t.Format("15:04:05.999999")
-				}
 			case "CHAR", "VARCHAR", "VARCHAR2", "CLOB", "TEXT", "LONGVARCHAR":
 				if b, ok := v.([]byte); ok {
 					vals[i] = strings.ReplaceAll(string(b), "\x00", "")
 				} else if s, ok := v.(string); ok {
 					vals[i] = strings.ReplaceAll(s, "\x00", "")
 				}
-				// BLOB, BINARY, VARBINARY: 保持 []byte
+				// DATE/DATETIME/TIMESTAMP/TIME 保持 time.Time(中立值),
+				// 由目标 ValueConverter 格式化;BLOB/BINARY/VARBINARY 保持 []byte
 			}
 		}
 		result = append(result, vals)
 	}
-	return cols, result, rows.Err()
+	return cols, colTypeName, result, rows.Err()
 }
 
 func (r *DaMengReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {
