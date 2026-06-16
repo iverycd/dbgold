@@ -134,7 +134,7 @@
                     <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 140px" />
                   </a-form-item>
                 </a-col>
-                <a-col :span="12">
+                <a-col v-if="selectedDst?.db_type !== 'dameng'" :span="12">
                   <a-form-item style="margin-bottom: 4px">
                     <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写</a-checkbox>
                   </a-form-item>
@@ -338,7 +338,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
@@ -477,6 +477,17 @@ const selectedSrc = computed(() =>
 const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )
+
+watch(() => dataMigrate.dstConnId, (newId) => {
+  const dst = connections.value.find((c) => c.id === newId)
+  if (dst?.db_type === 'dameng') {
+    dataMigrate.lowerCaseNames = false
+    dataMigrate.charInLength = true
+  } else {
+    dataMigrate.lowerCaseNames = true
+    dataMigrate.charInLength = false
+  }
+})
 
 const canStartMigration = computed(() =>
   dataMigrate.srcConnId !== undefined &&

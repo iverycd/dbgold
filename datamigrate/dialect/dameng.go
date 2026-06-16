@@ -34,14 +34,14 @@ func (d *DaMengDialect) Caps() Capabilities {
 }
 
 func (d *DaMengDialect) QuoteIdent(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
 }
 
 func (d *DaMengDialect) QualifyTable(schema, table string) string {
 	if schema == "" {
-		return fmt.Sprintf(`"%s"`, table)
+		return fmt.Sprintf(`"%s"`, strings.ToUpper(table))
 	}
-	return fmt.Sprintf(`"%s"."%s"`, schema, table)
+	return fmt.Sprintf(`"%s"."%s"`, strings.ToUpper(schema), strings.ToUpper(table))
 }
 
 func (d *DaMengDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOpt) string {
@@ -58,7 +58,7 @@ func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableD
 	var cols []string
 	for _, col := range info.Columns {
 		dmType := d.MapType(col, srcType, opt)
-		colDef := fmt.Sprintf(`"%s" %s`, name(col.Name), dmType)
+		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(name(col.Name)), dmType)
 		if col.Extra == "auto_increment" {
 			// 达梦 Oracle 兼容模式自增列:允许显式插入(导入原 id),种子先填 1
 			colDef += " IDENTITY(1, 1)"

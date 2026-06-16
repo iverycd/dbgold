@@ -31,7 +31,7 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 	quotedCols := make([]string, len(cols))
 	placeholders := make([]string, len(cols))
 	for i, c := range cols {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+		quotedCols[i] = fmt.Sprintf(`"%s"`, strings.ToUpper(c))
 		placeholders[i] = "?"
 	}
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,

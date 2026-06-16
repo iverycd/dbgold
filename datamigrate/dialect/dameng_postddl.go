@@ -11,8 +11,8 @@ import (
 // 把 IDENTITY 当前值推到源库当前 AUTO_INCREMENT 值,避免后续插入撞已导入的 id。
 // 确切语法依达梦版本而定;失败由 Writer 降级处理(记日志,不使 job 失败)。
 func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
-	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" RESTART WITH %d`,
-		d.QualifyTable(schema, seq.TableName), seq.ColumnName, seq.StartValue)
+	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s RESTART WITH %d`,
+		d.QualifyTable(schema, seq.TableName), d.QuoteIdent(seq.ColumnName), seq.StartValue)
 	return []Statement{{SQL: sql}}
 }
 
@@ -22,7 +22,7 @@ func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInf
 func (d *DaMengDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
 	quotedCols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+		quotedCols[i] = d.QuoteIdent(c)
 	}
 	cols := strings.Join(quotedCols, ", ")
 	qn := d.QualifyTable(schema, idx.TableName)
@@ -31,9 +31,9 @@ func (d *DaMengDialect) IndexStatements(schema string, idx source.IndexInfo) []S
 	case idx.IsPrimary:
 		sql = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", qn, cols)
 	case idx.IsUnique:
-		sql = fmt.Sprintf(`CREATE UNIQUE INDEX "%s" ON %s (%s)`, d.uniqueIndexName(idx), qn, cols)
+		sql = fmt.Sprintf(`CREATE UNIQUE INDEX %s ON %s (%s)`, d.QuoteIdent(d.uniqueIndexName(idx)), qn, cols)
 	default:
-		sql = fmt.Sprintf(`CREATE INDEX "%s" ON %s (%s)`, d.uniqueIndexName(idx), qn, cols)
+		sql = fmt.Sprintf(`CREATE INDEX %s ON %s (%s)`, d.QuoteIdent(d.uniqueIndexName(idx)), qn, cols)
 	}
 	return []Statement{{SQL: sql}}
 }
@@ -48,15 +48,15 @@ func (d *DaMengDialect) uniqueIndexName(idx source.IndexInfo) string {
 func (d *DaMengDialect) ForeignKeyStatements(schema string, fk source.FKInfo) []Statement {
 	quotedCols := make([]string, len(fk.Columns))
 	for i, c := range fk.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+		quotedCols[i] = d.QuoteIdent(c)
 	}
 	quotedRefCols := make([]string, len(fk.RefColumns))
 	for i, c := range fk.RefColumns {
-		quotedRefCols[i] = fmt.Sprintf(`"%s"`, c)
+		quotedRefCols[i] = d.QuoteIdent(c)
 	}
 	sql := fmt.Sprintf(
-		`ALTER TABLE %s ADD CONSTRAINT "%s" FOREIGN KEY (%s) REFERENCES %s (%s)`,
-		d.QualifyTable(schema, fk.TableName), fk.ConstraintName,
+		`ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)`,
+		d.QualifyTable(schema, fk.TableName), d.QuoteIdent(fk.ConstraintName),
 		strings.Join(quotedCols, ", "),
 		d.QualifyTable(schema, fk.RefTable),
 		strings.Join(quotedRefCols, ", "))

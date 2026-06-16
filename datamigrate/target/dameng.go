@@ -56,6 +56,7 @@ func (w *DaMengWriter) Close() error   { return w.db.Close() }
 func (w *DaMengWriter) DBType() string { return "dameng" }
 
 func (w *DaMengWriter) qualifiedTable(table string) string {
+	table = strings.ToUpper(table)
 	if w.schema == "" {
 		return fmt.Sprintf(`"%s"`, table)
 	}
