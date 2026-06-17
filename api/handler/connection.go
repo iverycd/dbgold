@@ -243,7 +243,11 @@ func ListConnectionSchemas(c *gin.Context) {
 		   'dbe_file','dbe_random','dbe_application_info','dbe_sql','dbe_lob','dbe_task',
 		   'dbe_match','dbe_session',
 		   'pg_aoseg','pg_bitmapindex','sc_toolkit','stat_perf',
-		   '_seaboxts_catalog','_seaboxts_internal','seaboxts_information','sdaudit'
+		   '_seaboxts_catalog','_seaboxts_internal','seaboxts_information','sdaudit',
+		   'pg_temp_1','pg_toast_temp_1',
+		   'dbms_pipe','dbms_alert','plvdate','plvstr','plvchr','dbms_output',
+		   'plvsubst','dbms_utility','plvlex','utl_file','dbms_assert','dbms_random',
+		   'oracle','plunit','wmsys','mysql'
 		 )`)
 	if err != nil {
 		c.Error(err)
