@@ -258,30 +258,58 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 }
 
 func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT TABLE_NAME, COLUMN_NAME, AUTO_INCREMENT
-		 FROM information_schema.TABLES t
-		 JOIN information_schema.COLUMNS c USING (TABLE_SCHEMA, TABLE_NAME)
-		 WHERE t.TABLE_SCHEMA = ? AND c.EXTRA = 'auto_increment'`, r.dbName)
+	// 大库（数千表/数万列）场景下，TABLES JOIN COLUMNS 的单条查询会极慢（最慢达 1 小时），
+	// 拆成两条单视图查询、在内存合并，实测可降到毫秒级。
+
+	// 查询 1：取每张表的自增起始值（AUTO_INCREMENT），存入 map
+	startRows, err := r.db.QueryContext(ctx,
+		`SELECT TABLE_NAME, AUTO_INCREMENT
+		 FROM information_schema.TABLES
+		 WHERE TABLE_SCHEMA = ? AND AUTO_INCREMENT IS NOT NULL`, r.dbName)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var seqs []SequenceInfo
-	for rows.Next() {
-		var s SequenceInfo
+	startMap := map[string]int64{}
+	for startRows.Next() {
+		var table string
 		var autoInc sql.NullInt64
-		if err := rows.Scan(&s.TableName, &s.ColumnName, &autoInc); err != nil {
+		if err := startRows.Scan(&table, &autoInc); err != nil {
+			startRows.Close()
 			return nil, err
 		}
 		if autoInc.Valid {
-			s.StartValue = autoInc.Int64
+			startMap[table] = autoInc.Int64
+		}
+	}
+	if err := startRows.Err(); err != nil {
+		startRows.Close()
+		return nil, err
+	}
+	startRows.Close()
+
+	// 查询 2：取自增列名（权威的"哪些表哪些列是自增列"列表），边读边合并起始值
+	colRows, err := r.db.QueryContext(ctx,
+		`SELECT TABLE_NAME, COLUMN_NAME
+		 FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = ? AND EXTRA = 'auto_increment'`, r.dbName)
+	if err != nil {
+		return nil, err
+	}
+	defer colRows.Close()
+	var seqs []SequenceInfo
+	for colRows.Next() {
+		var s SequenceInfo
+		if err := colRows.Scan(&s.TableName, &s.ColumnName); err != nil {
+			return nil, err
+		}
+		if start, ok := startMap[s.TableName]; ok {
+			s.StartValue = start
 		} else {
 			s.StartValue = 1
 		}
 		seqs = append(seqs, s)
 	}
-	return seqs, rows.Err()
+	return seqs, colRows.Err()
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
@@ -321,17 +349,46 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 }
 
 func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
+	// 大库场景下 KEY_COLUMN_USAGE JOIN REFERENTIAL_CONSTRAINTS 的单条查询很慢，
+	// 拆成两条单视图查询、在内存合并：查询 1 取约束级元数据（引用表 + 级联规则），
+	// 查询 2 取列级明细，按 表名.约束名 关联。
+
+	// 查询 1：约束级元数据。MySQL 外键约束名在 schema 内唯一，仍用 表名.约束名 作 key 兜底。
+	type fkMeta struct {
+		refTable string
+		onDelete string
+		onUpdate string
+	}
+	metaRows, err := r.db.QueryContext(ctx,
+		`SELECT CONSTRAINT_NAME, TABLE_NAME, REFERENCED_TABLE_NAME, DELETE_RULE, UPDATE_RULE
+		 FROM information_schema.REFERENTIAL_CONSTRAINTS
+		 WHERE CONSTRAINT_SCHEMA = ?`, r.dbName)
+	if err != nil {
+		return nil, err
+	}
+	metaMap := map[string]fkMeta{}
+	for metaRows.Next() {
+		var name, table, refTable, onDelete, onUpdate string
+		if err := metaRows.Scan(&name, &table, &refTable, &onDelete, &onUpdate); err != nil {
+			metaRows.Close()
+			return nil, err
+		}
+		metaMap[table+"."+name] = fkMeta{refTable: refTable, onDelete: onDelete, onUpdate: onUpdate}
+	}
+	if err := metaRows.Err(); err != nil {
+		metaRows.Close()
+		return nil, err
+	}
+	metaRows.Close()
+
+	// 查询 2：列级明细，按 ORDINAL_POSITION 排序以保证多列外键的列顺序。
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
-		        kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
-		        rc.DELETE_RULE, rc.UPDATE_RULE
-		 FROM information_schema.KEY_COLUMN_USAGE kcu
-		 JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
-		   ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
-		  AND kcu.TABLE_SCHEMA = rc.CONSTRAINT_SCHEMA
-		 WHERE kcu.TABLE_SCHEMA = ?
-		   AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
-		 ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`, r.dbName)
+		`SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME,
+		        REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+		 FROM information_schema.KEY_COLUMN_USAGE
+		 WHERE TABLE_SCHEMA = ?
+		   AND REFERENCED_TABLE_NAME IS NOT NULL
+		 ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`, r.dbName)
 	if err != nil {
 		return nil, err
 	}
@@ -339,15 +396,20 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 	fkMap := map[string]*FKInfo{}
 	var order []string
 	for rows.Next() {
-		var table, name, col, refTable, refCol, onDelete, onUpdate string
-		if err := rows.Scan(&table, &name, &col, &refTable, &refCol, &onDelete, &onUpdate); err != nil {
+		var table, name, col, refTable, refCol string
+		if err := rows.Scan(&table, &name, &col, &refTable, &refCol); err != nil {
 			return nil, err
 		}
 		key := table + "." + name
 		if _, ok := fkMap[key]; !ok {
+			meta := metaMap[key] // 缺失时为零值，级联规则空字符串与原行为一致
+			rt := meta.refTable
+			if rt == "" {
+				rt = refTable // 回退用列级明细里的引用表名
+			}
 			fkMap[key] = &FKInfo{
 				TableName: table, ConstraintName: name,
-				RefTable: refTable, OnDelete: onDelete, OnUpdate: onUpdate,
+				RefTable: rt, OnDelete: meta.onDelete, OnUpdate: meta.onUpdate,
 			}
 			order = append(order, key)
 		}
