@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -367,6 +368,186 @@ func StreamDataMigration(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+}
+
+// buildSrcReader 根据连接与可选的 srcDatabase 构造源库 Reader。
+// srcDatabase 非空时覆盖连接默认库(mysql/sqlserver 需重建 DSN,oracle/dameng 的库即 schema 不重建)。
+func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.ConnPoolConfig) (source.Reader, error) {
+	db := conn.Database
+	if srcDatabase != "" {
+		db = srcDatabase
+	}
+	dsn := buildDSN(conn)
+	if srcDatabase != "" {
+		switch conn.DBType {
+		case "mysql":
+			dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
+				conn.Username, conn.Password, conn.Host, conn.Port, srcDatabase)
+		case "sqlserver":
+			dsn = fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
+				conn.Host, conn.Port, srcDatabase, conn.Username, conn.Password)
+		}
+	}
+	switch conn.DBType {
+	case "sqlserver":
+		return source.NewSQLServer(dsn, db, pool)
+	case "dameng":
+		return source.NewDaMeng(dsn, db, pool)
+	case "oracle":
+		return source.NewOracle(dsn, db, pool)
+	default: // mysql
+		return source.NewMySQL(dsn, db, pool)
+	}
+}
+
+// ListConnectionViews 列出源连接指定库下的全部视图名(query 参数 database 可选覆盖默认库)
+func ListConnectionViews(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	conn, err := store.GetConnection(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return
+	}
+	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{})
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer reader.Close()
+	views, err := reader.GetViews(c.Request.Context())
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	names := make([]string, 0, len(views))
+	for _, v := range views {
+		names = append(names, v.ViewName)
+	}
+	c.JSON(http.StatusOK, names)
+}
+
+type migrateViewsRequest struct {
+	SrcConnID        uint     `json:"src_conn_id" binding:"required"`
+	DstConnID        uint     `json:"dst_conn_id" binding:"required"`
+	ViewNames        []string `json:"view_names" binding:"required,min=1"`
+	SrcDatabase      string   `json:"src_database"`
+	TargetSchema     string   `json:"target_schema"`
+	LowerCaseNames   bool     `json:"lower_case_names"`
+	ChangeOwner      *bool    `json:"change_owner"` // nil 时默认 true
+	StripViewSchemas string   `json:"strip_view_schemas"`
+}
+
+// MigrateViews 按所选视图名同步批量在目标库创建视图,返回每个视图的结果
+func MigrateViews(c *gin.Context) {
+	var req migrateViewsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
+
+	srcConn, err := store.GetConnection(req.SrcConnID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
+		return
+	}
+	dstConn, err := store.GetConnection(req.DstConnID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
+		return
+	}
+
+	supported := false
+	for _, p := range supportedPairs {
+		if p.Source == srcConn.DBType && p.Target == dstConn.DBType {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
+		})
+		return
+	}
+
+	reader, err := buildSrcReader(srcConn, req.SrcDatabase, source.ConnPoolConfig{})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接源库失败: %v", err)})
+		return
+	}
+	defer reader.Close()
+
+	dstDSN := buildDSN(dstConn)
+	var writer target.Writer
+	var writerErr error
+	switch dstConn.DBType {
+	case "gaussdb":
+		writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
+	case "dameng":
+		writer, writerErr = target.NewDaMeng(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
+	case "highgo":
+		writer, writerErr = target.NewHighGo(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
+	default:
+		writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
+	}
+	if writerErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接目标库失败: %v", writerErr)})
+		return
+	}
+	defer writer.Close()
+
+	ctx := c.Request.Context()
+	if req.TargetSchema != "" {
+		exists, err := writer.SchemaExists(ctx, req.TargetSchema)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("检查目标 Schema 失败: %v", err)})
+			return
+		}
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema),
+			})
+			return
+		}
+	}
+
+	var stripSchemas []string
+	for _, s := range strings.Split(req.StripViewSchemas, ",") {
+		if t := strings.TrimSpace(s); t != "" {
+			stripSchemas = append(stripSchemas, t)
+		}
+	}
+
+	// 同步执行:用本地 Job(不注册 Registry),后台 drain 日志避免写阻塞
+	job := &datamigrate.Job{LogCh: make(chan string, 512)}
+	done := make(chan struct{})
+	go func() {
+		for range job.LogCh {
+		}
+		close(done)
+	}()
+
+	cfg := datamigrate.Config{
+		Mode:             "all",
+		LowerCaseNames:   req.LowerCaseNames,
+		TargetSchema:     req.TargetSchema,
+		ChangeOwner:      changeOwner,
+		TargetDBType:     dstConn.DBType,
+		StripViewSchemas: stripSchemas,
+	}
+	m := datamigrate.NewMigrator(reader, writer, job, cfg)
+	results := m.MigrateViews(ctx, req.ViewNames)
+	close(job.LogCh)
+	<-done
+
+	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
 // CancelDataMigration 取消运行中的迁移任务

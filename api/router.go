@@ -41,6 +41,7 @@ func NewRouter() *gin.Engine {
 		authed.POST("/connections/:id/test", handler.TestConnection)
 		authed.GET("/connections/:id/databases", handler.ListConnectionDatabases)
 		authed.GET("/connections/:id/schemas", handler.ListConnectionSchemas)
+		authed.GET("/connections/:id/views", handler.ListConnectionViews)
 
 		authed.POST("/schema/extract", handler.ExtractSchema)
 		authed.POST("/schema/extract-full", handler.ExtractFullSchema)
@@ -59,6 +60,7 @@ func NewRouter() *gin.Engine {
 		authed.POST("/migration/data-migrate/:jobID/cancel", handler.CancelDataMigration)
 		authed.GET("/migration/data-migrate/jobs", handler.ListDataMigrationJobs)
 		authed.GET("/migration/data-migrate/:jobID/report", handler.GetDataMigrationReport)
+		authed.POST("/migration/view-migrate", handler.MigrateViews)
 	}
 
 	// SSE 端点：token 从 query string 读取，因为浏览器 EventSource 不支持自定义 header

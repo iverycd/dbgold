@@ -40,3 +40,6 @@ export const listConnectionDatabases = (id: number) =>
 
 export const listConnectionSchemas = (id: number) =>
   api.get<string[]>(`/connections/${id}/schemas`)
+
+export const listConnectionViews = (id: number, database?: string) =>
+  api.get<string[]>(`/connections/${id}/views`, { params: { database } })

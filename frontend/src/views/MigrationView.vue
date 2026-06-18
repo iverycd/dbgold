@@ -345,6 +345,206 @@
           <sql-preview :sqls="fullSqls" />
         </a-space>
       </a-tab-pane>
+
+      <a-tab-pane key="view-migrate" title="视图迁移">
+        <a-form :model="viewMigrate" layout="vertical" style="margin-top: 12px">
+          <!-- 源库 / 目标库选择 -->
+          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
+            <a-col :span="11">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="orange" size="small">源库</a-tag>
+                  <span class="conn-card-title">源库</span>
+                </div>
+                <a-select
+                  v-model="viewMigrate.srcConnId"
+                  placeholder="选择源库连接"
+                  style="width: 100%; margin-top: 10px"
+                  @change="(val) => { vmCheckPairSupport(); vmLoadSrcDatabases(val as number) }"
+                >
+                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                  </a-option>
+                </a-select>
+                <div v-if="vmSelectedSrc" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedSrc.host }}:{{ vmSelectedSrc.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedSrc.username }}</span>
+                </div>
+                <a-select
+                  v-if="viewMigrate.srcDatabases.length > 0"
+                  v-model="viewMigrate.srcDatabase"
+                  placeholder="选择数据库"
+                  style="width: 100%; margin-top: 10px"
+                  allow-search
+                  @change="vmLoadViews"
+                >
+                  <a-option v-for="db in viewMigrate.srcDatabases" :key="db" :value="db" :label="db" />
+                </a-select>
+              </a-card>
+            </a-col>
+            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+            </a-col>
+            <a-col :span="11">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="blue" size="small">目标库</a-tag>
+                  <span class="conn-card-title">目标库</span>
+                </div>
+                <a-select
+                  v-model="viewMigrate.dstConnId"
+                  placeholder="选择目标库连接"
+                  style="width: 100%; margin-top: 10px"
+                  @change="(val) => { vmCheckPairSupport(); vmLoadDstSchemas(val as number) }"
+                >
+                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                  </a-option>
+                </a-select>
+                <div v-if="vmSelectedDst" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedDst.host }}:{{ vmSelectedDst.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ vmSelectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedDst.username }}</span>
+                </div>
+                <a-select
+                  v-if="viewMigrate.dstConnId"
+                  v-model="viewMigrate.dstSchema"
+                  placeholder="请选择目标 Schema"
+                  style="width: 100%; margin-top: 10px"
+                  allow-search
+                >
+                  <a-option v-for="s in viewMigrate.dstSchemas" :key="s" :value="s" :label="s" />
+                </a-select>
+                <div v-if="viewMigrate.dstConnId" class="schema-permission-tip">
+                  <icon-info-circle style="flex-shrink:0" />
+                  请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。
+                </div>
+              </a-card>
+            </a-col>
+          </a-row>
+
+          <!-- 不支持提示 -->
+          <a-alert
+            v-if="viewMigrate.unsupportedMsg"
+            type="error"
+            :content="viewMigrate.unsupportedMsg"
+            style="margin-bottom: 16px"
+          />
+
+          <!-- 视图选择 -->
+          <a-spin :loading="viewMigrate.loadingViews" style="display:block">
+            <div v-if="viewMigrate.views.length > 0" style="margin-bottom: 16px">
+              <a-space style="margin-bottom: 8px" wrap>
+                <a-input
+                  v-model="viewMigrate.search"
+                  placeholder="搜索视图名"
+                  allow-clear
+                  style="width: 240px"
+                >
+                  <template #prefix><icon-search /></template>
+                </a-input>
+                <a-button size="small" @click="vmSelectAllFiltered">全选当前结果</a-button>
+                <a-button size="small" @click="vmClearSelection">清空选择</a-button>
+                <span style="font-size: 12px; color: var(--color-text-3)">
+                  已选 {{ viewMigrate.selected.length }} / 共 {{ viewMigrate.views.length }}
+                </span>
+              </a-space>
+              <a-table
+                :data="vmFilteredRows"
+                row-key="name"
+                :pagination="{ pageSize: 15, showTotal: true }"
+                :scroll="{ y: 360 }"
+                size="small"
+                :row-selection="{ type: 'checkbox', showCheckedAll: true }"
+                v-model:selected-keys="viewMigrate.selected"
+              >
+                <template #columns>
+                  <a-table-column title="视图名" data-index="name" />
+                </template>
+              </a-table>
+            </div>
+            <a-empty v-else-if="viewMigrate.srcConnId && !viewMigrate.loadingViews" description="该连接下没有视图，或所选数据库不含视图" />
+          </a-spin>
+
+          <!-- 高级设置 -->
+          <a-collapse style="margin-bottom: 16px; max-width: 560px">
+            <a-collapse-item key="advanced" header="高级设置">
+              <a-row :gutter="16">
+                <a-col v-if="vmSelectedDst?.db_type !== 'dameng'" :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="viewMigrate.lowerCaseNames">对象名转小写</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="viewMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24">
+                  <a-form-item label="视图剥离模式名">
+                    <a-input
+                      v-model="viewMigrate.stripViewSchemas"
+                      placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
+                      allow-clear
+                    />
+                    <template #extra>
+                      从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。
+                    </template>
+                  </a-form-item>
+                </a-col>
+              </a-row>
+            </a-collapse-item>
+          </a-collapse>
+
+          <!-- 操作按钮 -->
+          <a-space style="margin-bottom: 16px">
+            <a-button
+              type="primary"
+              :disabled="!vmCanMigrate"
+              :loading="viewMigrate.running"
+              @click="handleMigrateViews"
+            >开始迁移视图</a-button>
+          </a-space>
+
+          <!-- 结果 -->
+          <div v-if="viewMigrate.results.length > 0">
+            <a-divider>迁移结果</a-divider>
+            <a-space style="margin-bottom: 8px">
+              <a-tag color="green">成功 {{ vmSuccessCount }}</a-tag>
+              <a-tag :color="vmFailCount > 0 ? 'red' : 'gray'">失败 {{ vmFailCount }}</a-tag>
+            </a-space>
+            <a-table
+              :data="viewMigrate.results"
+              row-key="name"
+              :pagination="false"
+              size="small"
+              :expandable="{ icon: (_: unknown, record: any) => record.error ? undefined : null }"
+            >
+              <template #columns>
+                <a-table-column title="视图名" data-index="name" :width="280" />
+                <a-table-column title="结果" :width="100">
+                  <template #cell="{ record }">
+                    <span :style="record.error ? 'color: rgb(var(--danger-6))' : 'color: rgb(var(--success-6))'">
+                      {{ record.error ? '失败' : '成功' }}
+                    </span>
+                  </template>
+                </a-table-column>
+                <a-table-column title="错误摘要">
+                  <template #cell="{ record }">
+                    <span style="color: rgb(var(--danger-6)); font-size: 12px">{{ record.error }}</span>
+                  </template>
+                </a-table-column>
+              </template>
+              <template #expand-row="{ record }">
+                <div class="view-result-detail">
+                  <div v-if="record.error" class="view-result-error">失败原因：{{ record.error }}</div>
+                  <pre v-if="record.ddl" class="view-result-ddl">{{ record.ddl }}</pre>
+                </div>
+              </template>
+            </a-table>
+          </div>
+        </a-form>
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
@@ -358,13 +558,15 @@ import SqlPreview from '@/components/SqlPreview.vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
-import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
+import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
 import {
   getSupportedPairs,
   startDataMigration as apiStartMigration,
   cancelDataMigration as apiCancelMigration,
   createDataMigrateEventSource,
+  migrateViews as apiMigrateViews,
   type SupportedPair,
+  type ObjectResult,
 } from '@/api/migration'
 
 const activeTab = ref('data-migrate')
@@ -683,6 +885,147 @@ onUnmounted(() => {
   currentEventSource?.close()
   currentEventSource = null
 })
+
+// ===== 视图迁移 Tab =====
+const viewMigrate = reactive({
+  srcConnId: undefined as number | undefined,
+  dstConnId: undefined as number | undefined,
+  srcDatabase: '',
+  srcDatabases: [] as string[],
+  dstSchema: '',
+  dstSchemas: [] as string[],
+  views: [] as string[],
+  selected: [] as string[],
+  search: '',
+  lowerCaseNames: true,
+  changeOwner: true,
+  stripViewSchemas: '',
+  loadingViews: false,
+  running: false,
+  unsupportedMsg: '',
+  results: [] as ObjectResult[],
+})
+
+const vmSelectedSrc = computed(() => connections.value.find((c) => c.id === viewMigrate.srcConnId))
+const vmSelectedDst = computed(() => connections.value.find((c) => c.id === viewMigrate.dstConnId))
+
+const vmFilteredRows = computed(() => {
+  const kw = viewMigrate.search.trim().toLowerCase()
+  const list = kw ? viewMigrate.views.filter((v) => v.toLowerCase().includes(kw)) : viewMigrate.views
+  return list.map((name) => ({ name }))
+})
+
+const vmSuccessCount = computed(() => viewMigrate.results.filter((r) => !r.error).length)
+const vmFailCount = computed(() => viewMigrate.results.filter((r) => r.error).length)
+
+const vmCanMigrate = computed(() =>
+  viewMigrate.srcConnId !== undefined &&
+  viewMigrate.dstConnId !== undefined &&
+  viewMigrate.selected.length > 0 &&
+  !viewMigrate.unsupportedMsg &&
+  !viewMigrate.running
+)
+
+watch(() => viewMigrate.dstConnId, (newId) => {
+  const dst = connections.value.find((c) => c.id === newId)
+  viewMigrate.lowerCaseNames = dst?.db_type !== 'dameng'
+})
+
+function vmCheckPairSupport() {
+  if (!viewMigrate.srcConnId || !viewMigrate.dstConnId) {
+    viewMigrate.unsupportedMsg = ''
+    return
+  }
+  const src = connections.value.find((c) => c.id === viewMigrate.srcConnId)
+  const dst = connections.value.find((c) => c.id === viewMigrate.dstConnId)
+  if (!src || !dst) return
+  const supported = supportedPairs.value.some((p) => p.source === src.db_type && p.target === dst.db_type)
+  viewMigrate.unsupportedMsg = supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的视图迁移`
+}
+
+async function vmLoadSrcDatabases(connId: number) {
+  viewMigrate.srcDatabase = ''
+  viewMigrate.srcDatabases = []
+  viewMigrate.views = []
+  viewMigrate.selected = []
+  try {
+    const res = await listConnectionDatabases(connId)
+    viewMigrate.srcDatabases = res.data ?? []
+  } catch {
+    // 不支持列库时静默忽略，仍可加载连接默认库的视图
+  }
+  // 无可选库列表时（如 oracle），直接按连接默认库加载视图
+  if (viewMigrate.srcDatabases.length === 0) await vmLoadViews()
+}
+
+async function vmLoadDstSchemas(connId: number) {
+  viewMigrate.dstSchema = ''
+  viewMigrate.dstSchemas = []
+  const dst = connections.value.find((c) => c.id === connId)
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo')) return
+  try {
+    const res = await listConnectionSchemas(connId)
+    viewMigrate.dstSchemas = res.data ?? []
+  } catch {
+    // 列 schema 失败时静默忽略
+  }
+}
+
+async function vmLoadViews() {
+  if (!viewMigrate.srcConnId) return
+  viewMigrate.loadingViews = true
+  viewMigrate.views = []
+  viewMigrate.selected = []
+  viewMigrate.results = []
+  try {
+    const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined)
+    viewMigrate.views = res.data ?? []
+  } catch (e: any) {
+    Message.error(`加载视图失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
+  } finally {
+    viewMigrate.loadingViews = false
+  }
+}
+
+function vmSelectAllFiltered() {
+  const set = new Set(viewMigrate.selected)
+  for (const row of vmFilteredRows.value) set.add(row.name)
+  viewMigrate.selected = Array.from(set)
+}
+
+function vmClearSelection() {
+  viewMigrate.selected = []
+}
+
+async function handleMigrateViews() {
+  if (viewMigrate.dstConnId && !viewMigrate.dstSchema) {
+    Message.error('请选择目标 Schema')
+    return
+  }
+  viewMigrate.running = true
+  viewMigrate.results = []
+  try {
+    const res = await apiMigrateViews({
+      src_conn_id: viewMigrate.srcConnId!,
+      dst_conn_id: viewMigrate.dstConnId!,
+      view_names: viewMigrate.selected,
+      src_database: viewMigrate.srcDatabase || undefined,
+      target_schema: viewMigrate.dstSchema || undefined,
+      lower_case_names: viewMigrate.lowerCaseNames,
+      change_owner: viewMigrate.changeOwner,
+      strip_view_schemas: viewMigrate.stripViewSchemas || undefined,
+    })
+    viewMigrate.results = res.data.results ?? []
+    const fail = viewMigrate.results.filter((r) => r.error).length
+    if (fail > 0) Message.warning(`迁移完成，${fail} 个视图失败`)
+    else Message.success(`成功迁移 ${viewMigrate.results.length} 个视图`)
+  } catch (e: any) {
+    Message.error(`迁移失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
+  } finally {
+    viewMigrate.running = false
+  }
+}
+
 </script>
 
 <style scoped>
@@ -786,5 +1129,24 @@ onUnmounted(() => {
   font-size: 18px;
   color: #165dff;
   flex-shrink: 0;
+}
+.view-result-detail {
+  padding: 8px 12px;
+}
+.view-result-error {
+  color: rgb(var(--danger-6));
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.view-result-ddl {
+  background: var(--color-fill-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }
 </style>

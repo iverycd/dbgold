@@ -606,46 +606,86 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
-				vCopy := v
-				vCopy.ViewName = m.objName(v.ViewName)
-				vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
-				if v.ViewName == "view_huiyuanhistorychange" {
-					vCopy.Definition = `select huiyuan_histroyofchange.danweiguid AS DanWeiGuid,huiyuan_histroyofchange.pguid AS PGuid,huiyuan_histroyofchange.pname AS PName,huiyuan_histroyofchange.beforeinfo AS BeforeInfo,huiyuan_histroyofchange.changercode AS ChangerCode,huiyuan_histroyofchange.afterinfo AS AfterInfo,huiyuan_histroyofchange.changename AS ChangeName,huiyuan_histroyofchange.belongxiaqucode AS BelongXiaQuCode,huiyuan_histroyofchange.operateusername AS OperateUserName,huiyuan_histroyofchange.operatedate AS OperateDate,huiyuan_histroyofchange.row_id AS Row_ID,huiyuan_histroyofchange.danweitype AS DanWeiType,huiyuan_histroyofchange.changetype AS ChangeType,huiyuan_histroyofchange.changedate AS ChangeDate,huiyuan_histroyofchange.xiaqucode AS XiaQuCode,huiyuan_histroyofchange.viewurl AS ViewUrl,huiyuan_histroyofchange.status AS STATUS,huiyuan_histroyofchange.infoguid AS InfoGuid,huiyuan_histroyofchange.copystatus AS CopyStatus,huiyuan_histroyofchange.changecontent AS ChangeContent,huiyuan_histroyofchange.tableid AS TableID,huiyuan_histroyofchange.fieldid AS FieldID,table_struct.bak2 AS Bak2,table_struct.bak1 AS Bak1,table_struct.bak3 AS Bak3,huiyuan_histroyofchange.rowguid AS ROWGUID FROM huiyuan_histroyofchange INNER JOIN table_struct ON (((huiyuan_histroyofchange.fieldid = table_struct.fieldid::varchar) and (huiyuan_histroyofchange.tableid = table_struct.tableid::varchar)))`
-				}
-				if v.ViewName == "view_pwprojectinfo" {
-					vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib.pw_name AS pwname, pw_lib.shengfenzh AS shengfenzh, pw_lib.mobile AS mobile, pw_lib.operateusername AS operateusername, pw_lib.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '可以参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib ON yytz_project_pw.pingweiguid = pw_lib.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib.pw_name, pw_lib.shengfenzh, pw_lib.mobile, pw_lib.operateusername, pw_lib.danweiguid`
-				}
-				if v.ViewName == "view_pwprojectinfo_history" {
-					vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib_history.pw_name AS pwname, pw_lib_history.shengfenzh AS shengfenzh, pw_lib_history.mobile AS mobile, pw_lib_history.operateusername AS operateusername, pw_lib_history.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '确认参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib_history ON yytz_project_pw.pingweiguid = pw_lib_history.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib_history.pw_name, pw_lib_history.shengfenzh, pw_lib_history.mobile, pw_lib_history.operateusername, pw_lib_history.danweiguid`
-				}
-				if v.ViewName == "view_sys_changdinew" {
-					vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
-				}
-				// 去除用户指定的跨库模式名前缀(忽略大小写)
-				vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
-				// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
-				viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
-				if m.cfg.TargetSchema != "" {
-					viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
-				}
-				if err := m.writer.CreateView(ctx, vCopy); err != nil {
-					m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
+				ddl, cerr := m.createOneView(ctx, v)
+				if cerr != nil {
 					report.Views.Failed++
 					report.Views.Items = append(report.Views.Items, ObjectResult{
-						Name:  vCopy.ViewName,
-						DDL:   viewDDL,
-						Error: err.Error(),
+						Name:  m.objName(v.ViewName),
+						DDL:   ddl,
+						Error: cerr.Error(),
 					})
 				} else {
-					m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
 					report.Views.Success++
-					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-						if err := m.writer.ChangeOwner(ctx, "VIEW", vCopy.ViewName, m.cfg.TargetSchema); err != nil {
-							m.log.Warnf("修改视图 owner 失败 [%s]: %v", vCopy.ViewName, err)
-						}
-					}
 				}
 			}
 		}
 	}
+}
+
+// createOneView 处理单个视图:对象名规范化、定义调整、特殊视图修正、剥离跨库模式名,
+// 然后在目标库创建视图并按需修改 owner。返回实际执行的 DDL 与执行错误(nil 表示成功)。
+func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string, error) {
+	vCopy := v
+	vCopy.ViewName = m.objName(v.ViewName)
+	vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
+	if v.ViewName == "view_huiyuanhistorychange" {
+		vCopy.Definition = `select huiyuan_histroyofchange.danweiguid AS DanWeiGuid,huiyuan_histroyofchange.pguid AS PGuid,huiyuan_histroyofchange.pname AS PName,huiyuan_histroyofchange.beforeinfo AS BeforeInfo,huiyuan_histroyofchange.changercode AS ChangerCode,huiyuan_histroyofchange.afterinfo AS AfterInfo,huiyuan_histroyofchange.changename AS ChangeName,huiyuan_histroyofchange.belongxiaqucode AS BelongXiaQuCode,huiyuan_histroyofchange.operateusername AS OperateUserName,huiyuan_histroyofchange.operatedate AS OperateDate,huiyuan_histroyofchange.row_id AS Row_ID,huiyuan_histroyofchange.danweitype AS DanWeiType,huiyuan_histroyofchange.changetype AS ChangeType,huiyuan_histroyofchange.changedate AS ChangeDate,huiyuan_histroyofchange.xiaqucode AS XiaQuCode,huiyuan_histroyofchange.viewurl AS ViewUrl,huiyuan_histroyofchange.status AS STATUS,huiyuan_histroyofchange.infoguid AS InfoGuid,huiyuan_histroyofchange.copystatus AS CopyStatus,huiyuan_histroyofchange.changecontent AS ChangeContent,huiyuan_histroyofchange.tableid AS TableID,huiyuan_histroyofchange.fieldid AS FieldID,table_struct.bak2 AS Bak2,table_struct.bak1 AS Bak1,table_struct.bak3 AS Bak3,huiyuan_histroyofchange.rowguid AS ROWGUID FROM huiyuan_histroyofchange INNER JOIN table_struct ON (((huiyuan_histroyofchange.fieldid = table_struct.fieldid::varchar) and (huiyuan_histroyofchange.tableid = table_struct.tableid::varchar)))`
+	}
+	if v.ViewName == "view_pwprojectinfo" {
+		vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib.pw_name AS pwname, pw_lib.shengfenzh AS shengfenzh, pw_lib.mobile AS mobile, pw_lib.operateusername AS operateusername, pw_lib.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '可以参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib ON yytz_project_pw.pingweiguid = pw_lib.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib.pw_name, pw_lib.shengfenzh, pw_lib.mobile, pw_lib.operateusername, pw_lib.danweiguid`
+	}
+	if v.ViewName == "view_pwprojectinfo_history" {
+		vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib_history.pw_name AS pwname, pw_lib_history.shengfenzh AS shengfenzh, pw_lib_history.mobile AS mobile, pw_lib_history.operateusername AS operateusername, pw_lib_history.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '确认参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib_history ON yytz_project_pw.pingweiguid = pw_lib_history.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib_history.pw_name, pw_lib_history.shengfenzh, pw_lib_history.mobile, pw_lib_history.operateusername, pw_lib_history.danweiguid`
+	}
+	if v.ViewName == "view_sys_changdinew" {
+		vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
+	}
+	// 去除用户指定的跨库模式名前缀(忽略大小写)
+	vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
+	// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
+	viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
+	if m.cfg.TargetSchema != "" {
+		viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
+	}
+	if err := m.writer.CreateView(ctx, vCopy); err != nil {
+		m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
+		return viewDDL, err
+	}
+	m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
+	if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+		if err := m.writer.ChangeOwner(ctx, "VIEW", vCopy.ViewName, m.cfg.TargetSchema); err != nil {
+			m.log.Warnf("修改视图 owner 失败 [%s]: %v", vCopy.ViewName, err)
+		}
+	}
+	return viewDDL, nil
+}
+
+// MigrateViews 按名称批量创建视图,返回每个视图的结果(复用 createOneView)。
+// viewNames 以源库原始大小写匹配 ViewInfo.ViewName。
+func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []ObjectResult {
+	want := make(map[string]bool, len(viewNames))
+	for _, n := range viewNames {
+		want[n] = true
+	}
+	views, err := m.reader.GetViews(ctx)
+	if err != nil {
+		m.log.Errorf("获取视图信息失败: %v", err)
+		return nil
+	}
+	results := make([]ObjectResult, 0, len(viewNames))
+	for _, v := range views {
+		if !want[v.ViewName] {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		ddl, cerr := m.createOneView(ctx, v)
+		res := ObjectResult{Name: m.objName(v.ViewName), DDL: ddl}
+		if cerr != nil {
+			res.Error = cerr.Error()
+		}
+		results = append(results, res)
+	}
+	return results
 }

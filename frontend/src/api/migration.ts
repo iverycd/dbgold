@@ -165,3 +165,20 @@ export interface MigrationReport {
 
 export const getDataMigrationReport = (jobID: string) =>
   api.get<MigrationReport>(`/migration/data-migrate/${jobID}/report`)
+
+// ===== 视图迁移 =====
+
+export interface MigrateViewsRequest {
+  src_conn_id: number
+  dst_conn_id: number
+  view_names: string[]
+  src_database?: string
+  target_schema?: string
+  lower_case_names?: boolean
+  change_owner?: boolean
+  strip_view_schemas?: string
+}
+
+// migrateViews 同步批量迁移选中的视图，返回每个视图的结果
+export const migrateViews = (data: MigrateViewsRequest) =>
+  api.post<{ results: ObjectResult[] }>('/migration/view-migrate', data, { timeout: 300000 })
