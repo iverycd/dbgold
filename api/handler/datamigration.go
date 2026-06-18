@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"dbgold/datamigrate"
@@ -63,9 +64,10 @@ type startDataMigrationRequest struct {
 	CharInLength       bool   `json:"char_in_length"`
 	UseNvarchar2       bool   `json:"use_nvarchar2"`
 	Distributed        bool   `json:"distributed"`
-	ChangeOwner        *bool  `json:"change_owner"`  // nil 时默认 true
-	SrcDatabase        string `json:"src_database"`  // 可选，覆盖连接中的默认数据库
-	TargetSchema       string `json:"target_schema"` // 可选，目标库 schema，为空时使用连接默认 search_path
+	ChangeOwner        *bool  `json:"change_owner"`       // nil 时默认 true
+	SrcDatabase        string `json:"src_database"`       // 可选，覆盖连接中的默认数据库
+	TargetSchema       string `json:"target_schema"`      // 可选，目标库 schema，为空时使用连接默认 search_path
+	StripViewSchemas   string `json:"strip_view_schemas"` // 逗号分隔的模式名，迁移视图时从定义中剥离前缀(忽略大小写)
 	// 连接池配置，0 表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=3600s）
 	SrcMaxOpenConns    int `json:"src_max_open_conns"`
 	SrcMaxIdleConns    int `json:"src_max_idle_conns"`
@@ -252,6 +254,12 @@ func StartDataMigration(c *gin.Context) {
 			}
 		}
 
+		var stripSchemas []string
+		for _, s := range strings.Split(req.StripViewSchemas, ",") {
+			if t := strings.TrimSpace(s); t != "" {
+				stripSchemas = append(stripSchemas, t)
+			}
+		}
 		cfg := datamigrate.Config{
 			PageSize:           req.PageSize,
 			MaxParallel:        req.MaxParallel,
@@ -266,6 +274,7 @@ func StartDataMigration(c *gin.Context) {
 			ChangeOwner:        changeOwner,
 			IntraTableParallel: req.IntraTableParallel,
 			TargetDBType:       dstConn.DBType,
+			StripViewSchemas:   stripSchemas,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)

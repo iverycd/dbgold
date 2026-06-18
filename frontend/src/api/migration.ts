@@ -71,6 +71,7 @@ export interface StartDataMigrationRequest {
   change_owner?: boolean
   src_database?: string
   target_schema?: string
+  strip_view_schemas?: string
   src_max_open_conns?: number
   src_max_idle_conns?: number
   src_conn_max_lifetime?: number

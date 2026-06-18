@@ -159,6 +159,18 @@
                     <a-checkbox v-model="dataMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
                   </a-form-item>
                 </a-col>
+                <a-col :span="24">
+                  <a-form-item label="视图剥离模式名">
+                    <a-input
+                      v-model="dataMigrate.stripViewSchemas"
+                      placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
+                      allow-clear
+                    />
+                    <template #extra>
+                      迁移视图时，从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。
+                    </template>
+                  </a-form-item>
+                </a-col>
               </a-row>
               <a-divider style="margin: 12px 0 8px">连接池配置（0 表示使用默认值）</a-divider>
               <a-row :gutter="16">
@@ -431,6 +443,7 @@ const dataMigrate = reactive({
   useNvarchar2: false,
   distributed: false,
   changeOwner: true,
+  stripViewSchemas: '',
   srcMaxOpenConns: 50,
   srcMaxIdleConns: 25,
   srcConnMaxLifetime: 3600,
@@ -570,6 +583,7 @@ async function startDataMigration() {
       change_owner: dataMigrate.changeOwner,
       src_database: dataMigrate.srcDatabase,
       target_schema: dataMigrate.dstSchema || undefined,
+      strip_view_schemas: dataMigrate.stripViewSchemas || undefined,
       src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
       src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
       src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,

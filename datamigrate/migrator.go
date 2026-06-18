@@ -4,6 +4,7 @@ package datamigrate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,10 +25,11 @@ type Config struct {
 	LowerCaseNames     bool
 	CharInLength       bool
 	UseNvarchar2       bool
-	Distributed        bool   // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
-	TargetSchema       string // 目标库 schema，为空时使用连接默认 search_path
-	ChangeOwner        bool   // 迁移后将表/视图/序列的 owner 改为 TargetSchema
-	TargetDBType       string // "postgres" | "gaussdb" | "seabox"
+	Distributed        bool     // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
+	TargetSchema       string   // 目标库 schema，为空时使用连接默认 search_path
+	ChangeOwner        bool     // 迁移后将表/视图/序列的 owner 改为 TargetSchema
+	TargetDBType       string   // "postgres" | "gaussdb" | "seabox"
+	StripViewSchemas   []string // 需从视图定义中剥离的模式名前缀(忽略大小写)
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -59,6 +61,22 @@ func (m *Migrator) objName(s string) string {
 		return strings.ToLower(s)
 	}
 	return s
+}
+
+// stripViewSchemas 从视图定义中去除用户指定的模式名前缀(忽略大小写)。
+// 用于视图跨库引用其他库的表时,目标库找不到该 schema 的场景。
+func (m *Migrator) stripViewSchemas(def string) string {
+	for _, s := range m.cfg.StripViewSchemas {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		// schema 名可能含点号(如 financeplatform_3.0),用 QuoteMeta 转义;
+		// (?i) 忽略大小写;匹配 "<schema>." 整体前缀
+		re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(s) + `\.`)
+		def = re.ReplaceAllString(def, "")
+	}
+	return def
 }
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
@@ -603,6 +621,8 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if v.ViewName == "view_sys_changdinew" {
 					vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
 				}
+				// 去除用户指定的跨库模式名前缀(忽略大小写)
+				vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
 				// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
 				viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
 				if m.cfg.TargetSchema != "" {
