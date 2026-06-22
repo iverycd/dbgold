@@ -21,6 +21,7 @@ type DataMigrationJob struct {
 	ID                 uint       `gorm:"primaryKey" json:"id"`
 	OwnerID            uint       `gorm:"index;not null;default:0" json:"owner_id"`
 	JobID              string     `gorm:"uniqueIndex;not null" json:"job_id"`
+	BatchID            string     `gorm:"index" json:"batch_id"` // 非空表示属于某批量迁移批次，空表示单任务
 	SrcConnID          uint       `json:"src_conn_id"`
 	DstConnID          uint       `json:"dst_conn_id"`
 	SrcDBType          string     `json:"src_db_type"`

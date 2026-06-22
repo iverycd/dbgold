@@ -63,6 +63,13 @@ func NewRouter() *gin.Engine {
 		authed.GET("/migration/data-migrate/:jobID/report", handler.GetDataMigrationReport)
 		authed.POST("/migration/view-migrate", handler.MigrateViews)
 		authed.POST("/migration/object-migrate", handler.StartObjectMigration)
+
+		authed.POST("/migration/batch/validate", handler.ValidateBatch)
+		authed.POST("/migration/batch/start", handler.StartBatch)
+		authed.GET("/migration/batch", handler.ListBatches)
+		authed.GET("/migration/batch/template", handler.DownloadBatchTemplate)
+		authed.GET("/migration/batch/:batchID/jobs", handler.ListBatchJobs)
+		authed.POST("/migration/batch/:batchID/cancel", handler.CancelBatch)
 	}
 
 	// SSE 端点：token 从 query string 读取，因为浏览器 EventSource 不支持自定义 header

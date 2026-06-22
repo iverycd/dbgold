@@ -20,6 +20,10 @@
           <template #icon><icon-thunderbolt /></template>
           迁移生成
         </a-menu-item>
+        <a-menu-item key="/batch-migration">
+          <template #icon><icon-import /></template>
+          批量迁移
+        </a-menu-item>
         <a-menu-item key="/history">
           <template #icon><icon-history /></template>
           迁移历史
@@ -91,6 +95,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/schema': 'Schema 提取',
   '/diff': 'Schema 对比',
   '/migration': '迁移生成',
+  '/batch-migration': '批量迁移',
   '/history': '迁移历史',
   '/users': '用户管理',
   '/login-history': '登录历史',

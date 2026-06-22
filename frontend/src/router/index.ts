@@ -5,6 +5,7 @@ import ConnectionsView from '@/views/ConnectionsView.vue'
 import SchemaView from '@/views/SchemaView.vue'
 import DiffView from '@/views/DiffView.vue'
 import MigrationView from '@/views/MigrationView.vue'
+import BatchMigrationView from '@/views/BatchMigrationView.vue'
 import HistoryView from '@/views/HistoryView.vue'
 import LoginHistoryView from '@/views/LoginHistoryView.vue'
 import UsersView from '@/views/UsersView.vue'
@@ -18,6 +19,7 @@ const router = createRouter({
     { path: '/schema', component: SchemaView },
     { path: '/diff', component: DiffView },
     { path: '/migration', component: MigrationView },
+    { path: '/batch-migration', component: BatchMigrationView },
     { path: '/history', component: HistoryView },
     { path: '/users', component: UsersView, meta: { adminOnly: true } },
     { path: '/login-history', component: LoginHistoryView, meta: { adminOnly: true } },

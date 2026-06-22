@@ -162,19 +162,27 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
-	srcDSN := buildDSN(srcConn)
-
-	// 若请求中指定了源库数据库，覆盖连接默认值
-	// 注意：Oracle 的 SrcDatabase 是 schema/owner 名，不是 service name，不能用来重建 DSN
-	if req.SrcDatabase != "" {
-		switch srcConn.DBType {
-		case "mysql":
-			srcDSN = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
-				srcConn.Username, srcConn.Password, srcConn.Host, srcConn.Port, srcConnDatabase)
-		case "sqlserver":
-			srcDSN = fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
-				srcConn.Host, srcConn.Port, srcConnDatabase, srcConn.Username, srcConn.Password)
-		}
+	p := migrationParams{
+		MigrateMode:        req.MigrateMode,
+		TableFilter:        req.TableFilter,
+		MigrateContent:     req.MigrateContent,
+		TargetSchema:       req.TargetSchema,
+		StripViewSchemas:   req.StripViewSchemas,
+		SrcDatabase:        req.SrcDatabase,
+		PageSize:           req.PageSize,
+		MaxParallel:        req.MaxParallel,
+		IntraTableParallel: req.IntraTableParallel,
+		LowerCaseNames:     req.LowerCaseNames,
+		CharInLength:       req.CharInLength,
+		UseNvarchar2:       req.UseNvarchar2,
+		Distributed:        req.Distributed,
+		ChangeOwner:        changeOwner,
+		SrcMaxOpenConns:    req.SrcMaxOpenConns,
+		SrcMaxIdleConns:    req.SrcMaxIdleConns,
+		SrcConnMaxLifetime: req.SrcConnMaxLifetime,
+		DstMaxOpenConns:    req.DstMaxOpenConns,
+		DstMaxIdleConns:    req.DstMaxIdleConns,
+		DstConnMaxLifetime: req.DstConnMaxLifetime,
 	}
 
 	go func() {
@@ -182,105 +190,129 @@ func StartDataMigration(c *gin.Context) {
 			close(job.LogCh)
 			datamigrate.Registry.Remove(jobID)
 		}()
-
-		srcPool := source.ConnPoolConfig{
-			MaxOpenConns:    req.SrcMaxOpenConns,
-			MaxIdleConns:    req.SrcMaxIdleConns,
-			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
-		}
-		var reader source.Reader
-		var readerErr error
-		switch srcConn.DBType {
-		case "sqlserver":
-			reader, readerErr = source.NewSQLServer(srcDSN, srcConnDatabase, srcPool)
-		case "dameng":
-			reader, readerErr = source.NewDaMeng(srcDSN, srcConnDatabase, srcPool)
-		case "oracle":
-			reader, readerErr = source.NewOracle(srcDSN, srcConnDatabase, srcPool)
-		default: // mysql
-			reader, readerErr = source.NewMySQL(srcDSN, srcConnDatabase, srcPool)
-		}
-		if readerErr != nil {
-			slog.Warn("连接源库失败", "job_id", jobID, "db_type", srcConn.DBType, "err", readerErr)
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
-			return
-		}
-		defer reader.Close()
-
-		dstPool := target.ConnPoolConfig{
-			MaxOpenConns:    req.DstMaxOpenConns,
-			MaxIdleConns:    req.DstMaxIdleConns,
-			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
-		}
-		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool)
-		if writerErr != nil {
-			slog.Warn("连接目标库失败", "job_id", jobID, "db_type", dstConn.DBType, "err", writerErr)
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
-			return
-		}
-		defer writer.Close()
-
-		if req.TargetSchema != "" {
-			exists, err := writer.SchemaExists(ctx, req.TargetSchema)
-			if err != nil {
-				job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
-				updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
-				return
-			}
-			if !exists {
-				msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema)
-				job.LogCh <- "[ERROR] " + msg
-				updateJobStatus(dbJob, "failed", msg)
-				return
-			}
-		}
-
-		var stripSchemas []string
-		for _, s := range strings.Split(req.StripViewSchemas, ",") {
-			if t := strings.TrimSpace(s); t != "" {
-				stripSchemas = append(stripSchemas, t)
-			}
-		}
-		cfg := datamigrate.Config{
-			PageSize:           req.PageSize,
-			MaxParallel:        req.MaxParallel,
-			Mode:               req.MigrateMode,
-			Filter:             req.TableFilter,
-			Content:            req.MigrateContent,
-			LowerCaseNames:     req.LowerCaseNames,
-			CharInLength:       req.CharInLength,
-			UseNvarchar2:       req.UseNvarchar2,
-			Distributed:        req.Distributed,
-			TargetSchema:       req.TargetSchema,
-			ChangeOwner:        changeOwner,
-			IntraTableParallel: req.IntraTableParallel,
-			TargetDBType:       dstConn.DBType,
-			StripViewSchemas:   stripSchemas,
-		}
-		m := datamigrate.NewMigrator(reader, writer, job, cfg)
-		report := m.Run(ctx)
-
-		if reportJSON, err := json.Marshal(report); err == nil {
-			_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
-				JobID:      jobID,
-				ReportJSON: string(reportJSON),
-			})
-		}
-
-		status := "done"
-		if ctx.Err() != nil {
-			status = "cancelled"
-		} else if report.Tables.Failed+report.Data.Failed+report.PrimaryKeys.Failed+
-			report.Views.Failed+report.Indexes.Failed+report.Constraints.Failed+
-			report.Sequences.Failed > 0 {
-			status = "failed"
-		}
-		updateJobStatus(dbJob, status, "")
+		runDataMigration(ctx, job, dbJob, srcConn, dstConn, p)
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"job_id": jobID})
+}
+
+// migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
+type migrationParams struct {
+	MigrateMode      string
+	TableFilter      string
+	MigrateContent   string
+	TargetSchema     string
+	StripViewSchemas string
+	SrcDatabase      string // 可选，覆盖连接默认库
+
+	PageSize           int
+	MaxParallel        int
+	IntraTableParallel int
+
+	LowerCaseNames bool
+	CharInLength   bool
+	UseNvarchar2   bool
+	Distributed    bool
+	ChangeOwner    bool
+
+	SrcMaxOpenConns    int
+	SrcMaxIdleConns    int
+	SrcConnMaxLifetime int // 秒
+	DstMaxOpenConns    int
+	DstMaxIdleConns    int
+	DstConnMaxLifetime int // 秒
+}
+
+// runDataMigration 同步执行一次数据迁移：构造 reader/writer → 校验目标 Schema →
+// 运行 Migrator → 存储报告 → 更新任务状态。供单任务（goroutine 内调用）和批量串行复用。
+// 不负责 close(job.LogCh) 与 Registry.Remove，由调用方控制（批量串行需复用同一 worker）。
+func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.DataMigrationJob,
+	srcConn, dstConn *store.Connection, p migrationParams) {
+
+	srcPool := source.ConnPoolConfig{
+		MaxOpenConns:    p.SrcMaxOpenConns,
+		MaxIdleConns:    p.SrcMaxIdleConns,
+		ConnMaxLifetime: time.Duration(p.SrcConnMaxLifetime) * time.Second,
+	}
+	reader, readerErr := buildSrcReader(srcConn, p.SrcDatabase, srcPool)
+	if readerErr != nil {
+		slog.Warn("连接源库失败", "job_id", dbJob.JobID, "db_type", srcConn.DBType, "err", readerErr)
+		job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
+		updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
+		return
+	}
+	defer reader.Close()
+
+	dstPool := target.ConnPoolConfig{
+		MaxOpenConns:    p.DstMaxOpenConns,
+		MaxIdleConns:    p.DstMaxIdleConns,
+		ConnMaxLifetime: time.Duration(p.DstConnMaxLifetime) * time.Second,
+	}
+	writer, writerErr := buildDstWriter(dstConn, p.TargetSchema, dstPool)
+	if writerErr != nil {
+		slog.Warn("连接目标库失败", "job_id", dbJob.JobID, "db_type", dstConn.DBType, "err", writerErr)
+		job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
+		updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
+		return
+	}
+	defer writer.Close()
+
+	if p.TargetSchema != "" {
+		exists, err := writer.SchemaExists(ctx, p.TargetSchema)
+		if err != nil {
+			job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
+			updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
+			return
+		}
+		if !exists {
+			msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", p.TargetSchema)
+			job.LogCh <- "[ERROR] " + msg
+			updateJobStatus(dbJob, "failed", msg)
+			return
+		}
+	}
+
+	var stripSchemas []string
+	for _, s := range strings.Split(p.StripViewSchemas, ",") {
+		if t := strings.TrimSpace(s); t != "" {
+			stripSchemas = append(stripSchemas, t)
+		}
+	}
+	cfg := datamigrate.Config{
+		PageSize:           p.PageSize,
+		MaxParallel:        p.MaxParallel,
+		Mode:               p.MigrateMode,
+		Filter:             p.TableFilter,
+		Content:            p.MigrateContent,
+		LowerCaseNames:     p.LowerCaseNames,
+		CharInLength:       p.CharInLength,
+		UseNvarchar2:       p.UseNvarchar2,
+		Distributed:        p.Distributed,
+		TargetSchema:       p.TargetSchema,
+		ChangeOwner:        p.ChangeOwner,
+		IntraTableParallel: p.IntraTableParallel,
+		TargetDBType:       dstConn.DBType,
+		StripViewSchemas:   stripSchemas,
+	}
+	m := datamigrate.NewMigrator(reader, writer, job, cfg)
+	report := m.Run(ctx)
+
+	if reportJSON, err := json.Marshal(report); err == nil {
+		_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
+			JobID:      dbJob.JobID,
+			ReportJSON: string(reportJSON),
+		})
+	}
+
+	status := "done"
+	if ctx.Err() != nil {
+		status = "cancelled"
+	} else if report.Tables.Failed+report.Data.Failed+report.PrimaryKeys.Failed+
+		report.Views.Failed+report.Indexes.Failed+report.Constraints.Failed+
+		report.Sequences.Failed > 0 {
+		status = "failed"
+	}
+	updateJobStatus(dbJob, status, "")
 }
 
 func updateJobStatus(job *store.DataMigrationJob, status, summary string) {

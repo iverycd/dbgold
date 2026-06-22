@@ -42,6 +42,20 @@ type LoginHistory struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// BatchMigration 表示一次批量迁移（Excel 上传产生的批次）。
+// 其下的子任务为带 BatchID 的 DataMigrationJob；批量连接信息不入 Connection 表，
+// 仅保存在子任务的快照字段中（与现有连接管理隔离）。
+type BatchMigration struct {
+	ID         uint       `gorm:"primaryKey" json:"id"`
+	OwnerID    uint       `gorm:"index;not null;default:0" json:"owner_id"`
+	BatchID    string     `gorm:"uniqueIndex;not null" json:"batch_id"`
+	FileName   string     `json:"file_name"`
+	Total      int        `json:"total"`
+	Status     string     `json:"status"` // running / done / cancelled
+	CreatedAt  time.Time  `json:"created_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
 func Init(cfg *config.Config) {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(cfg.SQLitePath), &gorm.Config{})
@@ -49,7 +63,7 @@ func Init(cfg *config.Config) {
 		slog.Error("failed to open sqlite", "err", err)
 		os.Exit(1)
 	}
-	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}, &LoginHistory{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}, &LoginHistory{}, &BatchMigration{}); err != nil {
 		slog.Error("failed to migrate", "err", err)
 		os.Exit(1)
 	}
