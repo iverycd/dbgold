@@ -16,14 +16,6 @@
           <template #icon><icon-link /></template>
           连接管理
         </a-menu-item>
-        <a-menu-item key="/schema">
-          <template #icon><icon-storage /></template>
-          Schema 提取
-        </a-menu-item>
-        <a-menu-item key="/diff">
-          <template #icon><icon-swap /></template>
-          Schema 对比
-        </a-menu-item>
         <a-menu-item key="/migration">
           <template #icon><icon-thunderbolt /></template>
           迁移生成
@@ -35,6 +27,14 @@
         <a-menu-item v-if="auth.user?.role === 'admin'" key="/users">
           <template #icon><icon-user-group /></template>
           用户管理
+        </a-menu-item>
+        <a-menu-item key="/schema">
+          <template #icon><icon-storage /></template>
+          Schema 提取
+        </a-menu-item>
+        <a-menu-item key="/diff">
+          <template #icon><icon-swap /></template>
+          Schema 对比
         </a-menu-item>
         <a-menu-item v-if="auth.user?.role === 'admin'" key="/login-history">
           <template #icon><icon-user /></template>

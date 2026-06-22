@@ -298,54 +298,6 @@
         </a-form>
       </a-tab-pane>
 
-      <a-tab-pane key="diff" title="Diff 迁移">
-        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
-          <a-row :gutter="24">
-            <a-col :span="11">
-              <a-card title="源">
-                <connection-select v-model:connection-id="diffSrc.connId" v-model:database="diffSrc.dbName" />
-              </a-card>
-            </a-col>
-            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
-              <icon-arrow-right style="font-size: 24px; color: #165dff" />
-            </a-col>
-            <a-col :span="11">
-              <a-card title="目标">
-                <connection-select v-model:connection-id="diffDst.connId" v-model:database="diffDst.dbName" />
-              </a-card>
-            </a-col>
-          </a-row>
-          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
-          <a-button
-            type="primary"
-            :loading="diffLoading"
-            :disabled="!(diffSrc.connId && diffSrc.dbName && diffDst.connId && diffDst.dbName)"
-            @click="handleDiffMigration"
-          >
-            生成迁移 SQL
-          </a-button>
-          <sql-preview :sqls="diffSqls" />
-        </a-space>
-      </a-tab-pane>
-
-      <a-tab-pane key="full" title="全量迁移">
-        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
-          <a-card title="目标数据库（将为此库生成完整建表 SQL）">
-            <connection-select v-model:connection-id="fullDst.connId" v-model:database="fullDst.dbName" />
-          </a-card>
-          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
-          <a-button
-            type="primary"
-            :loading="fullLoading"
-            :disabled="!(fullDst.connId && fullDst.dbName)"
-            @click="handleFullMigration"
-          >
-            生成全量 SQL
-          </a-button>
-          <sql-preview :sqls="fullSqls" />
-        </a-space>
-      </a-tab-pane>
-
       <a-tab-pane key="view-migrate" title="视图迁移">
         <a-form :model="viewMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
@@ -749,6 +701,54 @@
             <MigrationReportPanel :jobID="objMigrate.currentJobId" />
           </div>
         </a-form>
+      </a-tab-pane>
+
+      <a-tab-pane key="diff" title="Diff 迁移">
+        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
+          <a-row :gutter="24">
+            <a-col :span="11">
+              <a-card title="源">
+                <connection-select v-model:connection-id="diffSrc.connId" v-model:database="diffSrc.dbName" />
+              </a-card>
+            </a-col>
+            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+              <icon-arrow-right style="font-size: 24px; color: #165dff" />
+            </a-col>
+            <a-col :span="11">
+              <a-card title="目标">
+                <connection-select v-model:connection-id="diffDst.connId" v-model:database="diffDst.dbName" />
+              </a-card>
+            </a-col>
+          </a-row>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
+          <a-button
+            type="primary"
+            :loading="diffLoading"
+            :disabled="!(diffSrc.connId && diffSrc.dbName && diffDst.connId && diffDst.dbName)"
+            @click="handleDiffMigration"
+          >
+            生成迁移 SQL
+          </a-button>
+          <sql-preview :sqls="diffSqls" />
+        </a-space>
+      </a-tab-pane>
+
+      <a-tab-pane key="full" title="全量迁移">
+        <a-space direction="vertical" fill style="width: 100%; margin-top: 12px">
+          <a-card title="目标数据库（将为此库生成完整建表 SQL）">
+            <connection-select v-model:connection-id="fullDst.connId" v-model:database="fullDst.dbName" />
+          </a-card>
+          <a-checkbox v-model="schemaMigrateLowerCase">对象名转小写</a-checkbox>
+          <a-button
+            type="primary"
+            :loading="fullLoading"
+            :disabled="!(fullDst.connId && fullDst.dbName)"
+            @click="handleFullMigration"
+          >
+            生成全量 SQL
+          </a-button>
+          <sql-preview :sqls="fullSqls" />
+        </a-space>
       </a-tab-pane>
     </a-tabs>
   </div>
