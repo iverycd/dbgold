@@ -545,6 +545,211 @@
           </div>
         </a-form>
       </a-tab-pane>
+
+      <a-tab-pane key="object-migrate" title="对象迁移">
+        <a-form :model="objMigrate" layout="vertical" style="margin-top: 12px">
+          <!-- 源库 / 目标库选择 -->
+          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
+            <a-col :span="11">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="orange" size="small">源库</a-tag>
+                  <span class="conn-card-title">源库</span>
+                </div>
+                <a-select
+                  v-model="objMigrate.srcConnId"
+                  placeholder="选择源库连接"
+                  style="width: 100%; margin-top: 10px"
+                  @change="(val) => { omCheckPairSupport(); omLoadSrcDatabases(val as number) }"
+                >
+                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                  </a-option>
+                </a-select>
+                <div v-if="omSelectedSrc" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedSrc.host }}:{{ omSelectedSrc.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedSrc.username }}</span>
+                </div>
+                <a-select
+                  v-if="objMigrate.srcDatabases.length > 0"
+                  v-model="objMigrate.srcDatabase"
+                  placeholder="选择数据库"
+                  style="width: 100%; margin-top: 10px"
+                  allow-search
+                  @change="omLoadTables"
+                >
+                  <a-option v-for="db in objMigrate.srcDatabases" :key="db" :value="db" :label="db" />
+                </a-select>
+              </a-card>
+            </a-col>
+            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+            </a-col>
+            <a-col :span="11">
+              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+                <div class="conn-card-header">
+                  <a-tag color="blue" size="small">目标库</a-tag>
+                  <span class="conn-card-title">目标库</span>
+                </div>
+                <a-select
+                  v-model="objMigrate.dstConnId"
+                  placeholder="选择目标库连接"
+                  style="width: 100%; margin-top: 10px"
+                  @change="(val) => { omCheckPairSupport(); omLoadDstSchemas(val as number) }"
+                >
+                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                  </a-option>
+                </a-select>
+                <div v-if="omSelectedDst" class="conn-meta">
+                  <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedDst.host }}:{{ omSelectedDst.port }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ omSelectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedDst.username }}</span>
+                </div>
+                <a-select
+                  v-if="objMigrate.dstConnId"
+                  v-model="objMigrate.dstSchema"
+                  placeholder="请选择目标 Schema"
+                  style="width: 100%; margin-top: 10px"
+                  allow-search
+                >
+                  <a-option v-for="s in objMigrate.dstSchemas" :key="s" :value="s" :label="s" />
+                </a-select>
+                <div v-if="objMigrate.dstConnId" class="schema-permission-tip">
+                  <icon-info-circle style="flex-shrink:0" />
+                  对象迁移仅向目标库已存在的表补建对象，请确保目标表与引用表已迁移完成。
+                </div>
+              </a-card>
+            </a-col>
+          </a-row>
+
+          <!-- 不支持提示 -->
+          <a-alert
+            v-if="objMigrate.unsupportedMsg"
+            type="error"
+            :content="objMigrate.unsupportedMsg"
+            style="margin-bottom: 16px"
+          />
+
+          <!-- 对象类型选择 -->
+          <a-form-item label="迁移对象类型" style="margin-bottom: 16px">
+            <a-checkbox-group v-model="objMigrate.objects">
+              <a-checkbox v-for="opt in OBJECT_TYPE_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</a-checkbox>
+            </a-checkbox-group>
+          </a-form-item>
+
+          <!-- 表选择 -->
+          <a-spin :loading="objMigrate.loadingTables" style="display:block">
+            <div v-if="objMigrate.tables.length > 0" style="margin-bottom: 16px">
+              <a-space style="margin-bottom: 8px" wrap>
+                <a-input
+                  v-model="objMigrate.search"
+                  placeholder="搜索表名"
+                  allow-clear
+                  style="width: 240px"
+                >
+                  <template #prefix><icon-search /></template>
+                </a-input>
+                <a-button size="small" @click="omSelectAllFiltered">全选当前结果</a-button>
+                <a-button size="small" @click="omClearSelection">清空选择</a-button>
+                <span style="font-size: 12px; color: var(--color-text-3)">
+                  已选 {{ objMigrate.selected.length }} / 共 {{ objMigrate.tables.length }}
+                </span>
+              </a-space>
+              <a-table
+                :data="omFilteredRows"
+                row-key="name"
+                :pagination="{ pageSize: 15, showTotal: true }"
+                :scroll="{ y: 360 }"
+                size="small"
+                :row-selection="{ type: 'checkbox', showCheckedAll: true }"
+                v-model:selected-keys="objMigrate.selected"
+              >
+                <template #columns>
+                  <a-table-column title="表名" data-index="name" />
+                </template>
+              </a-table>
+            </div>
+            <a-empty v-else-if="objMigrate.srcConnId && !objMigrate.loadingTables" description="该连接下没有表，或所选数据库不含表" />
+          </a-spin>
+
+          <!-- 手动输入表名 -->
+          <a-form-item label="手动追加表名（可选）" style="max-width: 560px; margin-bottom: 16px">
+            <a-input
+              v-model="objMigrate.manualTables"
+              placeholder="逗号分隔表名，与上方勾选合并去重"
+              allow-clear
+            />
+            <template #extra>
+              表名需与源库原始大小写一致；将与表格勾选的表合并后一并迁移。
+            </template>
+          </a-form-item>
+
+          <!-- 高级设置 -->
+          <a-collapse style="margin-bottom: 16px; max-width: 560px">
+            <a-collapse-item key="advanced" header="高级设置">
+              <a-row :gutter="16">
+                <a-col v-if="omSelectedDst?.db_type !== 'dameng'" :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="objMigrate.lowerCaseNames">对象名转小写</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="objMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  </a-form-item>
+                </a-col>
+                <a-col :span="12">
+                  <a-form-item style="margin-bottom: 4px">
+                    <a-checkbox v-model="objMigrate.distributed">分布式库（建主键前设置分布列）</a-checkbox>
+                  </a-form-item>
+                </a-col>
+              </a-row>
+            </a-collapse-item>
+          </a-collapse>
+
+          <!-- 操作按钮 -->
+          <a-space style="margin-bottom: 16px">
+            <a-button
+              type="primary"
+              :disabled="!omCanMigrate"
+              :loading="objMigrate.running"
+              @click="startObjectMigration"
+            >开始迁移对象</a-button>
+            <a-button
+              v-if="objMigrate.running"
+              status="danger"
+              @click="cancelObjectMigration"
+            >停止迁移</a-button>
+            <a-button
+              v-if="objMigrate.finished"
+              @click="resetObjectMigration"
+            >重新迁移</a-button>
+          </a-space>
+
+          <!-- 日志区 -->
+          <div v-if="objMigrate.logs.length > 0">
+            <a-space style="margin-bottom: 8px">
+              <span style="font-weight:500">迁移日志</span>
+              <a-button size="mini" @click="copyObjLogs">复制日志</a-button>
+            </a-space>
+            <div ref="objLogContainer" class="migration-log-container">
+              <div
+                v-for="(line, i) in objMigrate.logs"
+                :key="i"
+                :class="getLogClass(line)"
+                class="log-line"
+              >{{ line }}</div>
+            </div>
+          </div>
+
+          <!-- 迁移报告 -->
+          <div v-if="objMigrate.finished && objMigrate.currentJobId" style="margin-top: 16px">
+            <a-divider>迁移报告</a-divider>
+            <MigrationReportPanel :jobID="objMigrate.currentJobId" />
+          </div>
+        </a-form>
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
@@ -565,6 +770,9 @@ import {
   cancelDataMigration as apiCancelMigration,
   createDataMigrateEventSource,
   migrateViews as apiMigrateViews,
+  listConnectionTables,
+  startObjectMigration as apiStartObjectMigration,
+  type MigrateObjectType,
   type SupportedPair,
   type ObjectResult,
 } from '@/api/migration'
@@ -884,6 +1092,8 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   currentEventSource?.close()
   currentEventSource = null
+  objEventSource?.close()
+  objEventSource = null
 })
 
 // ===== 视图迁移 Tab =====
@@ -1024,6 +1234,220 @@ async function handleMigrateViews() {
   } finally {
     viewMigrate.running = false
   }
+}
+
+// ===== 对象迁移 Tab（主键/索引/序列/外键）=====
+const OBJECT_TYPE_OPTIONS: { label: string; value: MigrateObjectType }[] = [
+  { label: '主键', value: 'primary_keys' },
+  { label: '索引', value: 'indexes' },
+  { label: '序列（自增列）', value: 'sequences' },
+  { label: '外键', value: 'foreign_keys' },
+]
+
+const objMigrate = reactive({
+  srcConnId: undefined as number | undefined,
+  dstConnId: undefined as number | undefined,
+  srcDatabase: '',
+  srcDatabases: [] as string[],
+  dstSchema: '',
+  dstSchemas: [] as string[],
+  tables: [] as string[],          // 源库全部表名
+  selected: [] as string[],        // 表格勾选的表
+  manualTables: '',                // 手动输入的逗号分隔表名
+  search: '',
+  objects: [] as MigrateObjectType[],
+  lowerCaseNames: true,
+  changeOwner: true,
+  distributed: false,
+  loadingTables: false,
+  running: false,
+  finished: false,
+  unsupportedMsg: '',
+  logs: [] as string[],
+  currentJobId: '',
+})
+
+let objEventSource: EventSource | null = null
+const objLogContainer = ref<HTMLElement | null>(null)
+
+const omSelectedSrc = computed(() => connections.value.find((c) => c.id === objMigrate.srcConnId))
+const omSelectedDst = computed(() => connections.value.find((c) => c.id === objMigrate.dstConnId))
+
+const omFilteredRows = computed(() => {
+  const kw = objMigrate.search.trim().toLowerCase()
+  const list = kw ? objMigrate.tables.filter((t) => t.toLowerCase().includes(kw)) : objMigrate.tables
+  return list.map((name) => ({ name }))
+})
+
+// 合并表格勾选与手动输入,去重
+const omFinalTables = computed(() => {
+  const set = new Set<string>(objMigrate.selected)
+  for (const t of objMigrate.manualTables.split(',')) {
+    const v = t.trim()
+    if (v) set.add(v)
+  }
+  return Array.from(set)
+})
+
+const omCanMigrate = computed(() =>
+  objMigrate.srcConnId !== undefined &&
+  objMigrate.dstConnId !== undefined &&
+  omFinalTables.value.length > 0 &&
+  objMigrate.objects.length > 0 &&
+  !objMigrate.unsupportedMsg &&
+  !objMigrate.running
+)
+
+watch(() => objMigrate.dstConnId, (newId) => {
+  const dst = connections.value.find((c) => c.id === newId)
+  objMigrate.lowerCaseNames = dst?.db_type !== 'dameng'
+})
+
+function omCheckPairSupport() {
+  if (!objMigrate.srcConnId || !objMigrate.dstConnId) {
+    objMigrate.unsupportedMsg = ''
+    return
+  }
+  const src = connections.value.find((c) => c.id === objMigrate.srcConnId)
+  const dst = connections.value.find((c) => c.id === objMigrate.dstConnId)
+  if (!src || !dst) return
+  const supported = supportedPairs.value.some((p) => p.source === src.db_type && p.target === dst.db_type)
+  objMigrate.unsupportedMsg = supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的对象迁移`
+}
+
+async function omLoadSrcDatabases(connId: number) {
+  objMigrate.srcDatabase = ''
+  objMigrate.srcDatabases = []
+  objMigrate.tables = []
+  objMigrate.selected = []
+  try {
+    const res = await listConnectionDatabases(connId)
+    objMigrate.srcDatabases = res.data ?? []
+  } catch {
+    // 不支持列库时静默忽略,仍可加载连接默认库的表
+  }
+  if (objMigrate.srcDatabases.length === 0) await omLoadTables()
+}
+
+async function omLoadDstSchemas(connId: number) {
+  objMigrate.dstSchema = ''
+  objMigrate.dstSchemas = []
+  const dst = connections.value.find((c) => c.id === connId)
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo')) return
+  try {
+    const res = await listConnectionSchemas(connId)
+    objMigrate.dstSchemas = res.data ?? []
+  } catch {
+    // 列 schema 失败时静默忽略
+  }
+}
+
+async function omLoadTables() {
+  if (!objMigrate.srcConnId) return
+  objMigrate.loadingTables = true
+  objMigrate.tables = []
+  objMigrate.selected = []
+  try {
+    const res = await listConnectionTables(objMigrate.srcConnId, objMigrate.srcDatabase || undefined)
+    objMigrate.tables = res.data ?? []
+  } catch (e: any) {
+    Message.error(`加载表失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
+  } finally {
+    objMigrate.loadingTables = false
+  }
+}
+
+function omSelectAllFiltered() {
+  const set = new Set(objMigrate.selected)
+  for (const row of omFilteredRows.value) set.add(row.name)
+  objMigrate.selected = Array.from(set)
+}
+
+function omClearSelection() {
+  objMigrate.selected = []
+}
+
+async function startObjectMigration() {
+  if (objMigrate.dstConnId && !objMigrate.dstSchema) {
+    Message.error('请选择目标 Schema')
+    return
+  }
+  if (omFinalTables.value.length === 0) {
+    Message.error('请至少选择一张表')
+    return
+  }
+  if (objMigrate.objects.length === 0) {
+    Message.error('请至少选择一种对象类型')
+    return
+  }
+  objMigrate.running = true
+  objMigrate.finished = false
+  objMigrate.logs = []
+  try {
+    const res = await apiStartObjectMigration({
+      src_conn_id: objMigrate.srcConnId!,
+      dst_conn_id: objMigrate.dstConnId!,
+      migrate_objects: objMigrate.objects,
+      table_names: omFinalTables.value,
+      src_database: objMigrate.srcDatabase || undefined,
+      target_schema: objMigrate.dstSchema || undefined,
+      lower_case_names: objMigrate.lowerCaseNames,
+      change_owner: objMigrate.changeOwner,
+      distributed: objMigrate.distributed,
+    })
+    objMigrate.currentJobId = res.data.job_id
+    omConnectSSE(res.data.job_id)
+  } catch (e: any) {
+    objMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
+    objMigrate.running = false
+    objMigrate.finished = true
+  }
+}
+
+function omConnectSSE(jobID: string) {
+  objEventSource = createDataMigrateEventSource(jobID)
+  objEventSource.addEventListener('message', (e) => {
+    if (e.data === '[STREAM_END]') {
+      objMigrate.running = false
+      objMigrate.finished = true
+      objEventSource?.close()
+      objEventSource = null
+      return
+    }
+    objMigrate.logs.push(e.data)
+    nextTick(() => {
+      if (objLogContainer.value) {
+        objLogContainer.value.scrollTop = objLogContainer.value.scrollHeight
+      }
+    })
+  })
+  objEventSource.onerror = () => {
+    objMigrate.logs.push('[ERROR] 日志流连接中断，请查看历史任务获取详情')
+    objMigrate.running = false
+    objMigrate.finished = true
+    objEventSource?.close()
+    objEventSource = null
+  }
+}
+
+async function cancelObjectMigration() {
+  if (!objMigrate.currentJobId) return
+  try {
+    await apiCancelMigration(objMigrate.currentJobId)
+  } catch {
+    // 取消失败时 SSE 自然会断开
+  }
+}
+
+function resetObjectMigration() {
+  objMigrate.running = false
+  objMigrate.finished = false
+  objMigrate.logs = []
+  objMigrate.currentJobId = ''
+}
+
+function copyObjLogs() {
+  navigator.clipboard.writeText(objMigrate.logs.join('\n'))
 }
 
 </script>

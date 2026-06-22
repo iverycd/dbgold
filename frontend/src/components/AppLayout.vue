@@ -32,6 +32,10 @@
           <template #icon><icon-history /></template>
           迁移历史
         </a-menu-item>
+        <a-menu-item v-if="auth.user?.role === 'admin'" key="/users">
+          <template #icon><icon-user-group /></template>
+          用户管理
+        </a-menu-item>
         <a-menu-item v-if="auth.user?.role === 'admin'" key="/login-history">
           <template #icon><icon-user /></template>
           登录历史
@@ -88,6 +92,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/diff': 'Schema 对比',
   '/migration': '迁移生成',
   '/history': '迁移历史',
+  '/users': '用户管理',
   '/login-history': '登录历史',
 }
 

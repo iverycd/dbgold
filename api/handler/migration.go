@@ -3,6 +3,7 @@ package handler
 import (
 	"dbgold/diff"
 	"dbgold/driver"
+	"dbgold/middleware"
 	"dbgold/migrate"
 	"dbgold/schema"
 	"dbgold/store"
@@ -46,12 +47,12 @@ func RunDiffMigration(c *gin.Context) {
 		return
 	}
 
-	srcSchema, err := resolveSchema(body.SrcConnectionID, body.SrcDatabase, body.SrcSchema)
+	srcSchema, err := resolveSchema(c, body.SrcConnectionID, body.SrcDatabase, body.SrcSchema)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "src: " + err.Error()})
 		return
 	}
-	dstSchema, err := resolveSchema(body.DstConnectionID, body.DstDatabase, body.DstSchema)
+	dstSchema, err := resolveSchema(c, body.DstConnectionID, body.DstDatabase, body.DstSchema)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "dst: " + err.Error()})
 		return
@@ -61,7 +62,7 @@ func RunDiffMigration(c *gin.Context) {
 
 	var sqls []string
 	if body.SrcConnectionID != 0 {
-		conn, err := store.GetConnection(body.SrcConnectionID)
+		conn, err := store.GetConnectionOwned(body.SrcConnectionID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "src connection not found"})
 			return
@@ -95,6 +96,7 @@ func RunDiffMigration(c *gin.Context) {
 
 	sqlsJSON, _ := json.Marshal(sqls)
 	m := &store.MigrationHistory{
+		OwnerID:       middleware.GetCurrentUserID(c),
 		Type:          "diff",
 		SrcConnID:     body.SrcConnectionID,
 		SrcDatabase:   body.SrcDatabase,
@@ -115,7 +117,7 @@ func RunFullMigration(c *gin.Context) {
 		return
 	}
 
-	dstConn, err := store.GetConnection(body.DstConnectionID)
+	dstConn, err := store.GetConnectionOwned(body.DstConnectionID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "dst connection not found"})
 		return
@@ -144,6 +146,7 @@ func RunFullMigration(c *gin.Context) {
 
 	sqlsJSON, _ := json.Marshal(sqls)
 	m := &store.MigrationHistory{
+		OwnerID:       middleware.GetCurrentUserID(c),
 		Type:          "full",
 		SrcConnID:     body.SrcConnectionID,
 		SrcDatabase:   body.SrcDatabase,
@@ -164,7 +167,7 @@ func RunSelectiveMigration(c *gin.Context) {
 		return
 	}
 
-	conn, err := store.GetConnection(body.ConnectionID)
+	conn, err := store.GetConnectionOwned(body.ConnectionID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
@@ -187,6 +190,7 @@ func RunSelectiveMigration(c *gin.Context) {
 
 	sqlsJSON, _ := json.Marshal(sqls)
 	m := &store.MigrationHistory{
+		OwnerID:       middleware.GetCurrentUserID(c),
 		Type:          "selective",
 		DstConnID:     body.ConnectionID,
 		DstDatabase:   body.Database,
@@ -199,7 +203,7 @@ func RunSelectiveMigration(c *gin.Context) {
 }
 
 func ListMigrations(c *gin.Context) {
-	list, err := store.ListMigrations()
+	list, err := store.ListMigrations(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -215,6 +219,10 @@ func GetMigration(c *gin.Context) {
 	}
 	m, err := store.GetMigration(uint(id))
 	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	if !middleware.IsAdmin(c) && m.OwnerID != middleware.GetCurrentUserID(c) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}

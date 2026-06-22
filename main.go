@@ -30,6 +30,10 @@ func main() {
 		slog.Error("failed to ensure admin", "err", err)
 		os.Exit(1)
 	}
+	if err := store.BackfillOwner(cfg.AdminUser); err != nil {
+		slog.Error("failed to backfill owner", "err", err)
+		os.Exit(1)
+	}
 
 	middleware.SetJWTSecret(cfg.JWTSecret)
 	handler.SetJWTSecret(cfg.JWTSecret)

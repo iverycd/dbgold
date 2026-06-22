@@ -4,6 +4,7 @@ import "time"
 
 type MigrationHistory struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
+	OwnerID       uint      `gorm:"index;not null;default:0" json:"owner_id"`
 	Type          string    `gorm:"not null" json:"type"` // diff | full | selective
 	SrcConnID     uint      `json:"src_conn_id"`
 	SrcDatabase   string    `json:"src_database"`
@@ -19,9 +20,13 @@ func CreateMigration(m *MigrationHistory) error {
 	return DB.Create(m).Error
 }
 
-func ListMigrations() ([]MigrationHistory, error) {
+func ListMigrations(ownerID uint, isAdmin bool) ([]MigrationHistory, error) {
 	var list []MigrationHistory
-	if err := DB.Order("id desc").Find(&list).Error; err != nil {
+	q := DB.Order("id desc")
+	if !isAdmin {
+		q = q.Where("owner_id = ?", ownerID)
+	}
+	if err := q.Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil

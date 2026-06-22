@@ -19,6 +19,11 @@
         <a-table-column title="主机" data-index="host" />
         <a-table-column title="端口" data-index="port" :width="80" />
         <a-table-column title="数据库" data-index="database" />
+        <a-table-column v-if="isAdmin" title="所属用户" data-index="owner_username" :width="120">
+          <template #cell="{ record }">
+            <a-tag size="small" color="arcoblue">{{ record.owner_username || '-' }}</a-tag>
+          </template>
+        </a-table-column>
         <a-table-column title="操作" :width="200">
           <template #cell="{ record }">
             <a-space>
@@ -69,7 +74,7 @@
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item label="数据库名" field="database" :rules="[{ required: form.db_type !== 'mysql', message: '请输入数据库名' }]">
+        <a-form-item label="数据库名" field="database" :rules="[{ required: form.db_type !== 'mysql' && form.db_type !== 'dameng', message: '请输入数据库名' }]">
           <a-input v-model="form.database" placeholder="数据库名" />
         </a-form-item>
         <a-form-item label="用户名" field="username" :rules="[{ required: true }]">
@@ -84,7 +89,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   listConnections,
@@ -95,7 +100,10 @@ import {
   type Connection,
 } from '@/api/connections'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 const connections = ref<Connection[]>([])
 const loading = ref(false)
 const testingId = ref<number | null>(null)

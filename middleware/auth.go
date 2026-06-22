@@ -71,18 +71,24 @@ func GetCurrentUserID(c *gin.Context) uint {
 	return id.(uint)
 }
 
-// ValidateTokenString 验证 JWT token 字符串，供需要手动校验 token 的 handler 使用（例如 SSE 端点）
-func ValidateTokenString(tokenStr string) error {
+// IsAdmin 返回当前请求用户是否为 admin 角色。
+func IsAdmin(c *gin.Context) bool {
+	role, _ := c.Get(roleKey)
+	return role == "admin"
+}
+
+// ValidateTokenString 验证 JWT token 字符串并返回 claims，供需要手动校验 token 的 handler 使用（例如 SSE 端点）。
+func ValidateTokenString(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
 		return jwtSecret, nil
 	})
 	if err != nil || !token.Valid {
-		return fmt.Errorf("invalid token")
+		return nil, fmt.Errorf("invalid token")
 	}
 	user, err := store.GetUserByID(claims.UserID)
 	if err != nil || !user.Enabled {
-		return fmt.Errorf("user not found or disabled")
+		return nil, fmt.Errorf("user not found or disabled")
 	}
-	return nil
+	return claims, nil
 }

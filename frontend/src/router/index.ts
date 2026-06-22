@@ -7,6 +7,7 @@ import DiffView from '@/views/DiffView.vue'
 import MigrationView from '@/views/MigrationView.vue'
 import HistoryView from '@/views/HistoryView.vue'
 import LoginHistoryView from '@/views/LoginHistoryView.vue'
+import UsersView from '@/views/UsersView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -18,6 +19,7 @@ const router = createRouter({
     { path: '/diff', component: DiffView },
     { path: '/migration', component: MigrationView },
     { path: '/history', component: HistoryView },
+    { path: '/users', component: UsersView, meta: { adminOnly: true } },
     { path: '/login-history', component: LoginHistoryView, meta: { adminOnly: true } },
   ],
 })

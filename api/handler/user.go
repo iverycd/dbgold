@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"dbgold/middleware"
 	"dbgold/store"
 	"net/http"
 	"strconv"
@@ -50,6 +51,32 @@ func UpdateUser(c *gin.Context) {
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// 防呆：禁用账号时的边界校验
+	if body.Enabled != nil && !*body.Enabled {
+		target, err := store.GetUserByID(uint(id))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		// 不能禁用自己，避免误操作把自己锁死
+		if uint(id) == middleware.GetCurrentUserID(c) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "不能禁用当前登录的账号"})
+			return
+		}
+		// 不能禁用最后一个启用的 admin，否则系统将无管理员
+		if target.Role == "admin" && target.Enabled {
+			count, err := store.CountEnabledAdmins()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if count <= 1 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "不能禁用最后一个管理员账号"})
+				return
+			}
+		}
 	}
 
 	updates := map[string]any{}

@@ -55,12 +55,12 @@ func TestConnectionCRUD(t *testing.T) {
 	require.NoError(t, CreateConnection(c))
 	assert.NotZero(t, c.ID)
 
-	list, err := ListConnections()
+	list, err := ListConnections(0, true)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
 	require.NoError(t, DeleteConnection(c.ID))
-	list, _ = ListConnections()
+	list, _ = ListConnections(0, true)
 	assert.Len(t, list, 0)
 }
 
@@ -78,7 +78,7 @@ func TestCreateAndListMigrations(t *testing.T) {
 	require.NoError(t, CreateMigration(m))
 	assert.NotZero(t, m.ID)
 
-	list, err := ListMigrations()
+	list, err := ListMigrations(0, true)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 	assert.Equal(t, "diff", list[0].Type)

@@ -23,6 +23,7 @@ type User struct {
 
 type Connection struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
+	OwnerID   uint      `gorm:"index;not null;default:0" json:"owner_id"`
 	Name      string    `gorm:"not null" json:"name"`
 	DBType    string    `gorm:"not null" json:"db_type"`
 	Host      string    `gorm:"not null" json:"host"`

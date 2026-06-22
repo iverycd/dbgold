@@ -9,6 +9,7 @@ export interface Connection {
   database: string
   username: string
   created_at: string
+  owner_username?: string
 }
 
 export interface ConnectionForm {

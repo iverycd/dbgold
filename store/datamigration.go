@@ -19,6 +19,7 @@ type DataMigrationJobWithConn struct {
 
 type DataMigrationJob struct {
 	ID                 uint       `gorm:"primaryKey" json:"id"`
+	OwnerID            uint       `gorm:"index;not null;default:0" json:"owner_id"`
 	JobID              string     `gorm:"uniqueIndex;not null" json:"job_id"`
 	SrcConnID          uint       `json:"src_conn_id"`
 	DstConnID          uint       `json:"dst_conn_id"`
@@ -26,6 +27,7 @@ type DataMigrationJob struct {
 	DstDBType          string     `json:"dst_db_type"`
 	MigrateMode        string     `json:"migrate_mode"` // all / exclude / include
 	TableFilter        string     `json:"table_filter"`
+	MigrateObjects     string     `json:"migrate_objects"` // 仅对象迁移任务:逗号拼接的对象类型,空表示普通数据迁移
 	PageSize           int        `json:"page_size"`
 	MaxParallel        int        `json:"max_parallel"`
 	IntraTableParallel int        `json:"intra_table_parallel"`
@@ -67,16 +69,20 @@ func GetDataMigrationJob(jobID string) (*DataMigrationJob, error) {
 	return &j, nil
 }
 
-func ListDataMigrationJobs() ([]DataMigrationJob, error) {
+func ListDataMigrationJobs(ownerID uint, isAdmin bool) ([]DataMigrationJob, error) {
 	var jobs []DataMigrationJob
-	if err := DB.Order("id desc").Find(&jobs).Error; err != nil {
+	q := DB.Order("id desc")
+	if !isAdmin {
+		q = q.Where("owner_id = ?", ownerID)
+	}
+	if err := q.Find(&jobs).Error; err != nil {
 		return nil, err
 	}
 	return jobs, nil
 }
 
-func ListDataMigrationJobsWithConn() ([]DataMigrationJobWithConn, error) {
-	jobs, err := ListDataMigrationJobs()
+func ListDataMigrationJobsWithConn(ownerID uint, isAdmin bool) ([]DataMigrationJobWithConn, error) {
+	jobs, err := ListDataMigrationJobs(ownerID, isAdmin)
 	if err != nil {
 		return nil, err
 	}

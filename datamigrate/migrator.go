@@ -30,6 +30,19 @@ type Config struct {
 	ChangeOwner        bool     // 迁移后将表/视图/序列的 owner 改为 TargetSchema
 	TargetDBType       string   // "postgres" | "gaussdb" | "seabox"
 	StripViewSchemas   []string // 需从视图定义中剥离的模式名前缀(忽略大小写)
+	// Objects 为"仅对象迁移"模式的对象类型白名单,取值:
+	// "primary_keys" | "indexes" | "sequences" | "foreign_keys"。
+	// 为空时保持完整迁移流程(建表+数据+全部 Post-DDL);非空时只执行所列对象类型的 Post-DDL,
+	// 跳过建表、数据迁移、行数对比。
+	Objects []string
+	// TableNames 精确表名列表(源库原始大小写)。仅对象迁移模式下作为迁移表集合,
+	// 与 ListTables 结果取交集;为空则回退到 Mode+Filter 过滤。
+	TableNames []string
+}
+
+// objectMode 判断是否为"仅对象迁移"模式(只补主键/索引/序列/外键,不建表不迁数据)
+func (c Config) objectMode() bool {
+	return len(c.Objects) > 0
 }
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
@@ -101,7 +114,33 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.log.Errorf("获取表列表失败: %v", err)
 		return report
 	}
-	tables := FilterTables(allTables, m.cfg.Mode, m.cfg.Filter)
+	var tables []string
+	if m.cfg.objectMode() && len(m.cfg.TableNames) > 0 {
+		// 仅对象模式且指定了精确表名:与源库实际表取交集,过滤脏数据
+		allSet := make(map[string]bool, len(allTables))
+		for _, t := range allTables {
+			allSet[t] = true
+		}
+		for _, t := range m.cfg.TableNames {
+			if allSet[t] {
+				tables = append(tables, t)
+			}
+		}
+	} else {
+		tables = FilterTables(allTables, m.cfg.Mode, m.cfg.Filter)
+	}
+
+	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
+	if m.cfg.objectMode() {
+		m.log.Infof("开始对象迁移任务,共 %d 张表,对象类型: %s", len(tables), strings.Join(m.cfg.Objects, ", "))
+		report.Tables.Total = len(tables)
+		m.log.Info("=== 创建对象（主键/序列/索引/外键）===")
+		m.createPostDDL(ctx, &report, tables, allTables)
+		elapsed := time.Since(start).Round(time.Second)
+		m.log.Donef("对象迁移完成,耗时 %s", elapsed)
+		return report
+	}
+
 	m.log.Infof("开始迁移任务，共 %d 张表，pageSize=%d，maxParallel=%d，intraTableParallel=%d",
 		len(tables), m.cfg.PageSize, m.cfg.MaxParallel, m.cfg.IntraTableParallel)
 
@@ -428,126 +467,150 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		}
 	}
 
-	pks, err := m.reader.GetPrimaryKeys(ctx)
-	if err != nil {
-		m.log.Errorf("获取主键信息失败: %v", err)
-	} else {
-		filtered := make([]source.IndexInfo, 0, len(pks))
-		for _, pk := range pks {
-			if tableSet[pk.TableName] {
-				filtered = append(filtered, pk)
+	// want 判断某类对象是否需要迁移:
+	// 非对象模式(Objects 为空)→ 全部迁移,保持原行为;
+	// 对象模式 → 仅迁移 Objects 白名单中的类型。
+	want := func(objType string) bool {
+		if !m.cfg.objectMode() {
+			return true
+		}
+		for _, o := range m.cfg.Objects {
+			if o == objType {
+				return true
 			}
 		}
-		report.PrimaryKeys.Total = len(filtered)
-		for _, pk := range filtered {
-			if ctx.Err() != nil {
-				return
-			}
-			pkCopy := pk
-			pkCopy.TableName = m.objName(pk.TableName)
-			cols := make([]string, len(pk.Columns))
-			for i, c := range pk.Columns {
-				cols[i] = m.objName(c)
-			}
-			pkCopy.Columns = cols
-			ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
-			if m.cfg.Distributed {
-				if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
-					m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
+		return false
+	}
+
+	if want("primary_keys") {
+		pks, err := m.reader.GetPrimaryKeys(ctx)
+		if err != nil {
+			m.log.Errorf("获取主键信息失败: %v", err)
+		} else {
+			filtered := make([]source.IndexInfo, 0, len(pks))
+			for _, pk := range pks {
+				if tableSet[pk.TableName] {
+					filtered = append(filtered, pk)
 				}
 			}
-			if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
-				m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
-				report.PrimaryKeys.Failed++
-				report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkCopy.TableName, DDL: ddl, Error: err.Error()})
-			} else {
-				m.log.Indexf("创建主键 %s ... OK", pkCopy.TableName)
-				report.PrimaryKeys.Success++
+			report.PrimaryKeys.Total = len(filtered)
+			for _, pk := range filtered {
+				if ctx.Err() != nil {
+					return
+				}
+				pkCopy := pk
+				pkCopy.TableName = m.objName(pk.TableName)
+				cols := make([]string, len(pk.Columns))
+				for i, c := range pk.Columns {
+					cols[i] = m.objName(c)
+				}
+				pkCopy.Columns = cols
+				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
+				if m.cfg.Distributed {
+					if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
+						m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
+					}
+				}
+				if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
+					m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
+					report.PrimaryKeys.Failed++
+					report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkCopy.TableName, DDL: ddl, Error: err.Error()})
+				} else {
+					m.log.Indexf("创建主键 %s ... OK", pkCopy.TableName)
+					report.PrimaryKeys.Success++
+				}
 			}
 		}
 	}
 
-	seqs, err := m.reader.GetSequences(ctx)
-	if err != nil {
-		m.log.Errorf("获取序列信息失败: %v", err)
-	} else {
-		filtered := make([]source.SequenceInfo, 0, len(seqs))
-		for _, seq := range seqs {
-			if tableSet[seq.TableName] {
-				filtered = append(filtered, seq)
+	if want("sequences") {
+		seqs, err := m.reader.GetSequences(ctx)
+		if err != nil {
+			m.log.Errorf("获取序列信息失败: %v", err)
+		} else {
+			filtered := make([]source.SequenceInfo, 0, len(seqs))
+			for _, seq := range seqs {
+				if tableSet[seq.TableName] {
+					filtered = append(filtered, seq)
+				}
 			}
-		}
-		report.Sequences.Total = len(filtered)
-		for _, seq := range filtered {
-			if ctx.Err() != nil {
-				return
-			}
-			seqCopy := seq
-			seqCopy.TableName = m.objName(seq.TableName)
-			seqCopy.ColumnName = m.objName(seq.ColumnName)
-			ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy))
-			if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
-				m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
-				report.Sequences.Failed++
-				report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
-					Name:  fmt.Sprintf("%s.%s", seqCopy.TableName, seqCopy.ColumnName),
-					DDL:   ddl,
-					Error: err.Error(),
-				})
-			} else {
-				m.log.Indexf("创建序列 seq_%s_%s ... OK", seqCopy.TableName, seqCopy.ColumnName)
-				report.Sequences.Success++
-				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-					seqObj := fmt.Sprintf("seq_%s_%s", seqCopy.TableName, seqCopy.ColumnName)
-					if err := m.writer.ChangeOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
-						m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
+			report.Sequences.Total = len(filtered)
+			for _, seq := range filtered {
+				if ctx.Err() != nil {
+					return
+				}
+				seqCopy := seq
+				seqCopy.TableName = m.objName(seq.TableName)
+				seqCopy.ColumnName = m.objName(seq.ColumnName)
+				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy))
+				if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
+					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
+					report.Sequences.Failed++
+					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
+						Name:  fmt.Sprintf("%s.%s", seqCopy.TableName, seqCopy.ColumnName),
+						DDL:   ddl,
+						Error: err.Error(),
+					})
+				} else {
+					m.log.Indexf("创建序列 seq_%s_%s ... OK", seqCopy.TableName, seqCopy.ColumnName)
+					report.Sequences.Success++
+					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+						seqObj := fmt.Sprintf("seq_%s_%s", seqCopy.TableName, seqCopy.ColumnName)
+						if err := m.writer.ChangeOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
+							m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	indexes, err := m.reader.GetIndexes(ctx)
-	if err != nil {
-		m.log.Errorf("获取索引信息失败: %v", err)
-	} else {
-		filtered := make([]source.IndexInfo, 0, len(indexes))
-		for _, idx := range indexes {
-			if tableSet[idx.TableName] {
-				filtered = append(filtered, idx)
+	if want("indexes") {
+		indexes, err := m.reader.GetIndexes(ctx)
+		if err != nil {
+			m.log.Errorf("获取索引信息失败: %v", err)
+		} else {
+			filtered := make([]source.IndexInfo, 0, len(indexes))
+			for _, idx := range indexes {
+				if tableSet[idx.TableName] {
+					filtered = append(filtered, idx)
+				}
 			}
-		}
-		report.Indexes.Total = len(filtered)
-		for _, idx := range filtered {
-			if ctx.Err() != nil {
-				return
-			}
-			idxCopy := idx
-			idxCopy.TableName = m.objName(idx.TableName)
-			idxCopy.IndexName = m.objName(idx.IndexName)
-			cols := make([]string, len(idx.Columns))
-			for i, c := range idx.Columns {
-				cols[i] = m.objName(c)
-			}
-			idxCopy.Columns = cols
-			ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
-			if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
-				m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
-				report.Indexes.Failed++
-				report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
-					Name:  idxCopy.IndexName,
-					DDL:   ddl,
-					Error: err.Error(),
-				})
-			} else {
-				m.log.Indexf("创建索引 %s ... OK", idxCopy.IndexName)
-				report.Indexes.Success++
+			report.Indexes.Total = len(filtered)
+			for _, idx := range filtered {
+				if ctx.Err() != nil {
+					return
+				}
+				idxCopy := idx
+				idxCopy.TableName = m.objName(idx.TableName)
+				idxCopy.IndexName = m.objName(idx.IndexName)
+				cols := make([]string, len(idx.Columns))
+				for i, c := range idx.Columns {
+					cols[i] = m.objName(c)
+				}
+				idxCopy.Columns = cols
+				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
+				if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
+					m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
+					report.Indexes.Failed++
+					report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
+						Name:  idxCopy.IndexName,
+						DDL:   ddl,
+						Error: err.Error(),
+					})
+				} else {
+					m.log.Indexf("创建索引 %s ... OK", idxCopy.IndexName)
+					report.Indexes.Success++
+				}
 			}
 		}
 	}
 
-	// include 模式：跳过外键（引用表可能不在迁移范围内）
-	if m.cfg.Mode != "include" {
+	// 外键:
+	// - 非对象模式:沿用原逻辑,include 模式跳过(引用表可能不在迁移范围内)
+	// - 对象模式:用户明确要求迁外键(want),引用表视为已存在,不受 include 限制
+	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include")
+	if migrateFK {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
 			m.log.Errorf("获取外键信息失败: %v", err)
@@ -595,8 +658,8 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		}
 	}
 
-	// include 模式：跳过视图（依赖表可能不在迁移范围内）
-	if m.cfg.Mode != "include" {
+	// 视图:对象模式不处理(不在对象迁移范围内);非对象模式沿用原逻辑,include 模式跳过
+	if !m.cfg.objectMode() && m.cfg.Mode != "include" {
 		views, err := m.reader.GetViews(ctx)
 		if err != nil {
 			m.log.Errorf("获取视图信息失败: %v", err)

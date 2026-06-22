@@ -2,6 +2,7 @@ package handler
 
 import (
 	"dbgold/driver"
+	"dbgold/middleware"
 	"dbgold/schema"
 	"dbgold/store"
 	"io"
@@ -22,7 +23,7 @@ func ExtractSchema(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	conn, err := store.GetConnection(body.ConnectionID)
+	conn, err := store.GetConnectionOwned(body.ConnectionID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
@@ -51,7 +52,7 @@ func ExtractFullSchema(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	conn, err := store.GetConnection(body.ConnectionID)
+	conn, err := store.GetConnectionOwned(body.ConnectionID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
@@ -107,7 +108,7 @@ func ExportDDL(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid connection_id"})
 		return
 	}
-	conn, err := store.GetConnection(uint(id))
+	conn, err := store.GetConnectionOwned(uint(id), middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return

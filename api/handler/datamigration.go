@@ -99,26 +99,19 @@ func StartDataMigration(c *gin.Context) {
 	}
 	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
 
-	srcConn, err := store.GetConnection(req.SrcConnID)
+	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
 		return
 	}
-	dstConn, err := store.GetConnection(req.DstConnID)
+	dstConn, err := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
 
 	// 校验迁移组合是否支持
-	supported := false
-	for _, p := range supportedPairs {
-		if p.Source == srcConn.DBType && p.Target == dstConn.DBType {
-			supported = true
-			break
-		}
-	}
-	if !supported {
+	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
 		})
@@ -135,6 +128,7 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		OwnerID:            middleware.GetCurrentUserID(c),
 		JobID:              jobID,
 		SrcConnID:          req.SrcConnID,
 		DstConnID:          req.DstConnID,
@@ -169,7 +163,6 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	srcDSN := buildDSN(srcConn)
-	dstDSN := buildDSN(dstConn)
 
 	// 若请求中指定了源库数据库，覆盖连接默认值
 	// 注意：Oracle 的 SrcDatabase 是 schema/owner 名，不是 service name，不能用来重建 DSN
@@ -220,18 +213,7 @@ func StartDataMigration(c *gin.Context) {
 			MaxIdleConns:    req.DstMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
 		}
-		var writer target.Writer
-		var writerErr error
-		switch dstConn.DBType {
-		case "gaussdb":
-			writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, dstPool)
-		case "dameng":
-			writer, writerErr = target.NewDaMeng(dstDSN, req.TargetSchema, dstPool)
-		case "highgo":
-			writer, writerErr = target.NewHighGo(dstDSN, req.TargetSchema, dstPool)
-		default:
-			writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, dstPool)
-		}
+		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool)
 		if writerErr != nil {
 			slog.Warn("连接目标库失败", "job_id", jobID, "db_type", dstConn.DBType, "err", writerErr)
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
@@ -309,6 +291,171 @@ func updateJobStatus(job *store.DataMigrationJob, status, summary string) {
 	_ = store.UpdateDataMigrationJob(job)
 }
 
+type startObjectMigrationRequest struct {
+	SrcConnID          uint     `json:"src_conn_id" binding:"required"`
+	DstConnID          uint     `json:"dst_conn_id" binding:"required"`
+	MigrateObjects     []string `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys"`
+	TableNames         []string `json:"table_names" binding:"required,min=1"`
+	SrcDatabase        string   `json:"src_database"`
+	TargetSchema       string   `json:"target_schema"`
+	LowerCaseNames     bool     `json:"lower_case_names"`
+	ChangeOwner        *bool    `json:"change_owner"` // nil 时默认 true
+	Distributed        bool     `json:"distributed"`
+	SrcMaxOpenConns    int      `json:"src_max_open_conns"`
+	SrcMaxIdleConns    int      `json:"src_max_idle_conns"`
+	SrcConnMaxLifetime int      `json:"src_conn_max_lifetime"`
+	DstMaxOpenConns    int      `json:"dst_max_open_conns"`
+	DstMaxIdleConns    int      `json:"dst_max_idle_conns"`
+	DstConnMaxLifetime int      `json:"dst_conn_max_lifetime"`
+}
+
+// StartObjectMigration 创建并启动"仅对象迁移"后台任务:只为指定表补建所选对象类型
+// (主键/索引/序列/外键),不建表、不迁数据。复用 SSE 日志流与迁移报告基础设施。
+func StartObjectMigration(c *gin.Context) {
+	var req startObjectMigrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
+
+	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
+		return
+	}
+	dstConn, err := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
+		return
+	}
+	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
+		})
+		return
+	}
+
+	jobID := uuid.New().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	job := datamigrate.Registry.Register(jobID, cancel)
+
+	srcConnDatabase := srcConn.Database
+	if req.SrcDatabase != "" {
+		srcConnDatabase = req.SrcDatabase
+	}
+	dbJob := &store.DataMigrationJob{
+		OwnerID:         middleware.GetCurrentUserID(c),
+		JobID:           jobID,
+		SrcConnID:       req.SrcConnID,
+		DstConnID:       req.DstConnID,
+		SrcDBType:       srcConn.DBType,
+		DstDBType:       dstConn.DBType,
+		MigrateMode:     "all",
+		MigrateObjects:  strings.Join(req.MigrateObjects, ","),
+		LowerCaseNames:  req.LowerCaseNames,
+		DstSchema:       req.TargetSchema,
+		ChangeOwner:     changeOwner,
+		Status:          "running",
+		SrcConnName:     srcConn.Name,
+		SrcConnHost:     srcConn.Host,
+		SrcConnPort:     srcConn.Port,
+		SrcConnDatabase: srcConnDatabase,
+		SrcConnUsername: srcConn.Username,
+		DstConnName:     dstConn.Name,
+		DstConnHost:     dstConn.Host,
+		DstConnPort:     dstConn.Port,
+		DstConnDatabase: dstConn.Database,
+		DstConnUsername: dstConn.Username,
+	}
+	if err := store.CreateDataMigrationJob(dbJob); err != nil {
+		cancel()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建任务记录失败"})
+		return
+	}
+
+	go func() {
+		defer func() {
+			close(job.LogCh)
+			datamigrate.Registry.Remove(jobID)
+		}()
+
+		srcPool := source.ConnPoolConfig{
+			MaxOpenConns:    req.SrcMaxOpenConns,
+			MaxIdleConns:    req.SrcMaxIdleConns,
+			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
+		}
+		reader, readerErr := buildSrcReader(srcConn, req.SrcDatabase, srcPool)
+		if readerErr != nil {
+			slog.Warn("连接源库失败", "job_id", jobID, "db_type", srcConn.DBType, "err", readerErr)
+			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
+			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
+			return
+		}
+		defer reader.Close()
+
+		dstPool := target.ConnPoolConfig{
+			MaxOpenConns:    req.DstMaxOpenConns,
+			MaxIdleConns:    req.DstMaxIdleConns,
+			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
+		}
+		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool)
+		if writerErr != nil {
+			slog.Warn("连接目标库失败", "job_id", jobID, "db_type", dstConn.DBType, "err", writerErr)
+			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
+			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
+			return
+		}
+		defer writer.Close()
+
+		if req.TargetSchema != "" {
+			exists, err := writer.SchemaExists(ctx, req.TargetSchema)
+			if err != nil {
+				job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
+				updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
+				return
+			}
+			if !exists {
+				msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema)
+				job.LogCh <- "[ERROR] " + msg
+				updateJobStatus(dbJob, "failed", msg)
+				return
+			}
+		}
+
+		cfg := datamigrate.Config{
+			Mode:           "all",
+			Objects:        req.MigrateObjects,
+			TableNames:     req.TableNames,
+			LowerCaseNames: req.LowerCaseNames,
+			Distributed:    req.Distributed,
+			TargetSchema:   req.TargetSchema,
+			ChangeOwner:    changeOwner,
+			TargetDBType:   dstConn.DBType,
+		}
+		m := datamigrate.NewMigrator(reader, writer, job, cfg)
+		report := m.Run(ctx)
+
+		if reportJSON, err := json.Marshal(report); err == nil {
+			_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
+				JobID:      jobID,
+				ReportJSON: string(reportJSON),
+			})
+		}
+
+		status := "done"
+		if ctx.Err() != nil {
+			status = "cancelled"
+		} else if report.PrimaryKeys.Failed+report.Indexes.Failed+
+			report.Sequences.Failed+report.Constraints.Failed > 0 {
+			status = "failed"
+		}
+		updateJobStatus(dbJob, status, "")
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"job_id": jobID})
+}
+
 // StreamDataMigration 通过 SSE 推送迁移日志（token 从 query string 读取，因为 EventSource 不支持 Authorization header）
 func StreamDataMigration(c *gin.Context) {
 	// 手动验证 token（EventSource 不支持自定义 header）
@@ -317,24 +464,32 @@ func StreamDataMigration(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少 token"})
 		return
 	}
-	if err := middleware.ValidateTokenString(tokenStr); err != nil {
+	claims, err := middleware.ValidateTokenString(tokenStr)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "token 无效"})
 		return
 	}
+	isAdmin := claims.Role == "admin"
 
 	jobID := c.Query("jobID")
 	if jobID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "jobID 必填"})
 		return
 	}
+	// 归属校验：普通用户只能订阅自己的任务，admin 不限
+	ownerJob, ownerErr := store.GetDataMigrationJob(jobID)
+	if ownerErr != nil || ownerJob == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+		return
+	}
+	if !isAdmin && ownerJob.OwnerID != claims.UserID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+		return
+	}
 	job := datamigrate.Registry.Get(jobID)
 	if job == nil {
 		// goroutine 可能已退出（如连接失败），从数据库读取 summary 通过 SSE 推给前端
-		dbJob, dbErr := store.GetDataMigrationJob(jobID)
-		if dbErr != nil || dbJob == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
-			return
-		}
+		dbJob := ownerJob
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
@@ -400,6 +555,31 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	}
 }
 
+// buildDstWriter 根据目标连接类型构造对应的 Writer(消除多处重复的初始化 switch)
+func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.ConnPoolConfig) (target.Writer, error) {
+	dstDSN := buildDSN(dstConn)
+	switch dstConn.DBType {
+	case "gaussdb":
+		return target.NewGaussDB(dstDSN, targetSchema, pool)
+	case "dameng":
+		return target.NewDaMeng(dstDSN, targetSchema, pool)
+	case "highgo":
+		return target.NewHighGo(dstDSN, targetSchema, pool)
+	default: // postgres, seabox
+		return target.NewPostgres(dstDSN, targetSchema, pool)
+	}
+}
+
+// isSupportedPair 校验源→目标迁移组合是否受支持
+func isSupportedPair(srcType, dstType string) bool {
+	for _, p := range supportedPairs {
+		if p.Source == srcType && p.Target == dstType {
+			return true
+		}
+	}
+	return false
+}
+
 // ListConnectionViews 列出源连接指定库下的全部视图名(query 参数 database 可选覆盖默认库)
 func ListConnectionViews(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -407,7 +587,7 @@ func ListConnectionViews(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	conn, err := store.GetConnection(uint(id))
+	conn, err := store.GetConnectionOwned(uint(id), middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
@@ -432,6 +612,34 @@ func ListConnectionViews(c *gin.Context) {
 	c.JSON(http.StatusOK, names)
 }
 
+// ListConnectionTables 列出源连接指定库下的全部表名(query 参数 database 可选覆盖默认库)
+func ListConnectionTables(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	conn, err := store.GetConnectionOwned(uint(id), middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return
+	}
+	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{})
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer reader.Close()
+	tables, err := reader.ListTables(c.Request.Context())
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, tables)
+}
+
 type migrateViewsRequest struct {
 	SrcConnID        uint     `json:"src_conn_id" binding:"required"`
 	DstConnID        uint     `json:"dst_conn_id" binding:"required"`
@@ -452,25 +660,18 @@ func MigrateViews(c *gin.Context) {
 	}
 	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
 
-	srcConn, err := store.GetConnection(req.SrcConnID)
+	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
 		return
 	}
-	dstConn, err := store.GetConnection(req.DstConnID)
+	dstConn, err := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
 
-	supported := false
-	for _, p := range supportedPairs {
-		if p.Source == srcConn.DBType && p.Target == dstConn.DBType {
-			supported = true
-			break
-		}
-	}
-	if !supported {
+	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
 		})
@@ -484,19 +685,7 @@ func MigrateViews(c *gin.Context) {
 	}
 	defer reader.Close()
 
-	dstDSN := buildDSN(dstConn)
-	var writer target.Writer
-	var writerErr error
-	switch dstConn.DBType {
-	case "gaussdb":
-		writer, writerErr = target.NewGaussDB(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
-	case "dameng":
-		writer, writerErr = target.NewDaMeng(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
-	case "highgo":
-		writer, writerErr = target.NewHighGo(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
-	default:
-		writer, writerErr = target.NewPostgres(dstDSN, req.TargetSchema, target.ConnPoolConfig{})
-	}
+	writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, target.ConnPoolConfig{})
 	if writerErr != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接目标库失败: %v", writerErr)})
 		return
@@ -553,6 +742,16 @@ func MigrateViews(c *gin.Context) {
 // CancelDataMigration 取消运行中的迁移任务
 func CancelDataMigration(c *gin.Context) {
 	jobID := c.Param("jobID")
+	// 归属校验：普通用户只能取消自己的任务
+	dbJob, err := store.GetDataMigrationJob(jobID)
+	if err != nil || dbJob == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+		return
+	}
+	if !middleware.IsAdmin(c) && dbJob.OwnerID != middleware.GetCurrentUserID(c) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
+		return
+	}
 	job := datamigrate.Registry.Get(jobID)
 	if job == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
@@ -564,7 +763,7 @@ func CancelDataMigration(c *gin.Context) {
 
 // ListDataMigrationJobs 返回历史任务列表（含连接快照信息）
 func ListDataMigrationJobs(c *gin.Context) {
-	jobs, err := store.ListDataMigrationJobsWithConn()
+	jobs, err := store.ListDataMigrationJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -575,6 +774,16 @@ func ListDataMigrationJobs(c *gin.Context) {
 // GetDataMigrationReport 返回指定任务的迁移报告 JSON
 func GetDataMigrationReport(c *gin.Context) {
 	jobID := c.Param("jobID")
+	// 归属校验：普通用户只能查看自己任务的报告
+	dbJob, err := store.GetDataMigrationJob(jobID)
+	if err != nil || dbJob == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在"})
+		return
+	}
+	if !middleware.IsAdmin(c) && dbJob.OwnerID != middleware.GetCurrentUserID(c) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在"})
+		return
+	}
 	r, err := store.GetDataMigrationReport(jobID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在"})

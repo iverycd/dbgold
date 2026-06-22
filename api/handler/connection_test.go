@@ -21,9 +21,19 @@ func setupConnTest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 }
 
+// fakeAuth 注入认证中间件设置的 userID/role，模拟已登录用户。
+func fakeAuth(userID uint, role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set("userID", userID)
+		c.Set("role", role)
+		c.Next()
+	}
+}
+
 func TestCreateAndListConnection(t *testing.T) {
 	setupConnTest(t)
 	r := gin.New()
+	r.Use(fakeAuth(1, "user"))
 	r.POST("/api/connections", handler.CreateConnection)
 	r.GET("/api/connections", handler.GetConnections)
 
@@ -52,13 +62,15 @@ func TestCreateAndListConnection(t *testing.T) {
 func TestDeleteConnection(t *testing.T) {
 	setupConnTest(t)
 	conn := &store.Connection{
-		Name: "del-me", DBType: "mysql",
+		OwnerID: 1,
+		Name:    "del-me", DBType: "mysql",
 		Host: "localhost", Port: 3306,
 		Database: "db", Username: "u", Password: "p",
 	}
 	require.NoError(t, store.CreateConnection(conn))
 
 	r := gin.New()
+	r.Use(fakeAuth(1, "user"))
 	r.DELETE("/api/connections/:id", handler.DeleteConnection)
 	req := httptest.NewRequest("DELETE", "/api/connections/1", nil)
 	w := httptest.NewRecorder()

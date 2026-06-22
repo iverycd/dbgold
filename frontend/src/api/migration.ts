@@ -182,3 +182,37 @@ export interface MigrateViewsRequest {
 // migrateViews 同步批量迁移选中的视图，返回每个视图的结果
 export const migrateViews = (data: MigrateViewsRequest) =>
   api.post<{ results: ObjectResult[] }>('/migration/view-migrate', data, { timeout: 300000 })
+
+// ===== 对象迁移（主键/索引/序列/外键）=====
+
+// 对象迁移支持的对象类型
+export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys'
+
+// listConnectionTables 列出源连接指定库下的全部表名
+export const listConnectionTables = (connId: number, database?: string) =>
+  api.get<string[]>(`/connections/${connId}/tables`, {
+    params: database ? { database } : undefined,
+  })
+
+export interface StartObjectMigrationRequest {
+  src_conn_id: number
+  dst_conn_id: number
+  migrate_objects: MigrateObjectType[]
+  table_names: string[]
+  src_database?: string
+  target_schema?: string
+  lower_case_names?: boolean
+  change_owner?: boolean
+  distributed?: boolean
+  src_max_open_conns?: number
+  src_max_idle_conns?: number
+  src_conn_max_lifetime?: number
+  dst_max_open_conns?: number
+  dst_max_idle_conns?: number
+  dst_conn_max_lifetime?: number
+}
+
+// startObjectMigration 启动仅对象迁移任务，返回 job_id（复用 SSE 日志流与迁移报告）
+export const startObjectMigration = (data: StartObjectMigrationRequest) =>
+  api.post<{ job_id: string }>('/migration/object-migrate', data)
+

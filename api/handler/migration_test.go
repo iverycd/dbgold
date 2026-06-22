@@ -19,6 +19,7 @@ func setupMigrationRouter() *gin.Engine {
 	store.Init(&config.Config{SQLitePath: ":memory:"})
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(fakeAuth(1, "user"))
 	r.POST("/api/migration/diff", handler.RunDiffMigration)
 	r.GET("/api/migration", handler.ListMigrations)
 	r.GET("/api/migration/:id", handler.GetMigration)

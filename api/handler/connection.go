@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"dbgold/datamigrate/source"
 	"dbgold/driver"
+	"dbgold/middleware"
 	"dbgold/store"
 	"fmt"
 	"net/http"
@@ -32,6 +33,12 @@ type updateConnectionRequest struct {
 	Database string `json:"database"`
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password"`
+}
+
+// connectionWithOwner 在连接基础上附带所属用户名，仅 admin 视角返回。
+type connectionWithOwner struct {
+	store.Connection
+	OwnerUsername string `json:"owner_username"`
 }
 
 func buildDSN(c *store.Connection) string {
@@ -65,10 +72,44 @@ func buildDSN(c *store.Connection) string {
 	return ""
 }
 
+// getOwnedConnection 取连接并做归属校验：普通用户只能访问自己的连接，admin 可访问任意。
+// 非归属或不存在统一返回 404（不暴露存在性）。校验失败时已写入响应，调用方应直接 return。
+func getOwnedConnection(c *gin.Context, id uint) (*store.Connection, bool) {
+	conn, err := store.GetConnection(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return nil, false
+	}
+	if !middleware.IsAdmin(c) && conn.OwnerID != middleware.GetCurrentUserID(c) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+		return nil, false
+	}
+	return conn, true
+}
+
 func GetConnections(c *gin.Context) {
-	list, err := store.ListConnections()
+	isAdmin := middleware.IsAdmin(c)
+	list, err := store.ListConnections(middleware.GetCurrentUserID(c), isAdmin)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// admin 视角附带「所属用户」用户名，便于前端展示归属
+	if isAdmin {
+		users, err := store.ListUsers()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		nameByID := make(map[uint]string, len(users))
+		for _, u := range users {
+			nameByID[u.ID] = u.Username
+		}
+		resp := make([]connectionWithOwner, len(list))
+		for i := range list {
+			resp[i] = connectionWithOwner{Connection: list[i], OwnerUsername: nameByID[list[i].OwnerID]}
+		}
+		c.JSON(http.StatusOK, resp)
 		return
 	}
 	c.JSON(http.StatusOK, list)
@@ -81,7 +122,8 @@ func CreateConnection(c *gin.Context) {
 		return
 	}
 	conn := &store.Connection{
-		Name: body.Name, DBType: body.DBType,
+		OwnerID: middleware.GetCurrentUserID(c),
+		Name:    body.Name, DBType: body.DBType,
 		Host: body.Host, Port: body.Port,
 		Database: body.Database, Username: body.Username, Password: body.Password,
 	}
@@ -96,6 +138,9 @@ func UpdateConnection(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if _, ok := getOwnedConnection(c, uint(id)); !ok {
 		return
 	}
 	var body updateConnectionRequest
@@ -124,6 +169,9 @@ func DeleteConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
+	if _, ok := getOwnedConnection(c, uint(id)); !ok {
+		return
+	}
 	if err := store.DeleteConnection(uint(id)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -137,9 +185,8 @@ func TestConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	conn, err := store.GetConnection(uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+	conn, ok := getOwnedConnection(c, uint(id))
+	if !ok {
 		return
 	}
 	d, err := driver.NewDriver(conn.DBType)
@@ -162,9 +209,8 @@ func ListConnectionDatabases(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	conn, err := store.GetConnection(uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+	conn, ok := getOwnedConnection(c, uint(id))
+	if !ok {
 		return
 	}
 	var reader source.Reader
@@ -202,9 +248,8 @@ func ListConnectionSchemas(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	conn, err := store.GetConnection(uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
+	conn, ok := getOwnedConnection(c, uint(id))
+	if !ok {
 		return
 	}
 

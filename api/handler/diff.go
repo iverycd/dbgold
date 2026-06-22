@@ -3,6 +3,7 @@ package handler
 import (
 	"dbgold/diff"
 	"dbgold/driver"
+	"dbgold/middleware"
 	"dbgold/schema"
 	"dbgold/store"
 	"fmt"
@@ -28,12 +29,12 @@ func DiffSchemas(c *gin.Context) {
 		return
 	}
 
-	srcSchema, err := resolveSchema(body.SrcConnectionID, body.SrcDatabase, body.SrcSchema)
+	srcSchema, err := resolveSchema(c, body.SrcConnectionID, body.SrcDatabase, body.SrcSchema)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "src: " + err.Error()})
 		return
 	}
-	dstSchema, err := resolveSchema(body.DstConnectionID, body.DstDatabase, body.DstSchema)
+	dstSchema, err := resolveSchema(c, body.DstConnectionID, body.DstDatabase, body.DstSchema)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "dst: " + err.Error()})
 		return
@@ -43,14 +44,14 @@ func DiffSchemas(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-func resolveSchema(connID uint, dbName string, inline *schema.Schema) (*schema.Schema, error) {
+func resolveSchema(c *gin.Context, connID uint, dbName string, inline *schema.Schema) (*schema.Schema, error) {
 	if inline != nil {
 		return inline, nil
 	}
 	if connID == 0 || dbName == "" {
 		return nil, fmt.Errorf("connection_id and database are required when schema is not provided inline")
 	}
-	conn, err := store.GetConnection(connID)
+	conn, err := store.GetConnectionOwned(connID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		return nil, fmt.Errorf("connection not found")
 	}
