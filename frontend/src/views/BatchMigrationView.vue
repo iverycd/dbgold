@@ -15,7 +15,8 @@
             :auto-upload="false"
             accept=".xlsx"
             :limit="1"
-            :show-file-list="true"
+            :show-file-list="false"
+            :file-list="fileList"
             @change="handleFileChange"
           >
             <template #upload-button>
@@ -25,6 +26,14 @@
               </a-button>
             </template>
           </a-upload>
+
+          <span v-if="selectedFile" class="conn-text">
+            <icon-file /> {{ selectedFile.name }}
+            <a-button type="text" size="mini" status="danger" @click="clearFile">
+              <template #icon><icon-delete /></template>
+              移除
+            </a-button>
+          </span>
 
           <a-button @click="handleDownloadTemplate">
             <template #icon><icon-download /></template>
@@ -254,6 +263,7 @@ import MigrationReportPanel from './MigrationReportPanel.vue'
 
 const phase = ref<'upload' | 'progress'>('upload')
 const selectedFile = ref<File | null>(null)
+const fileList = ref<FileItem[]>([])
 const validating = ref(false)
 const starting = ref(false)
 const validateResult = ref<BatchValidateResult | null>(null)
@@ -290,8 +300,15 @@ const batchStatusText = computed(() =>
   batchStatus.value === 'running' ? '执行中' : batchStatus.value === 'done' ? '已完成' : '已取消',
 )
 
-function handleFileChange(_: FileItem[], item: FileItem) {
+function handleFileChange(list: FileItem[], item: FileItem) {
+  fileList.value = list.slice(-1) // 只保留最后选择的一个
   selectedFile.value = item.file ?? null
+  validateResult.value = null
+}
+
+function clearFile() {
+  fileList.value = []
+  selectedFile.value = null
   validateResult.value = null
 }
 
@@ -381,6 +398,7 @@ function resetToUpload() {
   stopPolling()
   phase.value = 'upload'
   selectedFile.value = null
+  fileList.value = []
   validateResult.value = null
   jobs.value = []
   batchId.value = ''
