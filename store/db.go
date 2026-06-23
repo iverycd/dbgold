@@ -63,7 +63,7 @@ func Init(cfg *config.Config) {
 		slog.Error("failed to open sqlite", "err", err)
 		os.Exit(1)
 	}
-	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}, &LoginHistory{}, &BatchMigration{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Connection{}, &MigrationHistory{}, &DataMigrationJob{}, &DataMigrationReport{}, &LoginHistory{}, &BatchMigration{}, &MigrationTicket{}); err != nil {
 		slog.Error("failed to migrate", "err", err)
 		os.Exit(1)
 	}

@@ -28,6 +28,10 @@ func NewRouter() *gin.Engine {
 		public.POST("/login", handler.Login)
 	}
 
+	// 公开端点：前台用户无需登录即可提交迁移工单 / 上传源库离线文件
+	r.POST("/api/tickets", handler.SubmitTicket)
+	r.POST("/api/tickets/upload", handler.UploadTicketFile)
+
 	authed := r.Group("/api")
 	authed.Use(middleware.Auth())
 	{
@@ -82,6 +86,13 @@ func NewRouter() *gin.Engine {
 		admin.POST("/users", handler.CreateUser)
 		admin.PUT("/users/:id", handler.UpdateUser)
 		admin.GET("/login-history", handler.ListLoginHistory)
+
+		admin.GET("/tickets", handler.ListTickets)
+		admin.GET("/tickets/:id", handler.GetTicket)
+		admin.PUT("/tickets/:id", handler.UpdateTicket)
+		admin.PUT("/tickets/:id/info", handler.UpdateTicketInfo)
+		admin.POST("/tickets/:id/connections", handler.CreateTicketConnections)
+		admin.DELETE("/tickets/:id", handler.DeleteTicket)
 	}
 
 	return r

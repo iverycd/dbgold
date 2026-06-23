@@ -39,6 +39,16 @@ func GetConnectionOwned(id, ownerID uint, isAdmin bool) (*Connection, error) {
 	return c, nil
 }
 
+// FindConnectionByOwnerName 按 owner + name 查找连接，用于「按名复用」判断。
+// 未命中返回 gorm.ErrRecordNotFound。
+func FindConnectionByOwnerName(ownerID uint, name string) (*Connection, error) {
+	var c Connection
+	if err := DB.Where("owner_id = ? AND name = ?", ownerID, name).First(&c).Error; err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 func UpdateConnection(id uint, updates map[string]any) error {
 	return DB.Model(&Connection{}).Where("id = ?", id).Updates(updates).Error
 }

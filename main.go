@@ -37,6 +37,7 @@ func main() {
 
 	middleware.SetJWTSecret(cfg.JWTSecret)
 	handler.SetJWTSecret(cfg.JWTSecret)
+	handler.SetUploadConfig(cfg.UploadDir, cfg.MaxUploadBytes)
 
 	r := api.NewRouter()
 	slog.Info("starting server", "port", cfg.Port)

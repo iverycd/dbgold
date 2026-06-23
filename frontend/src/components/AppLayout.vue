@@ -32,6 +32,10 @@
           <template #icon><icon-user-group /></template>
           用户管理
         </a-menu-item>
+        <a-menu-item v-if="auth.user?.role === 'admin'" key="/tickets">
+          <template #icon><icon-file /></template>
+          工单管理
+        </a-menu-item>
         <a-menu-item key="/schema">
           <template #icon><icon-storage /></template>
           Schema 提取
@@ -98,6 +102,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/batch-migration': '批量迁移',
   '/history': '迁移历史',
   '/users': '用户管理',
+  '/tickets': '工单管理',
   '/login-history': '登录历史',
 }
 

@@ -756,7 +756,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
@@ -778,6 +778,8 @@ import {
 } from '@/api/migration'
 
 const activeTab = ref('data-migrate')
+
+const route = useRoute()
 
 const diffSrc = reactive({ connId: undefined as number | undefined, dbName: '' })
 const diffDst = reactive({ connId: undefined as number | undefined, dbName: '' })
@@ -1086,6 +1088,33 @@ onMounted(async () => {
   ])
   connections.value = connsRes.data
   supportedPairs.value = pairsRes.data
+
+  // 从工单「一键迁移」跳转而来时，按 query 预选源/目标连接并触发与手动选择一致的联动。
+  const srcQ = Number(route.query.src)
+  const dstQ = Number(route.query.dst)
+  const srcDbQ = typeof route.query.srcdb === 'string' ? route.query.srcdb : ''
+  if (srcQ && connections.value.some((c) => c.id === srcQ)) {
+    dataMigrate.srcConnId = srcQ
+    checkPairSupport()
+    // 等源库数据库列表加载完成后，再按工单携带的库名预选（目标 schema 不预选）。
+    await loadSrcDatabases(srcQ)
+    if (srcDbQ) {
+      // 精确匹配 → 忽略大小写匹配 → 兜底直接塞入并选中，确保工单库名一定带入。
+      const exact = dataMigrate.srcDatabases.find((db) => db === srcDbQ)
+      const ci = exact ?? dataMigrate.srcDatabases.find((db) => db.toLowerCase() === srcDbQ.toLowerCase())
+      if (ci) {
+        dataMigrate.srcDatabase = ci
+      } else {
+        dataMigrate.srcDatabases = [srcDbQ, ...dataMigrate.srcDatabases]
+        dataMigrate.srcDatabase = srcDbQ
+      }
+    }
+  }
+  if (dstQ && connections.value.some((c) => c.id === dstQ)) {
+    dataMigrate.dstConnId = dstQ
+    checkPairSupport()
+    loadDstSchemas(dstQ)
+  }
 })
 
 onUnmounted(() => {
