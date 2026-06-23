@@ -30,7 +30,10 @@ func DaMengToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "real":
 		return "real"
 	case "float", "double", "double precision":
-		return "double precision"
+		if col.Precision > 0 {
+			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)
+		}
+		return "decimal"
 	case "numeric", "number", "decimal":
 		if col.Precision > 0 {
 			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)

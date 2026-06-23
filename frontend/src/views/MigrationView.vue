@@ -944,8 +944,11 @@ async function loadSrcDatabases(connId: number) {
   try {
     const res = await listConnectionDatabases(connId)
     dataMigrate.srcDatabases = res.data ?? []
-  } catch {
-    // 不支持列库时静默忽略，用户仍可迁移连接默认数据库
+  } catch (e: any) {
+    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
+    if (e?.response?.status !== 400) {
+      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
+    }
   }
 }
 
@@ -957,8 +960,8 @@ async function loadDstSchemas(connId: number) {
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
-  } catch {
-    // 列 schema 失败时静默忽略
+  } catch (e: any) {
+    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
 }
 
@@ -1190,8 +1193,11 @@ async function vmLoadSrcDatabases(connId: number) {
   try {
     const res = await listConnectionDatabases(connId)
     viewMigrate.srcDatabases = res.data ?? []
-  } catch {
-    // 不支持列库时静默忽略，仍可加载连接默认库的视图
+  } catch (e: any) {
+    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
+    if (e?.response?.status !== 400) {
+      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
+    }
   }
   // 无可选库列表时（如 oracle），直接按连接默认库加载视图
   if (viewMigrate.srcDatabases.length === 0) await vmLoadViews()
@@ -1205,8 +1211,8 @@ async function vmLoadDstSchemas(connId: number) {
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
-  } catch {
-    // 列 schema 失败时静默忽略
+  } catch (e: any) {
+    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
 }
 
@@ -1352,8 +1358,11 @@ async function omLoadSrcDatabases(connId: number) {
   try {
     const res = await listConnectionDatabases(connId)
     objMigrate.srcDatabases = res.data ?? []
-  } catch {
-    // 不支持列库时静默忽略,仍可加载连接默认库的表
+  } catch (e: any) {
+    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
+    if (e?.response?.status !== 400) {
+      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
+    }
   }
   if (objMigrate.srcDatabases.length === 0) await omLoadTables()
 }
@@ -1366,8 +1375,8 @@ async function omLoadDstSchemas(connId: number) {
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []
-  } catch {
-    // 列 schema 失败时静默忽略
+  } catch (e: any) {
+    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
 }
 

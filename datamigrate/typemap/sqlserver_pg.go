@@ -72,7 +72,7 @@ func SQLServerToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "real":
 		return "real"
 	case "float":
-		return "double precision"
+		return "decimal"
 	case "xml":
 		return "text"
 	case "geography", "geometry":

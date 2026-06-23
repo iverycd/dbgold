@@ -24,7 +24,10 @@ func MySQLToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "bigint":
 		return "bigint"
 	case "float", "double":
-		return "double precision"
+		if col.Precision > 0 {
+			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)
+		}
+		return "decimal"
 	case "decimal", "numeric":
 		if col.Precision > 0 {
 			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)

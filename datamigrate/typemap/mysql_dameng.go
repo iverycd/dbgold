@@ -32,8 +32,13 @@ func MySQLToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 			return fmt.Sprintf("NUMBER(%d,%d)", col.Precision, col.Scale)
 		}
 		return "NUMBER"
-	case "float", "double", "real":
+	case "real":
 		return "BINARY_DOUBLE"
+	case "float", "double":
+		if col.Precision > 0 {
+			return fmt.Sprintf("DECIMAL(%d,%d)", col.Precision, col.Scale)
+		}
+		return "DECIMAL"
 	case "char":
 		if useNvarchar2 {
 			return fmt.Sprintf("NVARCHAR2(%d)", col.Length)
