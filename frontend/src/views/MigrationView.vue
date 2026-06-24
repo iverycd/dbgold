@@ -82,9 +82,10 @@
           <a-alert
             v-if="dataMigrate.unsupportedMsg"
             type="error"
-            :content="dataMigrate.unsupportedMsg"
             style="margin-bottom: 16px"
-          />
+          >
+            {{ dataMigrate.unsupportedMsg }}
+          </a-alert>
 
           <!-- 迁移范围 -->
           <a-form-item label="迁移范围" style="margin-bottom: 16px">
@@ -379,9 +380,10 @@
           <a-alert
             v-if="viewMigrate.unsupportedMsg"
             type="error"
-            :content="viewMigrate.unsupportedMsg"
             style="margin-bottom: 16px"
-          />
+          >
+            {{ viewMigrate.unsupportedMsg }}
+          </a-alert>
 
           <!-- 视图选择 -->
           <a-spin :loading="viewMigrate.loadingViews" style="display:block">
@@ -579,9 +581,10 @@
           <a-alert
             v-if="objMigrate.unsupportedMsg"
             type="error"
-            :content="objMigrate.unsupportedMsg"
             style="margin-bottom: 16px"
-          />
+          >
+            {{ objMigrate.unsupportedMsg }}
+          </a-alert>
 
           <!-- 对象类型选择 -->
           <a-form-item label="迁移对象类型" style="margin-bottom: 16px">

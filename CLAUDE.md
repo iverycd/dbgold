@@ -110,6 +110,33 @@ app.use(ArcoVueIcon)
 
 ---
 
+## Arco Design Vue：`a-alert` 文字用默认插槽，没有 `content` prop
+
+### 问题描述
+
+`MigrationView.vue` 的不支持提示（oracle → dameng 等组合）只显示了红色叉号图标，文字区域空白。
+
+### 根本原因
+
+Arco Design **Vue** 的 `a-alert` **没有 `content` prop**——文字内容必须通过**默认插槽**传入。写成 `:content="msg"` 时绑定被静默忽略，只渲染了 `type` 对应的图标，文字不显示。（`content` 是 React/其它库的 API。）
+
+### 正确做法
+
+```vue
+<!-- 错误：content 绑定被忽略，只剩图标 -->
+<a-alert v-if="msg" type="error" :content="msg" />
+
+<!-- 正确：文字走默认插槽 -->
+<a-alert v-if="msg" type="error">
+  {{ msg }}
+</a-alert>
+```
+
+- `title` 是 prop（粗体标题），但正文内容只能用插槽。
+- 排查"alert 只有图标没文字"时，第一时间检查是不是用了 `:content`。
+
+---
+
 ## datamigrate：Reader 方法必须返回原始大小写
 
 ### 规则
