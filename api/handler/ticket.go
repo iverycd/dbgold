@@ -43,6 +43,10 @@ type submitTicketRequest struct {
 	Applicant string `json:"applicant"`
 	Remark    string `json:"remark"`
 
+	// 图形验证码：captcha_id 由 GET /api/tickets/captcha 签发，captcha_code 为用户输入。
+	CaptchaID   string `json:"captcha_id" binding:"required"`
+	CaptchaCode string `json:"captcha_code" binding:"required"`
+
 	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
 	SrcHost     string `json:"src_host"`
 	SrcPort     int    `json:"src_port" binding:"omitempty,min=1,max=65535"`
@@ -194,6 +198,11 @@ func SubmitTicket(c *gin.Context) {
 	var body submitTicketRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// 校验图形验证码（单次有效，校验后即失效）。
+	if !verifyCaptcha(body.CaptchaID, body.CaptchaCode) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "验证码错误或已失效，请重新输入"})
 		return
 	}
 	// 源库连接信息与离线文件二选一：都为空则拒绝。

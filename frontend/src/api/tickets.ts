@@ -5,6 +5,8 @@ import api from './index'
 export interface TicketForm {
   applicant: string
   remark: string
+  captcha_id: string
+  captcha_code: string
   src_db_type: string
   src_host: string
   src_port: number
@@ -81,6 +83,10 @@ export interface TicketInfoForm {
 // 公开提交（无需登录）
 export const submitTicket = (form: TicketForm) =>
   api.post<{ id: number; message: string }>('/tickets', form)
+
+// 获取图形验证码（无需登录）。image 为 base64 PNG data-uri，可直接作为 img src。
+export const getCaptcha = () =>
+  api.get<{ captcha_id: string; image: string }>('/tickets/captcha')
 
 // uploadTicketFile 上传源库离线文件（.sql / .dmp，最大 50GB）。
 // timeout: 0 关闭超时（默认 30s 对大文件远不够）；onProgress 透传 0-100 百分比。

@@ -28,9 +28,11 @@ func NewRouter() *gin.Engine {
 		public.POST("/login", handler.Login)
 	}
 
-	// 公开端点：前台用户无需登录即可提交迁移工单 / 上传源库离线文件
-	r.POST("/api/tickets", handler.SubmitTicket)
-	r.POST("/api/tickets/upload", handler.UploadTicketFile)
+	// 公开端点：前台用户无需登录即可提交迁移工单 / 上传源库离线文件。
+	// 均按客户端 IP 限流，提交接口额外要求图形验证码，防止滥用。
+	r.GET("/api/tickets/captcha", middleware.RateLimit(30, 10), handler.IssueCaptcha)
+	r.POST("/api/tickets", middleware.RateLimit(5, 3), handler.SubmitTicket)
+	r.POST("/api/tickets/upload", middleware.RateLimit(10, 5), handler.UploadTicketFile)
 
 	authed := r.Group("/api")
 	authed.Use(middleware.Auth())

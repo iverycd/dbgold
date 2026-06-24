@@ -144,6 +144,26 @@
           <a-input-password v-model="form.dst_password" placeholder="密码（选填）" />
         </a-form-item>
 
+        <a-form-item label="验证码" field="captcha_code" :rules="[{ required: true, message: '请输入验证码' }]">
+          <div class="ticket-captcha">
+            <a-input
+              v-model="form.captcha_code"
+              placeholder="请输入图中字符"
+              allow-clear
+              @press-enter="handleSubmit"
+            />
+            <img
+              v-if="captchaImg"
+              class="captcha-img"
+              :src="captchaImg"
+              alt="验证码"
+              title="点击刷新验证码"
+              @click="loadCaptcha"
+            />
+            <a-spin v-else class="captcha-img" />
+          </div>
+        </a-form-item>
+
         <div class="ticket-actions">
           <a-button type="primary" size="large" long :loading="submitting" @click="handleSubmit">
             提交工单
@@ -165,7 +185,7 @@
 import { ref, reactive, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { FileItem } from '@arco-design/web-vue'
-import { submitTicket, uploadTicketFile, type TicketForm } from '@/api/tickets'
+import { submitTicket, uploadTicketFile, getCaptcha, type TicketForm } from '@/api/tickets'
 
 const year = new Date().getFullYear()
 
@@ -211,6 +231,7 @@ function onPointerMove(e: MouseEvent) {
 
 onMounted(() => {
   if (glowEnabled.value) window.addEventListener('mousemove', onPointerMove, { passive: true })
+  loadCaptcha()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onPointerMove)
@@ -242,6 +263,8 @@ const defaultPortMap: Record<string, number> = {
 const defaultForm = (): TicketForm => ({
   applicant: '',
   remark: '',
+  captcha_id: '',
+  captcha_code: '',
   src_db_type: 'mysql',
   src_host: '',
   src_port: 3306,
@@ -263,6 +286,20 @@ const form = reactive(defaultForm())
 const formRef = ref<{ validate: () => Promise<Record<string, unknown> | undefined> } | null>(null)
 const submitting = ref(false)
 const submitted = ref(false)
+
+// 图形验证码：captchaImg 为后端签发的 base64 图片，form.captcha_id 随表单一并提交
+const captchaImg = ref('')
+async function loadCaptcha() {
+  captchaImg.value = ''
+  form.captcha_code = ''
+  try {
+    const { data } = await getCaptcha()
+    form.captcha_id = data.captcha_id
+    captchaImg.value = data.image
+  } catch {
+    Message.error('验证码加载失败，请点击图片重试')
+  }
+}
 
 // 源库提供方式：connection（填连接信息）/ file（上传离线文件）
 const srcMode = ref<'connection' | 'file'>('connection')
@@ -331,8 +368,14 @@ async function handleSubmit() {
     await submitTicket(form)
     submitted.value = true
   } catch (e: any) {
-    const detail = e?.response?.data?.error
-    Message.error(detail ? `提交失败：${detail}` : '提交失败')
+    if (e?.response?.status === 429) {
+      Message.error('提交过于频繁，请稍后再试')
+    } else {
+      const detail = e?.response?.data?.error
+      Message.error(detail ? `提交失败：${detail}` : '提交失败')
+    }
+    // 验证码单次有效，提交失败后刷新一张新的
+    loadCaptcha()
   } finally {
     submitting.value = false
   }
@@ -343,6 +386,7 @@ function resetForm() {
   srcMode.value = 'connection'
   clearFile()
   submitted.value = false
+  loadCaptcha()
 }
 </script>
 
@@ -567,6 +611,21 @@ function resetForm() {
 }
 .ticket-actions {
   margin-top: 24px;
+}
+.ticket-captcha {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.ticket-captcha .captcha-img {
+  height: 36px;
+  width: 108px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.06);
 }
 .ticket-tip {
   margin-bottom: 16px;
