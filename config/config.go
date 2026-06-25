@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -15,11 +17,17 @@ type Config struct {
 	LogDir         string
 	LogLevel       string
 	LogMaxFiles    int
+	LogMaxTotalMB  int64  // 日志总量上限（MB），默认 2048（=2GB）
 	UploadDir      string // 工单离线文件落盘目录
 	MaxUploadBytes int64  // 单个上传文件大小上限（字节）
+	JWTExpireHours int    // JWT 过期时间（小时），默认 240
 }
 
 func Load() *Config {
+	// 自动加载 .env 文件（若存在）。godotenv.Load 不会覆盖已存在的真实环境变量，
+	// 因此 systemd/容器注入的变量优先级高于 .env 文件。文件不存在时静默跳过。
+	_ = godotenv.Load()
+
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
 		SQLitePath:     getEnv("SQLITE_PATH", "dbgold.db"),
@@ -29,8 +37,10 @@ func Load() *Config {
 		LogDir:         getEnv("LOG_DIR", "log"),
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
 		LogMaxFiles:    getEnvInt("LOG_MAX_FILES", 7),
+		LogMaxTotalMB:  getEnvInt64("LOG_MAX_TOTAL_MB", 2048),
 		UploadDir:      getEnv("UPLOAD_DIR", "uploads"),
 		MaxUploadBytes: getEnvInt64("MAX_UPLOAD_BYTES", 50<<30), // 默认 50GB
+		JWTExpireHours: getEnvInt("JWT_EXPIRE_HOURS", 240),
 	}
 }
 

@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-const maxTotalBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GB
-
 type rotator struct {
 	cfg     *Config
 	mu      sync.Mutex
@@ -61,7 +59,7 @@ func (r *rotator) Write(p []byte) (int, error) {
 
 	n, err := r.file.Write(p)
 
-	if r.totalSizeOf(r.logFiles()) > maxTotalBytes {
+	if r.totalSizeOf(r.logFiles()) > r.cfg.MaxTotalBytes {
 		r.cleanup()
 	}
 	return n, err
@@ -93,7 +91,7 @@ func (r *rotator) cleanup() {
 		os.Remove(filepath.Join(r.cfg.Dir, files[0].Name()))
 		files = files[1:]
 	}
-	for r.totalSizeOf(files) > maxTotalBytes && len(files) > 1 {
+	for r.totalSizeOf(files) > r.cfg.MaxTotalBytes && len(files) > 1 {
 		os.Remove(filepath.Join(r.cfg.Dir, files[0].Name()))
 		files = files[1:]
 	}

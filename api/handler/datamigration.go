@@ -45,6 +45,10 @@ var supportedPairs = []SupportedPair{
 	{Source: "sqlserver", Target: "highgo"},
 	{Source: "dameng", Target: "highgo"},
 	{Source: "oracle", Target: "highgo"},
+	{Source: "oracle", Target: "mysql"},
+	{Source: "mysql", Target: "mysql"},
+	{Source: "sqlserver", Target: "mysql"},
+	{Source: "dameng", Target: "mysql"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -597,6 +601,8 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 		return target.NewDaMeng(dstDSN, targetSchema, pool)
 	case "highgo":
 		return target.NewHighGo(dstDSN, targetSchema, pool)
+	case "mysql":
+		return target.NewMySQL(dstDSN, targetSchema, pool)
 	default: // postgres, seabox
 		return target.NewPostgres(dstDSN, targetSchema, pool)
 	}

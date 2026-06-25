@@ -17,6 +17,14 @@ func SetJWTSecret(secret string) {
 	jwtSecret = []byte(secret)
 }
 
+var jwtExpireHours = 240 // 默认值，被 SetJWTExpireHours 覆盖
+
+func SetJWTExpireHours(h int) {
+	if h > 0 {
+		jwtExpireHours = h
+	}
+}
+
 func Login(c *gin.Context) {
 	var body struct {
 		Username string `json:"username" binding:"required"`
@@ -43,7 +51,7 @@ func Login(c *gin.Context) {
 		UserID: user.ID,
 		Role:   user.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(240 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(jwtExpireHours) * time.Hour)),
 		},
 	}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)

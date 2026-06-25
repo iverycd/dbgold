@@ -16,9 +16,10 @@ func main() {
 	cfg := config.Load()
 
 	cleanup, err := logger.Init(&logger.Config{
-		Dir:      cfg.LogDir,
-		Level:    cfg.LogLevel,
-		MaxFiles: cfg.LogMaxFiles,
+		Dir:           cfg.LogDir,
+		Level:         cfg.LogLevel,
+		MaxFiles:      cfg.LogMaxFiles,
+		MaxTotalBytes: cfg.LogMaxTotalMB * 1024 * 1024,
 	})
 	if err != nil {
 		log.Fatalf("failed to init logger: %v", err)
@@ -37,6 +38,7 @@ func main() {
 
 	middleware.SetJWTSecret(cfg.JWTSecret)
 	handler.SetJWTSecret(cfg.JWTSecret)
+	handler.SetJWTExpireHours(cfg.JWTExpireHours)
 	handler.SetUploadConfig(cfg.UploadDir, cfg.MaxUploadBytes)
 
 	r := api.NewRouter()

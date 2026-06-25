@@ -10,9 +10,10 @@ import (
 
 // Config 日志配置，独立于 config.Config 避免循环依赖。
 type Config struct {
-	Dir      string // 日志目录，默认 "log"
-	Level    string // debug/info/warn/error，默认 "info"
-	MaxFiles int    // 最多保留文件数，默认 7
+	Dir           string // 日志目录，默认 "log"
+	Level         string // debug/info/warn/error，默认 "info"
+	MaxFiles      int    // 最多保留文件数，默认 7
+	MaxTotalBytes int64  // 日志总量上限（字节），默认 2GB
 }
 
 // Init 初始化全局 slog logger，同时输出到 stdout 和日志文件。
@@ -27,6 +28,9 @@ func Init(cfg *Config) (cleanup func(), err error) {
 	}
 	if cfg.Level == "" {
 		cfg.Level = "info"
+	}
+	if cfg.MaxTotalBytes <= 0 {
+		cfg.MaxTotalBytes = 2 * 1024 * 1024 * 1024
 	}
 
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {

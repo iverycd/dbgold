@@ -12,6 +12,7 @@ import (
 
 	_ "gitee.com/chunanyong/dm"
 	"github.com/gin-gonic/gin"
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 )
 
@@ -259,6 +260,12 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
+	// MySQL 的 schema 即 database,走 information_schema.schemata 查询
+	if conn.DBType == "mysql" {
+		listMySQLSchemas(c, conn)
+		return
+	}
+
 	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" && conn.DBType != "highgo" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
 		return
@@ -330,6 +337,41 @@ func listDaMengSchemas(c *gin.Context, conn *store.Connection) {
 		   'CTISYS','SYSUSERS'
 		 )
 		 ORDER BY USERNAME`)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			continue
+		}
+		schemas = append(schemas, s)
+	}
+	c.JSON(http.StatusOK, schemas)
+}
+
+// listMySQLSchemas 列出 MySQL 可作为目标的 schema(即 database),
+// 过滤掉 MySQL 内置系统库。
+func listMySQLSchemas(c *gin.Context, conn *store.Connection) {
+	db, err := sql.Open("mysql", buildDSN(conn))
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(c.Request.Context(),
+		`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
+		 WHERE SCHEMA_NAME NOT IN (
+		   'information_schema','mysql','performance_schema','sys'
+		 )
+		 ORDER BY SCHEMA_NAME`)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
