@@ -99,6 +99,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
+import { isAxiosError } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -115,11 +116,26 @@ async function handleSubmit({ errors }: { errors?: Record<string, unknown> }) {
   try {
     await auth.login(form.username, form.password)
     router.push('/connections')
-  } catch {
-    Message.error('用户名或密码错误，请重试')
+  } catch (err) {
+    Message.error(loginErrorMessage(err))
   } finally {
     loading.value = false
   }
+}
+
+/* 根据真实错误区分提示:401 才是账号密码错误,其余多为后端/网关/网络问题 */
+function loginErrorMessage(err: unknown): string {
+  if (isAxiosError(err)) {
+    const status = err.response?.status
+    if (status === 401) return '用户名或密码错误，请重试'
+    if (status === 502 || status === 503 || status === 504) {
+      return `服务暂时不可用 (${status})，后端服务可能未启动，请联系管理员`
+    }
+    if (status) return `登录失败 (HTTP ${status})，请稍后重试`
+    // 没有 response:网络不通、跨域、超时等
+    return '无法连接到服务器，请检查网络或服务是否正常'
+  }
+  return '登录失败，请稍后重试'
 }
 </script>
 

@@ -28,6 +28,9 @@ func NewRouter() *gin.Engine {
 		public.POST("/login", handler.Login)
 	}
 
+	// 公开端点：系统版本信息，登录页也能取到，本身无敏感性。
+	r.GET("/api/version", handler.GetVersion)
+
 	// 公开端点：前台用户无需登录即可提交迁移工单 / 上传源库离线文件。
 	// 均按客户端 IP 限流，提交接口额外要求图形验证码，防止滥用。
 	r.GET("/api/tickets/captcha", middleware.RateLimit(30, 10), handler.IssueCaptcha)
@@ -76,6 +79,14 @@ func NewRouter() *gin.Engine {
 		authed.GET("/migration/batch/template", handler.DownloadBatchTemplate)
 		authed.GET("/migration/batch/:batchID/jobs", handler.ListBatchJobs)
 		authed.POST("/migration/batch/:batchID/cancel", handler.CancelBatch)
+
+		// 工单管理:只读 + 处理,普通用户也可用(仅需登录)。
+		// 路径保留 /admin/tickets 字面命名以兼容前端,功能上不限角色。
+		authed.GET("/admin/tickets", handler.ListTickets)
+		authed.GET("/admin/tickets/:id", handler.GetTicket)
+		authed.PUT("/admin/tickets/:id", handler.UpdateTicket)
+		authed.PUT("/admin/tickets/:id/info", handler.UpdateTicketInfo)
+		authed.POST("/admin/tickets/:id/connections", handler.CreateTicketConnections)
 	}
 
 	// SSE 端点：token 从 query string 读取，因为浏览器 EventSource 不支持自定义 header
@@ -89,11 +100,7 @@ func NewRouter() *gin.Engine {
 		admin.PUT("/users/:id", handler.UpdateUser)
 		admin.GET("/login-history", handler.ListLoginHistory)
 
-		admin.GET("/tickets", handler.ListTickets)
-		admin.GET("/tickets/:id", handler.GetTicket)
-		admin.PUT("/tickets/:id", handler.UpdateTicket)
-		admin.PUT("/tickets/:id/info", handler.UpdateTicketInfo)
-		admin.POST("/tickets/:id/connections", handler.CreateTicketConnections)
+		// 工单删除仅限 admin;其余工单接口已下放到 authed 组。
 		admin.DELETE("/tickets/:id", handler.DeleteTicket)
 	}
 

@@ -24,7 +24,7 @@ const router = createRouter({
     { path: '/migration', component: MigrationView },
     { path: '/batch-migration', component: BatchMigrationView },
     { path: '/history', component: HistoryView },
-    { path: '/tickets', component: TicketsManageView, meta: { adminOnly: true } },
+    { path: '/tickets', component: TicketsManageView },
     { path: '/users', component: UsersView, meta: { adminOnly: true } },
     { path: '/login-history', component: LoginHistoryView, meta: { adminOnly: true } },
   ],

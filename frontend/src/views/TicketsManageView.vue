@@ -42,7 +42,7 @@
             <a-space>
               <a-button size="small" @click="openDetail(record.id)">详情</a-button>
               <a-button size="small" type="primary" @click="openProcess(record)">处理</a-button>
-              <a-popconfirm content="确认删除此工单？" @ok="handleDelete(record.id)">
+              <a-popconfirm v-if="isAdmin" content="确认删除此工单？" @ok="handleDelete(record.id)">
                 <a-button size="small" status="danger">删除</a-button>
               </a-popconfirm>
             </a-space>
@@ -227,7 +227,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import {
@@ -242,8 +242,13 @@ import {
   type TicketInfoForm,
 } from '@/api/tickets'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+
+// 删除工单仅限 admin;普通用户只读 + 处理。
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 // 数据库类型下拉选项，取值与连接管理（ConnectionsView）保持一致。
 const dbTypeOptions = [

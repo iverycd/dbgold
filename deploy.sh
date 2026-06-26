@@ -87,7 +87,14 @@ remote_copy() {
 
 echo "==> [1/6] 交叉编译后端 (linux/amd64)..."
 cd "$SCRIPT_DIR"
-GOOS=linux GOARCH=amd64 "$GO_BIN" build -o dbgold dbgold
+# 采集 git 版本信息，通过 ldflags 注入到 api/handler 包变量。
+# BuildTime 用无空格 ISO 格式，避免 ldflags 引号问题；git describe 无 tag 时回退到短 commit。
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PKG="dbgold/api/handler"
+LDFLAGS="-X ${PKG}.Version=${VERSION} -X ${PKG}.GitCommit=${GIT_COMMIT} -X ${PKG}.BuildTime=${BUILD_TIME}"
+GOOS=linux GOARCH=amd64 "$GO_BIN" build -ldflags "$LDFLAGS" -o dbgold dbgold
 if [[ ! -f "$SCRIPT_DIR/dbgold" ]]; then
   echo "错误: 后端编译产物 dbgold 不存在。" >&2
   exit 1

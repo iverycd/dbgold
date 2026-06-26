@@ -32,7 +32,7 @@
           <template #icon><icon-user-group /></template>
           用户管理
         </a-menu-item>
-        <a-menu-item v-if="auth.user?.role === 'admin'" key="/tickets">
+        <a-menu-item key="/tickets">
           <template #icon><icon-file /></template>
           工单管理
         </a-menu-item>
@@ -49,6 +49,14 @@
           登录历史
         </a-menu-item>
       </a-menu>
+
+      <a-tooltip v-if="versionInfo" position="right">
+        <template #content>
+          commit: {{ versionInfo.git_commit }}<br />
+          构建: {{ versionInfo.build_time }}
+        </template>
+        <div class="sider-version">{{ versionInfo.version }}</div>
+      </a-tooltip>
     </a-layout-sider>
 
     <a-layout>
@@ -86,13 +94,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { getVersion, type VersionInfo } from '@/api/system'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+
+const versionInfo = ref<VersionInfo | null>(null)
+onMounted(async () => {
+  try {
+    const { data } = await getVersion()
+    versionInfo.value = data
+  } catch {
+    versionInfo.value = { version: 'dev', git_commit: 'unknown', build_time: 'unknown' }
+  }
+})
 
 const PAGE_TITLES: Record<string, string> = {
   '/connections': '连接管理',
@@ -133,6 +152,13 @@ function handleLogout() {
   box-shadow: 2px 0 8px rgba(15, 23, 42, 0.12);
 }
 
+/* sider 内容区设为纵向 flex，使版本块贴底 */
+.sider :deep(.arco-layout-sider-children) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
 .logo {
   height: 92px;
   display: flex;
@@ -170,6 +196,17 @@ function handleLogout() {
   background: transparent !important;
   border: none !important;
   overflow-y: auto;
+}
+
+.sider-version {
+  flex-shrink: 0;
+  padding: 12px 0;
+  text-align: center;
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+  color: rgba(203, 213, 225, 0.6);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: default;
 }
 
 /* ─── Header（浅色）─── */
