@@ -53,7 +53,7 @@
       <a-tooltip v-if="versionInfo" position="right">
         <template #content>
           commit: {{ versionInfo.git_commit }}<br />
-          构建: {{ versionInfo.build_time }}
+          构建: {{ buildTimeLocal }}
         </template>
         <div class="sider-version">{{ versionInfo.version }}</div>
       </a-tooltip>
@@ -111,6 +111,24 @@ onMounted(async () => {
   } catch {
     versionInfo.value = { version: 'dev', git_commit: 'unknown', build_time: 'unknown' }
   }
+})
+
+// 后端 build_time 是 UTC（ISO，带 Z），这里转成北京时间展示
+const buildTimeLocal = computed(() => {
+  const raw = versionInfo.value?.build_time
+  if (!raw || raw === 'unknown') return raw ?? ''
+  const d = new Date(raw)
+  if (isNaN(d.getTime())) return raw
+  return d.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
 })
 
 const PAGE_TITLES: Record<string, string> = {
