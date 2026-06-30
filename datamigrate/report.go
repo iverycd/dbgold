@@ -24,6 +24,7 @@ type MigrationReport struct {
 	Indexes     CategoryReport  `json:"indexes"`
 	Constraints CategoryReport  `json:"constraints"`
 	Sequences   CategoryReport  `json:"sequences"`
+	Comments    CategoryReport  `json:"comments"`
 	Triggers    CategoryReport  `json:"triggers"`
 	RowCounts   []TableRowCount `json:"rowCounts"`
 }
@@ -49,6 +50,7 @@ func newMigrationReport() MigrationReport {
 		Indexes:     newCategoryReport(),
 		Constraints: newCategoryReport(),
 		Sequences:   newCategoryReport(),
+		Comments:    newCategoryReport(),
 		Triggers:    newCategoryReport(),
 		RowCounts:   []TableRowCount{},
 	}

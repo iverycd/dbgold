@@ -73,3 +73,15 @@ func TestDaMengCaps(t *testing.T) {
 		t.Error("dameng should require IDENTITY_INSERT")
 	}
 }
+
+func TestDaMengComment(t *testing.T) {
+	d := NewDaMeng()
+	tbl := source.CommentInfo{TableName: "T", Comment: "用户表"}
+	if got := JoinSQL(d.CommentStatements("APP", tbl)); got != `COMMENT ON TABLE "APP"."T" IS '用户表'` {
+		t.Errorf("table comment mismatch: %s", got)
+	}
+	col := source.CommentInfo{TableName: "T", ColumnName: "NAME", Comment: "it's"}
+	if got := JoinSQL(d.CommentStatements("APP", col)); got != `COMMENT ON COLUMN "APP"."T"."NAME" IS 'it''s'` {
+		t.Errorf("column comment mismatch: %s", got)
+	}
+}

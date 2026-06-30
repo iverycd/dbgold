@@ -330,7 +330,7 @@ func updateJobStatus(job *store.DataMigrationJob, status, summary string) {
 type startObjectMigrationRequest struct {
 	SrcConnID          uint     `json:"src_conn_id" binding:"required"`
 	DstConnID          uint     `json:"dst_conn_id" binding:"required"`
-	MigrateObjects     []string `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys"`
+	MigrateObjects     []string `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments"`
 	TableNames         []string `json:"table_names" binding:"required,min=1"`
 	SrcDatabase        string   `json:"src_database"`
 	TargetSchema       string   `json:"target_schema"`

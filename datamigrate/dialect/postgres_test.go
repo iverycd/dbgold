@@ -134,3 +134,17 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestPostgresComment_Golden(t *testing.T) {
+	d := NewPostgres("postgres")
+	// 表注释
+	tbl := source.CommentInfo{TableName: "users", Comment: "用户表"}
+	if got := JoinSQL(d.CommentStatements("s", tbl)); got != `COMMENT ON TABLE "s"."users" IS '用户表';` {
+		t.Errorf("table comment mismatch: %s", got)
+	}
+	// 列注释 + 单引号转义
+	col := source.CommentInfo{TableName: "users", ColumnName: "name", Comment: "it's name"}
+	if got := JoinSQL(d.CommentStatements("s", col)); got != `COMMENT ON COLUMN "s"."users"."name" IS 'it''s name';` {
+		t.Errorf("column comment mismatch: %s", got)
+	}
+}

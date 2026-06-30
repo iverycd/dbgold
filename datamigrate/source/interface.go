@@ -53,6 +53,13 @@ type ViewInfo struct {
 	Definition string // 已转换为目标库语法的 SQL
 }
 
+// CommentInfo 表示一条表注释或列注释
+type CommentInfo struct {
+	TableName  string
+	ColumnName string // 为空表示表注释,非空表示列注释
+	Comment    string
+}
+
 // Reader 是源库抽象接口，新增源库只需实现此接口
 type Reader interface {
 	// DBType 返回数据库类型标识，如 "mysql"
@@ -78,6 +85,8 @@ type Reader interface {
 	GetForeignKeys(ctx context.Context) ([]FKInfo, error)
 	// GetViews 返回所有视图信息
 	GetViews(ctx context.Context) ([]ViewInfo, error)
+	// GetComments 返回所有表注释和列注释信息(原始大小写)
+	GetComments(ctx context.Context) ([]CommentInfo, error)
 	// GetTriggerCount 返回源库触发器总数，失败时返回 0 和 error
 	GetTriggerCount(ctx context.Context) (int, error)
 	// CountRows 返回指定表的行数

@@ -27,6 +27,8 @@ type Writer interface {
 	CreateForeignKey(ctx context.Context, fk source.FKInfo) error
 	// CreateView 创建视图
 	CreateView(ctx context.Context, view source.ViewInfo) error
+	// CreateComment 创建表注释或列注释(cm.ColumnName 为空表示表注释)
+	CreateComment(ctx context.Context, cm source.CommentInfo) error
 	// CountRows 返回指定表的行数
 	CountRows(ctx context.Context, table string) (int64, error)
 	// AlterDistribute 在分布式数据库中将表的分布列设置为指定列（非分布式实现返回 nil）

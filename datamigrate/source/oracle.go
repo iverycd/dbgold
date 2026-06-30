@@ -535,3 +535,8 @@ func (r *OracleReader) CountRows(ctx context.Context, table string) (int64, erro
 	).Scan(&count)
 	return count, err
 }
+
+// GetComments 暂未实现 Oracle 注释读取,返回空(后续按 MySQL 模式扩展)。
+func (r *OracleReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
+	return nil, nil
+}

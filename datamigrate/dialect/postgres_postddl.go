@@ -81,6 +81,20 @@ func (d *PostgresDialect) ViewStatements(schema string, view source.ViewInfo) []
 	return []Statement{{SQL: ddl}}
 }
 
+// CommentStatements 生成 PostgreSQL 系的 COMMENT ON 语句。
+// 表注释作用于表;列注释作用于列,均不需要列类型。
+func (d *PostgresDialect) CommentStatements(schema string, cm source.CommentInfo) []Statement {
+	val := strings.ReplaceAll(cm.Comment, "'", "''")
+	var ddl string
+	if cm.ColumnName == "" {
+		ddl = fmt.Sprintf("COMMENT ON TABLE %s IS '%s';", d.qualified(schema, cm.TableName), val)
+	} else {
+		ddl = fmt.Sprintf(`COMMENT ON COLUMN %s."%s" IS '%s';`,
+			d.qualified(schema, cm.TableName), cm.ColumnName, val)
+	}
+	return []Statement{{SQL: ddl}}
+}
+
 var reGenRandomUUID = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
 
 // AdjustViewDefinition 复刻 migrator.adjustViewUUID(行59-68)。

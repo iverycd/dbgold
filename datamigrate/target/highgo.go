@@ -123,6 +123,10 @@ func (w *HighGoWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) e
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
+func (w *HighGoWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
+	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
+}
+
 func (w *HighGoWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
 	stmts := w.dia.ViewStatements(w.schema, view)
 	if w.schema == "" {

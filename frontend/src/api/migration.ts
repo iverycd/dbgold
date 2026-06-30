@@ -159,6 +159,7 @@ export interface MigrationReport {
   indexes: CategoryReport
   constraints: CategoryReport
   sequences: CategoryReport
+  comments: CategoryReport
   triggers: CategoryReport
   rowCounts: TableRowCount[]
 }
@@ -186,7 +187,7 @@ export const migrateViews = (data: MigrateViewsRequest) =>
 // ===== 对象迁移（主键/索引/序列/外键）=====
 
 // 对象迁移支持的对象类型
-export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys'
+export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'comments'
 
 // listConnectionTables 列出源连接指定库下的全部表名
 export const listConnectionTables = (connId: number, database?: string) =>

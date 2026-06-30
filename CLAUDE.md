@@ -181,6 +181,7 @@ seqCopy.ColumnName = m.objName(seq.ColumnName)
 - `GetIndexes`
 - `GetForeignKeys`（表名、引用表名、约束名）
 - `GetViews`（视图名）
+- `GetComments`（表名、列名）— 表注释/列注释,SQL 里同样禁止 `lower()/upper()`
 
 ---
 

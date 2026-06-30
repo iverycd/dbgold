@@ -484,6 +484,11 @@ func (r *SQLServerReader) CountRows(ctx context.Context, table string) (int64, e
 	return count, err
 }
 
+// GetComments 暂未实现 SQL Server 注释读取,返回空(后续按 MySQL 模式扩展)。
+func (r *SQLServerReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
+	return nil, nil
+}
+
 // stripTopLevelOrderBy 移除 SELECT 语句最外层的 ORDER BY 子句（不影响子查询内部的 ORDER BY）。
 // SQL Server 视图常用 "TOP 100 PERCENT ... ORDER BY" 的写法，移除 TOP 100 PERCENT 后
 // 剩余的顶层 ORDER BY 在 PostgreSQL 视图中不合法，需要一并去除。

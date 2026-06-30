@@ -116,6 +116,10 @@ func (w *DaMengWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) e
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
+func (w *DaMengWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
+	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
+}
+
 func (w *DaMengWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
 	return w.execStatements(ctx, w.dia.ViewStatements(w.schema, view))
 }

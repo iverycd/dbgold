@@ -31,7 +31,7 @@ type Config struct {
 	TargetDBType       string   // "postgres" | "gaussdb" | "seabox"
 	StripViewSchemas   []string // 需从视图定义中剥离的模式名前缀(忽略大小写)
 	// Objects 为"仅对象迁移"模式的对象类型白名单,取值:
-	// "primary_keys" | "indexes" | "sequences" | "foreign_keys"。
+	// "primary_keys" | "indexes" | "sequences" | "foreign_keys" | "comments"。
 	// 为空时保持完整迁移流程(建表+数据+全部 Post-DDL);非空时只执行所列对象类型的 Post-DDL,
 	// 跳过建表、数据迁移、行数对比。
 	Objects []string
@@ -679,6 +679,51 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					})
 				} else {
 					report.Views.Success++
+				}
+			}
+		}
+	}
+
+	// 注释(表注释 + 列注释)。注意:MySQL 目标库的列注释暂不支持(需列类型重建列定义),
+	// 此类语句 CommentStatements 返回空,这里跳过、不计入 Total/Failed。
+	if want("comments") {
+		comments, err := m.reader.GetComments(ctx)
+		if err != nil {
+			m.log.Errorf("获取注释信息失败: %v", err)
+		} else {
+			for _, cm := range comments {
+				if ctx.Err() != nil {
+					return
+				}
+				if !tableSet[cm.TableName] {
+					continue
+				}
+				cmCopy := cm
+				cmCopy.TableName = m.objName(cm.TableName)
+				if cm.ColumnName != "" {
+					cmCopy.ColumnName = m.objName(cm.ColumnName)
+				}
+				ddl := dialect.JoinSQL(m.writer.Dialect().CommentStatements(m.cfg.TargetSchema, cmCopy))
+				if ddl == "" {
+					// 目标库不支持该类注释(如 MySQL 列注释),跳过不计数
+					continue
+				}
+				name := cmCopy.TableName
+				if cmCopy.ColumnName != "" {
+					name = fmt.Sprintf("%s.%s", cmCopy.TableName, cmCopy.ColumnName)
+				}
+				report.Comments.Total++
+				if err := m.writer.CreateComment(ctx, cmCopy); err != nil {
+					m.log.Errorf("创建注释失败 [%s]: %v", name, err)
+					report.Comments.Failed++
+					report.Comments.Items = append(report.Comments.Items, ObjectResult{
+						Name:  name,
+						DDL:   ddl,
+						Error: err.Error(),
+					})
+				} else {
+					m.log.DDLf("创建注释 %s ... OK", name)
+					report.Comments.Success++
 				}
 			}
 		}

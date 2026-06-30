@@ -1274,12 +1274,13 @@ async function handleMigrateViews() {
   }
 }
 
-// ===== 对象迁移 Tab（主键/索引/序列/外键）=====
+// ===== 对象迁移 Tab（主键/索引/序列/外键/注释）=====
 const OBJECT_TYPE_OPTIONS: { label: string; value: MigrateObjectType }[] = [
   { label: '主键', value: 'primary_keys' },
   { label: '索引', value: 'indexes' },
   { label: '序列（自增列）', value: 'sequences' },
   { label: '外键', value: 'foreign_keys' },
+  { label: '注释', value: 'comments' },
 ]
 
 const objMigrate = reactive({

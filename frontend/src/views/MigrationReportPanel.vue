@@ -166,6 +166,7 @@ const tableRows = computed<ReportRow[]>(() => {
     { key: 'indexes', label: '索引', ...r.indexes, isTrigger: false },
     { key: 'constraints', label: '外键', ...r.constraints, isTrigger: false },
     { key: 'sequences', label: '序列', ...r.sequences, isTrigger: false },
+    { key: 'comments', label: '注释', ...r.comments, isTrigger: false },
     {
       key: 'triggers',
       label: '触发器',
@@ -221,6 +222,7 @@ function exportReport() {
     { label: '索引', cat: r.indexes, isTrigger: false },
     { label: '外键', cat: r.constraints, isTrigger: false },
     { label: '序列', cat: r.sequences, isTrigger: false },
+    { label: '注释', cat: r.comments, isTrigger: false },
     { label: '触发器', cat: r.triggers, isTrigger: true },
   ]
   for (const { label, cat, isTrigger } of categories) {

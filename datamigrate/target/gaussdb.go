@@ -133,6 +133,10 @@ func (w *GaussDBWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) 
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
+func (w *GaussDBWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
+	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
+}
+
 func (w *GaussDBWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
 	stmts := w.dia.ViewStatements(w.schema, view)
 	if w.schema == "" {

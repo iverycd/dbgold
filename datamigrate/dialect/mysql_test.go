@@ -85,3 +85,17 @@ func TestMySQLQuoteIdent(t *testing.T) {
 		t.Errorf("带 schema 限定错误: %s", got)
 	}
 }
+
+func TestMySQLComment(t *testing.T) {
+	d := NewMySQL()
+	// 表注释:ALTER TABLE ... COMMENT
+	tbl := source.CommentInfo{TableName: "users", Comment: "用户表"}
+	if got := JoinSQL(d.CommentStatements("db", tbl)); got != "ALTER TABLE `db`.`users` COMMENT = '用户表'" {
+		t.Errorf("表注释不符: %s", got)
+	}
+	// 列注释:MySQL 不支持(需列类型),应返回空切片
+	col := source.CommentInfo{TableName: "users", ColumnName: "name", Comment: "姓名"}
+	if stmts := d.CommentStatements("db", col); len(stmts) != 0 {
+		t.Errorf("列注释应返回空切片(已知限制),得到 %d 条: %v", len(stmts), stmts)
+	}
+}

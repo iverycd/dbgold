@@ -78,6 +78,10 @@ func (w *MySQLWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) er
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
+func (w *MySQLWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
+	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
+}
+
 func (w *MySQLWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
 	return w.execStatements(ctx, w.dia.ViewStatements(w.schema, view))
 }

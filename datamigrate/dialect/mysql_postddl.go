@@ -92,6 +92,20 @@ func (d *MySQLDialect) ViewStatements(schema string, view source.ViewInfo) []Sta
 	return []Statement{{SQL: sql}}
 }
 
+// CommentStatements MySQL 不支持 COMMENT ON 语句。
+//   - 表注释:ALTER TABLE ... COMMENT = '...' 可行,不需列类型。
+//   - 列注释:必须用 ALTER TABLE ... MODIFY COLUMN <col> <type> COMMENT '...' 重写整列定义,
+//     需要列的完整类型,而 CommentInfo 不携带类型信息。本次作为已知限制不实现,返回空切片,
+//     由调用方(migrator)跳过、不计入失败。
+func (d *MySQLDialect) CommentStatements(schema string, cm source.CommentInfo) []Statement {
+	if cm.ColumnName != "" {
+		return []Statement{}
+	}
+	val := strings.ReplaceAll(cm.Comment, "'", "''")
+	sql := fmt.Sprintf("ALTER TABLE %s COMMENT = '%s'", d.QualifyTable(schema, cm.TableName), val)
+	return []Statement{{SQL: sql}}
+}
+
 var reGenRandomUUIDMySQL = regexp.MustCompile(`(?i)\bgen_random_uuid\s*\(\s*\)`)
 
 // AdjustViewDefinition 把视图定义中的中间形式 UUID 函数替换为 MySQL 的 uuid()。

@@ -66,6 +66,10 @@ type Dialect interface {
 	ForeignKeyStatements(schema string, fk source.FKInfo) []Statement
 	ViewStatements(schema string, view source.ViewInfo) []Statement
 
+	// CommentStatements 生成表/列注释语句。cm.ColumnName 为空表示表注释。
+	// 不支持某种注释的目标库(如 MySQL 列注释)返回空切片,由调用方跳过。
+	CommentStatements(schema string, cm source.CommentInfo) []Statement
+
 	// AdjustViewDefinition 把视图定义中的中间形式函数(如 gen_random_uuid())
 	// 替换为目标库对应函数。
 	AdjustViewDefinition(def string) string

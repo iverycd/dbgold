@@ -711,3 +711,31 @@ func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error
 	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
 	return count, err
 }
+
+// GetComments 返回表注释和列注释。
+// 遵守"Reader 返回原始大小写"约定:SQL 不做 lower()/upper(),由 migrator.objName 统一规整。
+// ColumnName 为空表示表注释,非空表示列注释。仅过滤空注释。
+func (r *MySQLReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT TABLE_NAME, '' AS COLUMN_NAME, TABLE_COMMENT AS COMMENT
+		 FROM information_schema.TABLES
+		 WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND TABLE_COMMENT <> ''
+		 UNION ALL
+		 SELECT TABLE_NAME, COLUMN_NAME, COLUMN_COMMENT AS COMMENT
+		 FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = ? AND COLUMN_COMMENT <> ''
+		 ORDER BY TABLE_NAME, COLUMN_NAME`, r.dbName, r.dbName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var comments []CommentInfo
+	for rows.Next() {
+		var cm CommentInfo
+		if err := rows.Scan(&cm.TableName, &cm.ColumnName, &cm.Comment); err != nil {
+			return nil, err
+		}
+		comments = append(comments, cm)
+	}
+	return comments, rows.Err()
+}

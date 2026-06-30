@@ -73,6 +73,19 @@ func (d *DaMengDialect) ViewStatements(schema string, view source.ViewInfo) []St
 	return []Statement{{SQL: sql}}
 }
 
+// CommentStatements 达梦支持 COMMENT ON TABLE/COLUMN,语法同 PostgreSQL,均不需要列类型。
+func (d *DaMengDialect) CommentStatements(schema string, cm source.CommentInfo) []Statement {
+	val := strings.ReplaceAll(cm.Comment, "'", "''")
+	var sql string
+	if cm.ColumnName == "" {
+		sql = fmt.Sprintf("COMMENT ON TABLE %s IS '%s'", d.QualifyTable(schema, cm.TableName), val)
+	} else {
+		sql = fmt.Sprintf("COMMENT ON COLUMN %s.%s IS '%s'",
+			d.QualifyTable(schema, cm.TableName), d.QuoteIdent(cm.ColumnName), val)
+	}
+	return []Statement{{SQL: sql}}
+}
+
 // AdjustViewDefinition 把中间形式 gen_random_uuid() 替换为达梦的 sys_guid()。
 func (d *DaMengDialect) AdjustViewDefinition(def string) string {
 	return reGenRandomUUID.ReplaceAllString(def, "sys_guid()")
