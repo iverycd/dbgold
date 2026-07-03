@@ -23,11 +23,12 @@
 
 <script setup lang="ts">
 import { Message } from '@arco-design/web-vue'
+import { copyText } from '@/utils/clipboard'
 
 const props = defineProps<{ sqls: string[] }>()
 
 function copyAll() {
-  navigator.clipboard.writeText(props.sqls.join(';\n'))
+  copyText(props.sqls.join(';\n'))
     .then(() => Message.success('已复制到剪贴板'))
     .catch(() => Message.error('复制失败，请手动复制'))
 }

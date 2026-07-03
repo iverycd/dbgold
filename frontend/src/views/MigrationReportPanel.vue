@@ -137,6 +137,7 @@ import {
   type ObjectResult,
   type TableRowCount,
 } from '@/api/migration'
+import { copyText } from '@/utils/clipboard'
 
 const props = defineProps<{ jobID: string }>()
 
@@ -283,7 +284,7 @@ function exportReport() {
 
 async function copyDDL(ddl: string) {
   try {
-    await navigator.clipboard.writeText(ddl)
+    await copyText(ddl)
     Message.success('DDL 已复制')
   } catch {
     Message.error('复制失败')

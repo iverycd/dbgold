@@ -764,6 +764,7 @@ import { Message, Modal } from '@arco-design/web-vue'
 import ConnectionSelect from '@/components/ConnectionSelect.vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { copyText } from '@/utils/clipboard'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
@@ -1061,7 +1062,7 @@ function resetDataMigration() {
 }
 
 function copyLogs() {
-  navigator.clipboard.writeText(dataMigrate.logs.join('\n'))
+  copyText(dataMigrate.logs.join('\n')).catch(() => Message.error('复制失败'))
 }
 
 function handleBeforeUnload(e: BeforeUnloadEvent) {
@@ -1489,7 +1490,7 @@ function resetObjectMigration() {
 }
 
 function copyObjLogs() {
-  navigator.clipboard.writeText(objMigrate.logs.join('\n'))
+  copyText(objMigrate.logs.join('\n')).catch(() => Message.error('复制失败'))
 }
 
 </script>
