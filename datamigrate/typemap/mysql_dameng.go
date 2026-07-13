@@ -18,15 +18,16 @@ func MySQLToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 	switch dt {
 	case "tinyint":
-		return "NUMBER(3)"
+		return "TINYINT"
 	case "smallint":
-		return "NUMBER(5)"
+		return "SMALLINT"
 	case "mediumint":
-		return "NUMBER(7)"
+		// 达梦没有 mediumint，用 INT 承接（范围更大，不会溢出）
+		return "INT"
 	case "int", "integer":
-		return "NUMBER(10)"
+		return "INT"
 	case "bigint":
-		return "NUMBER(19)"
+		return "BIGINT"
 	case "decimal", "numeric":
 		if col.Precision > 0 {
 			return fmt.Sprintf("NUMBER(%d,%d)", col.Precision, col.Scale)
@@ -58,7 +59,7 @@ func MySQLToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "tinytext":
 		return "VARCHAR2(4000)"
 	case "text", "mediumtext", "longtext":
-		return "CLOB"
+		return "TEXT"
 	case "json":
 		return "CLOB"
 	case "date":

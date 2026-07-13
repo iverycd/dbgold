@@ -24,9 +24,9 @@ func TestDaMengCreateTable_Golden(t *testing.T) {
 	}
 	want := `DROP TABLE "APP"."users" CASCADE CONSTRAINTS;
 CREATE TABLE "APP"."users" (
-  "id" NUMBER(19) IDENTITY(1, 1) NOT NULL,
+  "id" BIGINT IDENTITY(1, 1) NOT NULL,
   "name" VARCHAR2(100) NOT NULL,
-  "age" NUMBER(10) DEFAULT '0',
+  "age" INT DEFAULT '0',
   "created" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`
 	if got := JoinSQL(stmts); got != want {

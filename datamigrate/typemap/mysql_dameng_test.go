@@ -14,9 +14,11 @@ func TestMySQLToDameng(t *testing.T) {
 		useNvarchar2 bool
 		expected     string
 	}{
-		{source.ColumnInfo{DataType: "tinyint"}, false, false, "NUMBER(3)"},
-		{source.ColumnInfo{DataType: "int"}, false, false, "NUMBER(10)"},
-		{source.ColumnInfo{DataType: "bigint"}, false, false, "NUMBER(19)"},
+		{source.ColumnInfo{DataType: "tinyint"}, false, false, "TINYINT"},
+		{source.ColumnInfo{DataType: "smallint"}, false, false, "SMALLINT"},
+		{source.ColumnInfo{DataType: "mediumint"}, false, false, "INT"},
+		{source.ColumnInfo{DataType: "int"}, false, false, "INT"},
+		{source.ColumnInfo{DataType: "bigint"}, false, false, "BIGINT"},
 		{source.ColumnInfo{DataType: "decimal", Precision: 10, Scale: 2}, false, false, "NUMBER(10,2)"},
 		{source.ColumnInfo{DataType: "decimal"}, false, false, "NUMBER"},
 		{source.ColumnInfo{DataType: "double"}, false, false, "DECIMAL"},
@@ -25,8 +27,9 @@ func TestMySQLToDameng(t *testing.T) {
 		{source.ColumnInfo{DataType: "varchar", Length: 100}, true, false, "VARCHAR2(100 CHAR)"},
 		{source.ColumnInfo{DataType: "varchar", Length: 100}, false, true, "NVARCHAR2(100)"},
 		{source.ColumnInfo{DataType: "char", Length: 8}, false, false, "CHAR(8)"},
-		{source.ColumnInfo{DataType: "text"}, false, false, "CLOB"},
-		{source.ColumnInfo{DataType: "longtext"}, false, false, "CLOB"},
+		{source.ColumnInfo{DataType: "text"}, false, false, "TEXT"},
+		{source.ColumnInfo{DataType: "mediumtext"}, false, false, "TEXT"},
+		{source.ColumnInfo{DataType: "longtext"}, false, false, "TEXT"},
 		{source.ColumnInfo{DataType: "json"}, false, false, "CLOB"},
 		{source.ColumnInfo{DataType: "datetime"}, false, false, "TIMESTAMP"},
 		{source.ColumnInfo{DataType: "date"}, false, false, "DATE"},
