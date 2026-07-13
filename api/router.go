@@ -57,6 +57,7 @@ func NewRouter() *gin.Engine {
 		authed.POST("/schema/extract-full", handler.ExtractFullSchema)
 		authed.POST("/schema/parse", handler.ParseDDLFile)
 		authed.GET("/schema/export", handler.ExportDDL)
+		authed.GET("/schema/export-routines", handler.ExportRoutines)
 		authed.POST("/diff", handler.DiffSchemas)
 
 		authed.POST("/migration/diff", handler.RunDiffMigration)

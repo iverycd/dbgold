@@ -36,6 +36,22 @@
                 >
                   <a-option v-for="db in dataMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
+                <a-tooltip
+                  v-if="dataMigrate.srcDatabase && canExportRoutines"
+                  content="导出源库自定义函数/存储过程原始 DDL 为 .sql 文件。跨厂商语法不兼容，导出内容未做转换，需手动适配目标库。"
+                >
+                  <a-button
+                    type="outline"
+                    size="small"
+                    long
+                    style="margin-top: 10px"
+                    :loading="exportingRoutines"
+                    @click="handleExportRoutines"
+                  >
+                    <template #icon><icon-download /></template>
+                    导出函数/存储过程
+                  </a-button>
+                </a-tooltip>
               </a-card>
             </a-col>
             <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
@@ -774,6 +790,7 @@ import { copyText } from '@/utils/clipboard'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
+import { downloadRoutines } from '@/api/schema'
 import {
   getSupportedPairs,
   startDataMigration as apiStartMigration,
@@ -909,6 +926,24 @@ const pgConnections = computed(() =>
 const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)
 )
+// 支持导出函数/存储过程的源库类型（与后端 routineExporter 实现保持一致）
+const ROUTINE_EXPORT_TYPES = ['mysql', 'oracle', 'sqlserver', 'dameng']
+const canExportRoutines = computed(() =>
+  !!selectedSrc.value && ROUTINE_EXPORT_TYPES.includes(selectedSrc.value.db_type)
+)
+const exportingRoutines = ref(false)
+const handleExportRoutines = async () => {
+  if (!dataMigrate.srcConnId || !dataMigrate.srcDatabase) return
+  exportingRoutines.value = true
+  try {
+    await downloadRoutines(dataMigrate.srcConnId, dataMigrate.srcDatabase)
+    Message.success('导出成功')
+  } catch (e: any) {
+    Message.error(`导出失败: ${e?.message ?? e}`)
+  } finally {
+    exportingRoutines.value = false
+  }
+}
 const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )

@@ -248,3 +248,56 @@ seqCopy.ColumnName = m.objName(seq.ColumnName)
 
 - **PostgreSQL 兼容库**（highgo、seabox 等）：以 `datamigrate/target/postgres.go` 为模板，`sql.Open("postgres", dsn)`，`dialect.NewPostgres("<dbtype>")`
 - **OpenGauss 兼容库**（gaussdb 等）：以 `datamigrate/target/gaussdb.go` 为模板，`sql.Open("opengauss", dsn)`
+
+---
+
+## 导出自定义函数/存储过程：原样导出，禁止跨库转换
+
+### 背景
+
+跨厂商的自定义函数、存储过程语法互不兼容（Oracle PL/SQL、SQL Server T-SQL、MySQL 存储过程差异极大），自动转换只会产出错误代码、误导用户。因此迁移页（`MigrationView.vue`）提供「导出函数/存储过程」按钮，把源库对象**原样导出成单个 `.sql` 文件**，由用户手动适配目标库。
+
+### 架构（与迁移数据流解耦）
+
+功能挂在 **`driver/` 层**（schema 提取层），不走 `datamigrate/source/` 的 Reader，避免干扰迁移。通过**可选接口**接入，而非扩展 `Driver` 接口：
+
+```go
+// api/handler/schema.go
+type routineExporter interface {
+    ExtractRoutines(dbName string) ([]schema.Routine, error)
+}
+re, ok := d.(routineExporter)   // 类型断言，不支持的源库返回明确错误
+```
+
+好处：只需给支持的源库实现 `ExtractRoutines`，postgres/gaussdb/highgo 等无需改动，达梦的「不支持 schema diff」桩也不受影响。
+
+### 铁律：只读原始 DDL，不做任何转换
+
+- **禁止** `lower()`/`upper()`，**禁止**任何视图那样的语法改写（对比 `GetViews` 的 `transformViewDef`——那是转换，这里绝不能有）。
+- 每个 Reader 返回的 `Routine.Body` 必须是**可直接回放的完整语句**，含 `CREATE` 头和该方言的终止符/分隔符：
+  - MySQL：`SHOW CREATE PROCEDURE/FUNCTION`，用 `DELIMITER $$ ... $$ DELIMITER ;` 包裹；`SHOW CREATE` 列数随版本变化，**动态定位 "Create" 列**（`strings.HasPrefix(lower(col), "create ")`），不要写死列索引。
+  - Oracle / 达梦：`ALL_SOURCE` 按 `LINE` 拼接，首行是 `PROCEDURE name...`，需补 `CREATE OR REPLACE ` 头、`\n/` 结尾；含 `PACKAGE` / `PACKAGE BODY`。
+  - SQL Server：`sys.sql_modules.definition` 已含完整 CREATE，追加 `\nGO`；`WHERE o.type IN ('P','FN','IF','TF') AND o.is_ms_shipped = 0`。
+
+### 大小写/占位符注意
+
+- Oracle：owner 用 `strings.ToUpper(dbName)`（与 `oracle/schema.go` 一致）。
+- 达梦：owner **透传**连接配置的 `Database`，不转大小写（与 `datamigrate/source/dameng.go` reader 一致）；占位符用 `?` 不是 `:1`。
+
+### 新增源库时的检查清单
+
+给一个新源库加导出能力，需两处：
+
+1. **`driver/<dbtype>/routines.go`** — 新建，实现 `ExtractRoutines(dbName string) ([]schema.Routine, error)`，遵守上面「只读原始 DDL」铁律。
+2. **`frontend/src/views/MigrationView.vue`** — `ROUTINE_EXPORT_TYPES` 数组加新类型字符串（控制按钮是否显示，须与后端实现的源库集合保持一致）。
+
+后端 handler（`ExportRoutines`）、路由（`GET /schema/export-routines`）、前端 API（`downloadRoutines`）都是通用的，无需改动。
+
+### 常见漏改导致的问题
+
+| 现象 | 漏改的位置 |
+|------|-----------|
+| 点导出报"该源库类型暂不支持导出函数/存储过程" | `driver/<dbtype>/routines.go` 没实现，或 handler 类型断言失败 |
+| 按钮不显示 | `MigrationView.vue` 的 `ROUTINE_EXPORT_TYPES` 没加该类型 |
+| 导出的 SQL 在目标库/源库客户端无法回放 | Body 缺 `CREATE` 头或方言终止符（MySQL DELIMITER、Oracle `/`、SQLServer `GO`） |
+| 达梦导出为空 | owner 被误转大小写，或占位符用了 `:1` |
