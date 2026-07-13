@@ -691,6 +691,13 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		if err != nil {
 			m.log.Errorf("获取注释信息失败: %v", err)
 		} else {
+			matched := 0
+			for _, cm := range comments {
+				if tableSet[cm.TableName] {
+					matched++
+				}
+			}
+			m.log.Infof("读取到 %d 条注释记录(表注释+列注释)，其中 %d 条命中本次迁移的表范围", len(comments), matched)
 			for _, cm := range comments {
 				if ctx.Err() != nil {
 					return

@@ -541,11 +541,11 @@ func (r *OracleReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT TABLE_NAME, '' AS COLUMN_NAME, COMMENTS
 		 FROM ALL_TAB_COMMENTS
-		 WHERE OWNER = :1 AND TABLE_TYPE = 'TABLE' AND COMMENTS IS NOT NULL AND COMMENTS <> ''
+		 WHERE OWNER = :1 AND TABLE_TYPE = 'TABLE' AND COMMENTS IS NOT NULL
 		 UNION ALL
 		 SELECT TABLE_NAME, COLUMN_NAME, COMMENTS
 		 FROM ALL_COL_COMMENTS
-		 WHERE OWNER = :2 AND COMMENTS IS NOT NULL AND COMMENTS <> ''
+		 WHERE OWNER = :2 AND COMMENTS IS NOT NULL
 		 ORDER BY TABLE_NAME, COLUMN_NAME`, r.owner, r.owner)
 	if err != nil {
 		return nil, err
@@ -554,9 +554,13 @@ func (r *OracleReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
 	var comments []CommentInfo
 	for rows.Next() {
 		var cm CommentInfo
-		if err := rows.Scan(&cm.TableName, &cm.ColumnName, &cm.Comment); err != nil {
+		// Oracle 把 '' 字面量当作 NULL 处理（表注释分支用 '' AS COLUMN_NAME 占位），
+		// 直接 Scan 进 string 会报 "converting NULL to string is unsupported"，用 NullString 兜底。
+		var colName sql.NullString
+		if err := rows.Scan(&cm.TableName, &colName, &cm.Comment); err != nil {
 			return nil, err
 		}
+		cm.ColumnName = colName.String
 		comments = append(comments, cm)
 	}
 	return comments, rows.Err()
