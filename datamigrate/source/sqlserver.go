@@ -484,9 +484,37 @@ func (r *SQLServerReader) CountRows(ctx context.Context, table string) (int64, e
 	return count, err
 }
 
-// GetComments 暂未实现 SQL Server 注释读取,返回空(后续按 MySQL 模式扩展)。
+// GetComments 返回所有表注释和列注释信息(原始大小写)。
+// SQL Server 没有 COMMENT 语法,注释存于 sys.extended_properties(name='MS_Description'),
+// 表注释 minor_id=0,列注释 minor_id=column_id。
 func (r *SQLServerReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
-	return nil, nil
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT t.name, '' AS COLUMN_NAME, CAST(ep.value AS NVARCHAR(MAX))
+		 FROM sys.tables t
+		 JOIN sys.extended_properties ep
+		   ON ep.major_id = t.object_id AND ep.minor_id = 0 AND ep.class = 1
+		 WHERE ep.name = 'MS_Description'
+		 UNION ALL
+		 SELECT t.name, c.name, CAST(ep.value AS NVARCHAR(MAX))
+		 FROM sys.tables t
+		 JOIN sys.columns c ON c.object_id = t.object_id
+		 JOIN sys.extended_properties ep
+		   ON ep.major_id = t.object_id AND ep.minor_id = c.column_id AND ep.class = 1
+		 WHERE ep.name = 'MS_Description'
+		 ORDER BY 1, 2`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var comments []CommentInfo
+	for rows.Next() {
+		var cm CommentInfo
+		if err := rows.Scan(&cm.TableName, &cm.ColumnName, &cm.Comment); err != nil {
+			return nil, err
+		}
+		comments = append(comments, cm)
+	}
+	return comments, rows.Err()
 }
 
 // stripTopLevelOrderBy 移除 SELECT 语句最外层的 ORDER BY 子句（不影响子查询内部的 ORDER BY）。

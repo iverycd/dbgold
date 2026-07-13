@@ -536,7 +536,28 @@ func (r *OracleReader) CountRows(ctx context.Context, table string) (int64, erro
 	return count, err
 }
 
-// GetComments 暂未实现 Oracle 注释读取,返回空(后续按 MySQL 模式扩展)。
+// GetComments 返回所有表注释和列注释信息(原始大小写)。
 func (r *OracleReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
-	return nil, nil
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT TABLE_NAME, '' AS COLUMN_NAME, COMMENTS
+		 FROM ALL_TAB_COMMENTS
+		 WHERE OWNER = :1 AND TABLE_TYPE = 'TABLE' AND COMMENTS IS NOT NULL AND COMMENTS <> ''
+		 UNION ALL
+		 SELECT TABLE_NAME, COLUMN_NAME, COMMENTS
+		 FROM ALL_COL_COMMENTS
+		 WHERE OWNER = :2 AND COMMENTS IS NOT NULL AND COMMENTS <> ''
+		 ORDER BY TABLE_NAME, COLUMN_NAME`, r.owner, r.owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var comments []CommentInfo
+	for rows.Next() {
+		var cm CommentInfo
+		if err := rows.Scan(&cm.TableName, &cm.ColumnName, &cm.Comment); err != nil {
+			return nil, err
+		}
+		comments = append(comments, cm)
+	}
+	return comments, rows.Err()
 }
