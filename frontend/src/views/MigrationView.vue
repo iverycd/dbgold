@@ -13,6 +13,14 @@
                   <span class="conn-card-title">源库</span>
                 </div>
                 <a-select
+                  v-model="srcEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
+                <a-select
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
@@ -63,6 +71,14 @@
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">目标库</span>
                 </div>
+                <a-select
+                  v-model="dstEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
                 <a-select
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择目标库连接"
@@ -328,6 +344,14 @@
                   <span class="conn-card-title">源库</span>
                 </div>
                 <a-select
+                  v-model="srcEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
+                <a-select
                   v-model="viewMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
@@ -363,6 +387,14 @@
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">目标库</span>
                 </div>
+                <a-select
+                  v-model="dstEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
                 <a-select
                   v-model="viewMigrate.dstConnId"
                   placeholder="选择目标库连接"
@@ -531,6 +563,14 @@
                   <span class="conn-card-title">源库</span>
                 </div>
                 <a-select
+                  v-model="srcEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
+                <a-select
                   v-model="objMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
@@ -566,6 +606,14 @@
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">目标库</span>
                 </div>
+                <a-select
+                  v-model="dstEnvFilter"
+                  placeholder="按环境筛选"
+                  style="width: 100%; margin-top: 10px"
+                  allow-clear
+                >
+                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                </a-select>
                 <a-select
                   v-model="objMigrate.dstConnId"
                   placeholder="选择目标库连接"
@@ -915,13 +963,28 @@ function validateTableFilter(): boolean {
   return true
 }
 
+// 按环境筛选（源库 / 目标库各自独立，三个 Tab 共用，与连接管理页逻辑一致）
+const srcEnvFilter = ref<string | undefined>(undefined)
+const dstEnvFilter = ref<string | undefined>(undefined)
+// envHistory：从已有连接里去重取出用过的环境值，供筛选下拉使用
+const envHistory = computed(() => {
+  const set = new Set(connections.value.map((c) => c.env).filter((v): v is string => !!v))
+  return Array.from(set)
+})
+
 const srcConnections = computed(() =>
   connections.value.filter(
-    (c) => c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle'
+    (c) =>
+      (c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle') &&
+      (!srcEnvFilter.value || c.env === srcEnvFilter.value)
   )
 )
 const pgConnections = computed(() =>
-  connections.value.filter((c) => c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'mysql')
+  connections.value.filter(
+    (c) =>
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'mysql') &&
+      (!dstEnvFilter.value || c.env === dstEnvFilter.value)
+  )
 )
 const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)
