@@ -13,6 +13,7 @@
         v-model="envFilter"
         placeholder="按环境筛选"
         allow-clear
+        allow-search
         style="width: 180px"
         :options="envHistory"
       />

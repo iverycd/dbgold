@@ -16,6 +16,7 @@
                   v-model="dataMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { checkPairSupport(); loadSrcDatabases(val as number) }"
                 >
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
@@ -50,6 +51,7 @@
                   v-model="dataMigrate.dstConnId"
                   placeholder="选择目标库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { checkPairSupport(); loadDstSchemas(val as number) }"
                 >
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
@@ -313,6 +315,7 @@
                   v-model="viewMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { vmCheckPairSupport(); vmLoadSrcDatabases(val as number) }"
                 >
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
@@ -348,6 +351,7 @@
                   v-model="viewMigrate.dstConnId"
                   placeholder="选择目标库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { vmCheckPairSupport(); vmLoadDstSchemas(val as number) }"
                 >
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
@@ -514,6 +518,7 @@
                   v-model="objMigrate.srcConnId"
                   placeholder="选择源库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { omCheckPairSupport(); omLoadSrcDatabases(val as number) }"
                 >
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
@@ -549,6 +554,7 @@
                   v-model="objMigrate.dstConnId"
                   placeholder="选择目标库连接"
                   style="width: 100%; margin-top: 10px"
+                  allow-search
                   @change="(val) => { omCheckPairSupport(); omLoadDstSchemas(val as number) }"
                 >
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
