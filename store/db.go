@@ -31,6 +31,7 @@ type Connection struct {
 	Database  string    `gorm:"not null" json:"database"`
 	Username  string    `gorm:"not null" json:"username"`
 	Password  string    `gorm:"not null" json:"-"`
+	Env       string    `gorm:"index;default:''" json:"env"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

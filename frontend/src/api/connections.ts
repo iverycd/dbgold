@@ -10,6 +10,7 @@ export interface Connection {
   username: string
   created_at: string
   owner_username?: string
+  env: string
 }
 
 export interface ConnectionForm {
@@ -20,6 +21,7 @@ export interface ConnectionForm {
   database: string
   username: string
   password: string
+  env: string
 }
 
 export const listConnections = () => api.get<Connection[]>('/connections')

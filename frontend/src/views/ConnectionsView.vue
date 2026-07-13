@@ -8,12 +8,28 @@
       </a-button>
     </div>
 
-    <a-table :data="connections" :loading="loading" row-key="id" :pagination="false">
+    <div style="margin-bottom: 12px">
+      <a-select
+        v-model="envFilter"
+        placeholder="按环境筛选"
+        allow-clear
+        style="width: 180px"
+        :options="envHistory"
+      />
+    </div>
+
+    <a-table :data="filteredConnections" :loading="loading" row-key="id" :pagination="false">
       <template #columns>
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="db_type" :width="100">
           <template #cell="{ record }">
             <a-tag :color="getDbTypeColor(record.db_type)" size="small">{{ getDbTypeLabel(record.db_type) }}</a-tag>
+          </template>
+        </a-table-column>
+        <a-table-column title="环境" data-index="env" :width="100">
+          <template #cell="{ record }">
+            <a-tag v-if="record.env" :color="getEnvColor(record.env)" size="small">{{ record.env }}</a-tag>
+            <span v-else style="color: var(--color-text-3)">-</span>
           </template>
         </a-table-column>
         <a-table-column title="主机" data-index="host" />
@@ -83,6 +99,14 @@
         <a-form-item label="密码" field="password" :rules="editingId ? [] : [{ required: true }]">
           <a-input-password v-model="form.password" :placeholder="editingId ? '留空不修改' : '密码'" />
         </a-form-item>
+        <a-form-item label="环境" field="env">
+          <a-auto-complete
+            v-model="form.env"
+            :data="envHistory"
+            placeholder="如：测试 / 仿真 / 生产，可自定义输入"
+            allow-clear
+          />
+        </a-form-item>
       </a-form>
     </a-modal>
   </div>
@@ -120,9 +144,33 @@ const defaultForm = () => ({
   database: '',
   username: '',
   password: '',
+  env: '',
 })
 
 const form = reactive(defaultForm())
+const envFilter = ref<string | undefined>(undefined)
+
+// envHistory：从已有连接里去重取出用过的环境值，供筛选下拉和表单联想使用
+const envHistory = computed(() => {
+  const set = new Set(connections.value.map((c) => c.env).filter((v): v is string => !!v))
+  return Array.from(set).sort()
+})
+
+const filteredConnections = computed(() => {
+  if (!envFilter.value) return connections.value
+  return connections.value.filter((c) => c.env === envFilter.value)
+})
+
+// getEnvColor：环境是用户自定义文本，没有固定枚举，按内容哈希稳定映射到 Arco 标签色，
+// 保证同一个环境名在列表里始终显示同一种颜色。
+const ENV_COLORS = ['arcoblue', 'green', 'orange', 'red', 'purple', 'cyan', 'gold', 'magenta', 'lime', 'pinkpurple']
+function getEnvColor(env: string): string {
+  let hash = 0
+  for (let i = 0; i < env.length; i++) {
+    hash = (hash * 31 + env.charCodeAt(i)) >>> 0
+  }
+  return ENV_COLORS[hash % ENV_COLORS.length]
+}
 
 const defaultPortMap: Record<string, number> = {
   mysql: 3306,
@@ -169,6 +217,7 @@ function openEdit(conn: Connection) {
     database: conn.database,
     username: conn.username,
     password: '',
+    env: conn.env || '',
   })
   modalVisible.value = true
 }

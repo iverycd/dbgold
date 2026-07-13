@@ -24,6 +24,7 @@ type connectionRequest struct {
 	Database string `json:"database"`
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	Env      string `json:"env"`
 }
 
 type updateConnectionRequest struct {
@@ -34,6 +35,7 @@ type updateConnectionRequest struct {
 	Database string `json:"database"`
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password"`
+	Env      string `json:"env"`
 }
 
 // connectionWithOwner 在连接基础上附带所属用户名，仅 admin 视角返回。
@@ -127,6 +129,7 @@ func CreateConnection(c *gin.Context) {
 		Name:    body.Name, DBType: body.DBType,
 		Host: body.Host, Port: body.Port,
 		Database: body.Database, Username: body.Username, Password: body.Password,
+		Env: body.Env,
 	}
 	if err := store.CreateConnection(conn); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -153,6 +156,7 @@ func UpdateConnection(c *gin.Context) {
 		"name": body.Name, "db_type": body.DBType,
 		"host": body.Host, "port": body.Port,
 		"database": body.Database, "username": body.Username,
+		"env": body.Env,
 	}
 	if body.Password != "" {
 		updates["password"] = body.Password
