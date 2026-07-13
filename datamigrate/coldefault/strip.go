@@ -6,12 +6,14 @@ package coldefault
 import "strings"
 
 // Strip 按源库类型剥离默认值字面量中的脏数据,返回逻辑默认值。
-// srcType 取自 source.Reader.DBType(),如 "mysql" / "sqlserver" / "oracle"。
+// srcType 取自 source.Reader.DBType(),如 "mysql" / "sqlserver" / "oracle" / "dameng"。
+// 达梦系统表(ALL_TAB_COLUMNS.DATA_DEFAULT)与 Oracle 兼容,默认值同样以带字面量
+// 引号的文本存储,复用 StripOracle 的脱壳逻辑。
 func Strip(srcType, raw string) string {
 	switch srcType {
 	case "sqlserver":
 		return StripSQLServer(raw)
-	case "oracle":
+	case "oracle", "dameng":
 		return StripOracle(raw)
 	case "mysql":
 		return StripMySQLExpr(raw)
