@@ -197,6 +197,10 @@
           <MigrationReportPanel v-if="reportJobId" :jobID="reportJobId" />
         </a-drawer>
       </a-tab-pane>
+
+      <a-tab-pane key="incremental" title="增量迁移">
+        <IncrementalHistoryPanel />
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
@@ -206,6 +210,7 @@ import { ref, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import SqlPreview from '@/components/SqlPreview.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
+import IncrementalHistoryPanel from './IncrementalHistoryPanel.vue'
 import { listMigrations, listDataMigrationJobs, type MigrationHistory, type DataMigrationJob } from '@/api/migration'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 

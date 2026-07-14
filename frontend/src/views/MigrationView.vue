@@ -331,6 +331,10 @@
         </a-form>
       </a-tab-pane>
 
+      <a-tab-pane key="incremental" title="增量迁移">
+        <IncrementalMigrationPanel />
+      </a-tab-pane>
+
       <a-tab-pane key="view-migrate" title="视图迁移">
         <a-form :model="viewMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
@@ -821,6 +825,7 @@ import SqlPreview from '@/components/SqlPreview.vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import { copyText } from '@/utils/clipboard'
 import MigrationReportPanel from './MigrationReportPanel.vue'
+import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import { runDiffMigration, runFullMigration } from '@/api/migration'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
 import { downloadRoutines } from '@/api/schema'

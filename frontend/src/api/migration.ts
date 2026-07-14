@@ -167,6 +167,81 @@ export interface MigrationReport {
 export const getDataMigrationReport = (jobID: string) =>
   api.get<MigrationReport>(`/migration/data-migrate/${jobID}/report`)
 
+// ===== MySQL → PostgreSQL Binlog CDC =====
+
+export interface IncrementalRequest {
+  src_conn_id: number
+  dst_conn_id: number
+  src_database: string
+  target_schema: string
+  start_mode: 'full_then_cdc' | 'incremental_only'
+  position_mode?: 'auto' | 'gtid' | 'file'
+  start_gtid?: string
+  start_file?: string
+  start_position?: number
+  server_id?: number
+  migrate_mode: 'all' | 'include' | 'exclude'
+  table_filter?: string
+  lower_case_names?: boolean
+}
+
+export interface CDCPosition { file: string; position: number; gtid: string }
+export interface CDCTableInfo {
+  name: string
+  columns: string[]
+  primary_key_indexes: number[]
+}
+export interface IncrementalPreflight {
+  ok: boolean
+  log_bin: boolean
+  binlog_format: string
+  binlog_row_image: string
+  gtid_mode: string
+  current_position: CDCPosition
+  tables: CDCTableInfo[]
+  no_primary_key_tables: string[]
+  errors: string[]
+  warnings: string[]
+}
+
+export interface IncrementalJob {
+  id: number
+  job_id: string
+  src_conn_id: number
+  dst_conn_id: number
+  src_database: string
+  target_schema: string
+  start_mode: string
+  status: string
+  phase: string
+  summary: string
+  last_error: string
+  blocking_ddl: string
+  checkpoint_file: string
+  checkpoint_position: number
+  checkpoint_gtid: string
+  insert_count: number
+  update_count: number
+  delete_count: number
+  skipped_count: number
+  warning_count: number
+  last_event_at?: string
+  created_at: string
+  updated_at: string
+  finished_at?: string
+}
+
+export const preflightIncremental = (data: IncrementalRequest) =>
+  api.post<IncrementalPreflight>('/migration/incremental/preflight', data)
+export const startIncremental = (data: IncrementalRequest) =>
+  api.post<{ job_id: string; preflight: IncrementalPreflight }>('/migration/incremental/jobs', data)
+export const listIncrementalJobs = () => api.get<IncrementalJob[]>('/migration/incremental/jobs')
+export const getIncrementalJob = (jobID: string) => api.get<IncrementalJob>(`/migration/incremental/jobs/${jobID}`)
+export const pauseIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/pause`)
+export const resumeIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/resume`)
+export const stopIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/stop`)
+export const acknowledgeIncrementalDDL = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/ack-ddl`)
+
 // ===== 视图迁移 =====
 
 export interface MigrateViewsRequest {
@@ -314,4 +389,3 @@ export const downloadBatchTemplate = async () => {
   a.click()
   URL.revokeObjectURL(url)
 }
-

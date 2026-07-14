@@ -27,6 +27,9 @@ func main() {
 	defer cleanup()
 
 	store.Init(cfg)
+	if err := store.PauseInterruptedIncrementalJobs(); err != nil {
+		slog.Error("failed to pause interrupted incremental jobs", "err", err)
+	}
 	if err := store.EnsureAdminExists(cfg.AdminUser, cfg.AdminPass); err != nil {
 		slog.Error("failed to ensure admin", "err", err)
 		os.Exit(1)

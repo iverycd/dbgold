@@ -39,8 +39,16 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 
 // MySQLReader 实现 Reader 接口，连接到 MySQL 数据库
 type MySQLReader struct {
-	db     *sql.DB
-	dbName string
+	db         *sql.DB
+	dbName     string
+	snapshotTx *sql.Tx
+}
+
+// BinlogPosition identifies the first binlog event that follows a snapshot.
+type BinlogPosition struct {
+	File string
+	Pos  uint32
+	GTID string
 }
 
 // NewMySQL 创建并连接 MySQL Reader
@@ -57,11 +65,138 @@ func NewMySQL(dsn, dbName string, pool ConnPoolConfig) (*MySQLReader, error) {
 	return &MySQLReader{db: db, dbName: dbName}, nil
 }
 
-func (r *MySQLReader) Close() error   { return r.db.Close() }
+func (r *MySQLReader) Close() error {
+	if r.snapshotTx != nil {
+		_ = r.snapshotTx.Rollback()
+		r.snapshotTx = nil
+	}
+	return r.db.Close()
+}
 func (r *MySQLReader) DBType() string { return "mysql" }
 
+func (r *MySQLReader) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if r.snapshotTx != nil {
+		return r.snapshotTx.QueryContext(ctx, query, args...)
+	}
+	return r.db.QueryContext(ctx, query, args...)
+}
+
+func (r *MySQLReader) queryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if r.snapshotTx != nil {
+		return r.snapshotTx.QueryRowContext(ctx, query, args...)
+	}
+	return r.db.QueryRowContext(ctx, query, args...)
+}
+
+// CaptureConsistentSnapshot briefly takes a global read lock, establishes a
+// repeatable-read snapshot on a dedicated transaction, and captures its binlog
+// position. Call FinishSnapshot after all snapshot reads complete.
+func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosition, error) {
+	if r.snapshotTx != nil {
+		return BinlogPosition{}, fmt.Errorf("snapshot already active")
+	}
+	lockConn, err := r.db.Conn(ctx)
+	if err != nil {
+		return BinlogPosition{}, err
+	}
+	defer lockConn.Close()
+	if _, err = lockConn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
+		return BinlogPosition{}, fmt.Errorf("acquire snapshot read lock: %w", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = lockConn.ExecContext(context.Background(), "UNLOCK TABLES")
+		}
+	}()
+
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return BinlogPosition{}, err
+	}
+	r.snapshotTx = tx
+	// A consistent read establishes the InnoDB read view while writes are locked.
+	var firstTable string
+	err = tx.QueryRowContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME LIMIT 1`, r.dbName).Scan(&firstTable)
+	if err == nil {
+		var one int
+		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", strings.ReplaceAll(firstTable, "`", "``"))).Scan(&one); err != nil && err != sql.ErrNoRows {
+			_ = tx.Rollback()
+			r.snapshotTx = nil
+			return BinlogPosition{}, err
+		}
+	} else if err != sql.ErrNoRows {
+		_ = tx.Rollback()
+		r.snapshotTx = nil
+		return BinlogPosition{}, err
+	}
+	pos, err := readBinlogPosition(ctx, lockConn)
+	if err != nil {
+		_ = tx.Rollback()
+		r.snapshotTx = nil
+		return BinlogPosition{}, err
+	}
+	if _, err = lockConn.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+		_ = tx.Rollback()
+		r.snapshotTx = nil
+		return BinlogPosition{}, err
+	}
+	locked = false
+	return pos, nil
+}
+
+func readBinlogPosition(ctx context.Context, conn *sql.Conn) (BinlogPosition, error) {
+	rows, err := conn.QueryContext(ctx, "SHOW MASTER STATUS")
+	if err != nil {
+		rows, err = conn.QueryContext(ctx, "SHOW BINARY LOG STATUS")
+	}
+	if err != nil {
+		return BinlogPosition{}, fmt.Errorf("read binlog position: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil || !rows.Next() {
+		return BinlogPosition{}, fmt.Errorf("binary logging is disabled or position is unavailable")
+	}
+	values := make([]sql.RawBytes, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return BinlogPosition{}, err
+	}
+	var p BinlogPosition
+	for i, col := range cols {
+		switch strings.ToLower(col) {
+		case "file":
+			p.File = string(values[i])
+		case "position":
+			var n uint64
+			_, _ = fmt.Sscan(string(values[i]), &n)
+			p.Pos = uint32(n)
+		case "executed_gtid_set":
+			p.GTID = string(values[i])
+		}
+	}
+	if p.File == "" {
+		return BinlogPosition{}, fmt.Errorf("binlog file is unavailable")
+	}
+	return p, nil
+}
+
+func (r *MySQLReader) FinishSnapshot() error {
+	if r.snapshotTx == nil {
+		return nil
+	}
+	err := r.snapshotTx.Commit()
+	r.snapshotTx = nil
+	return err
+}
+
 func (r *MySQLReader) ListDatabases(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
 		 WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys')
 		 ORDER BY SCHEMA_NAME`)
@@ -81,7 +216,7 @@ func (r *MySQLReader) ListDatabases(ctx context.Context) ([]string, error) {
 }
 
 func (r *MySQLReader) ListTables(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME FROM information_schema.TABLES
 		 WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
 		 ORDER BY TABLE_NAME`, r.dbName)
@@ -101,7 +236,7 @@ func (r *MySQLReader) ListTables(ctx context.Context) ([]string, error) {
 }
 
 func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*TableDDLInfo, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
 		        NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA
 		 FROM information_schema.COLUMNS
@@ -141,7 +276,7 @@ func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*Table
 }
 
 func (r *MySQLReader) GetPrimaryKey(ctx context.Context, table string) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
 		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
 		 ORDER BY ORDINAL_POSITION`, r.dbName, table)
@@ -161,7 +296,7 @@ func (r *MySQLReader) GetPrimaryKey(ctx context.Context, table string) ([]string
 }
 
 func (r *MySQLReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, COLUMN_NAME
 		 FROM information_schema.KEY_COLUMN_USAGE
 		 WHERE TABLE_SCHEMA = ? AND CONSTRAINT_NAME = 'PRIMARY'
@@ -209,7 +344,7 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 	} else {
 		query = fmt.Sprintf(`SELECT * FROM %s LIMIT %d, %d`, table, offset, limit)
 	}
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.queryContext(ctx, query)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -262,7 +397,7 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 	// 拆成两条单视图查询、在内存合并，实测可降到毫秒级。
 
 	// 查询 1：取每张表的自增起始值（AUTO_INCREMENT），存入 map
-	startRows, err := r.db.QueryContext(ctx,
+	startRows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, AUTO_INCREMENT
 		 FROM information_schema.TABLES
 		 WHERE TABLE_SCHEMA = ? AND AUTO_INCREMENT IS NOT NULL`, r.dbName)
@@ -288,7 +423,7 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 	startRows.Close()
 
 	// 查询 2：取自增列名（权威的"哪些表哪些列是自增列"列表），边读边合并起始值
-	colRows, err := r.db.QueryContext(ctx,
+	colRows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, COLUMN_NAME
 		 FROM information_schema.COLUMNS
 		 WHERE TABLE_SCHEMA = ? AND EXTRA = 'auto_increment'`, r.dbName)
@@ -313,7 +448,7 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
 		 FROM information_schema.STATISTICS
 		 WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
@@ -359,7 +494,7 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 		onDelete string
 		onUpdate string
 	}
-	metaRows, err := r.db.QueryContext(ctx,
+	metaRows, err := r.queryContext(ctx,
 		`SELECT CONSTRAINT_NAME, TABLE_NAME, REFERENCED_TABLE_NAME, DELETE_RULE, UPDATE_RULE
 		 FROM information_schema.REFERENTIAL_CONSTRAINTS
 		 WHERE CONSTRAINT_SCHEMA = ?`, r.dbName)
@@ -382,7 +517,7 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 	metaRows.Close()
 
 	// 查询 2：列级明细，按 ORDINAL_POSITION 排序以保证多列外键的列顺序。
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME,
 		        REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
 		 FROM information_schema.KEY_COLUMN_USAGE
@@ -425,7 +560,7 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 
 func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 	// 在 MySQL 端做基础清理：去反引号、去 schema 前缀、去 convert/using utf8mb4
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT table_name,
 		        replace(replace(replace(replace(VIEW_DEFINITION,
 		            '`+"`"+`',''),
@@ -695,7 +830,7 @@ func rewriteFromParen(def string) string {
 // GetTriggerCount 查询 information_schema.TRIGGERS 返回触发器总数
 func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx,
+	err := r.queryRowContext(ctx,
 		`SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?`,
 		r.dbName,
 	).Scan(&count)
@@ -708,7 +843,7 @@ func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
 // CountRows 返回指定表的行数
 func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error) {
 	var count int64
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
+	err := r.queryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
 	return count, err
 }
 
@@ -716,7 +851,7 @@ func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error
 // 遵守"Reader 返回原始大小写"约定:SQL 不做 lower()/upper(),由 migrator.objName 统一规整。
 // ColumnName 为空表示表注释,非空表示列注释。仅过滤空注释。
 func (r *MySQLReader) GetComments(ctx context.Context) ([]CommentInfo, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, '' AS COLUMN_NAME, TABLE_COMMENT AS COMMENT
 		 FROM information_schema.TABLES
 		 WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND TABLE_COMMENT <> ''

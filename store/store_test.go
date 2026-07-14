@@ -64,6 +64,21 @@ func TestConnectionCRUD(t *testing.T) {
 	assert.Len(t, list, 0)
 }
 
+func TestPauseInterruptedIncrementalJobs(t *testing.T) {
+	setupTestDB(t)
+	running := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-running", SrcConnID: 1, DstConnID: 2, Status: "running", Phase: "running"}
+	stopped := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-stopped", SrcConnID: 1, DstConnID: 2, Status: "stopped", Phase: "stopped"}
+	require.NoError(t, CreateIncrementalJob(running))
+	require.NoError(t, CreateIncrementalJob(stopped))
+	require.NoError(t, PauseInterruptedIncrementalJobs())
+	got, err := GetIncrementalJob("cdc-running")
+	require.NoError(t, err)
+	assert.Equal(t, "paused_restart", got.Status)
+	untouched, err := GetIncrementalJob("cdc-stopped")
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", untouched.Status)
+}
+
 func TestCreateAndListMigrations(t *testing.T) {
 	setupTestDB(t)
 	m := &MigrationHistory{
