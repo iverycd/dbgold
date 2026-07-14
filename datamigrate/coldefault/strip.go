@@ -17,9 +17,36 @@ func Strip(srcType, raw string) string {
 		return StripOracle(raw)
 	case "mysql":
 		return StripMySQLExpr(raw)
+	case "postgres":
+		return StripPostgres(raw)
 	default:
 		return raw
 	}
+}
+
+// StripPostgres 清理 PostgreSQL 默认值中的类型转换后缀与字面量引号。
+// pg 在 information_schema.columns.column_default 中保存带类型标注的表达式，如：
+//
+//	'abc'::character varying → abc  (字符串默认值，剥 ::cast 与外层引号)
+//	0                        → 0    (数字默认值原样返回)
+//	true / false             → 由达梦 columnDefaultClause 转 1/0
+//	now()                    → now()(函数调用保留，由 columnDefaultClause 识别)
+func StripPostgres(def string) string {
+	def = strings.TrimSpace(def)
+	// 剥离末尾 ::type 类型转换（可能多层，如 '1'::numeric、'x'::character varying）
+	for {
+		idx := strings.LastIndex(def, "::")
+		if idx < 0 {
+			break
+		}
+		def = strings.TrimSpace(def[:idx])
+	}
+	// 字符串字面量 'value' → 裸值，交由上层 DEFAULT '%s' 统一补引号
+	if len(def) >= 2 && strings.HasPrefix(def, "'") && strings.HasSuffix(def, "'") {
+		inner := def[1 : len(def)-1]
+		return strings.ReplaceAll(inner, "''", "'")
+	}
+	return def
 }
 
 // StripOracle 清理 Oracle 默认值中多余的单引号。

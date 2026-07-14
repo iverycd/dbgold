@@ -89,11 +89,15 @@ func (d *DaMengDialect) columnDefaultClause(def string) string {
 	upper := strings.ToUpper(strings.TrimSpace(def))
 	// 函数/关键字默认值:达梦兼容形式
 	switch upper {
-	case "CURRENT_TIMESTAMP", "NOW()":
+	// 当前时间戳:pg 有一大家子等价函数,统一归一化为达梦可识别的 CURRENT_TIMESTAMP。
+	// 达梦不认识 pg_systimestamp()/clock_timestamp() 等,直接透传会报"DEFAULT约束表达式无效"。
+	case "CURRENT_TIMESTAMP", "NOW()",
+		"PG_SYSTIMESTAMP()", "CLOCK_TIMESTAMP()", "STATEMENT_TIMESTAMP()",
+		"TRANSACTION_TIMESTAMP()", "LOCALTIMESTAMP", "LOCALTIMESTAMP()", "SYSTIMESTAMP":
 		return " DEFAULT CURRENT_TIMESTAMP"
-	case "CURRENT_DATE":
+	case "CURRENT_DATE", "LOCALDATE", "SYSDATE":
 		return " DEFAULT CURRENT_DATE"
-	case "CURRENT_TIME":
+	case "CURRENT_TIME", "LOCALTIME", "LOCALTIME()":
 		return " DEFAULT CURRENT_TIME"
 	case "NULL":
 		return " DEFAULT NULL"

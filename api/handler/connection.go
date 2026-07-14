@@ -231,6 +231,11 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewDaMeng(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "oracle":
 		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+	case "postgres", "highgo", "seabox", "kingbase":
+		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
+		reader, err = source.NewPostgres(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+	case "gaussdb":
+		reader, err = source.NewPostgresCompatible("opengauss", buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
 		return

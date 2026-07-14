@@ -30,6 +30,15 @@ func (c *DaMengValueConverter) Convert(val interface{}, srcType, dbTypeName stri
 			}
 		}
 	}
+	if srcType == "postgres" {
+		// pg boolean 经 lib/pq 返回 Go bool，目标 NUMBER(1) 需要落地为 0/1
+		if b, ok := val.(bool); ok {
+			if b {
+				return 1
+			}
+			return 0
+		}
+	}
 	// 其余类型(time.Time、字符串、[]byte BLOB、数值)直接交给 dm 驱动
 	return val
 }

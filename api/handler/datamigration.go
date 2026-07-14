@@ -53,6 +53,11 @@ var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "mysql"},
 	{Source: "sqlserver", Target: "mysql"},
 	{Source: "dameng", Target: "mysql"},
+	{Source: "postgres", Target: "dameng"},
+	{Source: "gaussdb", Target: "dameng"},
+	{Source: "highgo", Target: "dameng"},
+	{Source: "seabox", Target: "dameng"},
+	{Source: "kingbase", Target: "dameng"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -590,6 +595,13 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 		return source.NewDaMeng(dsn, db, pool)
 	case "oracle":
 		return source.NewOracle(dsn, db, pool)
+	case "postgres", "highgo", "seabox", "kingbase":
+		// PG 兼容库共用 lib/pq 驱动。迁移单元是库内 schema，
+		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
+		return source.NewPostgres(dsn, db, pool)
+	case "gaussdb":
+		// GaussDB 需 opengauss 驱动，其余逻辑与 PG 一致
+		return source.NewPostgresCompatible("opengauss", dsn, db, pool)
 	default: // mysql
 		return source.NewMySQL(dsn, db, pool)
 	}

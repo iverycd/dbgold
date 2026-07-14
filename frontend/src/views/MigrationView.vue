@@ -960,7 +960,7 @@ const envHistory = computed(() => {
 const srcConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle') &&
+      (c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle' || c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'highgo' || c.db_type === 'seabox' || c.db_type === 'kingbase') &&
       (!srcEnvFilter.value || c.env === srcEnvFilter.value)
   )
 )
