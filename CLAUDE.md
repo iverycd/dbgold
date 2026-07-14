@@ -210,21 +210,29 @@ seqCopy.ColumnName = m.objName(seq.ColumnName)
      - `conn.DBType != "postgres" && ...` 白名单判断加新类型（否则返回"不支持"错误）
      - `driverName` 判断：默认 `"postgres"`，只有 `gaussdb` 用 `"opengauss"`；新增 PostgreSQL 兼容库不需要改这里
 
-4. **`api/handler/datamigration.go`** — 两处：
+5. **`api/handler/datamigration.go`** — 两处：
    - `supportedPairs` 追加支持的迁移组合（每个源库 → 新目标库）
-   - writer 初始化 switch 加 `case "<dbtype>"`
+   - `buildDstWriter` 的 writer 初始化 switch 加 `case "<dbtype>"`
+
+6. **`api/handler/ticket.go`** — **四处** `oneof` 标签：create/update 两个请求结构体的 `SrcDBType`、`DstDBType`（共 4 个字段）都要加新类型，否则提交/审批工单时 `oneof` 校验失败。
+
+7. **`api/handler/batchmigration.go`** — `dbTypeAlias` 别名表加 `"<dbtype>": "<dbtype>"`（可选再加简写别名，如 `"kb": "kingbase"`），否则 Excel 批量导入无法识别该类型。
 
 ### 前端
 
-5. **`frontend/src/utils/dbType.ts`** — `DB_TYPE_CONFIG` 加颜色和显示名称
+8. **`frontend/src/utils/dbType.ts`** — `DB_TYPE_CONFIG` 加颜色和显示名称
 
-6. **`frontend/src/views/ConnectionsView.vue`** — 两处：
+9. **`frontend/src/views/ConnectionsView.vue`** — 两处：
    - 数据库类型下拉 `<a-option value="<dbtype>">` 加选项
    - `defaultPortMap` 加默认端口
 
-7. **`frontend/src/views/MigrationView.vue`** — 两处：
-   - `pgConnections` computed 的过滤条件加 `|| c.db_type === '<dbtype>'`
-   - `loadDstSchemas` 里的 db_type 白名单判断加新类型
+10. **`frontend/src/views/MigrationView.vue`** — 两处：
+    - `pgConnections` computed 的过滤条件加 `|| c.db_type === '<dbtype>'`
+    - db_type 白名单判断加新类型（`loadDstSchemas` 等**共 3 处**相同的 `dst.db_type !== ...` 判断，全部要加，用全局替换避免漏改）
+
+11. **`frontend/src/views/TicketSubmitView.vue`** — 两处：数据库类型选项数组加 `{ value: '<dbtype>', label: '...' }`；`defaultPortMap` 加默认端口。
+
+12. **`frontend/src/views/TicketsManageView.vue`** — 数据库类型选项数组加 `{ value: '<dbtype>', label: '...' }`。
 
 ### 验证
 
@@ -243,10 +251,13 @@ seqCopy.ColumnName = m.objName(seq.ColumnName)
 | 连接测试报"不支持列出 xxx 类型的 schema" | `connection.go` schema 列表函数的白名单判断 |
 | 迁移任务启动报"目标库类型不支持" | `datamigration.go` 的 `supportedPairs` 或 writer switch |
 | 建表报 `type "xxx" does not exist` | `datamigrate/typemap/*_pg.go` 各文件漏加 `Register("...", "<dbtype>", ...)` |
+| 提交/审批工单报 `Field validation for 'SrcDBType'/'DstDBType' failed on the 'oneof' tag` | `ticket.go` 四个 `oneof` 标签 |
+| Excel 批量导入该类型被判为"不支持的数据库类型" | `batchmigration.go` 的 `dbTypeAlias` |
+| 工单页数据库类型下拉里没有该类型 | `TicketSubmitView.vue` / `TicketsManageView.vue` 的选项数组 |
 
 ### Writer 实现模板
 
-- **PostgreSQL 兼容库**（highgo、seabox 等）：以 `datamigrate/target/postgres.go` 为模板，`sql.Open("postgres", dsn)`，`dialect.NewPostgres("<dbtype>")`
+- **PostgreSQL 兼容库**（highgo、kingbase、seabox 等）：以 `datamigrate/target/postgres.go`（或直接照抄 `highgo.go`/`kingbase.go`）为模板，`sql.Open("postgres", dsn)`，`dialect.NewPostgres("<dbtype>")`
 - **OpenGauss 兼容库**（gaussdb 等）：以 `datamigrate/target/gaussdb.go` 为模板，`sql.Open("opengauss", dsn)`
 
 ---

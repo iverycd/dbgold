@@ -28,6 +28,8 @@ func NewDriver(dbType string) (Driver, error) {
 		return dameng.New(), nil
 	case "highgo":
 		return postgres.New(), nil
+	case "kingbase":
+		return postgres.New(), nil
 	default:
 		return nil, fmt.Errorf("unsupported db type: %s", dbType)
 	}

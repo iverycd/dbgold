@@ -12,6 +12,7 @@ func init() {
 	Register("sqlserver", "gaussdb", SQLServerToPG)
 	Register("sqlserver", "seabox", SQLServerToPG)
 	Register("sqlserver", "highgo", SQLServerToPG)
+	Register("sqlserver", "kingbase", SQLServerToPG)
 }
 
 // SQLServerToPG 将 SQL Server 列的数据类型转换为 PostgreSQL 类型字符串。

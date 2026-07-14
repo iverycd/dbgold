@@ -45,6 +45,10 @@ var supportedPairs = []SupportedPair{
 	{Source: "sqlserver", Target: "highgo"},
 	{Source: "dameng", Target: "highgo"},
 	{Source: "oracle", Target: "highgo"},
+	{Source: "mysql", Target: "kingbase"},
+	{Source: "sqlserver", Target: "kingbase"},
+	{Source: "dameng", Target: "kingbase"},
+	{Source: "oracle", Target: "kingbase"},
 	{Source: "oracle", Target: "mysql"},
 	{Source: "mysql", Target: "mysql"},
 	{Source: "sqlserver", Target: "mysql"},
@@ -601,6 +605,8 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 		return target.NewDaMeng(dstDSN, targetSchema, pool)
 	case "highgo":
 		return target.NewHighGo(dstDSN, targetSchema, pool)
+	case "kingbase":
+		return target.NewKingbase(dstDSN, targetSchema, pool)
 	case "mysql":
 		return target.NewMySQL(dstDSN, targetSchema, pool)
 	default: // postgres, seabox

@@ -18,7 +18,7 @@ import (
 
 type connectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -29,7 +29,7 @@ type connectionRequest struct {
 
 type updateConnectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -66,6 +66,9 @@ func buildDSN(c *store.Connection) string {
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "highgo":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
+	case "kingbase":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "dameng":
@@ -270,7 +273,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
-	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" && conn.DBType != "highgo" {
+	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" && conn.DBType != "highgo" && conn.DBType != "kingbase" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
 		return
 	}

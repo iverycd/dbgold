@@ -260,6 +260,7 @@ const dbTypeOptions = [
   { value: 'dameng', label: 'DaMeng（达梦）' },
   { value: 'seabox', label: 'SeaBox' },
   { value: 'highgo', label: 'HighGo（瀚高）' },
+  { value: 'kingbase', label: 'Kingbase（人大金仓）' },
 ]
 
 const tickets = ref<Ticket[]>([])

@@ -77,6 +77,7 @@
             <a-option value="dameng">DaMeng（达梦）</a-option>
             <a-option value="seabox">SeaBox</a-option>
             <a-option value="highgo">HighGo（瀚高）</a-option>
+            <a-option value="kingbase">Kingbase（人大金仓）</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -182,6 +183,7 @@ const defaultPortMap: Record<string, number> = {
   dameng: 5236,
   seabox: 5432,
   highgo: 5866,
+  kingbase: 54321,
 }
 
 watch(() => form.db_type, (newType) => {

@@ -247,6 +247,7 @@ const DB_OPTIONS = [
   { value: 'dameng', label: 'DaMeng（达梦）' },
   { value: 'seabox', label: 'SeaBox' },
   { value: 'highgo', label: 'HighGo（瀚高）' },
+  { value: 'kingbase', label: 'Kingbase（人大金仓）' },
 ]
 
 const defaultPortMap: Record<string, number> = {
@@ -258,6 +259,7 @@ const defaultPortMap: Record<string, number> = {
   dameng: 5236,
   seabox: 5432,
   highgo: 5866,
+  kingbase: 54321,
 }
 
 const defaultForm = (): TicketForm => ({

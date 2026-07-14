@@ -151,99 +151,97 @@
           </a-form-item>
 
           <!-- 高级设置 -->
-          <a-collapse :default-active-key="['advanced']" style="margin-bottom: 16px; max-width: 560px">
+          <a-collapse :default-active-key="['advanced']" style="margin-bottom: 16px; max-width: 1120px">
             <a-collapse-item key="advanced" header="高级设置">
-              <a-row :gutter="16">
-                <a-col :span="12">
-                  <a-form-item label="每页行数 (pageSize)">
-                    <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 140px" />
-                  </a-form-item>
+              <a-row :gutter="40">
+                <!-- 左列：迁移参数与选项 -->
+                <a-col :xs="24" :lg="12">
+                  <div class="adv-section-title">迁移参数</div>
+                  <a-row :gutter="16">
+                    <a-col :span="8">
+                      <a-form-item label="每页行数 (pageSize)">
+                        <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="最大并发数 (maxParallel)">
+                        <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="表内分页并发数">
+                        <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+
+                  <div class="adv-section-title">选项</div>
+                  <a-row :gutter="16">
+                    <a-col v-if="selectedDst?.db_type !== 'dameng'" :span="12">
+                      <a-checkbox v-model="dataMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
+                    </a-col>
+                    <a-col :span="12">
+                      <a-checkbox v-model="dataMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                    </a-col>
+                    <a-col :span="12">
+                      <a-checkbox v-model="dataMigrate.charInLength" class="adv-check">char 长度单位（CHAR）</a-checkbox>
+                    </a-col>
+                    <a-col :span="12">
+                      <a-checkbox v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
+                    </a-col>
+                    <a-col :span="12">
+                      <a-checkbox v-model="dataMigrate.distributed" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                    </a-col>
+                  </a-row>
+
+                  <div class="adv-section-title">视图剥离模式名</div>
+                  <a-input
+                    v-model="dataMigrate.stripViewSchemas"
+                    placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
+                    allow-clear
+                  />
+                  <div class="adv-hint">迁移视图时，从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。</div>
                 </a-col>
-                <a-col :span="12">
-                  <a-form-item label="最大并发数 (maxParallel)">
-                    <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" style="width: 140px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="12">
-                  <a-form-item label="表内分页并发数">
-                    <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 140px" />
-                  </a-form-item>
-                </a-col>
-                <a-col v-if="selectedDst?.db_type !== 'dameng'" :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="dataMigrate.lowerCaseNames">对象名转小写</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="dataMigrate.charInLength">char 长度单位（CHAR）</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="dataMigrate.useNvarchar2">使用 nvarchar2</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="dataMigrate.distributed">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="dataMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="24">
-                  <a-form-item label="视图剥离模式名">
-                    <a-input
-                      v-model="dataMigrate.stripViewSchemas"
-                      placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
-                      allow-clear
-                    />
-                    <template #extra>
-                      迁移视图时，从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。
-                    </template>
-                  </a-form-item>
-                </a-col>
-              </a-row>
-              <a-divider style="margin: 12px 0 8px">连接池配置（0 表示使用默认值）</a-divider>
-              <a-row :gutter="16">
-                <a-col :span="24" style="margin-bottom: 8px">
-                  <span style="font-size: 12px; color: var(--color-text-3)">源库连接池</span>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="最大连接数">
-                    <a-input-number v-model="dataMigrate.srcMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 120px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="最大空闲连接数">
-                    <a-input-number v-model="dataMigrate.srcMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 120px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="连接生命周期（秒）">
-                    <a-input-number v-model="dataMigrate.srcConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 120px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="24" style="margin-bottom: 8px">
-                  <span style="font-size: 12px; color: var(--color-text-3)">目标库连接池</span>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="最大连接数">
-                    <a-input-number v-model="dataMigrate.dstMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 120px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="最大空闲连接数">
-                    <a-input-number v-model="dataMigrate.dstMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 120px" />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="8">
-                  <a-form-item label="连接生命周期（秒）">
-                    <a-input-number v-model="dataMigrate.dstConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 120px" />
-                  </a-form-item>
+
+                <!-- 右列：连接池配置 -->
+                <a-col :xs="24" :lg="12">
+                  <div class="adv-section-title">连接池配置 <span class="adv-section-note">0 表示使用默认值</span></div>
+                  <div class="adv-subtitle">源库连接池</div>
+                  <a-row :gutter="16">
+                    <a-col :span="8">
+                      <a-form-item label="最大连接数">
+                        <a-input-number v-model="dataMigrate.srcMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="最大空闲连接数">
+                        <a-input-number v-model="dataMigrate.srcMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="连接生命周期（秒）">
+                        <a-input-number v-model="dataMigrate.srcConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                  <div class="adv-subtitle">目标库连接池</div>
+                  <a-row :gutter="16">
+                    <a-col :span="8">
+                      <a-form-item label="最大连接数" style="margin-bottom: 0">
+                        <a-input-number v-model="dataMigrate.dstMaxOpenConns" :min="0" :max="500" placeholder="默认 50" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="最大空闲连接数" style="margin-bottom: 0">
+                        <a-input-number v-model="dataMigrate.dstMaxIdleConns" :min="0" :max="500" placeholder="默认 25" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                    <a-col :span="8">
+                      <a-form-item label="连接生命周期（秒）" style="margin-bottom: 0">
+                        <a-input-number v-model="dataMigrate.dstConnMaxLifetime" :min="0" placeholder="默认 3600" style="width: 100%" />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
                 </a-col>
               </a-row>
             </a-collapse-item>
@@ -473,32 +471,24 @@
           </a-spin>
 
           <!-- 高级设置 -->
-          <a-collapse style="margin-bottom: 16px; max-width: 560px">
+          <a-collapse style="margin-bottom: 16px; max-width: 760px">
             <a-collapse-item key="advanced" header="高级设置">
+              <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
                 <a-col v-if="vmSelectedDst?.db_type !== 'dameng'" :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="viewMigrate.lowerCaseNames">对象名转小写</a-checkbox>
-                  </a-form-item>
+                  <a-checkbox v-model="viewMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="viewMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
-                  </a-form-item>
-                </a-col>
-                <a-col :span="24">
-                  <a-form-item label="视图剥离模式名">
-                    <a-input
-                      v-model="viewMigrate.stripViewSchemas"
-                      placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
-                      allow-clear
-                    />
-                    <template #extra>
-                      从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。
-                    </template>
-                  </a-form-item>
+                  <a-checkbox v-model="viewMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
               </a-row>
+              <div class="adv-section-title">视图剥离模式名</div>
+              <a-input
+                v-model="viewMigrate.stripViewSchemas"
+                placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
+                allow-clear
+              />
+              <div class="adv-hint">从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。</div>
             </a-collapse-item>
           </a-collapse>
 
@@ -711,23 +701,18 @@
           </a-form-item>
 
           <!-- 高级设置 -->
-          <a-collapse style="margin-bottom: 16px; max-width: 560px">
+          <a-collapse style="margin-bottom: 16px; max-width: 760px">
             <a-collapse-item key="advanced" header="高级设置">
+              <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
                 <a-col v-if="omSelectedDst?.db_type !== 'dameng'" :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="objMigrate.lowerCaseNames">对象名转小写</a-checkbox>
-                  </a-form-item>
+                  <a-checkbox v-model="objMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="objMigrate.changeOwner">更改对象 owner 为 Schema 同名角色</a-checkbox>
-                  </a-form-item>
+                  <a-checkbox v-model="objMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-form-item style="margin-bottom: 4px">
-                    <a-checkbox v-model="objMigrate.distributed">分布式库（建主键前设置分布列）</a-checkbox>
-                  </a-form-item>
+                  <a-checkbox v-model="objMigrate.distributed" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
                 </a-col>
               </a-row>
             </a-collapse-item>
@@ -982,7 +967,7 @@ const srcConnections = computed(() =>
 const pgConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'mysql') &&
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'kingbase' || c.db_type === 'mysql') &&
       (!dstEnvFilter.value || c.env === dstEnvFilter.value)
   )
 )
@@ -1064,7 +1049,7 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
@@ -1315,7 +1300,7 @@ async function vmLoadDstSchemas(connId: number) {
   viewMigrate.dstSchema = ''
   viewMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
@@ -1480,7 +1465,7 @@ async function omLoadDstSchemas(connId: number) {
   objMigrate.dstSchema = ''
   objMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []
@@ -1600,6 +1585,36 @@ function copyObjLogs() {
 </script>
 
 <style scoped>
+/* 高级设置 —— 轻量分组标题，替代厚重的 a-divider */
+.adv-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-1);
+  margin-bottom: 10px;
+}
+.adv-section-title:not(:first-child) {
+  margin-top: 16px;
+}
+.adv-section-note {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--color-text-3);
+  margin-left: 6px;
+}
+.adv-subtitle {
+  font-size: 12px;
+  color: var(--color-text-3);
+  margin-bottom: 8px;
+}
+.adv-check {
+  margin-bottom: 8px;
+}
+.adv-hint {
+  font-size: 12px;
+  color: var(--color-text-3);
+  line-height: 1.5;
+  margin-top: 4px;
+}
 .migration-log-container {
   background: #1a1a1a;
   color: #d4d4d4;

@@ -47,7 +47,7 @@ type submitTicketRequest struct {
 	CaptchaID   string `json:"captcha_id" binding:"required"`
 	CaptchaCode string `json:"captcha_code" binding:"required"`
 
-	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	SrcHost     string `json:"src_host"`
 	SrcPort     int    `json:"src_port" binding:"omitempty,min=1,max=65535"`
 	SrcDatabase string `json:"src_database"`
@@ -59,7 +59,7 @@ type submitTicketRequest struct {
 	SrcFilePath string `json:"src_file_path"`
 	SrcFileSize int64  `json:"src_file_size"`
 
-	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	DstHost     string `json:"dst_host"`
 	DstPort     int    `json:"dst_port" binding:"omitempty,min=1,max=65535"`
 	DstDatabase string `json:"dst_database"`
@@ -78,14 +78,14 @@ type updateTicketInfoRequest struct {
 	Applicant string `json:"applicant"`
 	Remark    string `json:"remark"`
 
-	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	SrcHost     string `json:"src_host"`
 	SrcPort     int    `json:"src_port" binding:"omitempty,min=1,max=65535"`
 	SrcDatabase string `json:"src_database"`
 	SrcUsername string `json:"src_username"`
 	SrcPassword string `json:"src_password"`
 
-	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo"`
+	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
 	DstHost     string `json:"dst_host"`
 	DstPort     int    `json:"dst_port" binding:"omitempty,min=1,max=65535"`
 	DstDatabase string `json:"dst_database"`

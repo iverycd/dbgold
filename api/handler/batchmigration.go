@@ -36,6 +36,8 @@ var dbTypeAlias = map[string]string{
 	"dm":         "dameng",
 	"seabox":     "seabox",
 	"highgo":     "highgo",
+	"kingbase":   "kingbase",
+	"kb":         "kingbase",
 }
 
 // normalizeDBType 去空格转小写后查别名表，查不到则原样返回（便于在 reason 中提示原值）。
