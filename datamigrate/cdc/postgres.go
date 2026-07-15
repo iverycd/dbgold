@@ -49,7 +49,7 @@ func (a *PostgresApplier) qualified(table string) string {
 	return quoteIdent(a.schema) + "." + quoteIdent(a.name(table))
 }
 func (a *PostgresApplier) checkpointTable() string {
-	return quoteIdent(a.schema) + `."__dbgold_cdc_checkpoint"`
+	return quoteIdent(a.schema) + "." + quoteIdent(CheckpointTableName)
 }
 
 func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {

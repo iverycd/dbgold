@@ -2,6 +2,8 @@ package cdc
 
 import "time"
 
+const CheckpointTableName = "__dbgold_cdc_checkpoint"
+
 type Position struct {
 	File string `json:"file"`
 	Pos  uint32 `json:"position"`
@@ -10,6 +12,7 @@ type Position struct {
 
 type TableInfo struct {
 	Name          string   `json:"name"`
+	Engine        string   `json:"engine"`
 	Columns       []string `json:"columns"`
 	ColumnTypes   []string `json:"column_types"`
 	PrimaryKey    []int    `json:"primary_key_indexes"`
@@ -22,6 +25,7 @@ type PreflightResult struct {
 	BinlogFormat    string      `json:"binlog_format"`
 	BinlogRowImage  string      `json:"binlog_row_image"`
 	GTIDMode        string      `json:"gtid_mode"`
+	RetentionSecs   *int64      `json:"binlog_retention_seconds"`
 	CurrentPosition Position    `json:"current_position"`
 	Tables          []TableInfo `json:"tables"`
 	NoPrimaryKey    []string    `json:"no_primary_key_tables"`
@@ -49,7 +53,18 @@ type Config struct {
 type Stats struct {
 	Inserts, Updates, Deletes, Skipped, Warnings int64
 	Position                                     Position
+	SourceHead                                   Position
+	CaughtUp                                     bool
+	LagSeconds                                   int64
 	LastEventAt                                  time.Time
+}
+
+type CountValidation struct {
+	Table  string `json:"table"`
+	Source int64  `json:"source"`
+	Target int64  `json:"target"`
+	Match  bool   `json:"match"`
+	Error  string `json:"error,omitempty"`
 }
 
 type Hooks struct {

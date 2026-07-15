@@ -23,7 +23,7 @@ func OpenSource(dsn string) (*sql.DB, error) {
 }
 
 func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) ([]TableInfo, error) {
-	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA
+	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, t.ENGINE
 		FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
 		ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE='BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`, database)
@@ -35,11 +35,12 @@ func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) 
 	var order []string
 	for rows.Next() {
 		var table, col, typ, extra string
-		if err := rows.Scan(&table, &col, &typ, &extra); err != nil {
+		var engine sql.NullString
+		if err := rows.Scan(&table, &col, &typ, &extra, &engine); err != nil {
 			return nil, err
 		}
 		if tableMap[table] == nil {
-			tableMap[table] = &TableInfo{Name: table}
+			tableMap[table] = &TableInfo{Name: table, Engine: engine.String}
 			order = append(order, table)
 		}
 		t := tableMap[table]

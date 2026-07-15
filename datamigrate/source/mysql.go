@@ -39,9 +39,17 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 
 // MySQLReader 实现 Reader 接口，连接到 MySQL 数据库
 type MySQLReader struct {
-	db         *sql.DB
-	dbName     string
-	snapshotTx *sql.Tx
+	db              *sql.DB
+	dbName          string
+	snapshotTx      *sql.Tx
+	snapshotCursors map[string]*snapshotCursor
+}
+
+type snapshotCursor struct {
+	rows      *sql.Rows
+	columns   []string
+	typeNames []string
+	read      int64
 }
 
 // BinlogPosition identifies the first binlog event that follows a snapshot.
@@ -66,6 +74,7 @@ func NewMySQL(dsn, dbName string, pool ConnPoolConfig) (*MySQLReader, error) {
 }
 
 func (r *MySQLReader) Close() error {
+	r.closeSnapshotCursors()
 	if r.snapshotTx != nil {
 		_ = r.snapshotTx.Rollback()
 		r.snapshotTx = nil
@@ -115,10 +124,11 @@ func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosi
 		return BinlogPosition{}, err
 	}
 	r.snapshotTx = tx
+	r.snapshotCursors = make(map[string]*snapshotCursor)
 	// A consistent read establishes the InnoDB read view while writes are locked.
 	var firstTable string
 	err = tx.QueryRowContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME LIMIT 1`, r.dbName).Scan(&firstTable)
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'InnoDB' ORDER BY TABLE_NAME LIMIT 1`, r.dbName).Scan(&firstTable)
 	if err == nil {
 		var one int
 		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", strings.ReplaceAll(firstTable, "`", "``"))).Scan(&one); err != nil && err != sql.ErrNoRows {
@@ -126,7 +136,11 @@ func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosi
 			r.snapshotTx = nil
 			return BinlogPosition{}, err
 		}
-	} else if err != sql.ErrNoRows {
+	} else if err == sql.ErrNoRows {
+		_ = tx.Rollback()
+		r.snapshotTx = nil
+		return BinlogPosition{}, fmt.Errorf("consistent snapshot requires at least one InnoDB table")
+	} else {
 		_ = tx.Rollback()
 		r.snapshotTx = nil
 		return BinlogPosition{}, err
@@ -177,7 +191,7 @@ func readBinlogPosition(ctx context.Context, conn *sql.Conn) (BinlogPosition, er
 			_, _ = fmt.Sscan(string(values[i]), &n)
 			p.Pos = uint32(n)
 		case "executed_gtid_set":
-			p.GTID = string(values[i])
+			p.GTID = strings.TrimSpace(string(values[i]))
 		}
 	}
 	if p.File == "" {
@@ -190,6 +204,7 @@ func (r *MySQLReader) FinishSnapshot() error {
 	if r.snapshotTx == nil {
 		return nil
 	}
+	r.closeSnapshotCursors()
 	err := r.snapshotTx.Commit()
 	r.snapshotTx = nil
 	return err
@@ -331,6 +346,9 @@ func (r *MySQLReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) {
 }
 
 func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
+	if r.snapshotTx != nil && len(pkCols) == 0 {
+		return r.readSnapshotCursorPage(ctx, table, offset, limit)
+	}
 	var query string
 	if len(pkCols) > 0 {
 		pkList := strings.Join(pkCols, ", ")
@@ -372,24 +390,100 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, nil, nil, err
 		}
-		for i, v := range vals {
-			b, ok := v.([]byte)
-			if !ok {
-				continue
-			}
-			dt := colTypeName[i]
-			switch {
-			case strings.Contains(dt, "BLOB") || strings.Contains(dt, "BINARY"):
-				// 二进制列保持 []byte（中立值），由目标 ValueConverter 落地
-			case dt == "BIT" || dt == "GEOMETRY":
-				// 中立值：保持原始 []byte，PG 专属的 hex 文本化移到 PostgresValueConverter
-			default:
-				vals[i] = strings.ReplaceAll(string(b), "\x00", "")
-			}
-		}
+		normalizeMySQLValues(vals, colTypeName)
 		result = append(result, vals)
 	}
 	return cols, colTypeName, result, rows.Err()
+}
+
+// readSnapshotCursorPage streams a keyless table from one stable result set.
+// OFFSET pagination without ORDER BY has no ordering guarantee; ordering all
+// columns would require an expensive full sort for every page. A cursor keeps
+// the repeatable-read snapshot correct while retaining bounded page memory.
+func (r *MySQLReader) readSnapshotCursorPage(ctx context.Context, table string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
+	if limit <= 0 {
+		return nil, nil, nil, fmt.Errorf("snapshot page limit must be positive")
+	}
+	cursor := r.snapshotCursors[table]
+	if cursor == nil {
+		if offset != 0 {
+			return nil, nil, nil, fmt.Errorf("snapshot cursor for %s must start at offset 0", table)
+		}
+		quotedTable := "`" + strings.ReplaceAll(table, "`", "``") + "`"
+		rows, err := r.snapshotTx.QueryContext(ctx, "SELECT * FROM "+quotedTable)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return nil, nil, nil, err
+		}
+		columnTypes, err := rows.ColumnTypes()
+		if err != nil {
+			rows.Close()
+			return nil, nil, nil, err
+		}
+		typeNames := make([]string, len(columnTypes))
+		for i, columnType := range columnTypes {
+			typeNames[i] = strings.ToUpper(columnType.DatabaseTypeName())
+		}
+		cursor = &snapshotCursor{rows: rows, columns: columns, typeNames: typeNames}
+		r.snapshotCursors[table] = cursor
+	}
+	if offset != cursor.read {
+		return nil, nil, nil, fmt.Errorf("non-sequential snapshot cursor for %s: offset=%d read=%d", table, offset, cursor.read)
+	}
+	result := make([][]interface{}, 0, limit)
+	for int64(len(result)) < limit && cursor.rows.Next() {
+		values := make([]interface{}, len(cursor.columns))
+		pointers := make([]interface{}, len(cursor.columns))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err := cursor.rows.Scan(pointers...); err != nil {
+			cursor.rows.Close()
+			delete(r.snapshotCursors, table)
+			return nil, nil, nil, err
+		}
+		normalizeMySQLValues(values, cursor.typeNames)
+		result = append(result, values)
+		cursor.read++
+	}
+	if err := cursor.rows.Err(); err != nil {
+		cursor.rows.Close()
+		delete(r.snapshotCursors, table)
+		return nil, nil, nil, err
+	}
+	if int64(len(result)) < limit {
+		cursor.rows.Close()
+		delete(r.snapshotCursors, table)
+	}
+	return cursor.columns, cursor.typeNames, result, nil
+}
+
+func normalizeMySQLValues(values []interface{}, typeNames []string) {
+	for i, value := range values {
+		bytes, ok := value.([]byte)
+		if !ok {
+			continue
+		}
+		databaseType := typeNames[i]
+		switch {
+		case strings.Contains(databaseType, "BLOB") || strings.Contains(databaseType, "BINARY"):
+		case databaseType == "BIT" || databaseType == "GEOMETRY":
+		default:
+			values[i] = strings.ReplaceAll(string(bytes), "\x00", "")
+		}
+	}
+}
+
+func (r *MySQLReader) closeSnapshotCursors() {
+	for table, cursor := range r.snapshotCursors {
+		_ = cursor.rows.Close()
+		delete(r.snapshotCursors, table)
+	}
+	r.snapshotCursors = nil
 }
 
 func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {

@@ -1,0 +1,37 @@
+services:
+  mysql:
+    image: mysql:8.4
+    command:
+      - --server-id=101
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-expire-logs-seconds=604800
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: cdc_source
+    ports:
+      - "13306:3306"
+    volumes:
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/01-cdc.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prootpass"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespass
+      POSTGRES_DB: cdc_target
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cdc_target"]
+      interval: 2s
+      timeout: 3s
+      retries: 40

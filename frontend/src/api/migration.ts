@@ -188,6 +188,7 @@ export interface IncrementalRequest {
 export interface CDCPosition { file: string; position: number; gtid: string }
 export interface CDCTableInfo {
   name: string
+  engine: string
   columns: string[]
   primary_key_indexes: number[]
 }
@@ -197,6 +198,7 @@ export interface IncrementalPreflight {
   binlog_format: string
   binlog_row_image: string
   gtid_mode: string
+  binlog_retention_seconds: number | null
   current_position: CDCPosition
   tables: CDCTableInfo[]
   no_primary_key_tables: string[]
@@ -212,6 +214,7 @@ export interface IncrementalJob {
   src_database: string
   target_schema: string
   start_mode: string
+  bootstrap_completed: boolean
   status: string
   phase: string
   summary: string
@@ -220,6 +223,16 @@ export interface IncrementalJob {
   checkpoint_file: string
   checkpoint_position: number
   checkpoint_gtid: string
+  source_head_file: string
+  source_head_position: number
+  source_head_gtid: string
+  caught_up: boolean
+  lag_seconds: number
+  cutover_file: string
+  cutover_position: number
+  cutover_gtid: string
+  validation_state: string
+  validation_json: string
   insert_count: number
   update_count: number
   delete_count: number
@@ -239,7 +252,11 @@ export const listIncrementalJobs = () => api.get<IncrementalJob[]>('/migration/i
 export const getIncrementalJob = (jobID: string) => api.get<IncrementalJob>(`/migration/incremental/jobs/${jobID}`)
 export const pauseIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/pause`)
 export const resumeIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/resume`)
-export const stopIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/stop`)
+export const prepareIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/prepare-cutover`)
+export const cancelIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/cancel-cutover`)
+export const stopIncrementalJob = (jobID: string, acknowledgeWarnings = false) =>
+  api.post(`/migration/incremental/jobs/${jobID}/stop`, { acknowledge_warnings: acknowledgeWarnings })
+export const abortIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/abort`)
 export const acknowledgeIncrementalDDL = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/ack-ddl`)
 
 // ===== 视图迁移 =====

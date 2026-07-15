@@ -79,7 +79,10 @@ func NewRouter() *gin.Engine {
 		authed.GET("/migration/incremental/jobs/:jobID", handler.GetIncremental)
 		authed.POST("/migration/incremental/jobs/:jobID/pause", handler.PauseIncremental)
 		authed.POST("/migration/incremental/jobs/:jobID/resume", handler.ResumeIncremental)
+		authed.POST("/migration/incremental/jobs/:jobID/prepare-cutover", handler.PrepareIncrementalCutover)
+		authed.POST("/migration/incremental/jobs/:jobID/cancel-cutover", handler.CancelIncrementalCutover)
 		authed.POST("/migration/incremental/jobs/:jobID/stop", handler.StopIncremental)
+		authed.POST("/migration/incremental/jobs/:jobID/abort", handler.AbortIncremental)
 		authed.POST("/migration/incremental/jobs/:jobID/ack-ddl", handler.AckIncrementalDDL)
 
 		authed.POST("/migration/batch/validate", handler.ValidateBatch)
