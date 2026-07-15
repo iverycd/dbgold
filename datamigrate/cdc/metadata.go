@@ -23,6 +23,14 @@ func OpenSource(dsn string) (*sql.DB, error) {
 }
 
 func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) ([]TableInfo, error) {
+	return loadTables(ctx, db, database, mode, filter, nil)
+}
+
+func LoadExactTables(ctx context.Context, db *sql.DB, database string, exact []string) ([]TableInfo, error) {
+	return loadTables(ctx, db, database, "all", "", exact)
+}
+
+func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, exact []string) ([]TableInfo, error) {
 	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, t.ENGINE
 		FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
 		ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME
@@ -76,6 +84,19 @@ func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) 
 		}
 	}
 	selected := datamigrate.FilterTables(order, mode, filter)
+	if exact != nil {
+		available := make(map[string]bool, len(order))
+		for _, name := range order {
+			available[name] = true
+		}
+		selected = make([]string, 0, len(exact))
+		for _, name := range exact {
+			if !available[name] {
+				return nil, fmt.Errorf("有效 CDC 表在源库中不存在: %s", name)
+			}
+			selected = append(selected, name)
+		}
+	}
 	result := make([]TableInfo, 0, len(selected))
 	for _, name := range selected {
 		if t := tableMap[name]; t != nil {
@@ -86,6 +107,16 @@ func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) 
 		return nil, fmt.Errorf("没有匹配的源表")
 	}
 	return result, nil
+}
+
+func LoadConfiguredTables(ctx context.Context, db *sql.DB, cfg Config) ([]TableInfo, error) {
+	if cfg.TableNames != nil {
+		if len(cfg.TableNames) == 0 {
+			return nil, fmt.Errorf("有效 CDC 表清单为空或损坏，已拒绝回退到原始表过滤条件")
+		}
+		return LoadExactTables(ctx, db, cfg.SourceDatabase, cfg.TableNames)
+	}
+	return LoadTables(ctx, db, cfg.SourceDatabase, cfg.Mode, cfg.Filter)
 }
 
 func tableMap(tables []TableInfo) map[string]*TableInfo {

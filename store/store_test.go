@@ -93,16 +93,24 @@ func TestIncrementalOperationalFieldsPersist(t *testing.T) {
 	job := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-fields", SrcConnID: 1, DstConnID: 2, Status: "snapshot"}
 	require.NoError(t, CreateIncrementalJob(job))
 	require.NoError(t, UpdateIncrementalJob(job.JobID, map[string]any{
-		"bootstrap_completed":  true,
-		"start_gtid":           "sid:1-10",
-		"checkpoint_gtid":      "sid:1-11",
-		"source_head_gtid":     "sid:1-12",
-		"cutover_gtid":         "sid:1-13",
-		"blocking_gtid":        "sid:1-14",
-		"checkpoint_position":  101,
-		"source_head_position": 202,
-		"cutover_position":     303,
-		"blocking_position":    404,
+		"bootstrap_completed":      true,
+		"start_gtid":               "sid:1-10",
+		"checkpoint_gtid":          "sid:1-11",
+		"source_head_gtid":         "sid:1-12",
+		"cutover_gtid":             "sid:1-13",
+		"blocking_gtid":            "sid:1-14",
+		"checkpoint_position":      101,
+		"source_head_position":     202,
+		"cutover_position":         303,
+		"blocking_position":        404,
+		"bootstrap_failure_policy": "review_and_exclude",
+		"bootstrap_state":          "review_pending",
+		"pending_file":             "mysql-bin.000001",
+		"pending_position":         88,
+		"effective_table_count":    4,
+		"excluded_table_count":     2,
+		"bootstrap_manifest_hash":  "manifest",
+		"effective_tables_json":    `["a","b","c","d"]`,
 	}))
 	got, err := GetIncrementalJob(job.JobID)
 	require.NoError(t, err)
@@ -116,6 +124,13 @@ func TestIncrementalOperationalFieldsPersist(t *testing.T) {
 	assert.Equal(t, uint32(202), got.SourceHeadPos)
 	assert.Equal(t, uint32(303), got.CutoverPos)
 	assert.Equal(t, uint32(404), got.BlockingPos)
+	assert.Equal(t, "review_and_exclude", got.BootstrapPolicy)
+	assert.Equal(t, "review_pending", got.BootstrapState)
+	assert.Equal(t, "mysql-bin.000001", got.PendingFile)
+	assert.Equal(t, uint32(88), got.PendingPos)
+	assert.Equal(t, 4, got.EffectiveCount)
+	assert.Equal(t, 2, got.ExcludedCount)
+	assert.Equal(t, "manifest", got.ManifestHash)
 	updated, err := UpdateIncrementalJobIfStatus(job.JobID, []string{"running"}, map[string]any{"status": "validating"})
 	require.NoError(t, err)
 	assert.False(t, updated)

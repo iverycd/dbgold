@@ -25,7 +25,18 @@ type IncrementalMigrationJob struct {
 	MigrateMode     string     `json:"migrate_mode"`
 	TableFilter     string     `json:"table_filter"`
 	LowerCaseNames  bool       `json:"lower_case_names"`
+	BootstrapPolicy string     `gorm:"column:bootstrap_failure_policy" json:"bootstrap_failure_policy"`
+	BootstrapState  string     `json:"bootstrap_state"`
 	BootstrapDone   bool       `gorm:"column:bootstrap_completed" json:"bootstrap_completed"`
+	PendingGTID     string     `gorm:"column:pending_gtid" json:"pending_gtid"`
+	PendingFile     string     `json:"pending_file"`
+	PendingPos      uint32     `gorm:"column:pending_position" json:"pending_position"`
+	EffectiveCount  int        `gorm:"column:effective_table_count" json:"effective_table_count"`
+	ExcludedCount   int        `gorm:"column:excluded_table_count" json:"excluded_table_count"`
+	ManifestHash    string     `gorm:"column:bootstrap_manifest_hash" json:"bootstrap_manifest_hash"`
+	EffectiveJSON   string     `gorm:"column:effective_tables_json" json:"-"`
+	ExcludedJSON    string     `gorm:"column:excluded_tables_json" json:"-"`
+	BootstrapReport string     `gorm:"column:bootstrap_report_json" json:"-"`
 	Status          string     `gorm:"index" json:"status"`
 	Phase           string     `json:"phase"`
 	Summary         string     `json:"summary"`

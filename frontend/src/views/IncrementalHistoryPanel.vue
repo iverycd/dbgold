@@ -21,7 +21,7 @@
               <a-button size="mini" type="primary">准备切换</a-button>
             </a-popconfirm>
             <a-button v-if="cancelable(record.status)" size="mini" @click="cancelCutover(record)">取消切换</a-button>
-            <a-popconfirm v-if="completable(record.status)" :content="record.status === 'ready_with_warnings' ? '存在被跳过的无主键变更，确认已核对并接受风险？' : '确认源库仍保持停写并完成迁移？'" @ok="complete(record)">
+            <a-popconfirm v-if="completable(record.status)" :content="record.status === 'ready_with_warnings' ? `存在同步警告或 ${record.excluded_table_count || 0} 张排除表，确认已核对并接受当前迁移范围？` : '确认源库仍保持停写并完成迁移？'" @ok="complete(record)">
               <a-button size="mini" type="primary" status="success">完成切换</a-button>
             </a-popconfirm>
             <a-popconfirm v-if="abortable(record.status)" content="放弃后不能恢复，目标端数据不会自动删除。确认放弃？" @ok="abort(record)">
@@ -33,13 +33,14 @@
     </template>
   </a-table>
 
-  <a-drawer v-model:visible="drawer" title="增量任务详情" :width="820" @close="detail = null">
+  <a-drawer v-model:visible="drawer" title="增量任务详情" :width="820" @close="closeDetail">
     <template v-if="detail">
       <a-descriptions :column="2" bordered>
         <a-descriptions-item label="Job ID" :span="2">{{ detail.job_id }}</a-descriptions-item>
         <a-descriptions-item label="状态">{{ text(detail.status) }}</a-descriptions-item>
         <a-descriptions-item label="阶段">{{ detail.phase }}</a-descriptions-item>
         <a-descriptions-item label="全量完成">{{ detail.bootstrap_completed ? '是' : '否' }}</a-descriptions-item>
+        <a-descriptions-item label="有效 / 排除表">{{ detail.effective_table_count || 0 }} / {{ detail.excluded_table_count || 0 }}</a-descriptions-item>
         <a-descriptions-item label="同步状态">{{ detail.caught_up ? '已追平' : `追赶中（约 ${detail.lag_seconds || 0} 秒）` }}</a-descriptions-item>
         <a-descriptions-item label="目标 checkpoint" :span="2">{{ position(detail.checkpoint_file, detail.checkpoint_position, detail.checkpoint_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="源端最新位点" :span="2">{{ position(detail.source_head_file, detail.source_head_position, detail.source_head_gtid) }}</a-descriptions-item>
@@ -50,6 +51,39 @@
         SQLite 尚未记录全量完成。恢复时会先查目标 checkpoint：有完成位点才会续跑，否则拒绝恢复，不会自动删表重跑。
       </a-alert>
       <a-alert v-if="detail.last_error" type="error" style="margin-top: 12px">{{ detail.last_error }}</a-alert>
+      <template v-if="bootstrapReview">
+        <a-divider>全量迁移范围</a-divider>
+        <a-alert v-if="detail.status === 'paused_bootstrap_review'" type="warning">
+          全量存在失败表，确认排除前不会启动 CDC。请确保原始快照位点的 binlog 仍被保留。
+        </a-alert>
+        <a-descriptions :column="3" size="small" style="margin-top: 10px">
+          <a-descriptions-item label="原始范围">{{ bootstrapReview.requested_count }}</a-descriptions-item>
+          <a-descriptions-item label="成功表">{{ bootstrapReview.effective_tables.length }}</a-descriptions-item>
+          <a-descriptions-item label="排除表">{{ bootstrapReview.excluded_tables.length }}</a-descriptions-item>
+          <a-descriptions-item label="原始快照位点" :span="3">{{ position(bootstrapReview.position.file, bootstrapReview.position.position, bootstrapReview.position.gtid) }}</a-descriptions-item>
+        </a-descriptions>
+        <a-table :data="bootstrapReview.excluded_tables" size="small" :pagination="false" :scroll="{ y: 260 }">
+          <template #columns>
+            <a-table-column title="表" data-index="table" :width="170" />
+            <a-table-column title="阶段" :width="120"><template #cell="{ record }">{{ bootstrapStageText(record.stage) }}</template></a-table-column>
+            <a-table-column title="错误" data-index="error" />
+            <a-table-column title="DDL" :width="90">
+              <template #cell="{ record }">
+                <a-popover v-if="record.ddl" title="失败 DDL">
+                  <a-button size="mini">查看</a-button>
+                  <template #content><pre class="ddl ddl-popover">{{ record.ddl }}</pre></template>
+                </a-popover>
+                <span v-else>—</span>
+              </template>
+            </a-table-column>
+          </template>
+        </a-table>
+        <a-alert v-for="warning in bootstrapReview.warnings" :key="warning" type="warning" style="margin-top: 8px">{{ warning }}</a-alert>
+        <div v-if="detail.status === 'paused_bootstrap_review'" class="review-confirm">
+          <a-checkbox v-model="reviewAccepted">我确认排除以上失败表，仅同步成功表</a-checkbox>
+          <a-button type="primary" :loading="acceptingReview" :disabled="!reviewAccepted" @click="acceptReview">接受排除并继续</a-button>
+        </div>
+      </template>
       <template v-if="detail.blocking_ddl"><a-divider>待处理 DDL</a-divider><pre class="ddl">{{ detail.blocking_ddl }}</pre></template>
       <template v-if="validation(detail).length">
         <a-divider>最终行数校验</a-divider>
@@ -71,15 +105,18 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
+  acceptIncrementalBootstrapExclusions,
   abortIncrementalJob,
   acknowledgeIncrementalDDL,
   cancelIncrementalCutover,
+  getIncrementalBootstrapReview,
   listIncrementalJobs,
   pauseIncrementalJob,
   prepareIncrementalCutover,
   resumeIncrementalJob,
   stopIncrementalJob,
   type IncrementalJob,
+  type BootstrapReview,
 } from '@/api/migration'
 
 interface ValidationRow { table: string; source: number; target: number; match: boolean; error?: string }
@@ -88,13 +125,19 @@ const jobs = ref<IncrementalJob[]>([])
 const loading = ref(false)
 const drawer = ref(false)
 const detail = ref<IncrementalJob | null>(null)
+const bootstrapReview = ref<BootstrapReview | null>(null)
+const reviewAccepted = ref(false)
+const acceptingReview = ref(false)
 let timer: number | undefined
 
 async function load() {
   loading.value = true
   try {
     jobs.value = (await listIncrementalJobs()).data
-    if (detail.value) detail.value = jobs.value.find(job => job.job_id === detail.value?.job_id) || detail.value
+    if (detail.value) {
+      detail.value = jobs.value.find(job => job.job_id === detail.value?.job_id) || detail.value
+      await loadBootstrapReview(detail.value)
+    }
   } catch {
     Message.error('加载增量任务失败')
   } finally {
@@ -115,10 +158,45 @@ const resume = (job: IncrementalJob) => act(() => resumeIncrementalJob(job.job_i
 const ack = (job: IncrementalJob) => act(() => acknowledgeIncrementalDDL(job.job_id), 'DDL 已确认')
 const prepare = (job: IncrementalJob) => act(() => prepareIncrementalCutover(job.job_id), '已锁定最终位点，正在追赶和校验')
 const cancelCutover = (job: IncrementalJob) => act(() => cancelIncrementalCutover(job.job_id), '已取消切换并继续同步')
-const complete = (job: IncrementalJob) => act(() => stopIncrementalJob(job.job_id, job.status === 'ready_with_warnings'), '迁移闭环已安全完成')
+const complete = (job: IncrementalJob) => act(() => stopIncrementalJob(job.job_id, job.status === 'ready_with_warnings', job.excluded_table_count > 0), '迁移闭环已安全完成')
 const abort = (job: IncrementalJob) => act(() => abortIncrementalJob(job.job_id), '任务已放弃')
 
-function openDetail(job: IncrementalJob) { detail.value = job; drawer.value = true }
+async function loadBootstrapReview(job: IncrementalJob) {
+  if (job.status !== 'paused_bootstrap_review' && job.excluded_table_count <= 0) {
+    bootstrapReview.value = null
+    return
+  }
+  try {
+    bootstrapReview.value = (await getIncrementalBootstrapReview(job.job_id)).data
+  } catch {
+    bootstrapReview.value = null
+  }
+}
+async function openDetail(job: IncrementalJob) {
+  detail.value = job
+  reviewAccepted.value = false
+  drawer.value = true
+  await loadBootstrapReview(job)
+}
+function closeDetail() {
+  detail.value = null
+  bootstrapReview.value = null
+  reviewAccepted.value = false
+}
+async function acceptReview() {
+  if (!detail.value || !bootstrapReview.value) return
+  acceptingReview.value = true
+  try {
+    await acceptIncrementalBootstrapExclusions(detail.value.job_id, bootstrapReview.value.manifest_hash)
+    Message.success('已确认排除失败表，正在追赶 binlog')
+    reviewAccepted.value = false
+    await load()
+  } catch (e: any) {
+    Message.error(e?.response?.data?.error || '确认失败表排除失败')
+  } finally {
+    acceptingReview.value = false
+  }
+}
 function pausable(job: IncrementalJob) { return ['catching_up', 'running', 'reconnecting'].includes(job.status) }
 function unsafeBootstrap(job: IncrementalJob) { return job.start_mode === 'full_then_cdc' && !job.bootstrap_completed && ['paused_restart', 'failed'].includes(job.status) }
 function resumable(job: IncrementalJob) { return ['paused_manual', 'paused_restart', 'failed'].includes(job.status) }
@@ -143,9 +221,12 @@ function position(file: string, pos: number, gtid: string) {
 const labels: Record<string, string> = {
   initializing: '初始化', snapshot: '全量快照', catching_up: '追赶', running: '运行中', reconnecting: '重连中',
   pausing: '暂停中', paused_manual: '已暂停', paused_restart: '重启后暂停', paused_ddl: 'DDL 暂停',
+  paused_bootstrap_review: '全量待确认',
   cutting_over: '追赶切换边界', validating: '最终校验', ready_to_cutover: '可完成切换',
   ready_with_warnings: '带风险待确认', cutover_blocked: '切换受阻', stopped: '已完成', aborted: '已放弃', failed: '失败',
 }
+const bootstrapStageLabels: Record<string, string> = { schema: '建表', data: '数据复制', row_count: '行数校验', cdc_compatibility: 'CDC 兼容性' }
+const bootstrapStageText = (stage: string) => bootstrapStageLabels[stage] || stage
 const text = (status: string) => labels[status] || status
 function color(status: string) {
   if (['running', 'ready_to_cutover', 'stopped'].includes(status)) return 'green'
@@ -163,4 +244,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 <style scoped>
 .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
 .ddl { padding: 12px; background: #f2f3f5; border-radius: 4px; white-space: pre-wrap; }
+.ddl-popover { max-width: 680px; max-height: 360px; overflow: auto; }
+.review-confirm { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding: 10px 12px; background: var(--color-warning-light-1); border-radius: 4px; }
 </style>

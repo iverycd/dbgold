@@ -21,6 +21,83 @@ const (
 	integrationTargetDSN      = "host=127.0.0.1 port=15432 user=postgres password=postgrespass dbname=cdc_target sslmode=disable"
 )
 
+func TestBootstrapCheckpointIntegration(t *testing.T) {
+	if os.Getenv("CDC_INTEGRATION") != "1" {
+		t.Skip("set CDC_INTEGRATION=1 and start testdata/docker-compose.yml")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dst := mustOpenIntegrationDB(t, "postgres", integrationTargetDSN)
+	defer dst.Close()
+	mustExecIntegration(t, dst, `CREATE SCHEMA IF NOT EXISTS cdc_test`)
+	mustExecIntegration(t, dst, `DROP TABLE IF EXISTS cdc_test.__dbgold_cdc_checkpoint`)
+	mustExecIntegration(t, dst, `CREATE TABLE cdc_test.__dbgold_cdc_checkpoint (
+		job_id text PRIMARY KEY, binlog_file text NOT NULL DEFAULT '', binlog_position bigint NOT NULL DEFAULT 4,
+		gtid text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now())`)
+	mustExecIntegration(t, dst, `DROP TABLE IF EXISTS cdc_test.bootstrap_failed CASCADE`)
+	mustExecIntegration(t, dst, `DROP TABLE IF EXISTS cdc_test.bootstrap_effective CASCADE`)
+	mustExecIntegration(t, dst, `DROP TABLE IF EXISTS cdc_test.bootstrap_unrelated CASCADE`)
+	mustExecIntegration(t, dst, `DROP TABLE IF EXISTS cdc_test.bootstrap_schema_failed CASCADE`)
+	mustExecIntegration(t, dst, `CREATE TABLE cdc_test.bootstrap_failed(id bigint)`)
+	mustExecIntegration(t, dst, `CREATE TABLE cdc_test.bootstrap_schema_failed(id bigint PRIMARY KEY)`)
+	mustExecIntegration(t, dst, `CREATE TABLE cdc_test.bootstrap_effective(id bigint REFERENCES cdc_test.bootstrap_schema_failed(id))`)
+	mustExecIntegration(t, dst, `CREATE TABLE cdc_test.bootstrap_unrelated(id bigint REFERENCES cdc_test.bootstrap_schema_failed(id))`)
+	cfg := Config{JobID: fmt.Sprintf("bootstrap-%d", time.Now().UnixNano()), TargetDSN: integrationTargetDSN, TargetSchema: "cdc_test", LowerCaseNames: true}
+	position := Position{File: "mysql-bin.000001", Pos: 120}
+	if err := SaveTargetBootstrapRecord(ctx, cfg, BootstrapRecord{State: "snapshot_in_progress", Position: position}); err != nil {
+		t.Fatal(err)
+	}
+	record := BootstrapRecord{
+		State:           "review_pending",
+		Position:        position,
+		EffectiveTables: []string{"cdc_pk", "bootstrap_effective"},
+		ExcludedTables: []BootstrapIssue{
+			{Table: "bootstrap_failed", Stage: "data", Error: "test"},
+			{Table: "bootstrap_schema_failed", Stage: "schema", Error: "test"},
+		},
+	}
+	record.ManifestHash = HashBootstrapManifest(record)
+	if err := SaveTargetBootstrapRecord(ctx, cfg, record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, exists, err := LoadTargetBootstrapRecord(ctx, cfg)
+	if err != nil || !exists || loaded.State != "review_pending" || loaded.ManifestHash != record.ManifestHash {
+		t.Fatalf("unexpected review checkpoint: exists=%v record=%+v err=%v", exists, loaded, err)
+	}
+	if err = FinalizeTargetBootstrap(ctx, cfg, record); err != nil {
+		t.Fatal(err)
+	}
+	var failedTableExists bool
+	if err = dst.QueryRowContext(ctx, `SELECT to_regclass('cdc_test.bootstrap_failed') IS NOT NULL`).Scan(&failedTableExists); err != nil || failedTableExists {
+		t.Fatalf("excluded table was not removed: exists=%v err=%v", failedTableExists, err)
+	}
+	var effectiveFKs, unrelatedFKs int
+	if err = dst.QueryRowContext(ctx, `SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+		JOIN pg_namespace n ON n.oid=t.relnamespace WHERE c.contype='f' AND n.nspname='cdc_test' AND t.relname='bootstrap_effective'`).Scan(&effectiveFKs); err != nil || effectiveFKs != 0 {
+		t.Fatalf("effective table foreign key to excluded table was not removed: count=%d err=%v", effectiveFKs, err)
+	}
+	if err = dst.QueryRowContext(ctx, `SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+		JOIN pg_namespace n ON n.oid=t.relnamespace WHERE c.contype='f' AND n.nspname='cdc_test' AND t.relname='bootstrap_unrelated'`).Scan(&unrelatedFKs); err != nil || unrelatedFKs != 1 {
+		t.Fatalf("unrelated table foreign key was unexpectedly removed: count=%d err=%v", unrelatedFKs, err)
+	}
+	loaded, exists, err = LoadTargetBootstrapRecord(ctx, cfg)
+	if err != nil || !exists || loaded.State != "completed" || len(loaded.EffectiveTables) != 2 {
+		t.Fatalf("unexpected completed checkpoint: exists=%v record=%+v err=%v", exists, loaded, err)
+	}
+	applier, err := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer applier.Close()
+	if err = applier.SaveCheckpoint(ctx, Position{File: position.File, Pos: 140}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err = applier.LoadBootstrapRecord(ctx)
+	if err != nil || loaded.ManifestHash != record.ManifestHash || len(loaded.ExcludedTables) != 2 {
+		t.Fatalf("CDC checkpoint update overwrote bootstrap manifest: %+v err=%v", loaded, err)
+	}
+}
+
 func TestCDCIntegration(t *testing.T) {
 	if os.Getenv("CDC_INTEGRATION") != "1" {
 		t.Skip("set CDC_INTEGRATION=1 and start testdata/docker-compose.yml")

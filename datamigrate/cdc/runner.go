@@ -17,6 +17,7 @@ import (
 
 var ErrDDLPause = errors.New("source DDL requires manual acknowledgement")
 var ErrCutoverReady = errors.New("cutover boundary reached")
+var ErrBootstrapReview = errors.New("bootstrap exclusions require manual review")
 var ddlPrefix = regexp.MustCompile(`(?is)^\s*(CREATE|ALTER|DROP|RENAME|TRUNCATE)\s+`)
 
 type Runner struct {
@@ -35,7 +36,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer src.Close()
-	tables, err := LoadTables(ctx, src, r.cfg.SourceDatabase, r.cfg.Mode, r.cfg.Filter)
+	tables, err := LoadConfiguredTables(ctx, src, r.cfg)
 	if err != nil {
 		return err
 	}
@@ -399,13 +400,50 @@ func LoadTargetCheckpoint(ctx context.Context, cfg Config) (Position, bool, erro
 	defer a.Close()
 	return a.LoadCheckpoint(ctx)
 }
+
+func SaveTargetBootstrapRecord(ctx context.Context, cfg Config, record BootstrapRecord) error {
+	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	if e != nil {
+		return e
+	}
+	defer a.Close()
+	return a.SaveBootstrapRecord(ctx, record)
+}
+
+func LoadTargetBootstrapRecord(ctx context.Context, cfg Config) (BootstrapRecord, bool, error) {
+	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	if e != nil {
+		return BootstrapRecord{}, false, e
+	}
+	defer a.Close()
+	return a.LoadBootstrapRecord(ctx)
+}
+
+func FinalizeTargetBootstrap(ctx context.Context, cfg Config, record BootstrapRecord) error {
+	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	if e != nil {
+		return e
+	}
+	defer a.Close()
+	return a.FinalizeBootstrap(ctx, record)
+}
+
+func AbortTargetBootstrap(ctx context.Context, cfg Config) error {
+	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	if e != nil {
+		return e
+	}
+	defer a.Close()
+	return a.MarkBootstrapAborted(ctx)
+}
+
 func SyncSequences(ctx context.Context, cfg Config) error {
 	src, e := OpenSource(cfg.SourceDSN)
 	if e != nil {
 		return e
 	}
 	defer src.Close()
-	tables, e := LoadTables(ctx, src, cfg.SourceDatabase, cfg.Mode, cfg.Filter)
+	tables, e := LoadConfiguredTables(ctx, src, cfg)
 	if e != nil {
 		return e
 	}

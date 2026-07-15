@@ -183,6 +183,7 @@ export interface IncrementalRequest {
   migrate_mode: 'all' | 'include' | 'exclude'
   table_filter?: string
   lower_case_names?: boolean
+  bootstrap_failure_policy?: 'review_and_exclude' | 'fail_all'
 }
 
 export interface CDCPosition { file: string; position: number; gtid: string }
@@ -215,6 +216,14 @@ export interface IncrementalJob {
   target_schema: string
   start_mode: string
   bootstrap_completed: boolean
+  bootstrap_failure_policy: string
+  bootstrap_state: string
+  pending_file: string
+  pending_position: number
+  pending_gtid: string
+  effective_table_count: number
+  excluded_table_count: number
+  bootstrap_manifest_hash: string
   status: string
   phase: string
   summary: string
@@ -244,18 +253,42 @@ export interface IncrementalJob {
   finished_at?: string
 }
 
+export interface BootstrapIssue {
+  table: string
+  stage: 'schema' | 'data' | 'row_count' | 'cdc_compatibility'
+  error: string
+  ddl?: string
+}
+
+export interface BootstrapReview {
+  state: string
+  position: CDCPosition
+  effective_tables: string[]
+  excluded_tables: BootstrapIssue[]
+  manifest_hash: string
+  requested_count: number
+  warnings: string[]
+}
+
 export const preflightIncremental = (data: IncrementalRequest) =>
   api.post<IncrementalPreflight>('/migration/incremental/preflight', data)
 export const startIncremental = (data: IncrementalRequest) =>
   api.post<{ job_id: string; preflight: IncrementalPreflight }>('/migration/incremental/jobs', data)
 export const listIncrementalJobs = () => api.get<IncrementalJob[]>('/migration/incremental/jobs')
 export const getIncrementalJob = (jobID: string) => api.get<IncrementalJob>(`/migration/incremental/jobs/${jobID}`)
+export const getIncrementalBootstrapReview = (jobID: string) =>
+  api.get<BootstrapReview>(`/migration/incremental/jobs/${jobID}/bootstrap-review`)
+export const acceptIncrementalBootstrapExclusions = (jobID: string, manifestHash: string) =>
+  api.post(`/migration/incremental/jobs/${jobID}/accept-bootstrap-exclusions`, { manifest_hash: manifestHash, acknowledge: true })
 export const pauseIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/pause`)
 export const resumeIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/resume`)
 export const prepareIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/prepare-cutover`)
 export const cancelIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/cancel-cutover`)
-export const stopIncrementalJob = (jobID: string, acknowledgeWarnings = false) =>
-  api.post(`/migration/incremental/jobs/${jobID}/stop`, { acknowledge_warnings: acknowledgeWarnings })
+export const stopIncrementalJob = (jobID: string, acknowledgeWarnings = false, acknowledgeExclusions = false) =>
+  api.post(`/migration/incremental/jobs/${jobID}/stop`, {
+    acknowledge_warnings: acknowledgeWarnings,
+    acknowledge_exclusions: acknowledgeExclusions,
+  })
 export const abortIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/abort`)
 export const acknowledgeIncrementalDDL = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/ack-ddl`)
 

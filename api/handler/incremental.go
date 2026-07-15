@@ -23,19 +23,20 @@ import (
 )
 
 type incrementalRequest struct {
-	SrcConnID      uint   `json:"src_conn_id" binding:"required"`
-	DstConnID      uint   `json:"dst_conn_id" binding:"required"`
-	SrcDatabase    string `json:"src_database" binding:"required"`
-	TargetSchema   string `json:"target_schema" binding:"required"`
-	StartMode      string `json:"start_mode" binding:"required,oneof=full_then_cdc incremental_only"`
-	PositionMode   string `json:"position_mode" binding:"omitempty,oneof=auto gtid file"`
-	StartGTID      string `json:"start_gtid"`
-	StartFile      string `json:"start_file"`
-	StartPosition  uint32 `json:"start_position"`
-	ServerID       uint32 `json:"server_id"`
-	MigrateMode    string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
-	TableFilter    string `json:"table_filter"`
-	LowerCaseNames bool   `json:"lower_case_names"`
+	SrcConnID       uint   `json:"src_conn_id" binding:"required"`
+	DstConnID       uint   `json:"dst_conn_id" binding:"required"`
+	SrcDatabase     string `json:"src_database" binding:"required"`
+	TargetSchema    string `json:"target_schema" binding:"required"`
+	StartMode       string `json:"start_mode" binding:"required,oneof=full_then_cdc incremental_only"`
+	PositionMode    string `json:"position_mode" binding:"omitempty,oneof=auto gtid file"`
+	StartGTID       string `json:"start_gtid"`
+	StartFile       string `json:"start_file"`
+	StartPosition   uint32 `json:"start_position"`
+	ServerID        uint32 `json:"server_id"`
+	MigrateMode     string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
+	TableFilter     string `json:"table_filter"`
+	LowerCaseNames  bool   `json:"lower_case_names"`
+	BootstrapPolicy string `json:"bootstrap_failure_policy" binding:"omitempty,oneof=review_and_exclude fail_all"`
 }
 
 var incrementalStartMu sync.Mutex
@@ -101,6 +102,9 @@ func StartIncremental(c *gin.Context) {
 		_, _ = h.Write([]byte(jobID))
 		req.ServerID = 1000 + h.Sum32()%4000000000
 	}
+	if req.BootstrapPolicy == "" {
+		req.BootstrapPolicy = "fail_all"
+	}
 	cfg := incrementalConfig(req, jobID, src, dst)
 	pf := cdc.Preflight(c.Request.Context(), cfg, req.StartMode == "incremental_only")
 	if !pf.OK {
@@ -121,7 +125,7 @@ func StartIncremental(c *gin.Context) {
 	j := &store.IncrementalMigrationJob{OwnerID: middleware.GetCurrentUserID(c), JobID: jobID, SrcConnID: req.SrcConnID, DstConnID: req.DstConnID,
 		SrcDatabase: req.SrcDatabase, TargetSchema: req.TargetSchema, StartMode: req.StartMode, PositionMode: req.PositionMode, StartGTID: req.StartGTID,
 		StartFile: req.StartFile, StartPosition: req.StartPosition, ServerID: req.ServerID, MigrateMode: req.MigrateMode, TableFilter: req.TableFilter,
-		LowerCaseNames: req.LowerCaseNames, Status: "initializing", Phase: "initializing"}
+		LowerCaseNames: req.LowerCaseNames, BootstrapPolicy: req.BootstrapPolicy, BootstrapState: "pending", Status: "initializing", Phase: "initializing"}
 	incrementalStartMu.Lock()
 	defer incrementalStartMu.Unlock()
 	if exists, e := store.HasOpenIncrementalTarget(req.DstConnID, req.TargetSchema); e != nil {
@@ -151,12 +155,17 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 		var runErr error
 		if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
 			cfg := configFromIncremental(j, src, dst)
-			if cp, ok, e := cdc.LoadTargetCheckpoint(ctx, cfg); e != nil {
+			if record, ok, e := cdc.LoadTargetBootstrapRecord(ctx, cfg); e != nil {
 				runErr = fmt.Errorf("读取目标 checkpoint 失败，已禁止重新全量: %w", e)
+			} else if ok && record.State == "completed" {
+				runErr = applyCompletedBootstrapRecord(j, record)
+			} else if ok && record.State == "review_pending" {
+				runErr = applyReviewBootstrapRecord(j, record)
+				if runErr == nil {
+					runErr = cdc.ErrBootstrapReview
+				}
 			} else if ok {
-				j.BootstrapDone = true
-				j.CheckpointFile, j.CheckpointPos, j.CheckpointGTID = cp.File, cp.Pos, cp.GTID
-				runErr = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_completed": true, "checkpoint_file": cp.File, "checkpoint_position": cp.Pos, "checkpoint_gtid": cp.GTID, "start_file": cp.File, "start_position": cp.Pos, "start_gtid": cp.GTID})
+				runErr = fmt.Errorf("全量 checkpoint 状态为 %s，不能安全恢复或自动重跑", record.State)
 			} else {
 				runErr = runIncrementalBootstrap(ctx, j, src, dst)
 			}
@@ -183,6 +192,9 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 		if errors.Is(runErr, cdc.ErrDDLPause) {
 			return
 		}
+		if errors.Is(runErr, cdc.ErrBootstrapReview) {
+			return
+		}
 		if action == "pause" {
 			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "paused_manual", "phase": "paused", "summary": "用户已暂停"})
 			return
@@ -195,8 +207,11 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 			return
 		}
 		if action == "abort" {
+			if !j.BootstrapDone {
+				_ = cdc.AbortTargetBootstrap(context.Background(), configFromIncremental(j, src, dst))
+			}
 			now := time.Now()
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "aborted", "phase": "aborted", "summary": "任务已放弃", "finished_at": &now})
+			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "aborted", "phase": "aborted", "bootstrap_state": "aborted", "summary": "任务已放弃", "finished_at": &now})
 			return
 		}
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
@@ -237,9 +252,9 @@ func finishIncrementalCutover(j *store.IncrementalMigrationJob, src, dst *store.
 	status := "ready_to_cutover"
 	summary := "已追到最终边界且行数校验通过，可以完成切换"
 	fresh, _ := store.GetIncrementalJob(j.JobID)
-	if fresh != nil && fresh.SkippedCount > 0 {
+	if fresh != nil && (fresh.SkippedCount > 0 || fresh.ExcludedCount > 0) {
 		status = "ready_with_warnings"
-		summary = "已追到边界且行数一致，但存在被跳过的无主键 UPDATE/DELETE，请人工确认"
+		summary = "已追到边界且行数一致，但存在被排除表或跳过的无主键变更，请人工确认"
 	}
 	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": status, "phase": "ready", "validation_state": "passed", "validation_json": string(payload), "caught_up": true, "lag_seconds": 0, "last_error": "", "summary": summary})
 }
@@ -259,6 +274,16 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	}
 	if j.PositionMode != "gtid" {
 		pos.GTID = ""
+	}
+	snapshotPosition := cdc.Position{File: pos.File, Pos: pos.Pos, GTID: pos.GTID}
+	cfg := configFromIncremental(j, src, dst)
+	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, cdc.BootstrapRecord{State: "snapshot_in_progress", Position: snapshotPosition}); e != nil {
+		return fmt.Errorf("保存全量快照待完成位点失败: %w", e)
+	}
+	j.BootstrapState = "snapshot_in_progress"
+	j.PendingFile, j.PendingPos, j.PendingGTID = pos.File, pos.Pos, pos.GTID
+	if e = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "snapshot_in_progress", "pending_file": pos.File, "pending_position": pos.Pos, "pending_gtid": pos.GTID}); e != nil {
+		return fmt.Errorf("保存全量快照待完成状态失败: %w", e)
 	}
 	snapshotActive := true
 	defer func() {
@@ -299,6 +324,87 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return e
 	}
 	snapshotActive = false
+	if j.BootstrapPolicy != "review_and_exclude" {
+		if strictErr := strictBootstrapFailure(report, expectedTables); strictErr != nil {
+			_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
+			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted"})
+			return strictErr
+		}
+	}
+
+	sourceDB, e := cdc.OpenSource(cfg.SourceDSN)
+	if e != nil {
+		return e
+	}
+	tableInfos, e := cdc.LoadExactTables(ctx, sourceDB, cfg.SourceDatabase, expectedTables)
+	sourceDB.Close()
+	if e != nil {
+		return fmt.Errorf("读取 CDC 表元数据失败: %w", e)
+	}
+	compatibility, e := cdc.ValidateTargetTableCompatibility(ctx, cfg, tableInfos)
+	if e != nil {
+		return fmt.Errorf("验证目标表 CDC 兼容性失败: %w", e)
+	}
+	review := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, compatibility)
+	if len(review.ExcludedTables) > 0 {
+		if foreignKeys, fkErr := r.GetForeignKeys(ctx); fkErr == nil {
+			excluded := make(map[string]bool, len(review.ExcludedTables))
+			for _, issue := range review.ExcludedTables {
+				excluded[issue.Table] = true
+			}
+			for _, fk := range foreignKeys {
+				if !excluded[fk.TableName] && excluded[fk.RefTable] {
+					review.Warnings = append(review.Warnings, fmt.Sprintf("外键 %s.%s 引用了被排除表 %s，确认排除时该外键会被移除", fk.TableName, fk.ConstraintName, fk.RefTable))
+				}
+			}
+		}
+	}
+	if j.BootstrapPolicy != "review_and_exclude" && len(review.ExcludedTables) > 0 {
+		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
+		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted"})
+		return fmt.Errorf("全量完成后 CDC 兼容性校验失败: excluded=%d", len(review.ExcludedTables))
+	}
+	if len(review.EffectiveTables) == 0 {
+		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
+		review.State = "aborted"
+		payload, _ := json.Marshal(review)
+		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted", "bootstrap_report_json": string(payload), "excluded_table_count": len(review.ExcludedTables)})
+		return fmt.Errorf("全量快照没有可安全进入 CDC 的成功表")
+	}
+
+	effectiveJSON, _ := json.Marshal(review.EffectiveTables)
+	excludedJSON, _ := json.Marshal(review.ExcludedTables)
+	reviewJSON, _ := json.Marshal(review)
+	if len(review.ExcludedTables) > 0 {
+		if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, review.BootstrapRecord); e != nil {
+			return fmt.Errorf("保存全量审阅 checkpoint 失败: %w", e)
+		}
+		j.BootstrapState = "review_pending"
+		j.EffectiveJSON, j.ExcludedJSON = string(effectiveJSON), string(excludedJSON)
+		j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(review.EffectiveTables), len(review.ExcludedTables), review.ManifestHash
+		if e = store.UpdateIncrementalJob(j.JobID, map[string]any{
+			"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
+			"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON), "bootstrap_report_json": string(reviewJSON),
+			"effective_table_count": len(review.EffectiveTables), "excluded_table_count": len(review.ExcludedTables), "bootstrap_manifest_hash": review.ManifestHash,
+			"summary": fmt.Sprintf("全量完成：%d 张表可继续，%d 张表待确认排除", len(review.EffectiveTables), len(review.ExcludedTables)),
+		}); e != nil {
+			return e
+		}
+		return cdc.ErrBootstrapReview
+	}
+
+	review.State = "completed"
+	if e = cdc.FinalizeTargetBootstrap(ctx, cfg, review.BootstrapRecord); e != nil {
+		return fmt.Errorf("完成全量 checkpoint 失败: %w", e)
+	}
+	if e = applyCompletedBootstrapRecord(j, review.BootstrapRecord); e != nil {
+		return e
+	}
+	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_report_json": string(reviewJSON)})
+	return store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "catching_up", "phase": "catching_up", "summary": "全量完成，正在追赶 binlog"})
+}
+
+func strictBootstrapFailure(report datamigrate.MigrationReport, expectedTables []string) error {
 	if report.Tables.Total != len(expectedTables) || report.Data.Total != len(expectedTables) || report.Tables.Failed+report.Data.Failed > 0 || report.Tables.Success != report.Tables.Total || report.Data.Success != report.Data.Total {
 		return fmt.Errorf("全量快照未完整完成: structure=%d/%d data=%d/%d", report.Tables.Success, report.Tables.Total, report.Data.Success, report.Data.Total)
 	}
@@ -310,24 +416,65 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	if len(report.RowCounts) != len(expectedTables) {
 		return fmt.Errorf("全量快照行数校验未完整执行: checked=%d expected=%d", len(report.RowCounts), len(expectedTables))
 	}
-	objectFailures := report.PrimaryKeys.Failed + report.Indexes.Failed + report.Constraints.Failed + report.Sequences.Failed
-	if objectFailures > 0 {
+	if report.PrimaryKeys.Failed+report.Indexes.Failed+report.Constraints.Failed+report.Sequences.Failed > 0 {
 		return fmt.Errorf("全量快照对象创建失败: primary_keys=%d indexes=%d constraints=%d sequences=%d", report.PrimaryKeys.Failed, report.Indexes.Failed, report.Constraints.Failed, report.Sequences.Failed)
 	}
-	j.StartFile, j.StartPosition, j.StartGTID = pos.File, pos.Pos, pos.GTID
-	cfg := configFromIncremental(j, src, dst)
-	checkpoint := cdc.Position{File: pos.File, Pos: pos.Pos, GTID: pos.GTID}
-	if e = cdc.SaveTargetCheckpoint(ctx, cfg, checkpoint); e != nil {
-		return fmt.Errorf("保存全量完成 checkpoint 失败: %w", e)
-	}
-	j.BootstrapDone = true
-	j.CheckpointFile, j.CheckpointPos, j.CheckpointGTID = pos.File, pos.Pos, pos.GTID
-	return store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "catching_up", "phase": "catching_up", "bootstrap_completed": true, "start_file": pos.File, "start_position": pos.Pos, "start_gtid": pos.GTID, "checkpoint_file": pos.File, "checkpoint_position": pos.Pos, "checkpoint_gtid": pos.GTID, "summary": "全量完成，正在追赶 binlog"})
+	return nil
 }
 
 func configFromIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connection) cdc.Config {
 	req := incrementalRequest{SrcDatabase: j.SrcDatabase, TargetSchema: j.TargetSchema, MigrateMode: j.MigrateMode, TableFilter: j.TableFilter, LowerCaseNames: j.LowerCaseNames, ServerID: j.ServerID, StartGTID: j.StartGTID, StartFile: j.StartFile, StartPosition: j.StartPosition}
-	return incrementalConfig(req, j.JobID, src, dst)
+	cfg := incrementalConfig(req, j.JobID, src, dst)
+	if j.BootstrapDone && j.EffectiveJSON != "" {
+		var tables []string
+		if json.Unmarshal([]byte(j.EffectiveJSON), &tables) == nil && tables != nil {
+			cfg.TableNames = tables
+		} else {
+			// A completed new-format task must never fall back to the original
+			// wildcard filter, because that could re-include excluded tables.
+			cfg.TableNames = []string{}
+		}
+	}
+	return cfg
+}
+
+func applyCompletedBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.BootstrapRecord) error {
+	effectiveJSON, _ := json.Marshal(record.EffectiveTables)
+	excludedJSON, _ := json.Marshal(record.ExcludedTables)
+	legacyScope := record.ManifestHash == "" && len(record.EffectiveTables) == 0 && len(record.ExcludedTables) == 0
+	j.BootstrapDone = true
+	j.BootstrapState = "completed"
+	j.StartFile, j.StartPosition, j.StartGTID = record.Position.File, record.Position.Pos, record.Position.GTID
+	j.CheckpointFile, j.CheckpointPos, j.CheckpointGTID = record.Position.File, record.Position.Pos, record.Position.GTID
+	fields := map[string]any{
+		"bootstrap_completed": true, "bootstrap_state": "completed",
+		"start_file": record.Position.File, "start_position": record.Position.Pos, "start_gtid": record.Position.GTID,
+		"checkpoint_file": record.Position.File, "checkpoint_position": record.Position.Pos, "checkpoint_gtid": record.Position.GTID,
+	}
+	if !legacyScope {
+		j.EffectiveJSON, j.ExcludedJSON = string(effectiveJSON), string(excludedJSON)
+		j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(record.EffectiveTables), len(record.ExcludedTables), record.ManifestHash
+		fields["effective_tables_json"], fields["excluded_tables_json"] = string(effectiveJSON), string(excludedJSON)
+		fields["effective_table_count"], fields["excluded_table_count"] = len(record.EffectiveTables), len(record.ExcludedTables)
+		fields["bootstrap_manifest_hash"] = record.ManifestHash
+	}
+	return store.UpdateIncrementalJob(j.JobID, fields)
+}
+
+func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.BootstrapRecord) error {
+	effectiveJSON, _ := json.Marshal(record.EffectiveTables)
+	excludedJSON, _ := json.Marshal(record.ExcludedTables)
+	j.BootstrapState = "review_pending"
+	j.PendingFile, j.PendingPos, j.PendingGTID = record.Position.File, record.Position.Pos, record.Position.GTID
+	j.EffectiveJSON, j.ExcludedJSON = string(effectiveJSON), string(excludedJSON)
+	j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(record.EffectiveTables), len(record.ExcludedTables), record.ManifestHash
+	return store.UpdateIncrementalJob(j.JobID, map[string]any{
+		"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
+		"pending_file": record.Position.File, "pending_position": record.Position.Pos, "pending_gtid": record.Position.GTID,
+		"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON),
+		"effective_table_count": len(record.EffectiveTables), "excluded_table_count": len(record.ExcludedTables),
+		"bootstrap_manifest_hash": record.ManifestHash, "summary": "全量存在失败表，请确认排除范围后继续",
+	})
 }
 
 func runCDC(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) error {
@@ -373,6 +520,122 @@ func GetIncremental(c *gin.Context) {
 	if ok {
 		c.JSON(200, j)
 	}
+}
+
+func GetIncrementalBootstrapReview(c *gin.Context) {
+	j, ok := ownedIncremental(c)
+	if !ok {
+		return
+	}
+	dst, e := store.GetConnection(j.DstConnID)
+	if e != nil {
+		c.JSON(400, gin.H{"error": "目标连接已删除"})
+		return
+	}
+	reviewCfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
+	record, exists, e := cdc.LoadTargetBootstrapRecord(c.Request.Context(), reviewCfg)
+	if e != nil {
+		c.JSON(500, gin.H{"error": "读取目标 bootstrap checkpoint 失败: " + e.Error()})
+		return
+	}
+	if !exists {
+		c.JSON(404, gin.H{"error": "该任务没有可用的 bootstrap 审阅记录"})
+		return
+	}
+	review := cdc.BootstrapReview{BootstrapRecord: record, RequestedCount: len(record.EffectiveTables) + len(record.ExcludedTables)}
+	if j.BootstrapReport != "" {
+		_ = json.Unmarshal([]byte(j.BootstrapReport), &review)
+		review.BootstrapRecord = record
+	}
+	// The live checkpoint position advances after CDC starts, while the review
+	// must continue to show the original consistent-snapshot position.
+	if j.PendingFile != "" || j.PendingGTID != "" {
+		review.Position = cdc.Position{File: j.PendingFile, Pos: j.PendingPos, GTID: j.PendingGTID}
+	}
+	if review.RequestedCount == 0 {
+		review.RequestedCount = len(record.EffectiveTables) + len(record.ExcludedTables)
+	}
+	c.JSON(200, review)
+}
+
+type acceptBootstrapExclusionsRequest struct {
+	ManifestHash string `json:"manifest_hash" binding:"required"`
+	Acknowledge  bool   `json:"acknowledge" binding:"required"`
+}
+
+func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
+	var req acceptBootstrapExclusionsRequest
+	if e := c.ShouldBindJSON(&req); e != nil || !req.Acknowledge {
+		c.JSON(400, gin.H{"error": "必须明确确认排除表清单"})
+		return
+	}
+	incrementalStartMu.Lock()
+	defer incrementalStartMu.Unlock()
+	j, ok := ownedIncremental(c)
+	if !ok {
+		return
+	}
+	if j.Status != "paused_bootstrap_review" && j.BootstrapState != "completed" {
+		c.JSON(409, gin.H{"error": "任务当前不处于全量排除审阅状态"})
+		return
+	}
+	src, e := store.GetConnection(j.SrcConnID)
+	if e != nil {
+		c.JSON(400, gin.H{"error": "源连接已删除"})
+		return
+	}
+	dst, e := store.GetConnection(j.DstConnID)
+	if e != nil {
+		c.JSON(400, gin.H{"error": "目标连接已删除"})
+		return
+	}
+	cfg := configFromIncremental(j, src, dst)
+	record, exists, e := cdc.LoadTargetBootstrapRecord(c.Request.Context(), cfg)
+	if e != nil {
+		c.JSON(500, gin.H{"error": "读取目标 bootstrap checkpoint 失败: " + e.Error()})
+		return
+	}
+	if !exists || (record.State != "review_pending" && record.State != "completed") {
+		c.JSON(409, gin.H{"error": "目标 bootstrap checkpoint 不可确认"})
+		return
+	}
+	if req.ManifestHash != record.ManifestHash || req.ManifestHash != j.ManifestHash {
+		c.JSON(409, gin.H{"error": "排除表清单已变化，请刷新后重新确认"})
+		return
+	}
+	if record.State == "completed" && j.BootstrapDone && j.Status != "paused_bootstrap_review" {
+		c.JSON(200, gin.H{"message": "失败表排除已确认，任务已进入后续阶段"})
+		return
+	}
+	if record.State == "review_pending" {
+		if e = cdc.ValidatePositionAvailable(c.Request.Context(), cfg, record.Position); e != nil {
+			c.JSON(409, gin.H{"error": "原始快照位点已不可继续: " + e.Error()})
+			return
+		}
+		if e = cdc.FinalizeTargetBootstrap(c.Request.Context(), cfg, record); e != nil {
+			c.JSON(500, gin.H{"error": "确认排除表失败: " + e.Error()})
+			return
+		}
+		record.State = "completed"
+	} else if e = cdc.ValidatePositionAvailable(c.Request.Context(), cfg, record.Position); e != nil {
+		// Covers the crash window after PostgreSQL committed the manifest but
+		// before SQLite moved the task out of bootstrap review.
+		c.JSON(409, gin.H{"error": "原始快照位点已不可继续: " + e.Error()})
+		return
+	}
+	if e = applyCompletedBootstrapRecord(j, record); e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
+	}
+	if e = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "catching_up", "phase": "catching_up", "last_error": "", "summary": "已确认排除失败表，正在从原始快照位点追赶 binlog"}); e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
+	}
+	j.Status, j.Phase = "catching_up", "catching_up"
+	if !cdc.Registry.Running(j.JobID) {
+		launchIncremental(j, src, dst)
+	}
+	c.JSON(200, gin.H{"message": "已确认排除失败表，成功表开始追赶 binlog"})
 }
 func PauseIncremental(c *gin.Context) {
 	j, ok := ownedIncremental(c)
@@ -450,7 +713,8 @@ func PrepareIncrementalCutover(c *gin.Context) {
 }
 
 type completeCutoverRequest struct {
-	AcknowledgeWarnings bool `json:"acknowledge_warnings"`
+	AcknowledgeWarnings   bool `json:"acknowledge_warnings"`
+	AcknowledgeExclusions bool `json:"acknowledge_exclusions"`
 }
 
 func StopIncremental(c *gin.Context) {
@@ -466,6 +730,10 @@ func StopIncremental(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	if j.Status == "ready_with_warnings" && !req.AcknowledgeWarnings {
 		c.JSON(409, gin.H{"error": "存在无主键变更被跳过，必须明确确认风险后才能完成切换"})
+		return
+	}
+	if j.ExcludedCount > 0 && !req.AcknowledgeExclusions {
+		c.JSON(409, gin.H{"error": "本次迁移排除了部分表，必须再次确认迁移范围后才能完成切换"})
 		return
 	}
 	src, e := store.GetConnection(j.SrcConnID)
@@ -565,6 +833,8 @@ func CancelIncrementalCutover(c *gin.Context) {
 }
 
 func AbortIncremental(c *gin.Context) {
+	incrementalStartMu.Lock()
+	defer incrementalStartMu.Unlock()
 	j, ok := ownedIncremental(c)
 	if !ok {
 		return
@@ -583,8 +853,15 @@ func AbortIncremental(c *gin.Context) {
 			return
 		}
 	} else {
+		if !j.BootstrapDone {
+			if src, srcErr := store.GetConnection(j.SrcConnID); srcErr == nil {
+				if dst, dstErr := store.GetConnection(j.DstConnID); dstErr == nil {
+					_ = cdc.AbortTargetBootstrap(c.Request.Context(), configFromIncremental(j, src, dst))
+				}
+			}
+		}
 		now := time.Now()
-		updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{j.Status}, map[string]any{"status": "aborted", "phase": "aborted", "summary": "任务已放弃", "finished_at": &now})
+		updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{j.Status}, map[string]any{"status": "aborted", "phase": "aborted", "bootstrap_state": "aborted", "summary": "任务已放弃", "finished_at": &now})
 		if e != nil {
 			c.JSON(500, gin.H{"error": e.Error()})
 			return
@@ -598,6 +875,8 @@ func AbortIncremental(c *gin.Context) {
 }
 
 func ResumeIncremental(c *gin.Context) {
+	incrementalStartMu.Lock()
+	defer incrementalStartMu.Unlock()
 	j, ok := ownedIncremental(c)
 	if !ok {
 		return
@@ -622,7 +901,7 @@ func ResumeIncremental(c *gin.Context) {
 	}
 	if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
 		cfg := configFromIncremental(j, src, dst)
-		checkpoint, exists, loadErr := cdc.LoadTargetCheckpoint(c.Request.Context(), cfg)
+		record, exists, loadErr := cdc.LoadTargetBootstrapRecord(c.Request.Context(), cfg)
 		if loadErr != nil {
 			c.JSON(500, gin.H{"error": "读取目标 checkpoint 失败，已禁止自动重跑全量: " + loadErr.Error()})
 			return
@@ -631,10 +910,16 @@ func ResumeIncremental(c *gin.Context) {
 			c.JSON(409, gin.H{"error": "全量快照未完成，不能安全断点恢复，也不会自动删表重跑；请放弃此任务后显式新建"})
 			return
 		}
-		j.BootstrapDone = true
-		j.StartFile, j.StartPosition, j.StartGTID = checkpoint.File, checkpoint.Pos, checkpoint.GTID
-		j.CheckpointFile, j.CheckpointPos, j.CheckpointGTID = checkpoint.File, checkpoint.Pos, checkpoint.GTID
-		if e = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_completed": true, "start_file": checkpoint.File, "start_position": checkpoint.Pos, "start_gtid": checkpoint.GTID, "checkpoint_file": checkpoint.File, "checkpoint_position": checkpoint.Pos, "checkpoint_gtid": checkpoint.GTID}); e != nil {
+		if record.State == "review_pending" {
+			_ = applyReviewBootstrapRecord(j, record)
+			c.JSON(409, gin.H{"error": "全量存在失败表，请使用“接受排除并继续”，不能通过普通恢复绕过人工确认"})
+			return
+		}
+		if record.State != "completed" {
+			c.JSON(409, gin.H{"error": "全量快照状态为 " + record.State + "，不能安全恢复，也不会自动删表重跑"})
+			return
+		}
+		if e = applyCompletedBootstrapRecord(j, record); e != nil {
 			c.JSON(500, gin.H{"error": e.Error()})
 			return
 		}

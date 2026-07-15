@@ -25,7 +25,7 @@ func ValidateCounts(ctx context.Context, cfg Config) ([]CountValidation, bool, e
 	if err = dst.PingContext(ctx); err != nil {
 		return nil, false, err
 	}
-	tables, err := LoadTables(ctx, src, cfg.SourceDatabase, cfg.Mode, cfg.Filter)
+	tables, err := LoadConfiguredTables(ctx, src, cfg)
 	if err != nil {
 		return nil, false, err
 	}

@@ -45,9 +45,31 @@ type Config struct {
 	TargetSchema   string
 	Mode           string
 	Filter         string
+	TableNames     []string
 	LowerCaseNames bool
 	ServerID       uint32
 	Start          Position
+}
+
+type BootstrapIssue struct {
+	Table string `json:"table"`
+	Stage string `json:"stage"`
+	Error string `json:"error"`
+	DDL   string `json:"ddl,omitempty"`
+}
+
+type BootstrapRecord struct {
+	State           string           `json:"state"`
+	Position        Position         `json:"position"`
+	EffectiveTables []string         `json:"effective_tables"`
+	ExcludedTables  []BootstrapIssue `json:"excluded_tables"`
+	ManifestHash    string           `json:"manifest_hash"`
+}
+
+type BootstrapReview struct {
+	BootstrapRecord
+	RequestedCount int      `json:"requested_count"`
+	Warnings       []string `json:"warnings"`
 }
 
 type Stats struct {
