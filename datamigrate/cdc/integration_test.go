@@ -48,10 +48,12 @@ func TestBootstrapCheckpointIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := BootstrapRecord{
-		State:                "review_pending",
-		Position:             position,
-		EffectiveTables:      []string{"cdc_pk", "bootstrap_effective"},
-		FailureReportVersion: 1,
+		State:                  "review_pending",
+		Position:               position,
+		EffectiveTables:        []string{"cdc_pk", "bootstrap_effective"},
+		FailureReportVersion:   1,
+		LocatorStrategyVersion: LocatorStrategyVersion,
+		LocatorStrategies:      []LocatorStrategy{{Table: "cdc_pk", Strategy: LocatorPrimaryKey, Index: "PRIMARY", Columns: []string{"id"}}},
 		FailedObjects: []BootstrapFailedObject{{
 			Category: "table", Name: "bootstrap_failed", Error: "test", DDL: "CREATE TABLE bootstrap_failed(id badtype)", Stage: "schema",
 		}},
@@ -97,7 +99,7 @@ func TestBootstrapCheckpointIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, _, err = applier.LoadBootstrapRecord(ctx)
-	if err != nil || loaded.ManifestHash != record.ManifestHash || len(loaded.ExcludedTables) != 2 || len(loaded.FailedObjects) != 1 || loaded.FailureReportVersion != 1 {
+	if err != nil || loaded.ManifestHash != record.ManifestHash || len(loaded.ExcludedTables) != 2 || len(loaded.FailedObjects) != 1 || loaded.FailureReportVersion != 1 || loaded.LocatorStrategyVersion != LocatorStrategyVersion || len(loaded.LocatorStrategies) != 1 {
 		t.Fatalf("CDC checkpoint update overwrote bootstrap manifest or failure report: %+v err=%v", loaded, err)
 	}
 }
@@ -133,6 +135,16 @@ func TestCDCIntegration(t *testing.T) {
 		ServerID:       uint32(2000000000 + time.Now().UnixNano()%1000000000),
 		Start:          start,
 	}
+	tables, err := LoadTables(ctx, src, cfg.SourceDatabase, cfg.Mode, cfg.Filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, err = ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.LocatorStrategyVersion = LocatorStrategyVersion
+	cfg.LocatorStrategies = LocatorStrategiesFromTables(tables)
 
 	runCtx, err := Registry.Register(cfg.JobID)
 	if err != nil {
@@ -156,12 +168,18 @@ func TestCDCIntegration(t *testing.T) {
 	}
 	mustExecIntegration(t, tx, `INSERT INTO cdc_pk(id,value_text) VALUES (1,'a'),(2,'b')`)
 	mustExecIntegration(t, tx, `INSERT INTO cdc_no_pk(value_num) VALUES (10)`)
+	mustExecIntegration(t, tx, `INSERT INTO cdc_unique(code,value_text) VALUES ('A','one')`)
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	mustExecIntegration(t, src, `UPDATE cdc_pk SET value_text='updated' WHERE id=1`)
 	mustExecIntegration(t, src, `DELETE FROM cdc_pk WHERE id=2`)
 	mustExecIntegration(t, src, `UPDATE cdc_no_pk SET value_num=11 WHERE value_num=10`)
+	mustExecIntegration(t, src, `INSERT INTO cdc_no_pk(value_num) VALUES (30),(30)`)
+	mustExecIntegration(t, src, `UPDATE cdc_no_pk SET value_num=31 WHERE value_num=30`)
+	mustExecIntegration(t, src, `DELETE FROM cdc_no_pk WHERE value_num=31`)
+	mustExecIntegration(t, src, `UPDATE cdc_unique SET code='B', value_text='two' WHERE code='A'`)
+	mustExecIntegration(t, src, `DELETE FROM cdc_unique WHERE code='B'`)
 	rollback, err := src.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +190,6 @@ func TestCDCIntegration(t *testing.T) {
 	}
 
 	head := waitTargetCheckpoint(t, ctx, cfg, src, 30*time.Second)
-	waitSkippedEvent(t, stats, 20*time.Second)
 	var value string
 	if err = dst.QueryRowContext(ctx, `SELECT value_text FROM cdc_test.cdc_pk WHERE id=1`).Scan(&value); err != nil || value != "updated" {
 		t.Fatalf("updated row mismatch: value=%q err=%v", value, err)
@@ -183,6 +200,14 @@ func TestCDCIntegration(t *testing.T) {
 	}
 	if err = dst.QueryRowContext(ctx, `SELECT COUNT(*) FROM cdc_test.cdc_no_pk`).Scan(&noPKCount); err != nil || noPKCount != 1 {
 		t.Fatalf("no-PK INSERT was duplicated or lost: count=%d err=%v", noPKCount, err)
+	}
+	var noPKValue int
+	if err = dst.QueryRowContext(ctx, `SELECT value_num FROM cdc_test.cdc_no_pk`).Scan(&noPKValue); err != nil || noPKValue != 11 {
+		t.Fatalf("no-key UPDATE mismatch: value=%d err=%v", noPKValue, err)
+	}
+	var uniqueCount int
+	if err = dst.QueryRowContext(ctx, `SELECT COUNT(*) FROM cdc_test.cdc_unique`).Scan(&uniqueCount); err != nil || uniqueCount != 0 {
+		t.Fatalf("unique-only UPDATE/DELETE mismatch: count=%d err=%v", uniqueCount, err)
 	}
 
 	if !Registry.RequestCutover(cfg.JobID, head) {
@@ -280,6 +305,105 @@ func TestCDCIntegration(t *testing.T) {
 	}
 }
 
+func TestFullRowConflictPauseAndReplayIntegration(t *testing.T) {
+	if os.Getenv("CDC_INTEGRATION") != "1" {
+		t.Skip("set CDC_INTEGRATION=1 and start testdata/docker-compose.yml")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := mustOpenIntegrationDB(t, "mysql", integrationSourceAdminDSN)
+	defer src.Close()
+	dst := mustOpenIntegrationDB(t, "postgres", integrationTargetDSN)
+	defer dst.Close()
+	setupIntegrationTables(t, ctx, src, dst)
+	start, err := CurrentPosition(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{JobID: fmt.Sprintf("conflict-%d", time.Now().UnixNano()), SourceDSN: integrationSourceCDCDSN,
+		SourceHost: "127.0.0.1", SourcePort: 13306, SourceUser: "cdc", SourcePassword: "cdcpass",
+		SourceDatabase: "cdc_source", TargetDSN: integrationTargetDSN, TargetSchema: "cdc_test", Mode: "all",
+		LowerCaseNames: true, ServerID: uint32(1000000000 + time.Now().UnixNano()%1000000000), Start: start}
+	tables, err := LoadTables(ctx, src, cfg.SourceDatabase, cfg.Mode, cfg.Filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, err = ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.LocatorStrategyVersion, cfg.LocatorStrategies = LocatorStrategyVersion, LocatorStrategiesFromTables(tables)
+
+	runCtx, err := Registry.Register(cfg.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := make(chan Stats, 32)
+	conflicts := make(chan RowConflict, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- NewRunner(cfg, Hooks{Stats: func(s Stats) {
+			select {
+			case stats <- s:
+			default:
+			}
+		}, RowConflict: func(c RowConflict) { conflicts <- c }}).Run(runCtx)
+	}()
+	waitCaughtUp(t, stats, 20*time.Second)
+	mustExecIntegration(t, src, `INSERT INTO cdc_no_pk(value_num) VALUES (100)`)
+	waitTargetCheckpoint(t, ctx, cfg, src, 20*time.Second)
+	checkpointBefore, exists, err := LoadTargetCheckpoint(ctx, cfg)
+	if err != nil || !exists {
+		t.Fatalf("load checkpoint before conflict: exists=%v err=%v", exists, err)
+	}
+	mustExecIntegration(t, dst, `DELETE FROM cdc_test.cdc_no_pk WHERE value_num=100`)
+	mustExecIntegration(t, src, `UPDATE cdc_no_pk SET value_num=101 WHERE value_num=100`)
+	select {
+	case conflict := <-conflicts:
+		if conflict.Table != "cdc_no_pk" || conflict.Action != "update" || len(conflict.BeforeHash) != 64 {
+			t.Fatalf("unexpected conflict: %+v", conflict)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out waiting for row conflict")
+	}
+	if err = waitRunnerError(t, runErr, 20*time.Second); !errors.Is(err, ErrRowConflict) {
+		t.Fatalf("runner error=%v, want ErrRowConflict", err)
+	}
+	Registry.Remove(cfg.JobID)
+	checkpointAfter, _, err := LoadTargetCheckpoint(ctx, cfg)
+	if err != nil || !PositionEquivalent(checkpointBefore, checkpointAfter) {
+		t.Fatalf("checkpoint advanced on conflict: before=%+v after=%+v err=%v", checkpointBefore, checkpointAfter, err)
+	}
+
+	mustExecIntegration(t, dst, `INSERT INTO cdc_test.cdc_no_pk(value_num) VALUES (100)`)
+	runCtx, err = Registry.Register(cfg.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats = make(chan Stats, 32)
+	runErr = make(chan error, 1)
+	go func() {
+		runErr <- NewRunner(cfg, Hooks{Stats: func(s Stats) {
+			select {
+			case stats <- s:
+			default:
+			}
+		}}).Run(runCtx)
+	}()
+	waitTargetCheckpoint(t, ctx, cfg, src, 20*time.Second)
+	var value int
+	if err = dst.QueryRowContext(ctx, `SELECT value_num FROM cdc_test.cdc_no_pk`).Scan(&value); err != nil || value != 101 {
+		t.Fatalf("replayed row mismatch: value=%d err=%v", value, err)
+	}
+	if !Registry.Cancel(cfg.JobID, "pause") {
+		t.Fatal("pause replay runner failed")
+	}
+	if err = waitRunnerError(t, runErr, 20*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pause error=%v", err)
+	}
+	Registry.Remove(cfg.JobID)
+}
+
 type integrationExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
@@ -308,8 +432,10 @@ func setupIntegrationTables(t *testing.T, ctx context.Context, src, dst *sql.DB)
 	for _, statement := range []string{
 		`DROP TABLE IF EXISTS cdc_pk`,
 		`DROP TABLE IF EXISTS cdc_no_pk`,
+		`DROP TABLE IF EXISTS cdc_unique`,
 		`CREATE TABLE cdc_pk(id BIGINT PRIMARY KEY, value_text VARCHAR(100) NOT NULL) ENGINE=InnoDB`,
 		`CREATE TABLE cdc_no_pk(value_num BIGINT NOT NULL) ENGINE=InnoDB`,
+		`CREATE TABLE cdc_unique(code VARCHAR(40) NOT NULL, value_text VARCHAR(100), UNIQUE KEY uq_code(code)) ENGINE=InnoDB`,
 	} {
 		mustExecIntegration(t, src, statement)
 	}
@@ -318,6 +444,7 @@ func setupIntegrationTables(t *testing.T, ctx context.Context, src, dst *sql.DB)
 		`CREATE SCHEMA cdc_test`,
 		`CREATE TABLE cdc_test.cdc_pk(id BIGINT PRIMARY KEY, value_text VARCHAR(100) NOT NULL)`,
 		`CREATE TABLE cdc_test.cdc_no_pk(value_num BIGINT NOT NULL)`,
+		`CREATE TABLE cdc_test.cdc_unique(code VARCHAR(40) NOT NULL, value_text VARCHAR(100), UNIQUE(code))`,
 	} {
 		mustExecIntegration(t, dst, statement)
 	}
@@ -349,22 +476,6 @@ func waitCaughtUp(t *testing.T, stats <-chan Stats, timeout time.Duration) {
 			}
 		case <-timer.C:
 			t.Fatal("timed out waiting for runner to catch up")
-		}
-	}
-}
-
-func waitSkippedEvent(t *testing.T, stats <-chan Stats, timeout time.Duration) {
-	t.Helper()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case stat := <-stats:
-			if stat.Skipped > 0 && stat.Warnings > 0 {
-				return
-			}
-		case <-timer.C:
-			t.Fatal("timed out waiting for visible no-primary-key warning")
 		}
 	}
 }

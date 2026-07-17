@@ -140,7 +140,7 @@ func TestPauseInterruptedSnapshotWritesWarningLog(t *testing.T) {
 	setupTestDB(t)
 	job := &IncrementalMigrationJob{
 		OwnerID: 1, JobID: "restart-snapshot", StartMode: "full_then_cdc",
-		Status: "snapshot", Phase: "snapshot", BootstrapDone: false,
+		Status: "snapshot", Phase: "snapshot", BootstrapDone: false, LocatorStrategyVersion: 1,
 	}
 	require.NoError(t, CreateIncrementalJob(job))
 	require.NoError(t, PauseInterruptedIncrementalJobs())

@@ -6,7 +6,7 @@
       <a-table-column title="源库" data-index="src_database" :width="150" />
       <a-table-column title="目标 Schema" data-index="target_schema" :width="150" />
       <a-table-column title="模式" :width="120"><template #cell="{ record }">{{ record.start_mode === 'full_then_cdc' ? '全量 + 增量' : '仅增量' }}</template></a-table-column>
-      <a-table-column title="状态" :width="130"><template #cell="{ record }"><a-tag :color="color(record.status)">{{ text(record.status) }}</a-tag></template></a-table-column>
+      <a-table-column title="状态" :width="150"><template #cell="{ record }"><a-tag :color="color(record.status)">{{ record.locator_strategy_version !== 1 ? '版本升级后已废弃' : text(record.status) }}</a-tag></template></a-table-column>
       <a-table-column title="同步" :width="100"><template #cell="{ record }"><a-tag :color="record.caught_up ? 'green' : 'orange'">{{ record.caught_up ? '已追平' : '追赶中' }}</a-tag></template></a-table-column>
       <a-table-column title="I / U / D / 跳过" :width="180"><template #cell="{ record }">{{ record.insert_count }} / {{ record.update_count }} / {{ record.delete_count }} / {{ record.skipped_count }}</template></a-table-column>
       <a-table-column title="最后事件" :width="170"><template #cell="{ record }">{{ record.last_event_at ? date(record.last_event_at) : '—' }}</template></a-table-column>
@@ -41,6 +41,7 @@
         <a-descriptions-item label="阶段">{{ detail.phase }}</a-descriptions-item>
         <a-descriptions-item label="全量完成">{{ detail.bootstrap_completed ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="有效 / 排除表">{{ detail.effective_table_count || 0 }} / {{ detail.excluded_table_count || 0 }}</a-descriptions-item>
+        <a-descriptions-item label="定位策略（主键 / 唯一 / 整行）">{{ detail.primary_locator_count || 0 }} / {{ detail.unique_locator_count || 0 }} / {{ detail.full_row_locator_count || 0 }}</a-descriptions-item>
         <a-descriptions-item v-if="detail.failed_object_count > 0" label="失败对象 / 含 DDL">{{ detail.failed_object_count }} / {{ detail.failed_ddl_count }}</a-descriptions-item>
         <a-descriptions-item label="同步状态">{{ detail.caught_up ? '已追平' : `追赶中（约 ${detail.lag_seconds || 0} 秒）` }}</a-descriptions-item>
         <a-descriptions-item label="目标 checkpoint" :span="2">{{ position(detail.checkpoint_file, detail.checkpoint_position, detail.checkpoint_gtid) }}</a-descriptions-item>
@@ -65,7 +66,15 @@
       <a-alert v-if="unsafeBootstrap(detail)" type="error" style="margin-top: 12px">
         SQLite 尚未记录全量完成。恢复时会先查目标 checkpoint：有完成位点才会续跑，否则拒绝恢复，不会自动删表重跑。
       </a-alert>
+      <a-alert v-if="detail.locator_strategy_version !== 1" type="warning" style="margin-top: 12px">
+        CDC 定位策略已经升级，此旧任务已废弃且不能恢复；目标表、checkpoint、日志和迁移数据均未自动删除。
+      </a-alert>
       <a-alert v-if="detail.last_error" type="error" style="margin-top: 12px">{{ detail.last_error }}</a-alert>
+      <a-alert v-if="detail.status === 'paused_row_conflict'" type="error" style="margin-top: 12px">
+        表 {{ detail.conflict_table }} 的 {{ detail.conflict_action.toUpperCase() }} 无法定位更新前记录；位点
+        {{ position(detail.conflict_file, detail.conflict_position, detail.conflict_gtid) }}，旧行摘要 {{ detail.conflict_before_hash }}。
+        修复目标数据后可恢复，checkpoint 尚未推进。
+      </a-alert>
       <template v-if="bootstrapReview">
         <a-divider>全量迁移范围</a-divider>
         <a-alert v-if="detail.status === 'paused_bootstrap_review'" type="warning">
@@ -255,7 +264,7 @@ async function exportFailedDDL() {
 }
 function pausable(job: IncrementalJob) { return ['catching_up', 'running', 'reconnecting'].includes(job.status) }
 function unsafeBootstrap(job: IncrementalJob) { return job.start_mode === 'full_then_cdc' && !job.bootstrap_completed && ['paused_restart', 'failed'].includes(job.status) }
-function resumable(job: IncrementalJob) { return ['paused_manual', 'paused_restart', 'failed'].includes(job.status) }
+function resumable(job: IncrementalJob) { return ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(job.status) && job.locator_strategy_version === 1 }
 function preparable(status: string) { return ['running', 'catching_up'].includes(status) }
 function cancelable(status: string) { return ['cutting_over', 'ready_to_cutover', 'ready_with_warnings', 'cutover_blocked'].includes(status) }
 function completable(status: string) { return ['ready_to_cutover', 'ready_with_warnings'].includes(status) }
@@ -278,6 +287,7 @@ function position(file: string, pos: number, gtid: string) {
 const labels: Record<string, string> = {
   initializing: '初始化', snapshot: '全量快照', catching_up: '追赶', running: '运行中', reconnecting: '重连中',
   pausing: '暂停中', paused_manual: '已暂停', paused_restart: '重启后暂停', paused_ddl: 'DDL 暂停',
+  paused_row_conflict: '行冲突暂停',
   paused_bootstrap_review: '全量待确认',
   cutting_over: '追赶切换边界', validating: '最终校验', ready_to_cutover: '可完成切换',
   ready_with_warnings: '带风险待确认', cutover_blocked: '切换受阻', stopped: '已完成', aborted: '已放弃', failed: '失败',

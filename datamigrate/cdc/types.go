@@ -11,12 +11,37 @@ type Position struct {
 }
 
 type TableInfo struct {
-	Name          string   `json:"name"`
-	Engine        string   `json:"engine"`
-	Columns       []string `json:"columns"`
-	ColumnTypes   []string `json:"column_types"`
-	PrimaryKey    []int    `json:"primary_key_indexes"`
-	AutoIncrement []int    `json:"auto_increment_indexes"`
+	Name            string            `json:"name"`
+	Engine          string            `json:"engine"`
+	Columns         []string          `json:"columns"`
+	ColumnTypes     []string          `json:"column_types"`
+	PrimaryKey      []int             `json:"primary_key_indexes"`
+	AutoIncrement   []int             `json:"auto_increment_indexes"`
+	LocatorStrategy string            `json:"locator_strategy"`
+	LocatorIndex    string            `json:"locator_index,omitempty"`
+	LocatorColumns  []string          `json:"locator_columns"`
+	LocatorWarning  string            `json:"locator_warning,omitempty"`
+	UniqueIndexes   []UniqueIndexInfo `json:"-"`
+}
+
+const LocatorStrategyVersion = 1
+
+const (
+	LocatorPrimaryKey = "primary_key"
+	LocatorUniqueKey  = "unique_key"
+	LocatorFullRow    = "full_row"
+)
+
+type UniqueIndexInfo struct {
+	Name    string
+	Columns []string
+}
+
+type LocatorStrategy struct {
+	Table    string   `json:"table"`
+	Strategy string   `json:"strategy"`
+	Index    string   `json:"index,omitempty"`
+	Columns  []string `json:"columns"`
 }
 
 type PreflightResult struct {
@@ -34,21 +59,24 @@ type PreflightResult struct {
 }
 
 type Config struct {
-	JobID          string
-	SourceDSN      string
-	SourceHost     string
-	SourcePort     uint16
-	SourceUser     string
-	SourcePassword string
-	SourceDatabase string
-	TargetDSN      string
-	TargetSchema   string
-	Mode           string
-	Filter         string
-	TableNames     []string
-	LowerCaseNames bool
-	ServerID       uint32
-	Start          Position
+	JobID                  string
+	SourceDSN              string
+	SourceHost             string
+	SourcePort             uint16
+	SourceUser             string
+	SourcePassword         string
+	SourceDatabase         string
+	TargetDSN              string
+	TargetSchema           string
+	Mode                   string
+	Filter                 string
+	TableNames             []string
+	LowerCaseNames         bool
+	ServerID               uint32
+	Start                  Position
+	KeylessChangePolicy    string
+	LocatorStrategyVersion int
+	LocatorStrategies      []LocatorStrategy
 }
 
 type BootstrapIssue struct {
@@ -70,13 +98,15 @@ type BootstrapFailedObject struct {
 }
 
 type BootstrapRecord struct {
-	State                string                  `json:"state"`
-	Position             Position                `json:"position"`
-	EffectiveTables      []string                `json:"effective_tables"`
-	ExcludedTables       []BootstrapIssue        `json:"excluded_tables"`
-	ManifestHash         string                  `json:"manifest_hash"`
-	FailedObjects        []BootstrapFailedObject `json:"failed_objects"`
-	FailureReportVersion int                     `json:"failure_report_version"`
+	State                  string                  `json:"state"`
+	Position               Position                `json:"position"`
+	EffectiveTables        []string                `json:"effective_tables"`
+	ExcludedTables         []BootstrapIssue        `json:"excluded_tables"`
+	ManifestHash           string                  `json:"manifest_hash"`
+	FailedObjects          []BootstrapFailedObject `json:"failed_objects"`
+	FailureReportVersion   int                     `json:"failure_report_version"`
+	LocatorStrategyVersion int                     `json:"locator_strategy_version"`
+	LocatorStrategies      []LocatorStrategy       `json:"locator_strategies"`
 }
 
 type BootstrapReview struct {
@@ -103,9 +133,18 @@ type CountValidation struct {
 }
 
 type Hooks struct {
-	Status func(status, phase, summary string)
-	Stats  func(Stats)
-	DDL    func(sql string, pos Position)
+	Status      func(status, phase, summary string)
+	Stats       func(Stats)
+	DDL         func(sql string, pos Position)
+	RowConflict func(RowConflict)
+}
+
+type RowConflict struct {
+	Table      string   `json:"table"`
+	Action     string   `json:"action"`
+	Position   Position `json:"position"`
+	Error      string   `json:"error"`
+	BeforeHash string   `json:"before_hash"`
 }
 
 type Change struct {

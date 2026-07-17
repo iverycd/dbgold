@@ -12,7 +12,6 @@ import (
 
 	"dbgold/datamigrate"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/lib/pq"
 )
 
 func BuildBootstrapReview(position Position, expected []string, report datamigrate.MigrationReport, lower bool, compatibility map[string]string) BootstrapReview {
@@ -283,24 +282,17 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 			}
 			expectedPK = append(expectedPK, column)
 		}
-		constraintRows, constraintErr := db.QueryContext(ctx, `SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
-			FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu
-			ON kcu.constraint_schema=tc.constraint_schema AND kcu.constraint_name=tc.constraint_name
-			AND kcu.table_schema=tc.table_schema AND kcu.table_name=tc.table_name
-			WHERE tc.table_schema=$1 AND tc.table_name=$2 AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE')
-			GROUP BY tc.constraint_name`, cfg.TargetSchema, targetName)
+		constraintSets, constraintErr := loadPostgresUniqueColumnSets(ctx, db, cfg.TargetSchema, targetName)
 		if constraintErr != nil {
 			failures[table.Name] = "读取目标唯一约束失败: " + constraintErr.Error()
 			continue
 		}
 		matched := false
-		for constraintRows.Next() {
-			var columns pq.StringArray
-			if scanErr := constraintRows.Scan(&columns); scanErr == nil && sameColumnSet(expectedPK, columns) {
+		for _, columns := range constraintSets {
+			if sameColumnSet(expectedPK, columns) {
 				matched = true
 			}
 		}
-		constraintRows.Close()
 		if !matched {
 			failures[table.Name] = "目标表缺少与源主键列一致的主键/唯一约束"
 		}

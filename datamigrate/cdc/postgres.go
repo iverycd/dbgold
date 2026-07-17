@@ -2,15 +2,32 @@ package cdc
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
 	"dbgold/datamigrate/valueconv"
 	_ "github.com/lib/pq"
 )
+
+var ErrRowConflict = errors.New("target row conflict")
+
+type RowConflictError struct {
+	Table      string
+	Action     string
+	BeforeHash string
+	Reason     string
+}
+
+func (e *RowConflictError) Error() string {
+	return fmt.Sprintf("表 %s %s 整行定位冲突: %s", e.Table, e.Action, e.Reason)
+}
+func (e *RowConflictError) Unwrap() error { return ErrRowConflict }
 
 type PostgresApplier struct {
 	db     *sql.DB
@@ -59,7 +76,8 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 			gtid text NOT NULL DEFAULT '', bootstrap_state text NOT NULL DEFAULT 'completed',
 			effective_tables text NOT NULL DEFAULT '[]', excluded_tables text NOT NULL DEFAULT '[]',
 			manifest_hash text NOT NULL DEFAULT '', failed_objects text NOT NULL DEFAULT '[]',
-			failure_report_version integer NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
+			failure_report_version integer NOT NULL DEFAULT 0, locator_strategy_version integer NOT NULL DEFAULT 0,
+			locator_strategies text NOT NULL DEFAULT '[]', updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
 		return err
 	}
 	for _, statement := range []string{
@@ -69,6 +87,8 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS manifest_hash text NOT NULL DEFAULT ''`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS failed_objects text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS failure_report_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS locator_strategy_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS locator_strategies text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
 	} {
 		if _, err := a.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -91,12 +111,13 @@ func (a *PostgresApplier) LoadCheckpoint(ctx context.Context) (Position, bool, e
 func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecord, bool, error) {
 	var record BootstrapRecord
 	var n int64
-	var effectiveJSON, excludedJSON, failedObjectsJSON string
+	var effectiveJSON, excludedJSON, failedObjectsJSON, locatorStrategiesJSON string
 	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT binlog_file, binlog_position, gtid, bootstrap_state,
-		effective_tables, excluded_tables, manifest_hash, failed_objects, failure_report_version
+		effective_tables, excluded_tables, manifest_hash, failed_objects, failure_report_version,
+		locator_strategy_version, locator_strategies
 		FROM %s WHERE job_id=$1`, a.checkpointTable()), a.jobID).
 		Scan(&record.Position.File, &n, &record.Position.GTID, &record.State, &effectiveJSON, &excludedJSON, &record.ManifestHash,
-			&failedObjectsJSON, &record.FailureReportVersion)
+			&failedObjectsJSON, &record.FailureReportVersion, &record.LocatorStrategyVersion, &locatorStrategiesJSON)
 	if err == sql.ErrNoRows {
 		return BootstrapRecord{}, false, nil
 	}
@@ -112,6 +133,9 @@ func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRec
 	}
 	if err = json.Unmarshal([]byte(failedObjectsJSON), &record.FailedObjects); err != nil {
 		return BootstrapRecord{}, false, fmt.Errorf("解析 checkpoint failed_objects 失败: %w", err)
+	}
+	if err = json.Unmarshal([]byte(locatorStrategiesJSON), &record.LocatorStrategies); err != nil {
+		return BootstrapRecord{}, false, fmt.Errorf("解析 checkpoint locator_strategies 失败: %w", err)
 	}
 	return record, true, nil
 }
@@ -129,14 +153,19 @@ func (a *PostgresApplier) SaveBootstrapRecord(ctx context.Context, record Bootst
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,manifest_hash,failed_objects,failure_report_version,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT(job_id) DO UPDATE SET
+	locatorStrategiesJSON, err := json.Marshal(record.LocatorStrategies)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,manifest_hash,failed_objects,failure_report_version,locator_strategy_version,locator_strategies,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) ON CONFLICT(job_id) DO UPDATE SET
 		binlog_file=EXCLUDED.binlog_file,binlog_position=EXCLUDED.binlog_position,gtid=EXCLUDED.gtid,
 		bootstrap_state=EXCLUDED.bootstrap_state,effective_tables=EXCLUDED.effective_tables,
 		excluded_tables=EXCLUDED.excluded_tables,manifest_hash=EXCLUDED.manifest_hash,
-		failed_objects=EXCLUDED.failed_objects,failure_report_version=EXCLUDED.failure_report_version,updated_at=now()`, a.checkpointTable()),
+		failed_objects=EXCLUDED.failed_objects,failure_report_version=EXCLUDED.failure_report_version,
+		locator_strategy_version=EXCLUDED.locator_strategy_version,locator_strategies=EXCLUDED.locator_strategies,updated_at=now()`, a.checkpointTable()),
 		a.jobID, record.Position.File, record.Position.Pos, record.Position.GTID, record.State, string(effectiveJSON), string(excludedJSON), record.ManifestHash,
-		string(failedObjectsJSON), record.FailureReportVersion)
+		string(failedObjectsJSON), record.FailureReportVersion, record.LocatorStrategyVersion, string(locatorStrategiesJSON))
 	return err
 }
 
@@ -180,10 +209,16 @@ func (a *PostgresApplier) FinalizeBootstrap(ctx context.Context, record Bootstra
 	if err != nil {
 		return err
 	}
+	locatorStrategiesJSON, err := json.Marshal(record.LocatorStrategies)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET bootstrap_state='completed',
-		effective_tables=$2,excluded_tables=$3,manifest_hash=$4,failed_objects=$5,failure_report_version=$6,updated_at=now()
+		effective_tables=$2,excluded_tables=$3,manifest_hash=$4,failed_objects=$5,failure_report_version=$6,
+		locator_strategy_version=$7,locator_strategies=$8,updated_at=now()
 		WHERE job_id=$1 AND bootstrap_state IN ('snapshot_in_progress','review_pending','completed')`, a.checkpointTable()),
-		a.jobID, string(effectiveJSON), string(excludedJSON), record.ManifestHash, string(failedObjectsJSON), record.FailureReportVersion)
+		a.jobID, string(effectiveJSON), string(excludedJSON), record.ManifestHash, string(failedObjectsJSON), record.FailureReportVersion,
+		record.LocatorStrategyVersion, string(locatorStrategiesJSON))
 	if err != nil {
 		return err
 	}
@@ -275,26 +310,26 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 				stats.Inserts++
 			}
 		case "update":
-			if len(ch.Table.PrimaryKey) == 0 {
-				stats.Skipped++
-				stats.Warnings++
-				continue
-			}
-			if primaryKeyChanged(ch.Table, ch.Before, ch.After) {
-				if err = a.delete(ctx, tx, ch.Table, ch.Before); err != nil {
-					break
+			if ch.Table.LocatorStrategy == LocatorFullRow {
+				err = a.updateFullRow(ctx, tx, ch.Table, ch.Before, ch.After)
+			} else {
+				if locatorChanged(ch.Table, ch.Before, ch.After) {
+					err = a.deleteByLocator(ctx, tx, ch.Table, ch.Before)
+				}
+				if err == nil {
+					err = a.insert(ctx, tx, ch.Table, ch.After)
 				}
 			}
-			if err = a.insert(ctx, tx, ch.Table, ch.After); err == nil {
+			if err == nil {
 				stats.Updates++
 			}
 		case "delete":
-			if len(ch.Table.PrimaryKey) == 0 {
-				stats.Skipped++
-				stats.Warnings++
-				continue
+			if ch.Table.LocatorStrategy == LocatorFullRow {
+				err = a.deleteFullRow(ctx, tx, ch.Table, ch.Before)
+			} else {
+				err = a.deleteByLocator(ctx, tx, ch.Table, ch.Before)
 			}
-			if err = a.delete(ctx, tx, ch.Table, ch.Before); err == nil {
+			if err == nil {
 				stats.Deletes++
 			}
 		}
@@ -312,9 +347,10 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 	return stats, nil
 }
 
-func primaryKeyChanged(t *TableInfo, before, after []any) bool {
-	for _, i := range t.PrimaryKey {
-		if i >= len(before) || i >= len(after) || fmt.Sprint(before[i]) != fmt.Sprint(after[i]) {
+func locatorChanged(t *TableInfo, before, after []any) bool {
+	for _, column := range t.LocatorColumns {
+		i := columnIndex(t, column)
+		if i < 0 || i >= len(before) || i >= len(after) || !reflect.DeepEqual(before[i], after[i]) {
 			return true
 		}
 	}
@@ -334,11 +370,15 @@ func (a *PostgresApplier) insert(ctx context.Context, tx *sql.Tx, t *TableInfo, 
 		vals[i] = a.conv.Convert(row[i], "mysql", t.ColumnTypes[i])
 	}
 	sqlText := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", a.qualified(t.Name), strings.Join(cols, ","), strings.Join(marks, ","))
-	if len(t.PrimaryKey) > 0 {
-		pk := make([]string, len(t.PrimaryKey))
+	if t.LocatorStrategy == LocatorPrimaryKey || t.LocatorStrategy == LocatorUniqueKey {
+		locatorIndexes, err := locatorColumnIndexes(t)
+		if err != nil {
+			return err
+		}
+		pk := make([]string, len(locatorIndexes))
 		set := make([]string, 0, len(t.Columns))
 		pkSet := map[int]bool{}
-		for i, p := range t.PrimaryKey {
+		for i, p := range locatorIndexes {
 			pk[i] = quoteIdent(a.name(t.Columns[p]))
 			pkSet[p] = true
 		}
@@ -358,15 +398,100 @@ func (a *PostgresApplier) insert(ctx context.Context, tx *sql.Tx, t *TableInfo, 
 	return err
 }
 
-func (a *PostgresApplier) delete(ctx context.Context, tx *sql.Tx, t *TableInfo, row []any) error {
-	where := make([]string, len(t.PrimaryKey))
-	vals := make([]any, len(t.PrimaryKey))
-	for i, p := range t.PrimaryKey {
+func (a *PostgresApplier) deleteByLocator(ctx context.Context, tx *sql.Tx, t *TableInfo, row []any) error {
+	indexes, err := locatorColumnIndexes(t)
+	if err != nil {
+		return err
+	}
+	where := make([]string, len(indexes))
+	vals := make([]any, len(indexes))
+	for i, p := range indexes {
 		where[i] = quoteIdent(a.name(t.Columns[p])) + fmt.Sprintf("=$%d", i+1)
 		vals[i] = a.conv.Convert(row[p], "mysql", t.ColumnTypes[p])
 	}
-	_, err := tx.ExecContext(ctx, "DELETE FROM "+a.qualified(t.Name)+" WHERE "+strings.Join(where, " AND "), vals...)
+	_, err = tx.ExecContext(ctx, "DELETE FROM "+a.qualified(t.Name)+" WHERE "+strings.Join(where, " AND "), vals...)
 	return err
+}
+
+func locatorColumnIndexes(t *TableInfo) ([]int, error) {
+	indexes := make([]int, 0, len(t.LocatorColumns))
+	for _, column := range t.LocatorColumns {
+		index := columnIndex(t, column)
+		if index < 0 {
+			return nil, fmt.Errorf("定位列不存在: %s", column)
+		}
+		indexes = append(indexes, index)
+	}
+	if len(indexes) == 0 {
+		return nil, fmt.Errorf("表 %s 没有定位列", t.Name)
+	}
+	return indexes, nil
+}
+
+func columnIndex(t *TableInfo, column string) int {
+	for i, name := range t.Columns {
+		if name == column {
+			return i
+		}
+	}
+	return -1
+}
+
+func (a *PostgresApplier) updateFullRow(ctx context.Context, tx *sql.Tx, t *TableInfo, before, after []any) error {
+	if len(before) != len(t.Columns) || len(after) != len(t.Columns) {
+		return fmt.Errorf("列数不匹配: before=%d after=%d metadata=%d", len(before), len(after), len(t.Columns))
+	}
+	set := make([]string, len(t.Columns))
+	where := make([]string, len(t.Columns))
+	values := make([]any, 0, len(t.Columns)*2)
+	for i, column := range t.Columns {
+		set[i] = quoteIdent(a.name(column)) + fmt.Sprintf("=$%d", i+1)
+		values = append(values, a.conv.Convert(after[i], "mysql", t.ColumnTypes[i]))
+	}
+	for i, column := range t.Columns {
+		parameter := len(t.Columns) + i + 1
+		where[i] = quoteIdent(a.name(column)) + fmt.Sprintf(" IS NOT DISTINCT FROM $%d", parameter)
+		values = append(values, a.conv.Convert(before[i], "mysql", t.ColumnTypes[i]))
+	}
+	statement := fmt.Sprintf("UPDATE %s SET %s WHERE ctid=(SELECT ctid FROM %s WHERE %s LIMIT 1)",
+		a.qualified(t.Name), strings.Join(set, ","), a.qualified(t.Name), strings.Join(where, " AND "))
+	result, err := tx.ExecContext(ctx, statement, values...)
+	if err != nil {
+		return err
+	}
+	return requireOneFullRow(t, "update", before, result)
+}
+
+func (a *PostgresApplier) deleteFullRow(ctx context.Context, tx *sql.Tx, t *TableInfo, before []any) error {
+	if len(before) != len(t.Columns) {
+		return fmt.Errorf("列数不匹配: before=%d metadata=%d", len(before), len(t.Columns))
+	}
+	where := make([]string, len(t.Columns))
+	values := make([]any, len(t.Columns))
+	for i, column := range t.Columns {
+		where[i] = quoteIdent(a.name(column)) + fmt.Sprintf(" IS NOT DISTINCT FROM $%d", i+1)
+		values[i] = a.conv.Convert(before[i], "mysql", t.ColumnTypes[i])
+	}
+	statement := fmt.Sprintf("DELETE FROM %s WHERE ctid=(SELECT ctid FROM %s WHERE %s LIMIT 1)",
+		a.qualified(t.Name), a.qualified(t.Name), strings.Join(where, " AND "))
+	result, err := tx.ExecContext(ctx, statement, values...)
+	if err != nil {
+		return err
+	}
+	return requireOneFullRow(t, "delete", before, result)
+}
+
+func requireOneFullRow(t *TableInfo, action string, before []any, result sql.Result) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		return nil
+	}
+	payload, _ := json.Marshal(before)
+	hash := sha256.Sum256(payload)
+	return &RowConflictError{Table: t.Name, Action: action, BeforeHash: fmt.Sprintf("%x", hash[:]), Reason: fmt.Sprintf("期望影响 1 行，实际影响 %d 行", affected)}
 }
 
 // SyncSequences moves PostgreSQL sequences to at least MAX(column)+1.

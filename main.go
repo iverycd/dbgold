@@ -30,6 +30,9 @@ func main() {
 	store.Init(cfg)
 	cleanupExpiredIncrementalLogs()
 	go runIncrementalLogCleanup()
+	if err := store.DiscardLegacyIncrementalJobs(); err != nil {
+		slog.Error("failed to discard legacy incremental jobs", "err", err)
+	}
 	if err := store.PauseInterruptedIncrementalJobs(); err != nil {
 		slog.Error("failed to pause interrupted incremental jobs", "err", err)
 	}

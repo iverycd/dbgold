@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/lib/pq"
 )
 
 func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightResult {
@@ -89,9 +88,6 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			if len(t.PrimaryKey) == 0 {
 				r.NoPrimaryKey = append(r.NoPrimaryKey, t.Name)
 			}
-		}
-		if len(r.NoPrimaryKey) > 0 {
-			r.Warnings = append(r.Warnings, "无主键表仅同步 INSERT，UPDATE/DELETE 将跳过")
 		}
 	}
 	if incrementalOnly {
@@ -200,28 +196,37 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 						}
 						expectedPK = append(expectedPK, column)
 					}
-					constraintRows, constraintErr := dst.QueryContext(ctx, `SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
-						FROM information_schema.table_constraints tc
-						JOIN information_schema.key_column_usage kcu
-						ON kcu.constraint_schema=tc.constraint_schema AND kcu.constraint_name=tc.constraint_name
-						AND kcu.table_schema=tc.table_schema AND kcu.table_name=tc.table_name
-						WHERE tc.table_schema=$1 AND tc.table_name=$2 AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE')
-						GROUP BY tc.constraint_name`, cfg.TargetSchema, name)
+					constraintSets, constraintErr := loadPostgresUniqueColumnSets(ctx, dst, cfg.TargetSchema, name)
 					if constraintErr != nil {
 						r.Errors = append(r.Errors, fmt.Sprintf("读取目标表唯一约束失败 %s: %v", name, constraintErr))
 					} else {
 						matched := false
-						for constraintRows.Next() {
-							var columns pq.StringArray
-							if constraintRows.Scan(&columns) == nil && sameColumnSet(expectedPK, columns) {
+						for _, columns := range constraintSets {
+							if sameColumnSet(expectedPK, columns) {
 								matched = true
 							}
 						}
-						constraintRows.Close()
 						if !matched {
 							r.Errors = append(r.Errors, fmt.Sprintf("目标表缺少与源主键列一致的主键/唯一约束: %s", name))
 						}
 					}
+				}
+			}
+		}
+		if len(tables) > 0 && e == nil {
+			resolved, resolveErr := ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+			if resolveErr != nil {
+				r.Errors = append(r.Errors, "解析 CDC 行定位策略失败: "+resolveErr.Error())
+			} else {
+				r.Tables = resolved
+				var fullRow []string
+				for _, table := range resolved {
+					if table.LocatorStrategy == LocatorFullRow {
+						fullRow = append(fullRow, table.Name)
+					}
+				}
+				if len(fullRow) > 0 {
+					r.Warnings = append(r.Warnings, fmt.Sprintf("%d 张表将使用更新前整行匹配 UPDATE/DELETE，目标端可能发生全表扫描: %s", len(fullRow), strings.Join(fullRow, ", ")))
 				}
 			}
 		}

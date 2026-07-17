@@ -7,11 +7,11 @@ import (
 )
 
 func TestPrimaryKeyChanged(t *testing.T) {
-	table := &TableInfo{Columns: []string{"tenant", "id", "name"}, PrimaryKey: []int{0, 1}}
-	if primaryKeyChanged(table, []any{1, 2, "a"}, []any{1, 2, "b"}) {
+	table := &TableInfo{Columns: []string{"tenant", "id", "name"}, PrimaryKey: []int{0, 1}, LocatorColumns: []string{"tenant", "id"}}
+	if locatorChanged(table, []any{1, 2, "a"}, []any{1, 2, "b"}) {
 		t.Fatal("non-key update reported as key change")
 	}
-	if !primaryKeyChanged(table, []any{1, 2, "a"}, []any{1, 3, "a"}) {
+	if !locatorChanged(table, []any{1, 2, "a"}, []any{1, 3, "a"}) {
 		t.Fatal("composite key change not detected")
 	}
 }

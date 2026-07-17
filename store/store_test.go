@@ -72,9 +72,9 @@ func TestConnectionCRUD(t *testing.T) {
 
 func TestPauseInterruptedIncrementalJobs(t *testing.T) {
 	setupTestDB(t)
-	running := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-running", SrcConnID: 1, DstConnID: 2, Status: "running", Phase: "running"}
-	cuttingOver := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-cutover", SrcConnID: 1, DstConnID: 2, Status: "cutting_over", Phase: "cutting_over"}
-	validating := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-validating", SrcConnID: 1, DstConnID: 2, Status: "validating", Phase: "validating"}
+	running := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-running", SrcConnID: 1, DstConnID: 2, Status: "running", Phase: "running", LocatorStrategyVersion: 1}
+	cuttingOver := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-cutover", SrcConnID: 1, DstConnID: 2, Status: "cutting_over", Phase: "cutting_over", LocatorStrategyVersion: 1}
+	validating := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-validating", SrcConnID: 1, DstConnID: 2, Status: "validating", Phase: "validating", LocatorStrategyVersion: 1}
 	stopped := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-stopped", SrcConnID: 1, DstConnID: 2, Status: "stopped", Phase: "stopped"}
 	require.NoError(t, CreateIncrementalJob(running))
 	require.NoError(t, CreateIncrementalJob(cuttingOver))
@@ -92,6 +92,25 @@ func TestPauseInterruptedIncrementalJobs(t *testing.T) {
 	untouched, err := GetIncrementalJob("cdc-stopped")
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", untouched.Status)
+}
+
+func TestDiscardLegacyIncrementalJobs(t *testing.T) {
+	setupTestDB(t)
+	legacy := &IncrementalMigrationJob{OwnerID: 1, JobID: "legacy", Status: "paused_manual", LocatorStrategyVersion: 0}
+	current := &IncrementalMigrationJob{OwnerID: 1, JobID: "current", Status: "paused_manual", LocatorStrategyVersion: 1}
+	terminal := &IncrementalMigrationJob{OwnerID: 1, JobID: "legacy-stopped", Status: "stopped", LocatorStrategyVersion: 0}
+	for _, job := range []*IncrementalMigrationJob{legacy, current, terminal} {
+		require.NoError(t, CreateIncrementalJob(job))
+	}
+	require.NoError(t, DiscardLegacyIncrementalJobs())
+	got, _ := GetIncrementalJob("legacy")
+	assert.Equal(t, "aborted", got.Status)
+	assert.NotNil(t, got.FinishedAt)
+	assert.Contains(t, got.Summary, "旧任务不能恢复")
+	got, _ = GetIncrementalJob("current")
+	assert.Equal(t, "paused_manual", got.Status)
+	got, _ = GetIncrementalJob("legacy-stopped")
+	assert.Equal(t, "stopped", got.Status)
 }
 
 func TestIncrementalOperationalFieldsPersist(t *testing.T) {

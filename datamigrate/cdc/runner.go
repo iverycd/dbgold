@@ -46,6 +46,30 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer applier.Close()
+	record, recordExists, err := applier.LoadBootstrapRecord(ctx)
+	if err != nil {
+		return err
+	}
+	if recordExists {
+		if record.LocatorStrategyVersion != LocatorStrategyVersion {
+			return fmt.Errorf("CDC 定位策略版本不兼容: checkpoint=%d current=%d", record.LocatorStrategyVersion, LocatorStrategyVersion)
+		}
+		if err = ApplyLocatorStrategies(tables, record.LocatorStrategies); err != nil {
+			return err
+		}
+	} else {
+		if r.cfg.LocatorStrategyVersion != LocatorStrategyVersion {
+			return fmt.Errorf("任务缺少当前版本的 CDC 定位策略")
+		}
+		if err = ApplyLocatorStrategies(tables, r.cfg.LocatorStrategies); err != nil {
+			return err
+		}
+		record = BootstrapRecord{State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables),
+			LocatorStrategyVersion: LocatorStrategyVersion, LocatorStrategies: r.cfg.LocatorStrategies}
+		if err = applier.SaveBootstrapRecord(ctx, record); err != nil {
+			return fmt.Errorf("保存 CDC 定位策略失败: %w", err)
+		}
+	}
 	start := r.cfg.Start
 	hasCheckpoint := false
 	if cp, ok, e := applier.LoadCheckpoint(ctx); e != nil {
@@ -162,6 +186,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else {
 			stats, e := applier.Apply(eventCtx, changes, pos)
 			if e != nil {
+				var conflict *RowConflictError
+				if errors.As(e, &conflict) && r.hooks.RowConflict != nil {
+					r.hooks.RowConflict(RowConflict{Table: conflict.Table, Action: conflict.Action, Position: pos, Error: conflict.Error(), BeforeHash: conflict.BeforeHash})
+				}
 				totals.Position, totals.SourceHead = applied, head
 				emitStats(true)
 				return e
@@ -292,6 +320,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func tableNames(tables []TableInfo) []string {
+	result := make([]string, len(tables))
+	for i := range tables {
+		result[i] = tables[i].Name
+	}
+	return result
 }
 
 // PositionReached reports whether applied includes the requested GTID set or

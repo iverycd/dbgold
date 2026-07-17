@@ -99,11 +99,16 @@
         <a-descriptions-item label="匹配表">{{ preflightResult.tables?.length || 0 }}</a-descriptions-item>
         <a-descriptions-item label="binlog 保留">{{ retentionText }}</a-descriptions-item>
       </a-descriptions>
+      <a-descriptions :column="3" size="small" style="margin-top: 10px">
+        <a-descriptions-item label="主键定位">{{ preflightLocatorCounts.primary }}</a-descriptions-item>
+        <a-descriptions-item label="唯一索引定位">{{ preflightLocatorCounts.unique }}</a-descriptions-item>
+        <a-descriptions-item label="更新前整行匹配">{{ preflightLocatorCounts.fullRow }}</a-descriptions-item>
+      </a-descriptions>
       <a-alert v-for="e in preflightResult.errors" :key="e" type="error" style="margin-top: 8px">{{ e }}</a-alert>
       <a-alert v-for="w in preflightResult.warnings" :key="w" type="warning" style="margin-top: 8px">{{ w }}</a-alert>
-      <div v-if="preflightResult.no_primary_key_tables?.length" class="hint">
-        无主键表：{{ preflightResult.no_primary_key_tables.join(', ') }}。这类表只同步 INSERT，UPDATE/DELETE 会跳过并阻止无风险完成切换。
-      </div>
+      <a-alert v-if="preflightFullRowTables.length" type="warning" style="margin-top: 8px">
+        以下表将按更新前完整行同步 UPDATE/DELETE，目标端可能全表扫描：{{ preflightFullRowTables.join(', ') }}
+      </a-alert>
     </a-card>
 
     <a-card v-if="currentJob" title="当前增量任务">
@@ -121,6 +126,7 @@
         <a-descriptions-item label="最后事件">{{ currentJob.last_event_at ? formatDate(currentJob.last_event_at) : '—' }}</a-descriptions-item>
         <a-descriptions-item label="全量完成">{{ currentJob.bootstrap_completed ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="有效 / 排除表">{{ currentJob.effective_table_count || 0 }} / {{ currentJob.excluded_table_count || 0 }}</a-descriptions-item>
+        <a-descriptions-item label="定位策略（主键 / 唯一 / 整行）">{{ currentJob.primary_locator_count || 0 }} / {{ currentJob.unique_locator_count || 0 }} / {{ currentJob.full_row_locator_count || 0 }}</a-descriptions-item>
         <a-descriptions-item v-if="currentJob.failed_object_count > 0" label="失败对象 / 含 DDL">{{ currentJob.failed_object_count }} / {{ currentJob.failed_ddl_count }}</a-descriptions-item>
         <a-descriptions-item v-if="currentJob.pending_file || currentJob.pending_gtid" label="全量起始位点" :span="2">{{ positionText(currentJob.pending_file, currentJob.pending_position, currentJob.pending_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="目标 checkpoint" :span="3">{{ positionText(currentJob.checkpoint_file, currentJob.checkpoint_position, currentJob.checkpoint_gtid) }}</a-descriptions-item>
@@ -149,6 +155,11 @@
         SQLite 尚未记录全量完成。点击“恢复”时系统会先查询目标 checkpoint：若全量已完成则从位点续跑；若没有完成位点则拒绝恢复，绝不会自动删表重跑。
       </a-alert>
       <a-alert v-if="currentJob.last_error" type="error" style="margin-top: 10px">{{ currentJob.last_error }}</a-alert>
+      <a-alert v-if="currentJob.status === 'paused_row_conflict'" type="error" style="margin-top: 10px">
+        表 {{ currentJob.conflict_table }} 的 {{ currentJob.conflict_action.toUpperCase() }} 无法在目标端定位更新前记录。
+        位点：{{ positionText(currentJob.conflict_file, currentJob.conflict_position, currentJob.conflict_gtid) }}；
+        摘要：{{ currentJob.conflict_before_hash }}。请修复目标数据后点击“修复后恢复”，系统会从未推进的 checkpoint 重放整个事务。
+      </a-alert>
       <a-alert v-if="cutoverInProgress" type="warning" style="margin-top: 10px">
         已锁定最终位点。必须继续保持整个源 MySQL 实例停写，且目标库不能有业务写入；系统会追到边界并执行序列校正和逐表行数校验。
       </a-alert>
@@ -156,7 +167,7 @@
         已到达最终边界且校验通过。保持源库停写，点击“完成切换”后再把业务流量切向 PostgreSQL。
       </a-alert>
       <a-alert v-if="currentJob.status === 'ready_with_warnings'" type="warning" style="margin-top: 10px">
-        行数一致，但存在被排除表或无主键 UPDATE/DELETE 被跳过。请检查影响后明确确认风险。
+        行数一致，但存在被排除表或其他同步警告。请检查影响后明确确认风险。
       </a-alert>
 
       <div v-if="bootstrapReview" class="bootstrap-review">
@@ -215,7 +226,7 @@
 
       <a-space wrap style="margin-top: 12px">
         <a-button v-if="canPause" @click="pause">暂停</a-button>
-        <a-button v-if="canResume" @click="resume">恢复</a-button>
+        <a-button v-if="canResume" @click="resume">{{ currentJob.status === 'paused_row_conflict' ? '修复后恢复' : '恢复' }}</a-button>
         <a-button v-if="currentJob.status === 'paused_ddl'" type="primary" @click="ackDDL">确认已处理并恢复</a-button>
         <a-button v-if="canPrepare" type="primary" :disabled="!sourceWritesStopped" @click="prepareCutover">准备切换</a-button>
         <a-button v-if="canCancelCutover" @click="cancelCutover">取消切换并继续同步</a-button>
@@ -291,6 +302,7 @@ const form = reactive<IncrementalRequest>({
   table_filter: '',
   lower_case_names: true,
   bootstrap_failure_policy: 'review_and_exclude',
+  keyless_change_policy: 'full_row_match',
 })
 
 const mysqlConnections = computed(() => connections.value.filter(c => c.db_type === 'mysql'))
@@ -298,7 +310,7 @@ const postgresConnections = computed(() => connections.value.filter(c => c.db_ty
 const ready = computed(() => !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
 const canPause = computed(() => ['catching_up', 'running', 'reconnecting'].includes(currentJob.value?.status || ''))
 const unsafeBootstrapResume = computed(() => !!currentJob.value && currentJob.value.start_mode === 'full_then_cdc' && !currentJob.value.bootstrap_completed && ['paused_restart', 'failed'].includes(currentJob.value.status))
-const canResume = computed(() => ['paused_manual', 'paused_restart', 'failed'].includes(currentJob.value?.status || ''))
+const canResume = computed(() => ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(currentJob.value?.status || ''))
 const canPrepare = computed(() => ['running', 'catching_up'].includes(currentJob.value?.status || ''))
 const cutoverInProgress = computed(() => ['cutting_over', 'validating'].includes(currentJob.value?.status || ''))
 const canCancelCutover = computed(() => ['cutting_over', 'ready_to_cutover', 'ready_with_warnings', 'cutover_blocked'].includes(currentJob.value?.status || ''))
@@ -315,6 +327,16 @@ const retentionText = computed(() => {
   if (seconds === 0) return '不自动清理'
   return `${(seconds / 3600).toFixed(1)} 小时`
 })
+const preflightLocatorCounts = computed(() => {
+  const tables = preflightResult.value?.tables || []
+  return {
+    primary: tables.filter(table => table.locator_strategy === 'primary_key').length,
+    unique: tables.filter(table => table.locator_strategy === 'unique_key').length,
+    fullRow: tables.filter(table => table.locator_strategy === 'full_row').length,
+  }
+})
+const preflightFullRowTables = computed(() => (preflightResult.value?.tables || [])
+  .filter(table => table.locator_strategy === 'full_row').map(table => table.name))
 const validationRows = computed<ValidationRow[]>(() => {
   if (!currentJob.value?.validation_json) return []
   try {
@@ -466,6 +488,7 @@ function positionText(file: string, pos: number, gtid: string) {
 const labels: Record<string, string> = {
   initializing: '初始化', snapshot: '全量快照', catching_up: '追赶', running: '运行中', reconnecting: '重连中',
   pausing: '暂停中', paused_manual: '已暂停', paused_restart: '重启后暂停', paused_ddl: 'DDL 暂停',
+  paused_row_conflict: '行冲突暂停',
   paused_bootstrap_review: '全量待确认',
   cutting_over: '追赶切换边界', validating: '最终校验', ready_to_cutover: '可完成切换',
   ready_with_warnings: '带风险待确认', cutover_blocked: '切换受阻', stopped: '已完成', aborted: '已放弃', failed: '失败',

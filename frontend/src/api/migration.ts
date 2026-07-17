@@ -184,6 +184,7 @@ export interface IncrementalRequest {
   table_filter?: string
   lower_case_names?: boolean
   bootstrap_failure_policy?: 'review_and_exclude' | 'fail_all'
+  keyless_change_policy?: 'full_row_match'
 }
 
 export interface CDCPosition { file: string; position: number; gtid: string }
@@ -192,6 +193,10 @@ export interface CDCTableInfo {
   engine: string
   columns: string[]
   primary_key_indexes: number[]
+  locator_strategy: 'primary_key' | 'unique_key' | 'full_row'
+  locator_index?: string
+  locator_columns: string[]
+  locator_warning?: string
 }
 export interface IncrementalPreflight {
   ok: boolean
@@ -217,6 +222,11 @@ export interface IncrementalJob {
   start_mode: string
   bootstrap_completed: boolean
   bootstrap_failure_policy: string
+  keyless_change_policy: string
+  locator_strategy_version: number
+  primary_locator_count: number
+  unique_locator_count: number
+  full_row_locator_count: number
   bootstrap_state: string
   pending_file: string
   pending_position: number
@@ -231,6 +241,13 @@ export interface IncrementalJob {
   summary: string
   last_error: string
   blocking_ddl: string
+  conflict_table: string
+  conflict_action: string
+  conflict_file: string
+  conflict_position: number
+  conflict_gtid: string
+  conflict_error: string
+  conflict_before_hash: string
   checkpoint_file: string
   checkpoint_position: number
   checkpoint_gtid: string
@@ -273,6 +290,15 @@ export interface BootstrapReview {
   warnings: string[]
   failed_objects: BootstrapFailedObject[]
   failure_report_version: number
+  locator_strategy_version: number
+  locator_strategies: LocatorStrategy[]
+}
+
+export interface LocatorStrategy {
+  table: string
+  strategy: 'primary_key' | 'unique_key' | 'full_row'
+  index?: string
+  columns: string[]
 }
 
 export interface BootstrapFailedObject {
