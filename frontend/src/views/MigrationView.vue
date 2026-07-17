@@ -46,7 +46,7 @@
                 </a-select>
                 <a-tooltip
                   v-if="dataMigrate.srcDatabase && canExportRoutines"
-                  content="导出源库自定义函数/存储过程原始 DDL 为 .sql 文件。跨厂商语法不兼容，导出内容未做转换，需手动适配目标库。"
+                  content="导出源库自定义函数/存储过程/触发器原始 DDL 为 .sql 文件。跨厂商语法不兼容，导出内容未做转换，需手动适配目标库。"
                 >
                   <a-button
                     type="outline"
@@ -57,7 +57,7 @@
                     @click="handleExportRoutines"
                   >
                     <template #icon><icon-download /></template>
-                    导出函数/存储过程
+                    导出函数/存储过程/触发器
                   </a-button>
                 </a-tooltip>
               </a-card>
@@ -979,7 +979,7 @@ const pgConnections = computed(() =>
 const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)
 )
-// 支持导出函数/存储过程的源库类型（与后端 routineExporter 实现保持一致）
+// 支持导出函数/存储过程/触发器的源库类型（与后端可选导出接口实现保持一致）
 const ROUTINE_EXPORT_TYPES = ['mysql', 'oracle', 'sqlserver', 'dameng']
 const canExportRoutines = computed(() =>
   !!selectedSrc.value && ROUTINE_EXPORT_TYPES.includes(selectedSrc.value.db_type)

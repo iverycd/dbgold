@@ -9,65 +9,67 @@ import (
 // IncrementalMigrationJob stores CDC configuration and operational state. The
 // authoritative apply checkpoint lives in the target PostgreSQL transaction.
 type IncrementalMigrationJob struct {
-	ID              uint       `gorm:"primaryKey" json:"id"`
-	OwnerID         uint       `gorm:"index;not null" json:"owner_id"`
-	JobID           string     `gorm:"uniqueIndex;not null" json:"job_id"`
-	SrcConnID       uint       `json:"src_conn_id"`
-	DstConnID       uint       `json:"dst_conn_id"`
-	SrcDatabase     string     `json:"src_database"`
-	TargetSchema    string     `json:"target_schema"`
-	StartMode       string     `json:"start_mode"`    // full_then_cdc | incremental_only
-	PositionMode    string     `json:"position_mode"` // auto | gtid | file
-	StartGTID       string     `gorm:"column:start_gtid" json:"start_gtid"`
-	StartFile       string     `json:"start_file"`
-	StartPosition   uint32     `json:"start_position"`
-	ServerID        uint32     `json:"server_id"`
-	MigrateMode     string     `json:"migrate_mode"`
-	TableFilter     string     `json:"table_filter"`
-	LowerCaseNames  bool       `json:"lower_case_names"`
-	BootstrapPolicy string     `gorm:"column:bootstrap_failure_policy" json:"bootstrap_failure_policy"`
-	BootstrapState  string     `json:"bootstrap_state"`
-	BootstrapDone   bool       `gorm:"column:bootstrap_completed" json:"bootstrap_completed"`
-	PendingGTID     string     `gorm:"column:pending_gtid" json:"pending_gtid"`
-	PendingFile     string     `json:"pending_file"`
-	PendingPos      uint32     `gorm:"column:pending_position" json:"pending_position"`
-	EffectiveCount  int        `gorm:"column:effective_table_count" json:"effective_table_count"`
-	ExcludedCount   int        `gorm:"column:excluded_table_count" json:"excluded_table_count"`
-	ManifestHash    string     `gorm:"column:bootstrap_manifest_hash" json:"bootstrap_manifest_hash"`
-	EffectiveJSON   string     `gorm:"column:effective_tables_json" json:"-"`
-	ExcludedJSON    string     `gorm:"column:excluded_tables_json" json:"-"`
-	BootstrapReport string     `gorm:"column:bootstrap_report_json" json:"-"`
-	Status          string     `gorm:"index" json:"status"`
-	Phase           string     `json:"phase"`
-	Summary         string     `json:"summary"`
-	LastError       string     `json:"last_error"`
-	BlockingDDL     string     `json:"blocking_ddl"`
-	BlockingFile    string     `json:"blocking_file"`
-	BlockingPos     uint32     `gorm:"column:blocking_position" json:"blocking_position"`
-	BlockingGTID    string     `gorm:"column:blocking_gtid" json:"blocking_gtid"`
-	CheckpointGTID  string     `gorm:"column:checkpoint_gtid" json:"checkpoint_gtid"`
-	CheckpointFile  string     `json:"checkpoint_file"`
-	CheckpointPos   uint32     `gorm:"column:checkpoint_position" json:"checkpoint_position"`
-	SourceHeadGTID  string     `gorm:"column:source_head_gtid" json:"source_head_gtid"`
-	SourceHeadFile  string     `json:"source_head_file"`
-	SourceHeadPos   uint32     `gorm:"column:source_head_position" json:"source_head_position"`
-	CaughtUp        bool       `json:"caught_up"`
-	LagSeconds      int64      `json:"lag_seconds"`
-	CutoverGTID     string     `gorm:"column:cutover_gtid" json:"cutover_gtid"`
-	CutoverFile     string     `json:"cutover_file"`
-	CutoverPos      uint32     `gorm:"column:cutover_position" json:"cutover_position"`
-	ValidationState string     `json:"validation_state"`
-	ValidationJSON  string     `json:"validation_json"`
-	InsertCount     int64      `json:"insert_count"`
-	UpdateCount     int64      `json:"update_count"`
-	DeleteCount     int64      `json:"delete_count"`
-	SkippedCount    int64      `json:"skipped_count"`
-	WarningCount    int64      `json:"warning_count"`
-	LogDroppedCount int64      `gorm:"column:log_dropped_count;not null;default:0" json:"log_dropped_count"`
-	LastEventAt     *time.Time `json:"last_event_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	OwnerID           uint       `gorm:"index;not null" json:"owner_id"`
+	JobID             string     `gorm:"uniqueIndex;not null" json:"job_id"`
+	SrcConnID         uint       `json:"src_conn_id"`
+	DstConnID         uint       `json:"dst_conn_id"`
+	SrcDatabase       string     `json:"src_database"`
+	TargetSchema      string     `json:"target_schema"`
+	StartMode         string     `json:"start_mode"`    // full_then_cdc | incremental_only
+	PositionMode      string     `json:"position_mode"` // auto | gtid | file
+	StartGTID         string     `gorm:"column:start_gtid" json:"start_gtid"`
+	StartFile         string     `json:"start_file"`
+	StartPosition     uint32     `json:"start_position"`
+	ServerID          uint32     `json:"server_id"`
+	MigrateMode       string     `json:"migrate_mode"`
+	TableFilter       string     `json:"table_filter"`
+	LowerCaseNames    bool       `json:"lower_case_names"`
+	BootstrapPolicy   string     `gorm:"column:bootstrap_failure_policy" json:"bootstrap_failure_policy"`
+	BootstrapState    string     `json:"bootstrap_state"`
+	BootstrapDone     bool       `gorm:"column:bootstrap_completed" json:"bootstrap_completed"`
+	PendingGTID       string     `gorm:"column:pending_gtid" json:"pending_gtid"`
+	PendingFile       string     `json:"pending_file"`
+	PendingPos        uint32     `gorm:"column:pending_position" json:"pending_position"`
+	EffectiveCount    int        `gorm:"column:effective_table_count" json:"effective_table_count"`
+	ExcludedCount     int        `gorm:"column:excluded_table_count" json:"excluded_table_count"`
+	ManifestHash      string     `gorm:"column:bootstrap_manifest_hash" json:"bootstrap_manifest_hash"`
+	EffectiveJSON     string     `gorm:"column:effective_tables_json" json:"-"`
+	ExcludedJSON      string     `gorm:"column:excluded_tables_json" json:"-"`
+	BootstrapReport   string     `gorm:"column:bootstrap_report_json" json:"-"`
+	FailedObjectCount int        `gorm:"column:failed_object_count;not null;default:0" json:"failed_object_count"`
+	FailedDDLCount    int        `gorm:"column:failed_ddl_count;not null;default:0" json:"failed_ddl_count"`
+	Status            string     `gorm:"index" json:"status"`
+	Phase             string     `json:"phase"`
+	Summary           string     `json:"summary"`
+	LastError         string     `json:"last_error"`
+	BlockingDDL       string     `json:"blocking_ddl"`
+	BlockingFile      string     `json:"blocking_file"`
+	BlockingPos       uint32     `gorm:"column:blocking_position" json:"blocking_position"`
+	BlockingGTID      string     `gorm:"column:blocking_gtid" json:"blocking_gtid"`
+	CheckpointGTID    string     `gorm:"column:checkpoint_gtid" json:"checkpoint_gtid"`
+	CheckpointFile    string     `json:"checkpoint_file"`
+	CheckpointPos     uint32     `gorm:"column:checkpoint_position" json:"checkpoint_position"`
+	SourceHeadGTID    string     `gorm:"column:source_head_gtid" json:"source_head_gtid"`
+	SourceHeadFile    string     `json:"source_head_file"`
+	SourceHeadPos     uint32     `gorm:"column:source_head_position" json:"source_head_position"`
+	CaughtUp          bool       `json:"caught_up"`
+	LagSeconds        int64      `json:"lag_seconds"`
+	CutoverGTID       string     `gorm:"column:cutover_gtid" json:"cutover_gtid"`
+	CutoverFile       string     `json:"cutover_file"`
+	CutoverPos        uint32     `gorm:"column:cutover_position" json:"cutover_position"`
+	ValidationState   string     `json:"validation_state"`
+	ValidationJSON    string     `json:"validation_json"`
+	InsertCount       int64      `json:"insert_count"`
+	UpdateCount       int64      `json:"update_count"`
+	DeleteCount       int64      `json:"delete_count"`
+	SkippedCount      int64      `json:"skipped_count"`
+	WarningCount      int64      `json:"warning_count"`
+	LogDroppedCount   int64      `gorm:"column:log_dropped_count;not null;default:0" json:"log_dropped_count"`
+	LastEventAt       *time.Time `json:"last_event_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 }
 
 func CreateIncrementalJob(j *IncrementalMigrationJob) error { return DB.Create(j).Error }

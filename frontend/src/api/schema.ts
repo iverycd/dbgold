@@ -37,7 +37,7 @@ export const parseDDLFile = (file: File) => {
   return api.post<FullSchema>('/schema/parse', form)
 }
 
-// downloadRoutines 导出源库自定义函数/存储过程原始 DDL 为 .sql 文件。
+// downloadRoutines 导出源库自定义函数/存储过程/触发器原始 DDL 为 .sql 文件。
 // 后端返回附件流，失败时返回 JSON 错误，需带 token（用 fetch + blob）。
 export const downloadRoutines = async (connectionId: number, database: string) => {
   const token = localStorage.getItem('token') ?? ''
@@ -62,7 +62,7 @@ export const downloadRoutines = async (connectionId: number, database: string) =
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${database}_routines.sql`
+  a.download = `${database}_routines_triggers.sql`
   a.click()
   URL.revokeObjectURL(url)
 }

@@ -58,7 +58,8 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 			job_id text PRIMARY KEY, binlog_file text NOT NULL DEFAULT '', binlog_position bigint NOT NULL DEFAULT 4,
 			gtid text NOT NULL DEFAULT '', bootstrap_state text NOT NULL DEFAULT 'completed',
 			effective_tables text NOT NULL DEFAULT '[]', excluded_tables text NOT NULL DEFAULT '[]',
-			manifest_hash text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
+			manifest_hash text NOT NULL DEFAULT '', failed_objects text NOT NULL DEFAULT '[]',
+			failure_report_version integer NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
 		return err
 	}
 	for _, statement := range []string{
@@ -66,6 +67,8 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS effective_tables text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS excluded_tables text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS manifest_hash text NOT NULL DEFAULT ''`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS failed_objects text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS failure_report_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
 	} {
 		if _, err := a.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -88,10 +91,12 @@ func (a *PostgresApplier) LoadCheckpoint(ctx context.Context) (Position, bool, e
 func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecord, bool, error) {
 	var record BootstrapRecord
 	var n int64
-	var effectiveJSON, excludedJSON string
+	var effectiveJSON, excludedJSON, failedObjectsJSON string
 	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT binlog_file, binlog_position, gtid, bootstrap_state,
-		effective_tables, excluded_tables, manifest_hash FROM %s WHERE job_id=$1`, a.checkpointTable()), a.jobID).
-		Scan(&record.Position.File, &n, &record.Position.GTID, &record.State, &effectiveJSON, &excludedJSON, &record.ManifestHash)
+		effective_tables, excluded_tables, manifest_hash, failed_objects, failure_report_version
+		FROM %s WHERE job_id=$1`, a.checkpointTable()), a.jobID).
+		Scan(&record.Position.File, &n, &record.Position.GTID, &record.State, &effectiveJSON, &excludedJSON, &record.ManifestHash,
+			&failedObjectsJSON, &record.FailureReportVersion)
 	if err == sql.ErrNoRows {
 		return BootstrapRecord{}, false, nil
 	}
@@ -105,6 +110,9 @@ func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRec
 	if err = json.Unmarshal([]byte(excludedJSON), &record.ExcludedTables); err != nil {
 		return BootstrapRecord{}, false, fmt.Errorf("解析 checkpoint excluded_tables 失败: %w", err)
 	}
+	if err = json.Unmarshal([]byte(failedObjectsJSON), &record.FailedObjects); err != nil {
+		return BootstrapRecord{}, false, fmt.Errorf("解析 checkpoint failed_objects 失败: %w", err)
+	}
 	return record, true, nil
 }
 
@@ -117,12 +125,18 @@ func (a *PostgresApplier) SaveBootstrapRecord(ctx context.Context, record Bootst
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,manifest_hash,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()) ON CONFLICT(job_id) DO UPDATE SET
+	failedObjectsJSON, err := json.Marshal(record.FailedObjects)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,manifest_hash,failed_objects,failure_report_version,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT(job_id) DO UPDATE SET
 		binlog_file=EXCLUDED.binlog_file,binlog_position=EXCLUDED.binlog_position,gtid=EXCLUDED.gtid,
 		bootstrap_state=EXCLUDED.bootstrap_state,effective_tables=EXCLUDED.effective_tables,
-		excluded_tables=EXCLUDED.excluded_tables,manifest_hash=EXCLUDED.manifest_hash,updated_at=now()`, a.checkpointTable()),
-		a.jobID, record.Position.File, record.Position.Pos, record.Position.GTID, record.State, string(effectiveJSON), string(excludedJSON), record.ManifestHash)
+		excluded_tables=EXCLUDED.excluded_tables,manifest_hash=EXCLUDED.manifest_hash,
+		failed_objects=EXCLUDED.failed_objects,failure_report_version=EXCLUDED.failure_report_version,updated_at=now()`, a.checkpointTable()),
+		a.jobID, record.Position.File, record.Position.Pos, record.Position.GTID, record.State, string(effectiveJSON), string(excludedJSON), record.ManifestHash,
+		string(failedObjectsJSON), record.FailureReportVersion)
 	return err
 }
 
@@ -162,10 +176,14 @@ func (a *PostgresApplier) FinalizeBootstrap(ctx context.Context, record Bootstra
 	if err != nil {
 		return err
 	}
+	failedObjectsJSON, err := json.Marshal(record.FailedObjects)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET bootstrap_state='completed',
-		effective_tables=$2,excluded_tables=$3,manifest_hash=$4,updated_at=now()
+		effective_tables=$2,excluded_tables=$3,manifest_hash=$4,failed_objects=$5,failure_report_version=$6,updated_at=now()
 		WHERE job_id=$1 AND bootstrap_state IN ('snapshot_in_progress','review_pending','completed')`, a.checkpointTable()),
-		a.jobID, string(effectiveJSON), string(excludedJSON), record.ManifestHash)
+		a.jobID, string(effectiveJSON), string(excludedJSON), record.ManifestHash, string(failedObjectsJSON), record.FailureReportVersion)
 	if err != nil {
 		return err
 	}

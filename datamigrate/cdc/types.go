@@ -58,12 +58,25 @@ type BootstrapIssue struct {
 	DDL   string `json:"ddl,omitempty"`
 }
 
+// BootstrapFailedObject preserves a full-snapshot failure independently from
+// the table exclusion manifest. DDL may be empty for data and validation
+// failures that still need to be visible in the diagnostic export.
+type BootstrapFailedObject struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Error    string `json:"error"`
+	DDL      string `json:"ddl,omitempty"`
+	Stage    string `json:"stage"`
+}
+
 type BootstrapRecord struct {
-	State           string           `json:"state"`
-	Position        Position         `json:"position"`
-	EffectiveTables []string         `json:"effective_tables"`
-	ExcludedTables  []BootstrapIssue `json:"excluded_tables"`
-	ManifestHash    string           `json:"manifest_hash"`
+	State                string                  `json:"state"`
+	Position             Position                `json:"position"`
+	EffectiveTables      []string                `json:"effective_tables"`
+	ExcludedTables       []BootstrapIssue        `json:"excluded_tables"`
+	ManifestHash         string                  `json:"manifest_hash"`
+	FailedObjects        []BootstrapFailedObject `json:"failed_objects"`
+	FailureReportVersion int                     `json:"failure_report_version"`
 }
 
 type BootstrapReview struct {

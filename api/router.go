@@ -78,6 +78,7 @@ func NewRouter() *gin.Engine {
 		authed.GET("/migration/incremental/jobs", handler.ListIncremental)
 		authed.GET("/migration/incremental/jobs/:jobID", handler.GetIncremental)
 		authed.GET("/migration/incremental/jobs/:jobID/logs", handler.GetIncrementalLogs)
+		authed.GET("/migration/incremental/jobs/:jobID/export-failed-ddl", handler.ExportIncrementalFailedDDL)
 		authed.GET("/migration/incremental/jobs/:jobID/bootstrap-review", handler.GetIncrementalBootstrapReview)
 		authed.POST("/migration/incremental/jobs/:jobID/accept-bootstrap-exclusions", handler.AcceptIncrementalBootstrapExclusions)
 		authed.POST("/migration/incremental/jobs/:jobID/pause", handler.PauseIncremental)

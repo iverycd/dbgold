@@ -48,9 +48,13 @@ func TestBootstrapCheckpointIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := BootstrapRecord{
-		State:           "review_pending",
-		Position:        position,
-		EffectiveTables: []string{"cdc_pk", "bootstrap_effective"},
+		State:                "review_pending",
+		Position:             position,
+		EffectiveTables:      []string{"cdc_pk", "bootstrap_effective"},
+		FailureReportVersion: 1,
+		FailedObjects: []BootstrapFailedObject{{
+			Category: "table", Name: "bootstrap_failed", Error: "test", DDL: "CREATE TABLE bootstrap_failed(id badtype)", Stage: "schema",
+		}},
 		ExcludedTables: []BootstrapIssue{
 			{Table: "bootstrap_failed", Stage: "data", Error: "test"},
 			{Table: "bootstrap_schema_failed", Stage: "schema", Error: "test"},
@@ -61,7 +65,7 @@ func TestBootstrapCheckpointIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, exists, err := LoadTargetBootstrapRecord(ctx, cfg)
-	if err != nil || !exists || loaded.State != "review_pending" || loaded.ManifestHash != record.ManifestHash {
+	if err != nil || !exists || loaded.State != "review_pending" || loaded.ManifestHash != record.ManifestHash || len(loaded.FailedObjects) != 1 {
 		t.Fatalf("unexpected review checkpoint: exists=%v record=%+v err=%v", exists, loaded, err)
 	}
 	if err = FinalizeTargetBootstrap(ctx, cfg, record); err != nil {
@@ -93,8 +97,8 @@ func TestBootstrapCheckpointIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, _, err = applier.LoadBootstrapRecord(ctx)
-	if err != nil || loaded.ManifestHash != record.ManifestHash || len(loaded.ExcludedTables) != 2 {
-		t.Fatalf("CDC checkpoint update overwrote bootstrap manifest: %+v err=%v", loaded, err)
+	if err != nil || loaded.ManifestHash != record.ManifestHash || len(loaded.ExcludedTables) != 2 || len(loaded.FailedObjects) != 1 || loaded.FailureReportVersion != 1 {
+		t.Fatalf("CDC checkpoint update overwrote bootstrap manifest or failure report: %+v err=%v", loaded, err)
 	}
 }
 

@@ -67,9 +67,14 @@ func BuildBootstrapReview(position Position, expected []string, report datamigra
 	}
 
 	review := BootstrapReview{
-		BootstrapRecord: BootstrapRecord{State: "review_pending", Position: position},
-		RequestedCount:  len(expected),
-		Warnings:        bootstrapObjectWarnings(report),
+		BootstrapRecord: BootstrapRecord{
+			State:                "review_pending",
+			Position:             position,
+			FailedObjects:        BuildBootstrapFailedObjects(expected, report, lower, compatibility),
+			FailureReportVersion: 1,
+		},
+		RequestedCount: len(expected),
+		Warnings:       bootstrapObjectWarnings(report),
 	}
 	for _, table := range expected {
 		if issue, failed := issues[table]; failed {
@@ -80,6 +85,77 @@ func BuildBootstrapReview(position Position, expected []string, report datamigra
 	}
 	review.ManifestHash = HashBootstrapManifest(review.BootstrapRecord)
 	return review
+}
+
+// BuildBootstrapFailedObjects converts the migrator report into a durable,
+// category-aware artifact. It deliberately remains separate from the
+// exclusion manifest: an index or view failure must be exportable without
+// changing which tables participate in CDC.
+func BuildBootstrapFailedObjects(expected []string, report datamigrate.MigrationReport, lower bool, compatibility map[string]string) []BootstrapFailedObject {
+	items := make([]BootstrapFailedObject, 0)
+	seen := make(map[string]bool)
+	failedTables := make(map[string]bool)
+	appendItems := func(category, stage string, failures []datamigrate.ObjectResult) {
+		for _, item := range failures {
+			failure := BootstrapFailedObject{Category: category, Name: item.Name, Error: item.Error, DDL: item.DDL, Stage: stage}
+			key := strings.Join([]string{failure.Category, failure.Name, failure.Error, failure.DDL, failure.Stage}, "\x00")
+			if !seen[key] {
+				seen[key] = true
+				items = append(items, failure)
+			}
+		}
+	}
+	appendItems("table", "schema", report.Tables.Items)
+	appendItems("data", "data", report.Data.Items)
+	appendItems("primary_key", "objects", report.PrimaryKeys.Items)
+	appendItems("sequence", "objects", report.Sequences.Items)
+	appendItems("index", "objects", report.Indexes.Items)
+	appendItems("foreign_key", "objects", report.Constraints.Items)
+	appendItems("view", "objects", report.Views.Items)
+	appendItems("comment", "objects", report.Comments.Items)
+	for _, item := range report.Tables.Items {
+		failedTables[item.Name] = true
+	}
+	for _, item := range report.Data.Items {
+		failedTables[item.Name] = true
+	}
+	targetToSource := make(map[string]string, len(expected))
+	for _, table := range expected {
+		targetName := table
+		if lower {
+			targetName = strings.ToLower(table)
+		}
+		targetToSource[targetName] = table
+	}
+	for _, item := range report.PrimaryKeys.Items {
+		if table, found := targetToSource[item.Name]; found {
+			failedTables[table] = true
+		}
+	}
+
+	targetRows := make(map[string]datamigrate.TableRowCount, len(report.RowCounts))
+	for _, row := range report.RowCounts {
+		targetRows[row.Table] = row
+	}
+	for _, table := range expected {
+		if failedTables[table] {
+			continue
+		}
+		targetName := table
+		if lower {
+			targetName = strings.ToLower(table)
+		}
+		row, exists := targetRows[targetName]
+		if !exists {
+			items = append(items, BootstrapFailedObject{Category: "row_count", Name: table, Error: "全量快照未完成该表行数校验", Stage: "validation"})
+		} else if !row.Match {
+			items = append(items, BootstrapFailedObject{Category: "row_count", Name: table, Error: fmt.Sprintf("源目标行数不一致: source=%d target=%d", row.Src, row.Dst), Stage: "validation"})
+		}
+		if message := compatibility[table]; message != "" {
+			items = append(items, BootstrapFailedObject{Category: "cdc_compatibility", Name: table, Error: message, Stage: "validation"})
+		}
+	}
+	return items
 }
 
 func bootstrapObjectWarnings(report datamigrate.MigrationReport) []string {

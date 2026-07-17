@@ -121,12 +121,21 @@
         <a-descriptions-item label="最后事件">{{ currentJob.last_event_at ? formatDate(currentJob.last_event_at) : '—' }}</a-descriptions-item>
         <a-descriptions-item label="全量完成">{{ currentJob.bootstrap_completed ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="有效 / 排除表">{{ currentJob.effective_table_count || 0 }} / {{ currentJob.excluded_table_count || 0 }}</a-descriptions-item>
+        <a-descriptions-item v-if="currentJob.failed_object_count > 0" label="失败对象 / 含 DDL">{{ currentJob.failed_object_count }} / {{ currentJob.failed_ddl_count }}</a-descriptions-item>
         <a-descriptions-item v-if="currentJob.pending_file || currentJob.pending_gtid" label="全量起始位点" :span="2">{{ positionText(currentJob.pending_file, currentJob.pending_position, currentJob.pending_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="目标 checkpoint" :span="3">{{ positionText(currentJob.checkpoint_file, currentJob.checkpoint_position, currentJob.checkpoint_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="源端最新位点" :span="3">{{ positionText(currentJob.source_head_file, currentJob.source_head_position, currentJob.source_head_gtid) }}</a-descriptions-item>
         <a-descriptions-item v-if="currentJob.cutover_file || currentJob.cutover_gtid" label="切换边界" :span="3">{{ positionText(currentJob.cutover_file, currentJob.cutover_position, currentJob.cutover_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="摘要" :span="3">{{ currentJob.summary || '—' }}</a-descriptions-item>
       </a-descriptions>
+
+      <div v-if="canExportFailedDDL" style="margin-top: 10px; display: flex; align-items: center; gap: 10px">
+        <a-button size="small" :loading="exportingFailedDDL" @click="exportFailedDDL">
+          <template #icon><icon-download /></template>
+          导出修复 SQL
+        </a-button>
+        <span class="hint" style="margin-top: 0">文件包含可执行语句，DROP 等破坏性操作默认禁用</span>
+      </div>
 
       <IncrementalMigrationLogPanel
         v-if="currentJob.start_mode === 'full_then_cdc'"
@@ -159,6 +168,7 @@
           <a-descriptions-item label="原始范围">{{ bootstrapReview.requested_count }}</a-descriptions-item>
           <a-descriptions-item label="成功表">{{ bootstrapReview.effective_tables.length }}</a-descriptions-item>
           <a-descriptions-item label="排除表">{{ bootstrapReview.excluded_tables.length }}</a-descriptions-item>
+          <a-descriptions-item label="失败对象 / 含 DDL">{{ bootstrapReview.failed_objects?.length || currentJob.failed_object_count || 0 }} / {{ bootstrapReview.failed_objects?.filter(item => !!item.ddl?.trim()).length || currentJob.failed_ddl_count || 0 }}</a-descriptions-item>
         </a-descriptions>
         <a-table v-if="bootstrapReview.excluded_tables.length" :data="bootstrapReview.excluded_tables" size="small" :pagination="false" :scroll="{ y: 280 }">
           <template #columns>
@@ -230,6 +240,7 @@ import {
   cancelIncrementalCutover,
   getIncrementalJob,
   getIncrementalBootstrapReview,
+  downloadIncrementalFailedDDL,
   listIncrementalJobs,
   pauseIncrementalJob,
   preflightIncremental,
@@ -258,6 +269,7 @@ const warningsAccepted = ref(false)
 const bootstrapExclusionsAccepted = ref(false)
 const finalExclusionsAccepted = ref(false)
 const acceptingBootstrap = ref(false)
+const exportingFailedDDL = ref(false)
 const logRefreshToken = ref(0)
 let timer: number | undefined
 let refreshRunning = false
@@ -294,6 +306,9 @@ const canComplete = computed(() => ['ready_to_cutover', 'ready_with_warnings'].i
 const terminalStatus = computed(() => ['stopped', 'aborted'].includes(currentJob.value?.status || ''))
 const bootstrapLogPolling = computed(() => ['initializing', 'snapshot', 'paused_bootstrap_review'].includes(currentJob.value?.status || ''))
 const canAbort = computed(() => !!currentJob.value && !['validating', 'stopped', 'aborted'].includes(currentJob.value.status))
+const canExportFailedDDL = computed(() => !!currentJob.value && currentJob.value.start_mode === 'full_then_cdc' && (
+  currentJob.value.failed_object_count > 0 || (bootstrapReview.value?.excluded_tables.length || 0) > 0 || (bootstrapReview.value?.warnings.length || 0) > 0
+))
 const retentionText = computed(() => {
   const seconds = preflightResult.value?.binlog_retention_seconds
   if (seconds == null) return '未知'
@@ -425,6 +440,18 @@ async function acceptBootstrap() {
 }
 const completeCutover = () => runAction(() => stopIncrementalJob(currentJob.value!.job_id, warningsAccepted.value, finalExclusionsAccepted.value), '迁移闭环已安全完成')
 const abort = () => runAction(() => abortIncrementalJob(currentJob.value!.job_id), '任务已放弃')
+async function exportFailedDDL() {
+  if (!currentJob.value) return
+  exportingFailedDDL.value = true
+  try {
+    await downloadIncrementalFailedDDL(currentJob.value.job_id)
+    Message.success('修复 SQL 已导出')
+  } catch (e: any) {
+    Message.error(e?.message || '导出修复 SQL 失败')
+  } finally {
+    exportingFailedDDL.value = false
+  }
+}
 function newTask() {
   pollGeneration++
   currentJob.value = null

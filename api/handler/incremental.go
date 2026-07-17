@@ -332,10 +332,27 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	snapshotActive = false
 	logPhase = "snapshot_validation"
 	appendIncrementalLifecycleLog(j.JobID, "snapshot_validation", "info", "一致性全量快照读取事务已结束，正在分类迁移结果")
+	// Persist the structured report before strict-mode evaluation. Otherwise a
+	// fail_all task would terminate with only transient log lines and the exact
+	// failed DDL could no longer be exported.
+	preliminaryReview := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, nil)
+	preliminaryReview.State = "snapshot_in_progress"
+	preliminaryJSON, _ := json.Marshal(preliminaryReview)
+	failedCount, failedDDLCount := bootstrapFailureCounts(preliminaryReview.FailedObjects)
+	if e = store.UpdateIncrementalJob(j.JobID, map[string]any{
+		"bootstrap_report_json": string(preliminaryJSON), "failed_object_count": failedCount, "failed_ddl_count": failedDDLCount,
+	}); e != nil {
+		return fmt.Errorf("保存全量失败报告摘要失败: %w", e)
+	}
+	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, preliminaryReview.BootstrapRecord); e != nil {
+		return fmt.Errorf("保存全量失败报告失败: %w", e)
+	}
 	if j.BootstrapPolicy != "review_and_exclude" {
 		if strictErr := strictBootstrapFailure(report, expectedTables); strictErr != nil {
 			_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted"})
+			preliminaryReview.State = "aborted"
+			preliminaryJSON, _ = json.Marshal(preliminaryReview)
+			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted", "bootstrap_report_json": string(preliminaryJSON)})
 			return strictErr
 		}
 	}
@@ -355,6 +372,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	}
 	logPhase = "bootstrap_review"
 	review := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, compatibility)
+	failedCount, failedDDLCount = bootstrapFailureCounts(review.FailedObjects)
 	if len(review.ExcludedTables) > 0 {
 		if foreignKeys, fkErr := r.GetForeignKeys(ctx); fkErr == nil {
 			excluded := make(map[string]bool, len(review.ExcludedTables))
@@ -376,15 +394,19 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "warn", warning)
 	}
 	if j.BootstrapPolicy != "review_and_exclude" && len(review.ExcludedTables) > 0 {
+		review.State = "aborted"
+		payload, _ := json.Marshal(review)
+		_ = cdc.SaveTargetBootstrapRecord(context.Background(), cfg, review.BootstrapRecord)
 		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
-		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted"})
+		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted", "bootstrap_report_json": string(payload), "failed_object_count": failedCount, "failed_ddl_count": failedDDLCount})
 		return fmt.Errorf("全量完成后 CDC 兼容性校验失败: excluded=%d", len(review.ExcludedTables))
 	}
 	if len(review.EffectiveTables) == 0 {
-		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
 		review.State = "aborted"
 		payload, _ := json.Marshal(review)
-		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted", "bootstrap_report_json": string(payload), "excluded_table_count": len(review.ExcludedTables)})
+		_ = cdc.SaveTargetBootstrapRecord(context.Background(), cfg, review.BootstrapRecord)
+		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
+		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_state": "aborted", "bootstrap_report_json": string(payload), "excluded_table_count": len(review.ExcludedTables), "failed_object_count": failedCount, "failed_ddl_count": failedDDLCount})
 		return fmt.Errorf("全量快照没有可安全进入 CDC 的成功表")
 	}
 
@@ -402,6 +424,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 			"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
 			"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON), "bootstrap_report_json": string(reviewJSON),
 			"effective_table_count": len(review.EffectiveTables), "excluded_table_count": len(review.ExcludedTables), "bootstrap_manifest_hash": review.ManifestHash,
+			"failed_object_count": failedCount, "failed_ddl_count": failedDDLCount,
 			"summary": fmt.Sprintf("全量完成：%d 张表可继续，%d 张表待确认排除", len(review.EffectiveTables), len(review.ExcludedTables)),
 		}); e != nil {
 			return e
@@ -417,9 +440,19 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	if e = applyCompletedBootstrapRecord(j, review.BootstrapRecord); e != nil {
 		return e
 	}
-	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_report_json": string(reviewJSON)})
+	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_report_json": string(reviewJSON), "failed_object_count": failedCount, "failed_ddl_count": failedDDLCount})
 	appendIncrementalLifecycleLog(j.JobID, "catching_up", "done", "全量快照完成，正在从原始快照位点追赶 binlog")
 	return store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "catching_up", "phase": "catching_up", "summary": "全量完成，正在追赶 binlog"})
+}
+
+func bootstrapFailureCounts(items []cdc.BootstrapFailedObject) (total, withDDL int) {
+	for _, item := range items {
+		total++
+		if strings.TrimSpace(item.DDL) != "" {
+			withDDL++
+		}
+	}
+	return total, withDDL
 }
 
 func formatIncrementalPosition(position cdc.Position) string {
@@ -483,6 +516,9 @@ func applyCompletedBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.
 		"start_file": record.Position.File, "start_position": record.Position.Pos, "start_gtid": record.Position.GTID,
 		"checkpoint_file": record.Position.File, "checkpoint_position": record.Position.Pos, "checkpoint_gtid": record.Position.GTID,
 	}
+	failedCount, failedDDLCount := bootstrapFailureCounts(record.FailedObjects)
+	j.FailedObjectCount, j.FailedDDLCount = failedCount, failedDDLCount
+	fields["failed_object_count"], fields["failed_ddl_count"] = failedCount, failedDDLCount
 	if !legacyScope {
 		j.EffectiveJSON, j.ExcludedJSON = string(effectiveJSON), string(excludedJSON)
 		j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(record.EffectiveTables), len(record.ExcludedTables), record.ManifestHash
@@ -500,12 +536,15 @@ func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.Boo
 	j.PendingFile, j.PendingPos, j.PendingGTID = record.Position.File, record.Position.Pos, record.Position.GTID
 	j.EffectiveJSON, j.ExcludedJSON = string(effectiveJSON), string(excludedJSON)
 	j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(record.EffectiveTables), len(record.ExcludedTables), record.ManifestHash
+	failedCount, failedDDLCount := bootstrapFailureCounts(record.FailedObjects)
+	j.FailedObjectCount, j.FailedDDLCount = failedCount, failedDDLCount
 	return store.UpdateIncrementalJob(j.JobID, map[string]any{
 		"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
 		"pending_file": record.Position.File, "pending_position": record.Position.Pos, "pending_gtid": record.Position.GTID,
 		"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON),
 		"effective_table_count": len(record.EffectiveTables), "excluded_table_count": len(record.ExcludedTables),
 		"bootstrap_manifest_hash": record.ManifestHash, "summary": "全量存在失败表，请确认排除范围后继续",
+		"failed_object_count": failedCount, "failed_ddl_count": failedDDLCount,
 	})
 }
 

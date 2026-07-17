@@ -41,12 +41,20 @@
         <a-descriptions-item label="阶段">{{ detail.phase }}</a-descriptions-item>
         <a-descriptions-item label="全量完成">{{ detail.bootstrap_completed ? '是' : '否' }}</a-descriptions-item>
         <a-descriptions-item label="有效 / 排除表">{{ detail.effective_table_count || 0 }} / {{ detail.excluded_table_count || 0 }}</a-descriptions-item>
+        <a-descriptions-item v-if="detail.failed_object_count > 0" label="失败对象 / 含 DDL">{{ detail.failed_object_count }} / {{ detail.failed_ddl_count }}</a-descriptions-item>
         <a-descriptions-item label="同步状态">{{ detail.caught_up ? '已追平' : `追赶中（约 ${detail.lag_seconds || 0} 秒）` }}</a-descriptions-item>
         <a-descriptions-item label="目标 checkpoint" :span="2">{{ position(detail.checkpoint_file, detail.checkpoint_position, detail.checkpoint_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="源端最新位点" :span="2">{{ position(detail.source_head_file, detail.source_head_position, detail.source_head_gtid) }}</a-descriptions-item>
         <a-descriptions-item v-if="detail.cutover_file || detail.cutover_gtid" label="切换边界" :span="2">{{ position(detail.cutover_file, detail.cutover_position, detail.cutover_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="摘要" :span="2">{{ detail.summary || '—' }}</a-descriptions-item>
       </a-descriptions>
+      <div v-if="canExportFailedDDL" style="margin-top: 10px; display: flex; align-items: center; gap: 10px">
+        <a-button size="small" :loading="exportingFailedDDL" @click="exportFailedDDL">
+          <template #icon><icon-download /></template>
+          导出修复 SQL
+        </a-button>
+        <span style="color: var(--color-text-3); font-size: 12px">文件包含可执行语句，DROP 等破坏性操作默认禁用</span>
+      </div>
       <IncrementalMigrationLogPanel
         v-if="detail.start_mode === 'full_then_cdc'"
         :key="detail.job_id"
@@ -67,6 +75,7 @@
           <a-descriptions-item label="原始范围">{{ bootstrapReview.requested_count }}</a-descriptions-item>
           <a-descriptions-item label="成功表">{{ bootstrapReview.effective_tables.length }}</a-descriptions-item>
           <a-descriptions-item label="排除表">{{ bootstrapReview.excluded_tables.length }}</a-descriptions-item>
+          <a-descriptions-item label="失败对象 / 含 DDL">{{ bootstrapReview.failed_objects?.length || detail.failed_object_count || 0 }} / {{ bootstrapReview.failed_objects?.filter(item => !!item.ddl?.trim()).length || detail.failed_ddl_count || 0 }}</a-descriptions-item>
           <a-descriptions-item label="原始快照位点" :span="3">{{ position(bootstrapReview.position.file, bootstrapReview.position.position, bootstrapReview.position.gtid) }}</a-descriptions-item>
         </a-descriptions>
         <a-table :data="bootstrapReview.excluded_tables" size="small" :pagination="false" :scroll="{ y: 260 }">
@@ -109,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import IncrementalMigrationLogPanel from '@/components/IncrementalMigrationLogPanel.vue'
 import {
@@ -118,6 +127,7 @@ import {
   acknowledgeIncrementalDDL,
   cancelIncrementalCutover,
   getIncrementalBootstrapReview,
+  downloadIncrementalFailedDDL,
   listIncrementalJobs,
   pauseIncrementalJob,
   prepareIncrementalCutover,
@@ -136,11 +146,15 @@ const detail = ref<IncrementalJob | null>(null)
 const bootstrapReview = ref<BootstrapReview | null>(null)
 const reviewAccepted = ref(false)
 const acceptingReview = ref(false)
+const exportingFailedDDL = ref(false)
 const logRefreshToken = ref(0)
 let timer: number | undefined
 let loadRunning = false
 let loadPending = false
 let disposed = false
+const canExportFailedDDL = computed(() => !!detail.value && detail.value.start_mode === 'full_then_cdc' && (
+  detail.value.failed_object_count > 0 || (bootstrapReview.value?.excluded_tables.length || 0) > 0 || (bootstrapReview.value?.warnings.length || 0) > 0
+))
 
 async function load() {
   if (disposed) return
@@ -225,6 +239,18 @@ async function acceptReview() {
     Message.error(e?.response?.data?.error || '确认失败表排除失败')
   } finally {
     acceptingReview.value = false
+  }
+}
+async function exportFailedDDL() {
+  if (!detail.value) return
+  exportingFailedDDL.value = true
+  try {
+    await downloadIncrementalFailedDDL(detail.value.job_id)
+    Message.success('修复 SQL 已导出')
+  } catch (e: any) {
+    Message.error(e?.message || '导出修复 SQL 失败')
+  } finally {
+    exportingFailedDDL.value = false
   }
 }
 function pausable(job: IncrementalJob) { return ['catching_up', 'running', 'reconnecting'].includes(job.status) }

@@ -27,6 +27,12 @@ func TestCreateAndGetUser(t *testing.T) {
 	assert.Equal(t, u.ID, got.ID)
 }
 
+func TestIncrementalFailureSummaryColumnsAutoMigrate(t *testing.T) {
+	setupTestDB(t)
+	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "failed_object_count"))
+	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "failed_ddl_count"))
+}
+
 func TestEnsureAdminExists(t *testing.T) {
 	setupTestDB(t)
 	err := EnsureAdminExists("admin", "Admin@123")

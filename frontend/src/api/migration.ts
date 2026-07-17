@@ -223,6 +223,8 @@ export interface IncrementalJob {
   pending_gtid: string
   effective_table_count: number
   excluded_table_count: number
+  failed_object_count: number
+  failed_ddl_count: number
   bootstrap_manifest_hash: string
   status: string
   phase: string
@@ -269,6 +271,16 @@ export interface BootstrapReview {
   manifest_hash: string
   requested_count: number
   warnings: string[]
+  failed_objects: BootstrapFailedObject[]
+  failure_report_version: number
+}
+
+export interface BootstrapFailedObject {
+  category: 'table' | 'data' | 'primary_key' | 'view' | 'index' | 'foreign_key' | 'sequence' | 'comment' | 'row_count' | 'cdc_compatibility'
+  name: string
+  error: string
+  ddl?: string
+  stage: 'schema' | 'data' | 'objects' | 'validation'
 }
 
 export type IncrementalLogLevel = 'info' | 'ddl' | 'data' | 'index' | 'warn' | 'error' | 'done'
@@ -307,6 +319,32 @@ export const getIncrementalMigrationLogs = (jobID: string, params: IncrementalMi
   api.get<IncrementalMigrationLogPage>(`/migration/incremental/jobs/${jobID}/logs`, { params })
 export const getIncrementalBootstrapReview = (jobID: string) =>
   api.get<BootstrapReview>(`/migration/incremental/jobs/${jobID}/bootstrap-review`)
+export const downloadIncrementalFailedDDL = async (jobID: string) => {
+  const token = localStorage.getItem('token') ?? ''
+  const resp = await fetch(`/api/migration/incremental/jobs/${encodeURIComponent(jobID)}/export-failed-ddl`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!resp.ok) {
+    let message = '导出修复 SQL 失败'
+    try {
+      const data = (await resp.json()) as { error?: string }
+      if (data.error) message = data.error
+    } catch {
+      // Keep the stable fallback for non-JSON proxy errors.
+    }
+    throw new Error(message)
+  }
+  const disposition = resp.headers.get('Content-Disposition') || ''
+  const filenameMatch = disposition.match(/filename="?([^";]+)"?/i)
+  const filename = filenameMatch?.[1] || `incremental-${jobID.slice(0, 8)}-failed-ddl.sql`
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
 export const acceptIncrementalBootstrapExclusions = (jobID: string, manifestHash: string) =>
   api.post(`/migration/incremental/jobs/${jobID}/accept-bootstrap-exclusions`, { manifest_hash: manifestHash, acknowledge: true })
 export const pauseIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/pause`)
