@@ -247,6 +247,7 @@ export interface IncrementalJob {
   delete_count: number
   skipped_count: number
   warning_count: number
+  log_dropped_count: number
   last_event_at?: string
   created_at: string
   updated_at: string
@@ -270,12 +271,40 @@ export interface BootstrapReview {
   warnings: string[]
 }
 
+export type IncrementalLogLevel = 'info' | 'ddl' | 'data' | 'index' | 'warn' | 'error' | 'done'
+
+export interface IncrementalMigrationLog {
+  id: number
+  job_id?: string
+  phase: string
+  level: IncrementalLogLevel
+  line: string
+  created_at: string
+}
+
+export interface IncrementalMigrationLogPage {
+  items: IncrementalMigrationLog[]
+  oldest_id: number
+  newest_id: number
+  has_older: boolean
+  has_newer: boolean
+  log_dropped_count: number
+}
+
+export interface IncrementalMigrationLogQuery {
+  after_id?: number
+  before_id?: number
+  limit?: number
+}
+
 export const preflightIncremental = (data: IncrementalRequest) =>
   api.post<IncrementalPreflight>('/migration/incremental/preflight', data)
 export const startIncremental = (data: IncrementalRequest) =>
   api.post<{ job_id: string; preflight: IncrementalPreflight }>('/migration/incremental/jobs', data)
 export const listIncrementalJobs = () => api.get<IncrementalJob[]>('/migration/incremental/jobs')
 export const getIncrementalJob = (jobID: string) => api.get<IncrementalJob>(`/migration/incremental/jobs/${jobID}`)
+export const getIncrementalMigrationLogs = (jobID: string, params: IncrementalMigrationLogQuery = {}) =>
+  api.get<IncrementalMigrationLogPage>(`/migration/incremental/jobs/${jobID}/logs`, { params })
 export const getIncrementalBootstrapReview = (jobID: string) =>
   api.get<BootstrapReview>(`/migration/incremental/jobs/${jobID}/bootstrap-review`)
 export const acceptIncrementalBootstrapExclusions = (jobID: string, manifestHash: string) =>

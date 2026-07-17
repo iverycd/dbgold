@@ -128,6 +128,14 @@
         <a-descriptions-item label="摘要" :span="3">{{ currentJob.summary || '—' }}</a-descriptions-item>
       </a-descriptions>
 
+      <IncrementalMigrationLogPanel
+        v-if="currentJob.start_mode === 'full_then_cdc'"
+        :key="currentJob.job_id"
+        :jobID="currentJob.job_id"
+        :polling="bootstrapLogPolling"
+        :refresh-token="logRefreshToken"
+      />
+
       <a-alert v-if="unsafeBootstrapResume" type="error" style="margin-top: 12px">
         SQLite 尚未记录全量完成。点击“恢复”时系统会先查询目标 checkpoint：若全量已完成则从位点续跑；若没有完成位点则拒绝恢复，绝不会自动删表重跑。
       </a-alert>
@@ -214,6 +222,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
+import IncrementalMigrationLogPanel from '@/components/IncrementalMigrationLogPanel.vue'
 import {
   acceptIncrementalBootstrapExclusions,
   abortIncrementalJob,
@@ -221,6 +230,7 @@ import {
   cancelIncrementalCutover,
   getIncrementalJob,
   getIncrementalBootstrapReview,
+  listIncrementalJobs,
   pauseIncrementalJob,
   preflightIncremental,
   prepareIncrementalCutover,
@@ -248,7 +258,12 @@ const warningsAccepted = ref(false)
 const bootstrapExclusionsAccepted = ref(false)
 const finalExclusionsAccepted = ref(false)
 const acceptingBootstrap = ref(false)
+const logRefreshToken = ref(0)
 let timer: number | undefined
+let refreshRunning = false
+let refreshPending = false
+let pollGeneration = 0
+let disposed = false
 
 const form = reactive<IncrementalRequest>({
   src_conn_id: 0,
@@ -277,6 +292,7 @@ const cutoverInProgress = computed(() => ['cutting_over', 'validating'].includes
 const canCancelCutover = computed(() => ['cutting_over', 'ready_to_cutover', 'ready_with_warnings', 'cutover_blocked'].includes(currentJob.value?.status || ''))
 const canComplete = computed(() => ['ready_to_cutover', 'ready_with_warnings'].includes(currentJob.value?.status || ''))
 const terminalStatus = computed(() => ['stopped', 'aborted'].includes(currentJob.value?.status || ''))
+const bootstrapLogPolling = computed(() => ['initializing', 'snapshot', 'paused_bootstrap_review'].includes(currentJob.value?.status || ''))
 const canAbort = computed(() => !!currentJob.value && !['validating', 'stopped', 'aborted'].includes(currentJob.value.status))
 const retentionText = computed(() => {
   const seconds = preflightResult.value?.binlog_retention_seconds
@@ -328,7 +344,9 @@ async function start() {
   starting.value = true
   try {
     const response = await startIncremental(form)
-    currentJob.value = (await getIncrementalJob(response.data.job_id)).data
+    const job = (await getIncrementalJob(response.data.job_id)).data
+    pollGeneration++
+    currentJob.value = job
     beginPoll()
     Message.success('增量任务已启动')
   } catch (e: any) {
@@ -338,17 +356,37 @@ async function start() {
   }
 }
 async function refresh() {
-  if (currentJob.value) currentJob.value = (await getIncrementalJob(currentJob.value.job_id)).data
+  if (disposed) return
+  if (refreshRunning) {
+    refreshPending = true
+    return
+  }
+  refreshRunning = true
+  try {
+    do {
+      refreshPending = false
+      const jobID = currentJob.value?.job_id
+      if (!jobID) return
+      const generation = pollGeneration
+      const job = (await getIncrementalJob(jobID)).data
+      if (!disposed && generation === pollGeneration && currentJob.value?.job_id === jobID) currentJob.value = job
+    } while (refreshPending)
+  } finally {
+    refreshRunning = false
+    if (!disposed && refreshPending) void refresh().catch(() => {})
+  }
 }
 async function loadBootstrapReview() {
   if (!currentJob.value || (currentJob.value.status !== 'paused_bootstrap_review' && currentJob.value.excluded_table_count <= 0)) {
     bootstrapReview.value = null
     return
   }
+  const jobID = currentJob.value.job_id
   try {
-    bootstrapReview.value = (await getIncrementalBootstrapReview(currentJob.value.job_id)).data
+    const review = (await getIncrementalBootstrapReview(jobID)).data
+    if (!disposed && currentJob.value?.job_id === jobID) bootstrapReview.value = review
   } catch {
-    bootstrapReview.value = null
+    if (!disposed && currentJob.value?.job_id === jobID) bootstrapReview.value = null
   }
 }
 function beginPoll() {
@@ -358,6 +396,7 @@ function beginPoll() {
 async function runAction(action: () => Promise<unknown>, success: string) {
   try {
     await action()
+    logRefreshToken.value++
     Message.success(success)
     await refresh()
   } catch (e: any) {
@@ -374,6 +413,7 @@ async function acceptBootstrap() {
   acceptingBootstrap.value = true
   try {
     await acceptIncrementalBootstrapExclusions(currentJob.value.job_id, bootstrapReview.value.manifest_hash)
+    logRefreshToken.value++
     Message.success('已确认排除失败表，正在追赶 binlog')
     await refresh()
     await loadBootstrapReview()
@@ -386,6 +426,7 @@ async function acceptBootstrap() {
 const completeCutover = () => runAction(() => stopIncrementalJob(currentJob.value!.job_id, warningsAccepted.value, finalExclusionsAccepted.value), '迁移闭环已安全完成')
 const abort = () => runAction(() => abortIncrementalJob(currentJob.value!.job_id), '任务已放弃')
 function newTask() {
+  pollGeneration++
   currentJob.value = null
   preflightResult.value = null
   bootstrapReview.value = null
@@ -414,8 +455,33 @@ function statusColor(status: string) {
 }
 function formatDate(value: string) { return new Date(value).toLocaleString('zh-CN') }
 
-onMounted(async () => { connections.value = (await listConnections()).data })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onMounted(async () => {
+  const [connectionResult, jobResult] = await Promise.allSettled([
+    listConnections(),
+    listIncrementalJobs(),
+  ])
+  if (disposed) return
+  if (connectionResult.status === 'fulfilled') {
+    connections.value = connectionResult.value.data
+  } else {
+    Message.error('加载连接列表失败')
+  }
+  if (jobResult.status === 'fulfilled') {
+    const latest = [...(jobResult.value.data || [])]
+      .filter(job => !['stopped', 'aborted'].includes(job.status))
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0]
+    if (latest) {
+      pollGeneration++
+      currentJob.value = latest
+      beginPoll()
+    }
+  }
+})
+onUnmounted(() => {
+  disposed = true
+  pollGeneration++
+  if (timer) clearInterval(timer)
+})
 </script>
 
 <style scoped>

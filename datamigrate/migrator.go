@@ -65,7 +65,13 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 	if s, ok := writer.(sourceTypeSetter); ok {
 		s.SetSourceType(reader.DBType())
 	}
-	return &Migrator{reader: reader, writer: writer, job: job, cfg: cfg, log: NewLogger(job.LogCh)}
+	return &Migrator{
+		reader: reader,
+		writer: writer,
+		job:    job,
+		cfg:    cfg,
+		log:    newCountingLogger(job.LogCh, job.recordDroppedLog),
+	}
 }
 
 // objName 根据 LowerCaseNames 配置决定是否将对象名转为小写
@@ -251,6 +257,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 				defer rcWg.Done()
 				defer func() { <-rcSem }()
 				dstTable := m.objName(tbl)
+				m.log.Infof("开始行数校验 [%s]", tbl)
 				srcCount, srcErr := m.reader.CountRows(ctx, tbl)
 				dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
 				rc := TableRowCount{Table: dstTable}
@@ -260,7 +267,13 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 					rc.Match = srcCount == dstCount
 					if !rc.Match {
 						m.log.Warnf("行数不一致 [%s]: 源=%d 目标=%d", tbl, srcCount, dstCount)
+					} else {
+						m.log.Dataf("行数校验 [%s]: 源=%d 目标=%d ... OK", tbl, srcCount, dstCount)
 					}
+				} else if srcErr != nil {
+					m.log.Errorf("读取源表行数失败 [%s]: %v", tbl, srcErr)
+				} else {
+					m.log.Errorf("读取目标表行数失败 [%s]: %v", tbl, dstErr)
 				}
 				rowCounts[idx] = rc
 			}(i, table)
@@ -321,6 +334,9 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 			return false, err.Error()
 		}
 		if len(rows) == 0 {
+			if pageNum == 0 {
+				m.log.Dataf("迁移 %s: 空表 ... OK", table)
+			}
 			break
 		}
 		dstTable := m.objName(table)

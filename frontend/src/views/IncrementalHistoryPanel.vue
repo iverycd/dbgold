@@ -33,7 +33,7 @@
     </template>
   </a-table>
 
-  <a-drawer v-model:visible="drawer" title="增量任务详情" :width="820" @close="closeDetail">
+  <a-drawer v-model:visible="drawer" title="增量任务详情" :width="1000" @close="closeDetail">
     <template v-if="detail">
       <a-descriptions :column="2" bordered>
         <a-descriptions-item label="Job ID" :span="2">{{ detail.job_id }}</a-descriptions-item>
@@ -47,6 +47,13 @@
         <a-descriptions-item v-if="detail.cutover_file || detail.cutover_gtid" label="切换边界" :span="2">{{ position(detail.cutover_file, detail.cutover_position, detail.cutover_gtid) }}</a-descriptions-item>
         <a-descriptions-item label="摘要" :span="2">{{ detail.summary || '—' }}</a-descriptions-item>
       </a-descriptions>
+      <IncrementalMigrationLogPanel
+        v-if="detail.start_mode === 'full_then_cdc'"
+        :key="detail.job_id"
+        :jobID="detail.job_id"
+        :polling="bootstrapLogPolling(detail)"
+        :refresh-token="logRefreshToken"
+      />
       <a-alert v-if="unsafeBootstrap(detail)" type="error" style="margin-top: 12px">
         SQLite 尚未记录全量完成。恢复时会先查目标 checkpoint：有完成位点才会续跑，否则拒绝恢复，不会自动删表重跑。
       </a-alert>
@@ -104,6 +111,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
+import IncrementalMigrationLogPanel from '@/components/IncrementalMigrationLogPanel.vue'
 import {
   acceptIncrementalBootstrapExclusions,
   abortIncrementalJob,
@@ -128,48 +136,69 @@ const detail = ref<IncrementalJob | null>(null)
 const bootstrapReview = ref<BootstrapReview | null>(null)
 const reviewAccepted = ref(false)
 const acceptingReview = ref(false)
+const logRefreshToken = ref(0)
 let timer: number | undefined
+let loadRunning = false
+let loadPending = false
+let disposed = false
 
 async function load() {
+  if (disposed) return
+  if (loadRunning) {
+    loadPending = true
+    return
+  }
+  loadRunning = true
   loading.value = true
   try {
-    jobs.value = (await listIncrementalJobs()).data
-    if (detail.value) {
-      detail.value = jobs.value.find(job => job.job_id === detail.value?.job_id) || detail.value
-      await loadBootstrapReview(detail.value)
-    }
+    do {
+      loadPending = false
+      const detailJobID = detail.value?.job_id
+      const nextJobs = (await listIncrementalJobs()).data
+      if (disposed) return
+      jobs.value = nextJobs
+      if (detailJobID && detail.value?.job_id === detailJobID) {
+        detail.value = nextJobs.find(job => job.job_id === detailJobID) || detail.value
+        await loadBootstrapReview(detail.value)
+      }
+    } while (loadPending)
   } catch {
     Message.error('加载增量任务失败')
   } finally {
     loading.value = false
+    loadRunning = false
+    if (!disposed && loadPending) void load()
   }
 }
-async function act(action: () => Promise<unknown>, message: string) {
+async function act(jobID: string, action: () => Promise<unknown>, message: string) {
   try {
     await action()
+    if (detail.value?.job_id === jobID) logRefreshToken.value++
     Message.success(message)
     await load()
   } catch (e: any) {
     Message.error(e?.response?.data?.error || '操作失败')
   }
 }
-const pause = (job: IncrementalJob) => act(() => pauseIncrementalJob(job.job_id), '正在安全暂停')
-const resume = (job: IncrementalJob) => act(() => resumeIncrementalJob(job.job_id), '任务已恢复')
-const ack = (job: IncrementalJob) => act(() => acknowledgeIncrementalDDL(job.job_id), 'DDL 已确认')
-const prepare = (job: IncrementalJob) => act(() => prepareIncrementalCutover(job.job_id), '已锁定最终位点，正在追赶和校验')
-const cancelCutover = (job: IncrementalJob) => act(() => cancelIncrementalCutover(job.job_id), '已取消切换并继续同步')
-const complete = (job: IncrementalJob) => act(() => stopIncrementalJob(job.job_id, job.status === 'ready_with_warnings', job.excluded_table_count > 0), '迁移闭环已安全完成')
-const abort = (job: IncrementalJob) => act(() => abortIncrementalJob(job.job_id), '任务已放弃')
+const pause = (job: IncrementalJob) => act(job.job_id, () => pauseIncrementalJob(job.job_id), '正在安全暂停')
+const resume = (job: IncrementalJob) => act(job.job_id, () => resumeIncrementalJob(job.job_id), '任务已恢复')
+const ack = (job: IncrementalJob) => act(job.job_id, () => acknowledgeIncrementalDDL(job.job_id), 'DDL 已确认')
+const prepare = (job: IncrementalJob) => act(job.job_id, () => prepareIncrementalCutover(job.job_id), '已锁定最终位点，正在追赶和校验')
+const cancelCutover = (job: IncrementalJob) => act(job.job_id, () => cancelIncrementalCutover(job.job_id), '已取消切换并继续同步')
+const complete = (job: IncrementalJob) => act(job.job_id, () => stopIncrementalJob(job.job_id, job.status === 'ready_with_warnings', job.excluded_table_count > 0), '迁移闭环已安全完成')
+const abort = (job: IncrementalJob) => act(job.job_id, () => abortIncrementalJob(job.job_id), '任务已放弃')
 
 async function loadBootstrapReview(job: IncrementalJob) {
   if (job.status !== 'paused_bootstrap_review' && job.excluded_table_count <= 0) {
     bootstrapReview.value = null
     return
   }
+  const jobID = job.job_id
   try {
-    bootstrapReview.value = (await getIncrementalBootstrapReview(job.job_id)).data
+    const review = (await getIncrementalBootstrapReview(jobID)).data
+    if (!disposed && detail.value?.job_id === jobID) bootstrapReview.value = review
   } catch {
-    bootstrapReview.value = null
+    if (!disposed && detail.value?.job_id === jobID) bootstrapReview.value = null
   }
 }
 async function openDetail(job: IncrementalJob) {
@@ -188,6 +217,7 @@ async function acceptReview() {
   acceptingReview.value = true
   try {
     await acceptIncrementalBootstrapExclusions(detail.value.job_id, bootstrapReview.value.manifest_hash)
+    logRefreshToken.value++
     Message.success('已确认排除失败表，正在追赶 binlog')
     reviewAccepted.value = false
     await load()
@@ -204,6 +234,7 @@ function preparable(status: string) { return ['running', 'catching_up'].includes
 function cancelable(status: string) { return ['cutting_over', 'ready_to_cutover', 'ready_with_warnings', 'cutover_blocked'].includes(status) }
 function completable(status: string) { return ['ready_to_cutover', 'ready_with_warnings'].includes(status) }
 function abortable(status: string) { return !['validating', 'stopped', 'aborted'].includes(status) }
+function bootstrapLogPolling(job: IncrementalJob) { return ['initializing', 'snapshot', 'paused_bootstrap_review'].includes(job.status) }
 function validation(job: IncrementalJob): ValidationRow[] {
   if (!job.validation_json) return []
   try {
@@ -238,7 +269,10 @@ function color(status: string) {
 const date = (value: string) => new Date(value).toLocaleString('zh-CN')
 
 onMounted(() => { load(); timer = window.setInterval(load, 5000) })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  disposed = true
+  if (timer) clearInterval(timer)
+})
 </script>
 
 <style scoped>

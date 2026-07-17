@@ -212,6 +212,9 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 			}
 			now := time.Now()
 			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "aborted", "phase": "aborted", "bootstrap_state": "aborted", "summary": "任务已放弃", "finished_at": &now})
+			if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
+				appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "warn", "用户已放弃未完成的全量任务")
+			}
 			return
 		}
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
@@ -259,7 +262,19 @@ func finishIncrementalCutover(j *store.IncrementalMigrationJob, src, dst *store.
 	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": status, "phase": "ready", "validation_state": "passed", "validation_json": string(payload), "caught_up": true, "lag_seconds": 0, "last_error": "", "summary": summary})
 }
 
-func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) error {
+func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) (resultErr error) {
+	logPhase := "snapshot_init"
+	appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "info", "开始建立 MySQL 一致性全量快照")
+	defer func() {
+		if resultErr == nil || errors.Is(resultErr, cdc.ErrBootstrapReview) {
+			return
+		}
+		level := "error"
+		if errors.Is(resultErr, context.Canceled) {
+			level = "warn"
+		}
+		appendIncrementalLifecycleLog(j.JobID, logPhase, level, "全量快照结束: "+resultErr.Error())
+	}()
 	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "snapshot", "phase": "snapshot", "summary": "正在建立一致快照"})
 	srcCopy := *src
 	srcCopy.Database = j.SrcDatabase
@@ -276,6 +291,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		pos.GTID = ""
 	}
 	snapshotPosition := cdc.Position{File: pos.File, Pos: pos.Pos, GTID: pos.GTID}
+	appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "info", "已获取一致快照起始位点: "+formatIncrementalPosition(snapshotPosition))
 	cfg := configFromIncremental(j, src, dst)
 	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, cdc.BootstrapRecord{State: "snapshot_in_progress", Position: snapshotPosition}); e != nil {
 		return fmt.Errorf("保存全量快照待完成位点失败: %w", e)
@@ -301,22 +317,12 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return e
 	}
 	defer w.Close()
-	logJob := &datamigrate.Job{LogCh: make(chan string, 512)}
-	done := make(chan struct{})
-	go func() {
-		lastPersist := time.Time{}
-		for line := range logJob.LogCh {
-			if time.Since(lastPersist) >= 2*time.Second {
-				_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"summary": "全量快照：" + line})
-				lastPersist = time.Now()
-			}
-		}
-		close(done)
-	}()
+	logJob := &datamigrate.Job{LogCh: make(chan string, 4096)}
+	journalDone := startIncrementalLogJournal(j.JobID, logJob)
 	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: "postgres"})
 	report := m.Run(ctx)
 	close(logJob.LogCh)
-	<-done
+	<-journalDone
 	if e = ctx.Err(); e != nil {
 		return e
 	}
@@ -324,6 +330,8 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return e
 	}
 	snapshotActive = false
+	logPhase = "snapshot_validation"
+	appendIncrementalLifecycleLog(j.JobID, "snapshot_validation", "info", "一致性全量快照读取事务已结束，正在分类迁移结果")
 	if j.BootstrapPolicy != "review_and_exclude" {
 		if strictErr := strictBootstrapFailure(report, expectedTables); strictErr != nil {
 			_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
@@ -345,6 +353,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	if e != nil {
 		return fmt.Errorf("验证目标表 CDC 兼容性失败: %w", e)
 	}
+	logPhase = "bootstrap_review"
 	review := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, compatibility)
 	if len(review.ExcludedTables) > 0 {
 		if foreignKeys, fkErr := r.GetForeignKeys(ctx); fkErr == nil {
@@ -358,6 +367,13 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 				}
 			}
 		}
+	}
+	appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "info", fmt.Sprintf("全量结果分类完成：%d 张表可继续，%d 张表需排除", len(review.EffectiveTables), len(review.ExcludedTables)))
+	for _, issue := range review.ExcludedTables {
+		appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "warn", fmt.Sprintf("排除候选表 %s，阶段=%s，错误=%s", issue.Table, issue.Stage, issue.Error))
+	}
+	for _, warning := range review.Warnings {
+		appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "warn", warning)
 	}
 	if j.BootstrapPolicy != "review_and_exclude" && len(review.ExcludedTables) > 0 {
 		_ = cdc.AbortTargetBootstrap(context.Background(), cfg)
@@ -390,6 +406,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		}); e != nil {
 			return e
 		}
+		appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "warn", "全量存在失败表，等待人工确认排除范围后再启动 CDC")
 		return cdc.ErrBootstrapReview
 	}
 
@@ -401,7 +418,22 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return e
 	}
 	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"bootstrap_report_json": string(reviewJSON)})
+	appendIncrementalLifecycleLog(j.JobID, "catching_up", "done", "全量快照完成，正在从原始快照位点追赶 binlog")
 	return store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "catching_up", "phase": "catching_up", "summary": "全量完成，正在追赶 binlog"})
+}
+
+func formatIncrementalPosition(position cdc.Position) string {
+	filePosition := position.File
+	if filePosition != "" {
+		filePosition = fmt.Sprintf("%s:%d", position.File, position.Pos)
+	}
+	if position.GTID == "" {
+		return filePosition
+	}
+	if filePosition == "" {
+		return "GTID " + position.GTID
+	}
+	return filePosition + " · GTID " + position.GTID
 }
 
 func strictBootstrapFailure(report datamigrate.MigrationReport, expectedTables []string) error {
@@ -631,6 +663,7 @@ func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
+	appendIncrementalLifecycleLog(j.JobID, "catching_up", "done", fmt.Sprintf("用户已确认排除 %d 张失败表，成功表开始追赶 binlog", len(record.ExcludedTables)))
 	j.Status, j.Phase = "catching_up", "catching_up"
 	if !cdc.Registry.Running(j.JobID) {
 		launchIncremental(j, src, dst)
@@ -869,6 +902,9 @@ func AbortIncremental(c *gin.Context) {
 		if !updated {
 			c.JSON(409, gin.H{"error": "任务状态已变化，请刷新后重试"})
 			return
+		}
+		if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
+			appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "warn", "用户已放弃未完成的全量任务")
 		}
 	}
 	c.JSON(200, gin.H{"message": "任务已放弃"})

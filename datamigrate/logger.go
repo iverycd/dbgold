@@ -18,12 +18,19 @@ const (
 
 // Logger 向 channel 写入带前缀的日志行，channel 满时丢弃（非阻塞）
 type Logger struct {
-	ch chan string
+	ch     chan string
+	onDrop func()
 }
 
 // NewLogger 创建一个使用给定 channel 的 Logger
 func NewLogger(ch chan string) *Logger {
 	return &Logger{ch: ch}
+}
+
+// newCountingLogger 创建一个保持非阻塞行为、并在丢弃日志时回调的 Logger。
+// NewLogger 的既有调用不受影响；迁移任务通过该构造器把计数记录到 Job。
+func newCountingLogger(ch chan string, onDrop func()) *Logger {
+	return &Logger{ch: ch, onDrop: onDrop}
 }
 
 func (l *Logger) Info(msg string)  { l.send(PrefixInfo + "  " + msg) }
@@ -47,5 +54,8 @@ func (l *Logger) send(msg string) {
 	select {
 	case l.ch <- ts + " " + msg:
 	default:
+		if l.onDrop != nil {
+			l.onDrop()
+		}
 	}
 }

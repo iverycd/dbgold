@@ -63,6 +63,7 @@ type IncrementalMigrationJob struct {
 	DeleteCount     int64      `json:"delete_count"`
 	SkippedCount    int64      `json:"skipped_count"`
 	WarningCount    int64      `json:"warning_count"`
+	LogDroppedCount int64      `gorm:"column:log_dropped_count;not null;default:0" json:"log_dropped_count"`
 	LastEventAt     *time.Time `json:"last_event_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
@@ -111,12 +112,40 @@ func UpdateIncrementalJobIfStatus(jobID string, statuses []string, fields map[st
 
 // PauseInterruptedIncrementalJobs enforces manual resume after process restart.
 func PauseInterruptedIncrementalJobs() error {
-	return DB.Model(&IncrementalMigrationJob{}).
-		Where("status IN ?", []string{"initializing", "snapshot", "catching_up", "running", "reconnecting", "pausing", "cutting_over", "validating"}).
+	interruptedStatuses := []string{"initializing", "snapshot", "catching_up", "running", "reconnecting", "pausing", "cutting_over", "validating"}
+	var interruptedSnapshots []IncrementalMigrationJob
+	if err := DB.Select("job_id").
+		Where("status IN ? AND start_mode = ? AND bootstrap_completed = ?", interruptedStatuses, "full_then_cdc", false).
+		Find(&interruptedSnapshots).Error; err != nil {
+		return err
+	}
+	if err := DB.Model(&IncrementalMigrationJob{}).
+		Where("status IN ?", interruptedStatuses).
 		Updates(map[string]any{
 			"status": "paused_restart", "phase": "paused",
 			"summary": "服务已重启，请手工恢复任务",
-		}).Error
+		}).Error; err != nil {
+		return err
+	}
+	if len(interruptedSnapshots) == 0 {
+		return nil
+	}
+	now := time.Now()
+	logs := make([]IncrementalMigrationLog, 0, len(interruptedSnapshots))
+	for _, job := range interruptedSnapshots {
+		logs = append(logs, IncrementalMigrationLog{
+			JobID: job.JobID, Phase: "snapshot_init", Level: "warn",
+			Line:      now.Format("15:04:05.000") + " [WARN] 全量快照被服务重启中断，请检查目标 checkpoint 后手工恢复",
+			CreatedAt: now,
+		})
+	}
+	if err := AppendIncrementalMigrationLogs(logs); err != nil {
+		// Restart safety is authoritative; observability remains best-effort.
+		for _, job := range interruptedSnapshots {
+			_ = AddIncrementalLogDroppedCount(job.JobID, 1)
+		}
+	}
+	return nil
 }
 
 func IsNotFound(err error) bool { return err == gorm.ErrRecordNotFound }

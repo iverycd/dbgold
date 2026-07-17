@@ -10,6 +10,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"time"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 	defer cleanup()
 
 	store.Init(cfg)
+	cleanupExpiredIncrementalLogs()
+	go runIncrementalLogCleanup()
 	if err := store.PauseInterruptedIncrementalJobs(); err != nil {
 		slog.Error("failed to pause interrupted incremental jobs", "err", err)
 	}
@@ -49,5 +52,20 @@ func main() {
 	if err := r.Run(":" + cfg.Port); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
+	}
+}
+
+func cleanupExpiredIncrementalLogs() {
+	const retention = 30 * 24 * time.Hour
+	if _, err := store.CleanupExpiredIncrementalMigrationLogs(time.Now().Add(-retention)); err != nil {
+		slog.Error("failed to clean expired incremental migration logs", "err", err)
+	}
+}
+
+func runIncrementalLogCleanup() {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		cleanupExpiredIncrementalLogs()
 	}
 }

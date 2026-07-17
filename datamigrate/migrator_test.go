@@ -131,6 +131,7 @@ func TestMigratorRun_AllTables(t *testing.T) {
 	assert.Equal(t, 1, report.Data.Success)
 	assert.Equal(t, 0, report.Data.Failed)
 	assert.Equal(t, 3, report.Triggers.Total)
+	assert.Contains(t, strings.Join(logs, "\n"), "行数校验 [users]")
 
 	hasDone := false
 	for _, l := range logs {
@@ -139,6 +140,25 @@ func TestMigratorRun_AllTables(t *testing.T) {
 		}
 	}
 	assert.True(t, hasDone, "should emit [DONE] log")
+}
+
+func TestMigratorRun_EmptyTableEmitsProgress(t *testing.T) {
+	reader := &mockReader{
+		tables: []string{"empty_table"},
+		ddl: map[string]*source.TableDDLInfo{
+			"empty_table": {TableName: "empty_table", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}},
+		},
+		pk:   map[string][]string{"empty_table": {"id"}},
+		rows: map[string][][]interface{}{},
+	}
+	writer := &mockWriter{}
+	m, job := newTestMigrator(reader, writer)
+
+	report := m.Run(context.Background())
+	logs := drainLogs(job)
+
+	assert.Equal(t, 1, report.Data.Success)
+	assert.Contains(t, strings.Join(logs, "\n"), "迁移 empty_table: 空表 ... OK")
 }
 
 func TestMigratorRun_TableCreationFailed(t *testing.T) {
