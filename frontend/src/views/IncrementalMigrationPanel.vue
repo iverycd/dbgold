@@ -6,7 +6,7 @@
 
     <a-row :gutter="20">
       <a-col :span="12">
-        <a-form-item label="MySQL 源连接">
+        <a-form-item label="源连接">
           <a-select v-model="form.src_conn_id" allow-search @change="loadDatabases">
             <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id">
               {{ c.name }} · {{ c.host }}:{{ c.port }}
@@ -20,7 +20,7 @@
         </a-form-item>
       </a-col>
       <a-col :span="12">
-        <a-form-item label="PostgreSQL 目标连接">
+        <a-form-item label="目标连接">
           <a-select v-model="form.dst_conn_id" allow-search @change="loadSchemas">
             <a-option v-for="c in postgresConnections" :key="c.id" :value="c.id">
               {{ c.name }} · {{ c.host }}:{{ c.port }}
