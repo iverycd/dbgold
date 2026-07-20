@@ -36,14 +36,6 @@
           <template #icon><icon-file /></template>
           工单管理
         </a-menu-item>
-        <a-menu-item key="/schema">
-          <template #icon><icon-storage /></template>
-          Schema 提取
-        </a-menu-item>
-        <a-menu-item key="/diff">
-          <template #icon><icon-swap /></template>
-          Schema 对比
-        </a-menu-item>
         <a-menu-item v-if="auth.user?.role === 'admin'" key="/login-history">
           <template #icon><icon-user /></template>
           登录历史
@@ -133,8 +125,6 @@ const buildTimeLocal = computed(() => {
 
 const PAGE_TITLES: Record<string, string> = {
   '/connections': '连接管理',
-  '/schema': 'Schema 提取',
-  '/diff': 'Schema 对比',
   '/migration': '迁移生成',
   '/batch-migration': '批量迁移',
   '/history': '迁移历史',

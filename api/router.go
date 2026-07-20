@@ -53,18 +53,7 @@ func NewRouter() *gin.Engine {
 		authed.GET("/connections/:id/views", handler.ListConnectionViews)
 		authed.GET("/connections/:id/tables", handler.ListConnectionTables)
 
-		authed.POST("/schema/extract", handler.ExtractSchema)
-		authed.POST("/schema/extract-full", handler.ExtractFullSchema)
-		authed.POST("/schema/parse", handler.ParseDDLFile)
-		authed.GET("/schema/export", handler.ExportDDL)
 		authed.GET("/schema/export-routines", handler.ExportRoutines)
-		authed.POST("/diff", handler.DiffSchemas)
-
-		authed.POST("/migration/diff", handler.RunDiffMigration)
-		authed.POST("/migration/full", handler.RunFullMigration)
-		authed.POST("/migration/selective", handler.RunSelectiveMigration)
-		authed.GET("/migration", handler.ListMigrations)
-		authed.GET("/migration/:id", handler.GetMigration)
 
 		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
 		authed.POST("/migration/data-migrate", handler.StartDataMigration)

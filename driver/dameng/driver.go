@@ -2,8 +2,6 @@ package dameng
 
 import (
 	"database/sql"
-	"dbgold/diff"
-	"dbgold/schema"
 	"fmt"
 
 	_ "gitee.com/chunanyong/dm"
@@ -36,24 +34,4 @@ func (d *Driver) Close() error {
 		return d.db.Close()
 	}
 	return nil
-}
-
-func (d *Driver) ExtractSchema(dbName string) (*schema.Schema, error) {
-	return nil, fmt.Errorf("达梦暂不支持 schema diff")
-}
-
-func (d *Driver) ExtractFullObjects(dbName string) (*schema.FullSchema, error) {
-	return nil, fmt.Errorf("达梦暂不支持 schema diff")
-}
-
-func (d *Driver) GenerateDiffSQL(r *diff.Result, lowerCase bool) ([]string, error) {
-	return nil, fmt.Errorf("达梦暂不支持 schema diff")
-}
-
-func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema, lowerCase bool) ([]string, error) {
-	return nil, fmt.Errorf("达梦暂不支持 schema diff")
-}
-
-func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects, lowerCase bool) ([]string, error) {
-	return nil, fmt.Errorf("达梦暂不支持 schema diff")
 }

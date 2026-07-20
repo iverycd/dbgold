@@ -177,30 +177,6 @@ func TestHasOpenIncrementalTarget(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func TestCreateAndListMigrations(t *testing.T) {
-	setupTestDB(t)
-	m := &MigrationHistory{
-		Type:          "diff",
-		SrcConnID:     1,
-		SrcDatabase:   "db_src",
-		DstConnID:     2,
-		DstDatabase:   "db_dst",
-		SQLStatements: `["ALTER TABLE users ADD COLUMN email VARCHAR(255)"]`,
-		Status:        "success",
-	}
-	require.NoError(t, CreateMigration(m))
-	assert.NotZero(t, m.ID)
-
-	list, err := ListMigrations(0, true)
-	require.NoError(t, err)
-	assert.Len(t, list, 1)
-	assert.Equal(t, "diff", list[0].Type)
-
-	got, err := GetMigration(m.ID)
-	require.NoError(t, err)
-	assert.Equal(t, m.ID, got.ID)
-}
-
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

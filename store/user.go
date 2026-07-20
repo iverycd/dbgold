@@ -59,7 +59,7 @@ func EnsureAdminExists(username, plainPassword string) error {
 	return err
 }
 
-// BackfillOwner 把存量无归属（owner_id = 0）的连接、迁移任务、迁移历史归到指定 admin 用户名下。
+// BackfillOwner 把存量无归属（owner_id = 0）的连接和迁移任务归到指定 admin 用户名下。
 // 用 owner_id = 0 作为「未归属」判据，admin 用户 ID 不会是 0，重复执行安全（幂等）。
 func BackfillOwner(adminUsername string) error {
 	admin, err := GetUserByUsername(adminUsername)
@@ -67,9 +67,6 @@ func BackfillOwner(adminUsername string) error {
 		return err
 	}
 	if err := DB.Model(&Connection{}).Where("owner_id = ?", 0).Update("owner_id", admin.ID).Error; err != nil {
-		return err
-	}
-	if err := DB.Model(&MigrationHistory{}).Where("owner_id = ?", 0).Update("owner_id", admin.ID).Error; err != nil {
 		return err
 	}
 	if err := DB.Model(&DataMigrationJob{}).Where("owner_id = ?", 0).Update("owner_id", admin.ID).Error; err != nil {

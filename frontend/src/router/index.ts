@@ -2,8 +2,6 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import LoginView from '@/views/LoginView.vue'
 import ConnectionsView from '@/views/ConnectionsView.vue'
-import SchemaView from '@/views/SchemaView.vue'
-import DiffView from '@/views/DiffView.vue'
 import MigrationView from '@/views/MigrationView.vue'
 import BatchMigrationView from '@/views/BatchMigrationView.vue'
 import HistoryView from '@/views/HistoryView.vue'
@@ -19,8 +17,6 @@ const router = createRouter({
     { path: '/ticket', component: TicketSubmitView, meta: { public: true } },
     { path: '/', redirect: '/connections' },
     { path: '/connections', component: ConnectionsView },
-    { path: '/schema', component: SchemaView },
-    { path: '/diff', component: DiffView },
     { path: '/migration', component: MigrationView },
     { path: '/batch-migration', component: BatchMigrationView },
     { path: '/history', component: HistoryView },

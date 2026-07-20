@@ -2,9 +2,6 @@ package sqlserver
 
 import (
 	"database/sql"
-	"dbgold/diff"
-	"dbgold/migrate"
-	"dbgold/schema"
 	"fmt"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -37,16 +34,4 @@ func (d *Driver) Close() error {
 		return d.db.Close()
 	}
 	return nil
-}
-
-func (d *Driver) GenerateDiffSQL(r *diff.Result, lowerCase bool) ([]string, error) {
-	return migrate.SQLServerGenerateDiffSQL(r, lowerCase)
-}
-
-func (d *Driver) GenerateFullMigrationSQL(src, dst *schema.FullSchema, lowerCase bool) ([]string, error) {
-	return migrate.SQLServerGenerateFullMigrationSQL(src, dst, lowerCase)
-}
-
-func (d *Driver) GenerateSelectiveSQL(objects *schema.SelectedObjects, lowerCase bool) ([]string, error) {
-	return migrate.SQLServerGenerateSelectiveSQL(objects, lowerCase)
 }
