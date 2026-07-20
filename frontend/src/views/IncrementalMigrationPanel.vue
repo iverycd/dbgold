@@ -1,7 +1,7 @@
 <template>
   <a-form :model="form" layout="vertical" class="incremental-panel">
     <a-alert type="warning" style="margin-bottom: 16px">
-      “全量快照后持续同步”只在任务首次初始化时删除并重建所选目标表；全量完成后会立即把 checkpoint 写入目标 PostgreSQL，恢复任务只会从 checkpoint 继续，不会再次删表。全量未完成的中断任务禁止直接恢复。
+      “全量快照后持续同步”只在任务首次初始化时删除并重建所选目标表；全量完成后会立即把 checkpoint 写入目标库，恢复任务只会从 checkpoint 继续，不会再次删表。全量未完成的中断任务禁止直接恢复。
     </a-alert>
 
     <a-row :gutter="20">
@@ -22,7 +22,7 @@
       <a-col :span="12">
         <a-form-item label="目标连接">
           <a-select v-model="form.dst_conn_id" allow-search @change="loadSchemas">
-            <a-option v-for="c in postgresConnections" :key="c.id" :value="c.id">
+            <a-option v-for="c in targetConnections" :key="c.id" :value="c.id">
               {{ c.name }} · {{ c.host }}:{{ c.port }}
             </a-option>
           </a-select>
@@ -164,7 +164,7 @@
         已锁定最终位点。必须继续保持整个源 MySQL 实例停写，且目标库不能有业务写入；系统会追到边界并执行序列校正和逐表行数校验。
       </a-alert>
       <a-alert v-if="currentJob.status === 'ready_to_cutover'" type="success" style="margin-top: 10px">
-        已到达最终边界且校验通过。保持源库停写，点击“完成切换”后再把业务流量切向 PostgreSQL。
+        已到达最终边界且校验通过。保持源库停写，点击“完成切换”后再把业务流量切向目标库。
       </a-alert>
       <a-alert v-if="currentJob.status === 'ready_with_warnings'" type="warning" style="margin-top: 10px">
         行数一致，但存在被排除表或其他同步警告。请检查影响后明确确认风险。
@@ -306,7 +306,8 @@ const form = reactive<IncrementalRequest>({
 })
 
 const mysqlConnections = computed(() => connections.value.filter(c => c.db_type === 'mysql'))
-const postgresConnections = computed(() => connections.value.filter(c => c.db_type === 'postgres'))
+const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'kingbase', 'seabox'])
+const targetConnections = computed(() => connections.value.filter(c => incrementalTargetTypes.has(c.db_type)))
 const ready = computed(() => !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
 const canPause = computed(() => ['catching_up', 'running', 'reconnecting'].includes(currentJob.value?.status || ''))
 const unsafeBootstrapResume = computed(() => !!currentJob.value && currentJob.value.start_mode === 'full_then_cdc' && !currentJob.value.bootstrap_completed && ['paused_restart', 'failed'].includes(currentJob.value.status))

@@ -139,7 +139,7 @@ func TestCDCIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tables, err = ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+	tables, err = ResolveLocatorStrategies(ctx, cfg, tables)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestFullRowConflictPauseAndReplayIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tables, err = ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+	tables, err = ResolveLocatorStrategies(ctx, cfg, tables)
 	if err != nil {
 		t.Fatal(err)
 	}

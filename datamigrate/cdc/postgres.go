@@ -38,7 +38,15 @@ type PostgresApplier struct {
 }
 
 func NewPostgresApplier(ctx context.Context, dsn, schema, jobID string, lower bool) (*PostgresApplier, error) {
-	db, err := sql.Open("postgres", dsn)
+	return newPostgresApplier(ctx, Config{TargetDSN: dsn, TargetSchema: schema, JobID: jobID, LowerCaseNames: lower})
+}
+
+func newTargetApplier(ctx context.Context, cfg Config) (*PostgresApplier, error) {
+	return newPostgresApplier(ctx, cfg)
+}
+
+func newPostgresApplier(ctx context.Context, cfg Config) (*PostgresApplier, error) {
+	db, err := openTargetDB(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +54,7 @@ func NewPostgresApplier(ctx context.Context, dsn, schema, jobID string, lower bo
 		db.Close()
 		return nil, err
 	}
-	a := &PostgresApplier{db: db, schema: schema, jobID: jobID, lower: lower, conv: valueconv.NewPostgres()}
+	a := &PostgresApplier{db: db, schema: cfg.TargetSchema, jobID: cfg.JobID, lower: cfg.LowerCaseNames, conv: valueconv.NewPostgres()}
 	if err = a.ensureCheckpoint(ctx); err != nil {
 		db.Close()
 		return nil, err

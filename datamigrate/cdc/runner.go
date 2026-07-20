@@ -41,7 +41,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	byName := tableMap(tables)
-	applier, err := NewPostgresApplier(ctx, r.cfg.TargetDSN, r.cfg.TargetSchema, r.cfg.JobID, r.cfg.LowerCaseNames)
+	applier, err := newTargetApplier(ctx, r.cfg)
 	if err != nil {
 		return err
 	}
@@ -411,7 +411,7 @@ func addStats(a, b Stats) Stats {
 }
 
 func AcknowledgeDDL(ctx context.Context, cfg Config, p Position) error {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -420,7 +420,7 @@ func AcknowledgeDDL(ctx context.Context, cfg Config, p Position) error {
 }
 
 func SaveTargetCheckpoint(ctx context.Context, cfg Config, p Position) error {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -429,7 +429,7 @@ func SaveTargetCheckpoint(ctx context.Context, cfg Config, p Position) error {
 }
 
 func LoadTargetCheckpoint(ctx context.Context, cfg Config) (Position, bool, error) {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return Position{}, false, e
 	}
@@ -438,7 +438,7 @@ func LoadTargetCheckpoint(ctx context.Context, cfg Config) (Position, bool, erro
 }
 
 func SaveTargetBootstrapRecord(ctx context.Context, cfg Config, record BootstrapRecord) error {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -447,7 +447,7 @@ func SaveTargetBootstrapRecord(ctx context.Context, cfg Config, record Bootstrap
 }
 
 func LoadTargetBootstrapRecord(ctx context.Context, cfg Config) (BootstrapRecord, bool, error) {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return BootstrapRecord{}, false, e
 	}
@@ -456,7 +456,7 @@ func LoadTargetBootstrapRecord(ctx context.Context, cfg Config) (BootstrapRecord
 }
 
 func FinalizeTargetBootstrap(ctx context.Context, cfg Config, record BootstrapRecord) error {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -465,7 +465,7 @@ func FinalizeTargetBootstrap(ctx context.Context, cfg Config, record BootstrapRe
 }
 
 func AbortTargetBootstrap(ctx context.Context, cfg Config) error {
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -483,7 +483,7 @@ func SyncSequences(ctx context.Context, cfg Config) error {
 	if e != nil {
 		return e
 	}
-	a, e := NewPostgresApplier(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.JobID, cfg.LowerCaseNames)
+	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
 	}

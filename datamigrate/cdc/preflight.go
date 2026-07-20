@@ -126,13 +126,13 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 	}
-	dst, e := sql.Open("postgres", cfg.TargetDSN)
+	dst, e := openTargetDB(cfg)
 	if e != nil {
-		r.Errors = append(r.Errors, "连接 PostgreSQL 失败: "+e.Error())
+		r.Errors = append(r.Errors, "连接目标库失败: "+e.Error())
 	} else {
 		defer dst.Close()
 		if e = dst.PingContext(ctx); e != nil {
-			r.Errors = append(r.Errors, "连接 PostgreSQL 失败: "+e.Error())
+			r.Errors = append(r.Errors, "连接目标库失败: "+e.Error())
 		} else {
 			var schemaExists bool
 			if e = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, cfg.TargetSchema).Scan(&schemaExists); e != nil || !schemaExists {
@@ -214,7 +214,7 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 		if len(tables) > 0 && e == nil {
-			resolved, resolveErr := ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tables)
+			resolved, resolveErr := ResolveLocatorStrategies(ctx, cfg, tables)
 			if resolveErr != nil {
 				r.Errors = append(r.Errors, "解析 CDC 行定位策略失败: "+resolveErr.Error())
 			} else {

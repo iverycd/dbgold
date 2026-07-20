@@ -9,7 +9,6 @@ import (
 
 	"dbgold/datamigrate"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/lib/pq"
 )
 
 func OpenSource(dsn string) (*sql.DB, error) {
@@ -230,8 +229,8 @@ func ApplyLocatorStrategies(tables []TableInfo, strategies []LocatorStrategy) er
 // ResolveLocatorStrategies chooses a stable locator for every table. PostgreSQL
 // unique indexes (including indexes not backed by information_schema
 // constraints) are considered, because the full migrator creates both forms.
-func ResolveLocatorStrategies(ctx context.Context, targetDSN, schema string, lower bool, tables []TableInfo) ([]TableInfo, error) {
-	db, err := sql.Open("postgres", targetDSN)
+func ResolveLocatorStrategies(ctx context.Context, cfg Config, tables []TableInfo) ([]TableInfo, error) {
+	db, err := openTargetDB(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -249,14 +248,14 @@ func ResolveLocatorStrategies(ctx context.Context, targetDSN, schema string, low
 			continue
 		}
 		targetName := table.Name
-		if lower {
+		if cfg.LowerCaseNames {
 			targetName = strings.ToLower(targetName)
 		}
-		uniqueSets, queryErr := loadPostgresUniqueColumnSets(ctx, db, schema, targetName)
+		uniqueSets, queryErr := loadPostgresUniqueColumnSets(ctx, db, cfg.TargetSchema, targetName)
 		if queryErr != nil {
 			return nil, fmt.Errorf("读取目标表唯一索引失败 %s: %w", targetName, queryErr)
 		}
-		selectUniqueLocator(table, uniqueSets, lower)
+		selectUniqueLocator(table, uniqueSets, cfg.LowerCaseNames)
 		if table.LocatorStrategy == "" {
 			table.LocatorStrategy = LocatorFullRow
 			table.LocatorColumns = append([]string(nil), table.Columns...)
@@ -304,28 +303,35 @@ func columnNamesAt(table *TableInfo, indexes []int) []string {
 	return columns
 }
 
-func loadPostgresUniqueColumnSets(ctx context.Context, db *sql.DB, schema, table string) ([][]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT array_agg(a.attname ORDER BY key_column.ordinality)
+const loadPostgresUniqueColumnSetsSQL = `SELECT i.indexrelid, a.attname
 		FROM pg_index i
 		JOIN pg_class target_table ON target_table.oid=i.indrelid
 		JOIN pg_namespace target_schema ON target_schema.oid=target_table.relnamespace
-		CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key_column(attnum, ordinality)
-		JOIN pg_attribute a ON a.attrelid=target_table.oid AND a.attnum=key_column.attnum
+		JOIN pg_attribute a ON a.attrelid=target_table.oid AND a.attnum=ANY(i.indkey)
 		WHERE target_schema.nspname=$1 AND target_table.relname=$2
 		AND i.indisunique AND i.indisvalid AND i.indimmediate AND i.indpred IS NULL AND i.indexprs IS NULL
-		AND key_column.ordinality <= i.indnkeyatts
-		GROUP BY i.indexrelid`, schema, table)
+		AND a.attnum > 0
+		ORDER BY i.indexrelid, a.attnum`
+
+func loadPostgresUniqueColumnSets(ctx context.Context, db *sql.DB, schema, table string) ([][]string, error) {
+	rows, err := db.QueryContext(ctx, loadPostgresUniqueColumnSetsSQL, schema, table)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result [][]string
+	var currentOID int64 = -1
 	for rows.Next() {
-		var columns []string
-		if err := rows.Scan(pq.Array(&columns)); err != nil {
+		var indexOID int64
+		var column string
+		if err := rows.Scan(&indexOID, &column); err != nil {
 			return nil, err
 		}
-		result = append(result, columns)
+		if indexOID != currentOID {
+			result = append(result, nil)
+			currentOID = indexOID
+		}
+		result[len(result)-1] = append(result[len(result)-1], column)
 	}
 	return result, rows.Err()
 }

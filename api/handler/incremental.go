@@ -42,11 +42,23 @@ type incrementalRequest struct {
 
 var incrementalStartMu sync.Mutex
 
+var incrementalTargetTypes = map[string]bool{
+	"postgres": true,
+	"gaussdb":  true,
+	"highgo":   true,
+	"kingbase": true,
+	"seabox":   true,
+}
+
+func isSupportedIncrementalTarget(dbType string) bool {
+	return incrementalTargetTypes[dbType]
+}
+
 func incrementalConfig(req incrementalRequest, jobID string, src, dst *store.Connection) cdc.Config {
 	srcCopy := *src
 	srcCopy.Database = req.SrcDatabase
 	return cdc.Config{JobID: jobID, SourceDSN: buildDSN(&srcCopy), SourceHost: src.Host, SourcePort: uint16(src.Port), SourceUser: src.Username,
-		SourcePassword: src.Password, SourceDatabase: req.SrcDatabase, TargetDSN: buildDSN(dst), TargetSchema: req.TargetSchema,
+		SourcePassword: src.Password, SourceDatabase: req.SrcDatabase, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: req.TargetSchema,
 		Mode: req.MigrateMode, Filter: req.TableFilter, LowerCaseNames: req.LowerCaseNames, ServerID: req.ServerID,
 		Start: cdc.Position{File: req.StartFile, Pos: req.StartPosition, GTID: req.StartGTID}, KeylessChangePolicy: "full_row_match"}
 }
@@ -58,8 +70,8 @@ func validateIncrementalConnections(c *gin.Context, req incrementalRequest) (*st
 		return nil, nil, false
 	}
 	dst, e := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
-	if e != nil || dst.DBType != "postgres" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL 连接"})
+	if e != nil || !isSupportedIncrementalTarget(dst.DBType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL、GaussDB、HighGo、Kingbase 或 SeaBox 连接"})
 		return nil, nil, false
 	}
 	if req.StartMode == "incremental_only" {
@@ -324,14 +336,14 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return fmt.Errorf("读取全量快照表列表失败: %w", e)
 	}
 	expectedTables := datamigrate.FilterTables(allTables, j.MigrateMode, j.TableFilter)
-	w, e := target.NewPostgres(buildDSN(dst), j.TargetSchema, target.ConnPoolConfig{})
+	w, e := buildDstWriter(dst, j.TargetSchema, target.ConnPoolConfig{})
 	if e != nil {
 		return e
 	}
 	defer w.Close()
 	logJob := &datamigrate.Job{LogCh: make(chan string, 4096)}
 	journalDone := startIncrementalLogJournal(j.JobID, logJob)
-	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: "postgres"})
+	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: dst.DBType})
 	report := m.Run(ctx)
 	close(logJob.LogCh)
 	<-journalDone
@@ -385,7 +397,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	}
 	logPhase = "bootstrap_review"
 	review := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, compatibility)
-	resolvedTables, e := cdc.ResolveLocatorStrategies(ctx, cfg.TargetDSN, cfg.TargetSchema, cfg.LowerCaseNames, tableInfos)
+	resolvedTables, e := cdc.ResolveLocatorStrategies(ctx, cfg, tableInfos)
 	if e != nil {
 		return fmt.Errorf("解析 CDC 行定位策略失败: %w", e)
 	}
@@ -676,7 +688,7 @@ func GetIncrementalBootstrapReview(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "目标连接已删除"})
 		return
 	}
-	reviewCfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
+	reviewCfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
 	record, exists, e := cdc.LoadTargetBootstrapRecord(c.Request.Context(), reviewCfg)
 	if e != nil {
 		c.JSON(500, gin.H{"error": "读取目标 bootstrap checkpoint 失败: " + e.Error()})
@@ -762,7 +774,7 @@ func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
 		}
 		record.State = "completed"
 	} else if e = cdc.ValidatePositionAvailable(c.Request.Context(), cfg, record.Position); e != nil {
-		// Covers the crash window after PostgreSQL committed the manifest but
+		// Covers the crash window after the target committed the manifest but
 		// before SQLite moved the task out of bootstrap review.
 		c.JSON(409, gin.H{"error": "原始快照位点已不可继续: " + e.Error()})
 		return

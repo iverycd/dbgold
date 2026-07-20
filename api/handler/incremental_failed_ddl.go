@@ -69,7 +69,7 @@ func loadIncrementalFailureReview(ctx context.Context, j *store.IncrementalMigra
 	// preferred source for its original snapshot position and warning details.
 	if !loaded || review.FailureReportVersion == 0 {
 		if dst, err := store.GetConnection(j.DstConnID); err == nil {
-			cfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
+			cfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
 			if record, exists, err := cdc.LoadTargetBootstrapRecord(ctx, cfg); err == nil && exists {
 				if !loaded {
 					review.BootstrapRecord = record

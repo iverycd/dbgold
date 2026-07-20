@@ -619,9 +619,11 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 		return target.NewHighGo(dstDSN, targetSchema, pool)
 	case "kingbase":
 		return target.NewKingbase(dstDSN, targetSchema, pool)
+	case "seabox":
+		return target.NewPostgresCompatible(dstDSN, targetSchema, "seabox", pool)
 	case "mysql":
 		return target.NewMySQL(dstDSN, targetSchema, pool)
-	default: // postgres, seabox
+	default: // postgres
 		return target.NewPostgres(dstDSN, targetSchema, pool)
 	}
 }

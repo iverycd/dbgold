@@ -2,7 +2,6 @@ package cdc
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -17,7 +16,7 @@ func ValidateCounts(ctx context.Context, cfg Config) ([]CountValidation, bool, e
 		return nil, false, err
 	}
 	defer src.Close()
-	dst, err := sql.Open("postgres", cfg.TargetDSN)
+	dst, err := openTargetDB(cfg)
 	if err != nil {
 		return nil, false, err
 	}

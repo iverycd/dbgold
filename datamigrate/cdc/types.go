@@ -67,6 +67,7 @@ type Config struct {
 	SourcePassword         string
 	SourceDatabase         string
 	TargetDSN              string
+	TargetDBType           string
 	TargetSchema           string
 	Mode                   string
 	Filter                 string

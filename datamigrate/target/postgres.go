@@ -43,6 +43,7 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 type PostgresWriter struct {
 	db        *sql.DB
 	schema    string
+	dbType    string
 	srcType   string                   // 源库类型，用于 ValueConverter 落地中立值
 	valueConv valueconv.ValueConverter // 把 Reader 中立值落地为 PG 形态
 	dia       dialect.Dialect          // SQL 生成方言
@@ -58,6 +59,12 @@ func (w *PostgresWriter) Dialect() dialect.Dialect { return w.dia }
 // dsn 格式：host=... port=... user=... password=... dbname=... sslmode=disable
 // schema 为空时使用连接默认 search_path
 func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresWriter, error) {
+	return NewPostgresCompatible(dsn, schema, "postgres", pool)
+}
+
+// NewPostgresCompatible creates a Writer for a lib/pq-compatible target while
+// preserving its dialect name for type mappings and generated DDL.
+func NewPostgresCompatible(dsn, schema, dbType string, pool ConnPoolConfig) (*PostgresWriter, error) {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
@@ -66,7 +73,7 @@ func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresWriter, erro
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	return &PostgresWriter{db: db, schema: schema, valueConv: valueconv.NewPostgres(), dia: dialect.NewPostgres("postgres")}, nil
+	return &PostgresWriter{db: db, schema: schema, dbType: dbType, valueConv: valueconv.NewPostgres(), dia: dialect.NewPostgres(dbType)}, nil
 }
 
 // qualifiedTable 返回带 schema 前缀的表名，schema 为空时直接返回表名
@@ -78,7 +85,7 @@ func (w *PostgresWriter) qualifiedTable(table string) string {
 }
 
 func (w *PostgresWriter) Close() error   { return w.db.Close() }
-func (w *PostgresWriter) DBType() string { return "postgres" }
+func (w *PostgresWriter) DBType() string { return w.dbType }
 
 func (w *PostgresWriter) CreateTable(ctx context.Context, ddl string) error {
 	_, err := w.db.ExecContext(ctx, ddl)

@@ -45,6 +45,21 @@ func TestConfigFromIncrementalUsesFrozenEffectiveTables(t *testing.T) {
 	require.Empty(t, cfg.TableNames, "a corrupt frozen manifest must fail closed")
 }
 
+func TestIncrementalTargetTypesAndConfig(t *testing.T) {
+	supported := []string{"postgres", "gaussdb", "highgo", "kingbase", "seabox"}
+	for _, dbType := range supported {
+		t.Run(dbType, func(t *testing.T) {
+			require.True(t, isSupportedIncrementalTarget(dbType))
+			src := &store.Connection{DBType: "mysql", Host: "127.0.0.1", Port: 3306, Username: "root"}
+			dst := &store.Connection{DBType: dbType, Host: "127.0.0.1", Port: 5432, Username: "target", Database: "target"}
+			cfg := incrementalConfig(incrementalRequest{SrcDatabase: "source", TargetSchema: "public"}, "job-1", src, dst)
+			require.Equal(t, dbType, cfg.TargetDBType)
+		})
+	}
+	require.False(t, isSupportedIncrementalTarget("mysql"))
+	require.False(t, isSupportedIncrementalTarget("dameng"))
+}
+
 func TestStrictBootstrapFailure(t *testing.T) {
 	success := datamigrate.MigrationReport{
 		Tables:    datamigrate.CategoryReport{Total: 1, Success: 1},

@@ -198,7 +198,7 @@ func HashBootstrapManifest(record BootstrapRecord) string {
 }
 
 func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []TableInfo) (map[string]string, error) {
-	db, err := sql.Open("postgres", cfg.TargetDSN)
+	db, err := openTargetDB(cfg)
 	if err != nil {
 		return nil, err
 	}
