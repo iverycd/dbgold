@@ -7,11 +7,31 @@
     <a-row :gutter="20">
       <a-col :span="12">
         <a-form-item label="源连接">
-          <a-select v-model="form.src_conn_id" allow-search @change="loadDatabases">
-            <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id">
-              {{ c.name }} · {{ c.host }}:{{ c.port }}
-            </a-option>
-          </a-select>
+          <div style="width: 100%">
+            <a-select
+              v-model="srcEnvFilter"
+              placeholder="按环境筛选"
+              allow-clear
+              style="width: 100%; margin-bottom: 10px"
+            >
+              <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+            </a-select>
+            <a-select
+              v-model="form.src_conn_id"
+              placeholder="选择源连接"
+              allow-search
+              style="width: 100%"
+              @change="loadDatabases"
+            >
+              <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id">
+                {{ c.name }} · {{ c.host }}:{{ c.port }}
+              </a-option>
+            </a-select>
+            <div v-if="selectedSrc" class="conn-meta">
+              <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
+              <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedSrc.username }}</span>
+            </div>
+          </div>
         </a-form-item>
         <a-form-item label="源数据库">
           <a-select v-model="form.src_database" allow-search>
@@ -21,11 +41,32 @@
       </a-col>
       <a-col :span="12">
         <a-form-item label="目标连接">
-          <a-select v-model="form.dst_conn_id" allow-search @change="loadSchemas">
-            <a-option v-for="c in targetConnections" :key="c.id" :value="c.id">
-              {{ c.name }} · {{ c.host }}:{{ c.port }}
-            </a-option>
-          </a-select>
+          <div style="width: 100%">
+            <a-select
+              v-model="dstEnvFilter"
+              placeholder="按环境筛选"
+              allow-clear
+              style="width: 100%; margin-bottom: 10px"
+            >
+              <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+            </a-select>
+            <a-select
+              v-model="form.dst_conn_id"
+              placeholder="选择目标连接"
+              allow-search
+              style="width: 100%"
+              @change="loadSchemas"
+            >
+              <a-option v-for="c in targetConnections" :key="c.id" :value="c.id">
+                {{ c.name }} · {{ c.host }}:{{ c.port }}
+              </a-option>
+            </a-select>
+            <div v-if="selectedDst" class="conn-meta">
+              <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
+              <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedDst.database }}</span>
+              <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
+            </div>
+          </div>
         </a-form-item>
         <a-form-item label="目标 Schema">
           <a-select v-model="form.target_schema" allow-search>
@@ -266,10 +307,16 @@ import {
 } from '@/api/migration'
 
 interface ValidationRow { table: string; source: number; target: number; match: boolean; error?: string }
+type IncrementalForm = Omit<IncrementalRequest, 'src_conn_id' | 'dst_conn_id'> & {
+  src_conn_id?: number
+  dst_conn_id?: number
+}
 
 const connections = ref<Connection[]>([])
 const databases = ref<string[]>([])
 const schemas = ref<string[]>([])
+const srcEnvFilter = ref<string | undefined>(undefined)
+const dstEnvFilter = ref<string | undefined>(undefined)
 const checking = ref(false)
 const starting = ref(false)
 const preflightResult = ref<IncrementalPreflight | null>(null)
@@ -288,9 +335,9 @@ let refreshPending = false
 let pollGeneration = 0
 let disposed = false
 
-const form = reactive<IncrementalRequest>({
-  src_conn_id: 0,
-  dst_conn_id: 0,
+const form = reactive<IncrementalForm>({
+  src_conn_id: undefined,
+  dst_conn_id: undefined,
   src_database: '',
   target_schema: '',
   start_mode: 'full_then_cdc',
@@ -305,9 +352,19 @@ const form = reactive<IncrementalRequest>({
   keyless_change_policy: 'full_row_match',
 })
 
-const mysqlConnections = computed(() => connections.value.filter(c => c.db_type === 'mysql'))
+const envHistory = computed(() => {
+  const set = new Set(connections.value.map(c => c.env).filter((env): env is string => !!env))
+  return Array.from(set)
+})
+const mysqlConnections = computed(() => connections.value.filter(c =>
+  c.db_type === 'mysql' && (!srcEnvFilter.value || c.env === srcEnvFilter.value)
+))
 const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'kingbase', 'seabox'])
-const targetConnections = computed(() => connections.value.filter(c => incrementalTargetTypes.has(c.db_type)))
+const targetConnections = computed(() => connections.value.filter(c =>
+  incrementalTargetTypes.has(c.db_type) && (!dstEnvFilter.value || c.env === dstEnvFilter.value)
+))
+const selectedSrc = computed(() => connections.value.find(c => c.id === form.src_conn_id))
+const selectedDst = computed(() => connections.value.find(c => c.id === form.dst_conn_id))
 const ready = computed(() => !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
 const canPause = computed(() => ['catching_up', 'running', 'reconnecting'].includes(currentJob.value?.status || ''))
 const unsafeBootstrapResume = computed(() => !!currentJob.value && currentJob.value.start_mode === 'full_then_cdc' && !currentJob.value.bootstrap_completed && ['paused_restart', 'failed'].includes(currentJob.value.status))
@@ -365,10 +422,20 @@ async function loadSchemas() {
   form.target_schema = ''
   if (form.dst_conn_id) schemas.value = (await listConnectionSchemas(form.dst_conn_id)).data || []
 }
+function buildRequest(): IncrementalRequest | null {
+  if (!form.src_conn_id || !form.dst_conn_id) return null
+  return {
+    ...form,
+    src_conn_id: form.src_conn_id,
+    dst_conn_id: form.dst_conn_id,
+  }
+}
 async function preflight() {
+  const request = buildRequest()
+  if (!request) return
   checking.value = true
   try {
-    preflightResult.value = (await preflightIncremental(form)).data
+    preflightResult.value = (await preflightIncremental(request)).data
     if (preflightResult.value.ok) Message.success('预检通过')
     else Message.error('预检未通过')
   } catch (e: any) {
@@ -379,9 +446,11 @@ async function preflight() {
   }
 }
 async function start() {
+  const request = buildRequest()
+  if (!request) return
   starting.value = true
   try {
-    const response = await startIncremental(form)
+    const response = await startIncremental(request)
     const job = (await getIncrementalJob(response.data.job_id)).data
     pollGeneration++
     currentJob.value = job
@@ -537,6 +606,9 @@ onUnmounted(() => {
 
 <style scoped>
 .incremental-panel { margin-top: 12px; max-width: 1180px; }
+.conn-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.conn-meta-item { font-size: 12px; color: var(--color-text-3); }
+.conn-meta-label { color: var(--color-text-4); margin-right: 3px; }
 .hint { margin-top: 8px; color: var(--color-text-3); font-size: 12px; }
 .ddl { padding: 10px; background: #f2f3f5; white-space: pre-wrap; border-radius: 4px; }
 .section-title { margin-bottom: 8px; font-weight: 500; }
