@@ -821,7 +821,12 @@ func CancelDataMigration(c *gin.Context) {
 
 // ListDataMigrationJobs 返回历史任务列表（含连接快照信息）
 func ListDataMigrationJobs(c *gin.Context) {
-	jobs, err := store.ListDataMigrationJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	filter, err := parseJobListFilter(c, dataMigrationListStatuses, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	jobs, err := store.QueryDataMigrationJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

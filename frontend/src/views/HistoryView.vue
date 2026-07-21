@@ -1,251 +1,419 @@
 <template>
-  <div>
-    <a-tabs v-model:active-key="activeTab" @change="handleTabChange">
-      <!-- ===== 单次迁移任务 ===== -->
+  <div class="task-center-page">
+    <a-tabs v-model:active-key="activeTab" class="task-tabs" @change="handleTabChange">
       <a-tab-pane key="data" title="单次迁移">
-        <div style="display: flex; justify-content: flex-end; margin-bottom: 16px">
-          <a-button @click="loadDataJobs" :loading="dataJobsLoading">
-            <template #icon><icon-refresh /></template>
-            刷新
-          </a-button>
-        </div>
+        <TaskListToolbar
+          v-model:keyword="dataKeywordInput"
+          v-model:status="dataStatus"
+          v-model:origin="dataOrigin"
+          :status-options="dataStatusOptions"
+          :loading="dataJobsLoading"
+          :last-updated="dataLastUpdatedText"
+          show-origin
+          @refresh="loadDataJobs(false)"
+        />
 
         <a-table
           :data="dataJobs"
           :loading="dataJobsLoading"
+          :pagination="dataPagination"
           row-key="id"
-          :pagination="{ pageSize: 20 }"
+          size="small"
+          class="task-table"
+          @page-change="handleDataPageChange"
+          @page-size-change="handleDataPageSizeChange"
         >
           <template #columns>
-            <a-table-column title="Job ID" :width="100">
+            <a-table-column title="任务" :width="165">
               <template #cell="{ record }">
-                <a-tooltip :content="record.job_id" mini>
-                  <span style="font-family: monospace; font-size: 12px; cursor: default">
-                    {{ record.job_id.slice(0, 6) }}…
-                  </span>
-                </a-tooltip>
-              </template>
-            </a-table-column>
-            <a-table-column title="源库" :width="220">
-              <template #cell="{ record }">
-                <div class="history-conn-cell">
-                  <a-tag :color="getDbTypeColor(record.src_db_type)" size="small">{{ getDbTypeLabel(record.src_db_type) }}</a-tag>
-                  <a-tooltip v-if="record.src_conn" :content="record.src_conn.name" mini>
-                    <span class="conn-name">{{ record.src_conn.name }}</span>
+                <div class="task-identity">
+                  <a-tooltip :content="record.job_id" mini>
+                    <router-link class="job-link" :to="dataDetailPath(record.job_id)">
+                      {{ shortJobID(record.job_id) }}
+                    </router-link>
                   </a-tooltip>
-                  <span v-else class="conn-deleted">已删除</span>
-                </div>
-                <div v-if="record.src_conn" class="conn-detail">
-                  <span class="conn-label">库</span>
-                  <a-tooltip :content="record.src_conn.database" mini>
-                    <span class="conn-detail-val">{{ record.src_conn.database }}</span>
-                  </a-tooltip>
-                  <span class="conn-detail-sep">·</span>
-                  <span class="conn-label">账号</span>
-                  <span class="conn-detail-val">{{ record.src_conn.username }}</span>
+                  <div class="task-meta-row">
+                    <a-tag size="small" color="arcoblue">{{ dataTaskType(record) }}</a-tag>
+                    <a-tooltip v-if="record.batch_id" :content="`批次 ${record.batch_id}`" mini>
+                      <a-tag size="small" color="purple">批量</a-tag>
+                    </a-tooltip>
+                    <a-tag v-else size="small" color="gray">单次</a-tag>
+                  </div>
                 </div>
               </template>
             </a-table-column>
-            <a-table-column title="目标库" :width="220">
+
+            <a-table-column title="迁移链路">
               <template #cell="{ record }">
-                <div class="history-conn-cell">
-                  <a-tag :color="getDbTypeColor(record.dst_db_type)" size="small">{{ getDbTypeLabel(record.dst_db_type) }}</a-tag>
-                  <a-tooltip v-if="record.dst_conn" :content="record.dst_conn.name" mini>
-                    <span class="conn-name">{{ record.dst_conn.name }}</span>
+                <MigrationRouteCell :source="dataSource(record)" :destination="dataDestination(record)" />
+              </template>
+            </a-table-column>
+
+            <a-table-column title="状态" :width="165">
+              <template #cell="{ record }">
+                <div class="status-cell">
+                  <a-tag :color="dataJobStatusColor(record.status)">{{ dataJobStatusText(record.status) }}</a-tag>
+                  <a-tooltip v-if="record.status === 'failed' && record.summary" :content="record.summary" mini>
+                    <span class="status-summary">{{ record.summary }}</span>
                   </a-tooltip>
-                  <span v-else class="conn-deleted">已删除</span>
-                </div>
-                <div v-if="record.dst_conn" class="conn-detail">
-                  <span class="conn-label">库</span>
-                  <a-tooltip :content="record.dst_conn.database" mini>
-                    <span class="conn-detail-val">{{ record.dst_conn.database }}</span>
-                  </a-tooltip>
-                  <span class="conn-detail-sep">·</span>
-                  <span class="conn-label">账号</span>
-                  <span class="conn-detail-val">{{ record.dst_conn.username }}</span>
-                  <template v-if="record.dst_schema">
-                    <span class="conn-detail-sep">·</span>
-                    <span class="conn-label">Schema</span>
-                    <span class="conn-detail-val schema-val">{{ record.dst_schema }}</span>
-                  </template>
                 </div>
               </template>
             </a-table-column>
-            <a-table-column title="迁移模式" :width="90">
+
+            <a-table-column title="时间" :width="155">
               <template #cell="{ record }">
-                <a-tag>{{ record.migrate_mode }}</a-tag>
+                <div class="time-cell">
+                  <span>{{ formatDate(record.created_at) }}</span>
+                  <span class="time-secondary">{{ dataDurationText(record) }}</span>
+                </div>
               </template>
             </a-table-column>
-            <a-table-column title="状态" :width="100">
+
+            <a-table-column title="操作" :width="76" align="center">
               <template #cell="{ record }">
-                <a-tag :color="dataJobStatusColor(record.status)">{{ record.status }}</a-tag>
-              </template>
-            </a-table-column>
-            <a-table-column title="开始时间" :width="160">
-              <template #cell="{ record }">
-                {{ formatDate(record.created_at) }}
-              </template>
-            </a-table-column>
-            <a-table-column title="结束时间" :width="160">
-              <template #cell="{ record }">
-                <span v-if="record.finished_at">{{ formatDate(record.finished_at) }}</span>
-                <span v-else style="color: #86909c">—</span>
-              </template>
-            </a-table-column>
-            <a-table-column title="操作" :width="100">
-              <template #cell="{ record }">
-                <a-button
-                  size="small"
-                  @click="viewReport(record)"
-                >
-                  详情
-                </a-button>
+                <a-button size="mini" @click="viewReport(record)">详情</a-button>
               </template>
             </a-table-column>
           </template>
+          <template #empty>
+            <a-empty description="暂无符合条件的单次迁移任务" />
+          </template>
         </a-table>
-
       </a-tab-pane>
 
       <a-tab-pane key="incremental" title="增量迁移">
-        <IncrementalHistoryPanel />
+        <IncrementalHistoryPanel :active="activeTab === 'incremental'" />
       </a-tab-pane>
     </a-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import IncrementalHistoryPanel from './IncrementalHistoryPanel.vue'
-import { listDataMigrationJobs, type DataMigrationJob } from '@/api/migration'
-import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import MigrationRouteCell, { type MigrationRouteEndpoint } from '@/components/MigrationRouteCell.vue'
+import TaskListToolbar, { type TaskStatusOption } from '@/components/TaskListToolbar.vue'
+import { listDataMigrationJobs, type DataMigrationJob, type DataMigrationListQuery } from '@/api/migration'
 
-const dataJobs = ref<DataMigrationJob[]>([])
-const dataJobsLoading = ref(false)
+type PageSize = 20 | 50 | 100
+type DataOrigin = 'all' | 'single' | 'batch'
+
 const route = useRoute()
 const router = useRouter()
 const activeTab = ref(route.query.tab === 'incremental' ? 'incremental' : 'data')
+const dataJobs = ref<DataMigrationJob[]>([])
+const dataJobsLoading = ref(false)
+const dataTotal = ref(0)
+const dataLastUpdated = ref<Date | null>(null)
+const dataKeywordInput = ref('')
+const dataKeyword = ref('')
+const dataStatus = ref('')
+const dataOrigin = ref<DataOrigin>('all')
+const dataPage = ref(1)
+const dataPageSize = ref<PageSize>(20)
 
-watch(() => route.query.tab, (tab) => {
-  activeTab.value = tab === 'incremental' ? 'incremental' : 'data'
-})
+let keywordTimer: number | undefined
+let pollTimer: number | undefined
+let requestSerial = 0
+let disposed = false
+let dataInitialized = false
 
-function handleTabChange(key: string | number) {
-  const tab = String(key)
-  router.replace({ path: '/history', query: tab === 'incremental' ? { tab: 'incremental' } : {} })
+const dataStatusOptions: TaskStatusOption[] = [
+  { value: 'running', label: '运行中' },
+  { value: 'done', label: '成功' },
+  { value: 'failed', label: '失败' },
+  { value: 'cancelled', label: '已取消' },
+]
+
+const dataPagination = computed(() => ({
+  current: dataPage.value,
+  pageSize: dataPageSize.value,
+  total: dataTotal.value,
+  showTotal: true,
+  showPageSize: true,
+  pageSizeOptions: [20, 50, 100],
+}))
+
+const dataLastUpdatedText = computed(() => dataLastUpdated.value?.toLocaleTimeString('zh-CN', { hour12: false }) || '')
+
+function queryString(value: unknown) {
+  return typeof value === 'string' ? value : ''
 }
 
-async function loadDataJobs() {
-  dataJobsLoading.value = true
-  try {
-    const res = await listDataMigrationJobs()
-    dataJobs.value = res.data
-  } catch {
-    Message.error('加载失败')
-  } finally {
-    dataJobsLoading.value = false
+function parsePositiveInt(value: unknown, fallback: number) {
+  const parsed = Number(queryString(value))
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parsePageSize(value: unknown): PageSize {
+  const parsed = parsePositiveInt(value, 20)
+  return parsed === 50 || parsed === 100 ? parsed : 20
+}
+
+function readDataQuery() {
+  const keyword = queryString(route.query.q)
+  const status = dataStatusOptions.some(option => option.value === route.query.status) ? queryString(route.query.status) : ''
+  const origin = ['all', 'single', 'batch'].includes(queryString(route.query.origin)) ? queryString(route.query.origin) as DataOrigin : 'all'
+  dataKeywordInput.value = keyword
+  dataKeyword.value = keyword
+  dataStatus.value = status
+  dataOrigin.value = origin
+  dataPage.value = parsePositiveInt(route.query.page, 1)
+  dataPageSize.value = parsePageSize(route.query.page_size)
+}
+
+function dataQueryObject() {
+  const query: Record<string, string> = {}
+  if (dataKeyword.value) query.q = dataKeyword.value
+  if (dataStatus.value) query.status = dataStatus.value
+  if (dataOrigin.value !== 'all') query.origin = dataOrigin.value
+  if (dataPage.value !== 1) query.page = String(dataPage.value)
+  if (dataPageSize.value !== 20) query.page_size = String(dataPageSize.value)
+  return query
+}
+
+function syncDataQuery() {
+  if (activeTab.value !== 'data') return
+  const next = dataQueryObject()
+  const current = Object.fromEntries(Object.entries(route.query).filter(([, value]) => typeof value === 'string')) as Record<string, string>
+  if (JSON.stringify(next) !== JSON.stringify(current)) void router.replace({ path: '/history', query: next })
+}
+
+function scheduleDataPoll() {
+  if (pollTimer) window.clearTimeout(pollTimer)
+  pollTimer = undefined
+  if (
+    !disposed && activeTab.value === 'data' && document.visibilityState === 'visible'
+    && dataJobs.value.some(job => job.status === 'running')
+  ) {
+    pollTimer = window.setTimeout(() => void loadDataJobs(true), 5000)
   }
 }
 
+async function loadDataJobs(silent = false) {
+  if (disposed || activeTab.value !== 'data') return
+  const serial = ++requestSerial
+  if (!silent) dataJobsLoading.value = true
+  const params: DataMigrationListQuery = {
+    page: dataPage.value,
+    page_size: dataPageSize.value,
+    keyword: dataKeyword.value || undefined,
+    status: dataStatus.value || undefined,
+    origin: dataOrigin.value,
+  }
+  try {
+    const { data } = await listDataMigrationJobs(params)
+    if (disposed || serial !== requestSerial) return
+    dataJobs.value = data.items
+    dataTotal.value = data.total
+    dataLastUpdated.value = new Date()
+    if (data.items.length === 0 && data.page > 1 && data.total > 0) {
+      dataPage.value = Math.max(1, Math.ceil(data.total / data.page_size))
+      return
+    }
+  } catch {
+    if (!silent && serial === requestSerial) Message.error('加载单次迁移任务失败')
+  } finally {
+    if (serial === requestSerial) {
+      dataJobsLoading.value = false
+      scheduleDataPoll()
+    }
+  }
+}
+
+function handleTabChange(key: string | number) {
+  const tab = String(key) === 'incremental' ? 'incremental' : 'data'
+  void router.replace({ path: '/history', query: tab === 'incremental' ? { tab: 'incremental' } : {} })
+}
+
+function handleDataPageChange(page: number) {
+  dataPage.value = page
+}
+
+function handleDataPageSizeChange(size: number) {
+  dataPageSize.value = size === 50 || size === 100 ? size : 20
+  dataPage.value = 1
+}
+
+function dataDetailPath(jobID: string) {
+  return `/history/data/${encodeURIComponent(jobID)}`
+}
+
 function viewReport(record: DataMigrationJob) {
-  router.push(`/history/data/${encodeURIComponent(record.job_id)}`)
+  router.push(dataDetailPath(record.job_id))
+}
+
+function shortJobID(jobID: string) {
+  return jobID.length > 10 ? `${jobID.slice(0, 8)}…` : jobID
+}
+
+function dataTaskType(record: DataMigrationJob) {
+  return record.migrate_objects ? '对象迁移' : '数据迁移'
 }
 
 function dataJobStatusColor(status: string) {
   return { done: 'green', failed: 'red', running: 'blue', cancelled: 'gray' }[status] ?? 'gray'
 }
 
-function formatDate(dateStr: string) {
-  return new Date(dateStr).toLocaleString('zh-CN')
+function dataJobStatusText(status: string) {
+  return { done: '成功', failed: '失败', running: '运行中', cancelled: '已取消' }[status] ?? status
+}
+
+function dataSource(record: DataMigrationJob): MigrationRouteEndpoint {
+  return {
+    dbType: record.src_db_type,
+    name: record.src_conn?.name,
+    host: record.src_conn?.host,
+    port: record.src_conn?.port,
+    database: record.src_conn?.database,
+    username: record.src_conn?.username,
+  }
+}
+
+function dataDestination(record: DataMigrationJob): MigrationRouteEndpoint {
+  return {
+    dbType: record.dst_db_type,
+    name: record.dst_conn?.name,
+    host: record.dst_conn?.host,
+    port: record.dst_conn?.port,
+    database: record.dst_conn?.database,
+    username: record.dst_conn?.username,
+    schema: record.dst_schema,
+  }
+}
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value || '—'
+  const datePart = date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+  const timePart = date.toLocaleTimeString('zh-CN', { hour12: false })
+  return `${datePart} ${timePart}`
+}
+
+function durationText(start: string, end?: string) {
+  const startTime = new Date(start).getTime()
+  const endTime = end ? new Date(end).getTime() : Date.now()
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return '—'
+  const seconds = Math.max(0, Math.floor((endTime - startTime) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+  const hours = Math.floor(seconds / 3600)
+  return `${hours} 小时 ${Math.floor((seconds % 3600) / 60)} 分`
+}
+
+function dataDurationText(record: DataMigrationJob) {
+  const prefix = record.finished_at ? '耗时' : '已运行'
+  return `${prefix} ${durationText(record.created_at, record.finished_at)}`
+}
+
+watch(dataKeywordInput, value => {
+  if (keywordTimer) window.clearTimeout(keywordTimer)
+  keywordTimer = window.setTimeout(() => {
+    dataKeyword.value = value.trim()
+    dataPage.value = 1
+  }, 300)
+})
+
+watch([dataKeyword, dataStatus, dataOrigin, dataPage, dataPageSize], () => {
+	if (!dataInitialized || activeTab.value !== 'data') return
+  syncDataQuery()
+  void loadDataJobs(false)
+})
+
+watch(() => route.query, () => {
+  const nextTab = route.query.tab === 'incremental' ? 'incremental' : 'data'
+  if (activeTab.value !== nextTab) activeTab.value = nextTab
+  if (nextTab !== 'data') return
+  const nextKeyword = queryString(route.query.q)
+  const nextStatus = queryString(route.query.status)
+  const nextOrigin = queryString(route.query.origin) || 'all'
+  const nextPage = parsePositiveInt(route.query.page, 1)
+  const nextPageSize = parsePageSize(route.query.page_size)
+  if (
+    nextKeyword !== dataKeyword.value || nextStatus !== dataStatus.value || nextOrigin !== dataOrigin.value
+    || nextPage !== dataPage.value || nextPageSize !== dataPageSize.value
+  ) readDataQuery()
+})
+
+watch(activeTab, tab => {
+	if (tab === 'data') {
+		dataInitialized = false
+		readDataQuery()
+		dataInitialized = true
+		void loadDataJobs(false)
+  } else if (pollTimer) {
+    window.clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
+})
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    if (activeTab.value === 'data') void loadDataJobs(true)
+  } else if (pollTimer) {
+    window.clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
 }
 
 onMounted(() => {
-  loadDataJobs()
+	readDataQuery()
+	dataInitialized = true
+	if (activeTab.value === 'data') void loadDataJobs(false)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
+onBeforeUnmount(() => {
+  disposed = true
+  requestSerial++
+  if (keywordTimer) window.clearTimeout(keywordTimer)
+  if (pollTimer) window.clearTimeout(pollTimer)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
 <style scoped>
-.history-conn-cell {
+.task-center-page {
+  min-width: 0;
+  padding: 0;
+}
+.task-tabs :deep(.arco-tabs-nav) { margin-bottom: 14px; }
+.task-tabs :deep(.arco-tabs-content) { padding-top: 0; }
+.task-table { min-width: 0; }
+.task-table :deep(.arco-table-container) { overflow-x: hidden; }
+.task-table :deep(.arco-table-cell) { padding: 10px 12px; }
+.task-table :deep(.arco-table-pagination) { margin: 12px 0 0; }
+.task-identity,
+.status-cell,
+.time-cell {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
   min-width: 0;
 }
-.conn-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--fg-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 130px;
-  cursor: default;
-}
-.conn-deleted {
+.job-link {
+  color: #165dff;
+  font-family: var(--font-mono);
   font-size: 12px;
-  color: #86909c;
+  font-weight: 600;
+  text-decoration: none;
 }
-.conn-detail {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  margin-top: 3px;
+.job-link:hover { text-decoration: underline; }
+.job-link:focus-visible { border-radius: 3px; outline: 2px solid #165dff; outline-offset: 2px; }
+.task-meta-row { display: flex; gap: 4px; }
+.status-summary {
+  display: block;
+  max-width: 145px;
+  overflow: hidden;
+  color: var(--destructive);
   font-size: 11px;
-  color: var(--fg-muted);
-  min-width: 0;
-}
-.conn-label {
-  color: var(--fg-muted);
-  flex-shrink: 0;
-}
-.conn-detail-val {
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 72px;
   cursor: default;
 }
-.schema-val {
-  color: #165dff;
-  max-width: 80px;
-}
-.conn-detail-sep {
-  color: var(--border-strong);
-  flex-shrink: 0;
-}
-.report-conn-info {
-  padding: 12px 0 16px;
-  border-bottom: 1px solid var(--color-border-2);
-  margin-bottom: 4px;
-}
-.report-conn-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-size: 13px;
-}
-.report-conn-label {
-  font-weight: 600;
-  min-width: 36px;
-  color: var(--color-text-2);
-}
-.report-conn-sub {
-  margin-left: 4px;
-  font-size: 12px;
-  color: var(--color-text-3);
-}
-.report-schema-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 8px;
-  background: #e8f3ff;
-  color: #165dff;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
-  border: 1px solid #bedaff;
-}
+.time-cell { gap: 3px; font-size: 12px; white-space: nowrap; }
+.time-secondary { color: var(--fg-muted); font-size: 11px; }
 </style>

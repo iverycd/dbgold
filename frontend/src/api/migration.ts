@@ -68,6 +68,24 @@ export interface DataMigrationJob {
   dst_conn?: ConnSnapshot
 }
 
+export interface PageResult<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface TaskListQuery {
+  page: number
+  page_size: 20 | 50 | 100
+  keyword?: string
+  status?: string
+}
+
+export interface DataMigrationListQuery extends TaskListQuery {
+  origin?: 'all' | 'single' | 'batch'
+}
+
 export const getSupportedPairs = () =>
   api.get<SupportedPair[]>('/migration/data-migrate/supported-pairs')
 
@@ -77,8 +95,8 @@ export const startDataMigration = (data: StartDataMigrationRequest) =>
 export const cancelDataMigration = (jobID: string) =>
   api.post<void>(`/migration/data-migrate/${jobID}/cancel`)
 
-export const listDataMigrationJobs = () =>
-  api.get<DataMigrationJob[]>('/migration/data-migrate/jobs')
+export const listDataMigrationJobs = (params: DataMigrationListQuery) =>
+  api.get<PageResult<DataMigrationJob>>('/migration/data-migrate/jobs', { params })
 
 export const getDataMigrationJob = (jobID: string) =>
   api.get<DataMigrationJob>(`/migration/data-migrate/jobs/${jobID}`)
@@ -313,7 +331,8 @@ export const preflightIncremental = (data: IncrementalRequest) =>
   api.post<IncrementalPreflight>('/migration/incremental/preflight', data)
 export const startIncremental = (data: IncrementalRequest) =>
   api.post<{ job_id: string; preflight: IncrementalPreflight }>('/migration/incremental/jobs', data)
-export const listIncrementalJobs = () => api.get<IncrementalJob[]>('/migration/incremental/jobs')
+export const listIncrementalJobs = (params: TaskListQuery) =>
+  api.get<PageResult<IncrementalJob>>('/migration/incremental/jobs', { params })
 export const getIncrementalJob = (jobID: string) => api.get<IncrementalJob>(`/migration/incremental/jobs/${jobID}`)
 export const getIncrementalMigrationLogs = (jobID: string, params: IncrementalMigrationLogQuery = {}) =>
   api.get<IncrementalMigrationLogPage>(`/migration/incremental/jobs/${jobID}/logs`, { params })

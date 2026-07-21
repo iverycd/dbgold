@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -183,6 +184,63 @@ func ListIncrementalJobsWithConn(ownerID uint, isAdmin bool) ([]IncrementalMigra
 	if err != nil {
 		return nil, err
 	}
+	return decorateIncrementalJobs(jobs)
+}
+
+var incrementalStatusGroups = map[string][]string{
+	"active": {
+		"initializing", "snapshot", "catching_up", "running", "reconnecting", "pausing", "cutting_over", "validating",
+	},
+	"attention": {
+		"paused_manual", "paused_restart", "paused_ddl", "paused_row_conflict", "paused_bootstrap_review",
+		"ready_to_cutover", "ready_with_warnings", "cutover_blocked", "failed",
+	},
+	"completed": {"stopped"},
+	"aborted":   {"aborted"},
+}
+
+func QueryIncrementalJobsWithConn(ownerID uint, isAdmin bool, filter JobListFilter) (*PageResult[IncrementalMigrationJobWithConn], error) {
+	query := DB.Model(&IncrementalMigrationJob{}).
+		Joins("LEFT JOIN connections AS src_connections ON src_connections.id = incremental_migration_jobs.src_conn_id").
+		Joins("LEFT JOIN connections AS dst_connections ON dst_connections.id = incremental_migration_jobs.dst_conn_id")
+	if !isAdmin {
+		query = query.Where("incremental_migration_jobs.owner_id = ?", ownerID)
+	}
+	if statuses := incrementalStatusGroups[filter.Status]; len(statuses) > 0 {
+		query = query.Where("incremental_migration_jobs.status IN ?", statuses)
+	}
+	if keyword := strings.ToLower(strings.TrimSpace(filter.Keyword)); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where(`(LOWER(COALESCE(incremental_migration_jobs.job_id, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.src_conn_name, ''), src_connections.name, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.src_conn_host, ''), src_connections.host, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.src_conn_database, ''), incremental_migration_jobs.src_database, src_connections.database, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.dst_conn_name, ''), dst_connections.name, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.dst_conn_host, ''), dst_connections.host, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(incremental_migration_jobs.dst_conn_database, ''), dst_connections.database, '')) LIKE ?
+			OR LOWER(COALESCE(incremental_migration_jobs.target_schema, '')) LIKE ?)`,
+			like, like, like, like, like, like, like, like)
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, err
+	}
+	var jobs []IncrementalMigrationJob
+	if err := query.Order("incremental_migration_jobs.id DESC").
+		Offset((filter.Page - 1) * filter.PageSize).
+		Limit(filter.PageSize).
+		Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	items, err := decorateIncrementalJobs(jobs)
+	if err != nil {
+		return nil, err
+	}
+	return &PageResult[IncrementalMigrationJobWithConn]{Items: items, Total: total, Page: filter.Page, PageSize: filter.PageSize}, nil
+}
+
+func decorateIncrementalJobs(jobs []IncrementalMigrationJob) ([]IncrementalMigrationJobWithConn, error) {
 
 	idSet := make(map[uint]struct{})
 	for _, j := range jobs {
@@ -200,7 +258,7 @@ func ListIncrementalJobsWithConn(ownerID uint, isAdmin bool) ([]IncrementalMigra
 			ids = append(ids, id)
 		}
 		var conns []Connection
-		if err = DB.Where("id IN ?", ids).Find(&conns).Error; err != nil {
+		if err := DB.Where("id IN ?", ids).Find(&conns).Error; err != nil {
 			return nil, err
 		}
 		for i := range conns {

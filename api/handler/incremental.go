@@ -667,7 +667,12 @@ func ownedIncremental(c *gin.Context) (*store.IncrementalMigrationJob, bool) {
 	return j, true
 }
 func ListIncremental(c *gin.Context) {
-	j, e := store.ListIncrementalJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	filter, e := parseJobListFilter(c, incrementalListStatuses, false)
+	if e != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": e.Error()})
+		return
+	}
+	j, e := store.QueryIncrementalJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c), filter)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return

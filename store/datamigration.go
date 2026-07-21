@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,6 +20,21 @@ type DataMigrationJobWithConn struct {
 	DataMigrationJob
 	SrcConn *ConnSnapshot `json:"src_conn"`
 	DstConn *ConnSnapshot `json:"dst_conn"`
+}
+
+type JobListFilter struct {
+	Page     int
+	PageSize int
+	Keyword  string
+	Status   string
+	Origin   string
+}
+
+type PageResult[T any] struct {
+	Items    []T   `json:"items"`
+	Total    int64 `json:"total"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
 }
 
 type DataMigrationJob struct {
@@ -130,6 +146,58 @@ func ListDataMigrationJobsWithConn(ownerID uint, isAdmin bool) ([]DataMigrationJ
 	if err != nil {
 		return nil, err
 	}
+	return decorateDataMigrationJobs(jobs)
+}
+
+func QueryDataMigrationJobsWithConn(ownerID uint, isAdmin bool, filter JobListFilter) (*PageResult[DataMigrationJobWithConn], error) {
+	query := DB.Model(&DataMigrationJob{}).
+		Joins("LEFT JOIN connections AS src_connections ON src_connections.id = data_migration_jobs.src_conn_id").
+		Joins("LEFT JOIN connections AS dst_connections ON dst_connections.id = data_migration_jobs.dst_conn_id")
+	if !isAdmin {
+		query = query.Where("data_migration_jobs.owner_id = ?", ownerID)
+	}
+	if filter.Status != "" {
+		query = query.Where("data_migration_jobs.status = ?", filter.Status)
+	}
+	switch filter.Origin {
+	case "single":
+		query = query.Where("data_migration_jobs.batch_id = '' OR data_migration_jobs.batch_id IS NULL")
+	case "batch":
+		query = query.Where("data_migration_jobs.batch_id <> ''")
+	}
+	if keyword := strings.ToLower(strings.TrimSpace(filter.Keyword)); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where(`(LOWER(COALESCE(data_migration_jobs.job_id, '')) LIKE ?
+			OR LOWER(COALESCE(data_migration_jobs.batch_id, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.src_conn_name, ''), src_connections.name, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.src_conn_host, ''), src_connections.host, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.src_conn_database, ''), src_connections.database, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.dst_conn_name, ''), dst_connections.name, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.dst_conn_host, ''), dst_connections.host, '')) LIKE ?
+			OR LOWER(COALESCE(NULLIF(data_migration_jobs.dst_conn_database, ''), dst_connections.database, '')) LIKE ?
+			OR LOWER(COALESCE(data_migration_jobs.dst_schema, '')) LIKE ?)`,
+			like, like, like, like, like, like, like, like, like)
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, err
+	}
+	var jobs []DataMigrationJob
+	if err := query.Order("data_migration_jobs.id DESC").
+		Offset((filter.Page - 1) * filter.PageSize).
+		Limit(filter.PageSize).
+		Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	items, err := decorateDataMigrationJobs(jobs)
+	if err != nil {
+		return nil, err
+	}
+	return &PageResult[DataMigrationJobWithConn]{Items: items, Total: total, Page: filter.Page, PageSize: filter.PageSize}, nil
+}
+
+func decorateDataMigrationJobs(jobs []DataMigrationJob) ([]DataMigrationJobWithConn, error) {
 
 	// 收集需要回退查表的旧记录连接 ID（快照字段为空说明是旧数据）
 	idSet := make(map[uint]struct{})
