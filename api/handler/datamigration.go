@@ -829,6 +829,22 @@ func ListDataMigrationJobs(c *gin.Context) {
 	c.JSON(http.StatusOK, jobs)
 }
 
+// GetDataMigrationJobDetail returns one owned task with its frozen connection snapshots.
+func GetDataMigrationJobDetail(c *gin.Context) {
+	jobID := c.Param("jobID")
+	job, err := store.GetDataMigrationJob(jobID)
+	if err != nil || job == nil || (!middleware.IsAdmin(c) && job.OwnerID != middleware.GetCurrentUserID(c)) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+	detail, err := store.GetDataMigrationJobWithConn(jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
 // GetDataMigrationReport 返回指定任务的迁移报告 JSON
 func GetDataMigrationReport(c *gin.Context) {
 	jobID := c.Param("jobID")

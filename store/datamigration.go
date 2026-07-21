@@ -1,6 +1,10 @@
 package store
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type ConnSnapshot struct {
 	ID       uint   `json:"id"`
@@ -68,6 +72,45 @@ func GetDataMigrationJob(jobID string) (*DataMigrationJob, error) {
 		return nil, err
 	}
 	return &j, nil
+}
+
+// GetDataMigrationJobWithConn returns the frozen connection snapshots used by
+// the history list. Legacy jobs fall back to the current connection records.
+func GetDataMigrationJobWithConn(jobID string) (*DataMigrationJobWithConn, error) {
+	j, err := GetDataMigrationJob(jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	var srcConn, dstConn *ConnSnapshot
+	if j.SrcConnName != "" {
+		srcConn = &ConnSnapshot{ID: j.SrcConnID, Name: j.SrcConnName, Host: j.SrcConnHost, Port: j.SrcConnPort,
+			Database: j.SrcConnDatabase, Username: j.SrcConnUsername}
+		dstConn = &ConnSnapshot{ID: j.DstConnID, Name: j.DstConnName, Host: j.DstConnHost, Port: j.DstConnPort,
+			Database: j.DstConnDatabase, Username: j.DstConnUsername}
+	} else {
+		loadCurrent := func(id uint) (*ConnSnapshot, error) {
+			var conn Connection
+			if loadErr := DB.First(&conn, id).Error; loadErr != nil {
+				if loadErr == gorm.ErrRecordNotFound {
+					return nil, nil
+				}
+				return nil, loadErr
+			}
+			return &ConnSnapshot{ID: conn.ID, Name: conn.Name, Host: conn.Host, Port: conn.Port,
+				Database: conn.Database, Username: conn.Username}, nil
+		}
+		srcConn, err = loadCurrent(j.SrcConnID)
+		if err != nil {
+			return nil, err
+		}
+		dstConn, err = loadCurrent(j.DstConnID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &DataMigrationJobWithConn{DataMigrationJob: *j, SrcConn: srcConn, DstConn: dstConn}, nil
 }
 
 func ListDataMigrationJobs(ownerID uint, isAdmin bool) ([]DataMigrationJob, error) {

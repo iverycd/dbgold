@@ -28,6 +28,9 @@ func main() {
 	defer cleanup()
 
 	store.Init(cfg)
+	handler.SetQueryConfig(cfg.QueryTimeoutSeconds, cfg.QueryMaxRows)
+	cleanupExpiredQueryAudits(cfg.QueryAuditRetentionDays)
+	go runQueryAuditCleanup(cfg.QueryAuditRetentionDays)
 	cleanupExpiredIncrementalLogs()
 	go runIncrementalLogCleanup()
 	if err := store.DiscardLegacyIncrementalJobs(); err != nil {
@@ -70,5 +73,19 @@ func runIncrementalLogCleanup() {
 	defer ticker.Stop()
 	for range ticker.C {
 		cleanupExpiredIncrementalLogs()
+	}
+}
+
+func cleanupExpiredQueryAudits(retentionDays int) {
+	if _, err := store.CleanupExpiredQueryAudits(time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)); err != nil {
+		slog.Error("failed to clean expired query audits", "err", err)
+	}
+}
+
+func runQueryAuditCleanup(retentionDays int) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		cleanupExpiredQueryAudits(retentionDays)
 	}
 }

@@ -60,6 +60,44 @@ func TestIncrementalTargetTypesAndConfig(t *testing.T) {
 	require.False(t, isSupportedIncrementalTarget("dameng"))
 }
 
+func TestGetIncrementalReturnsConnectionSnapshotsAndEnforcesOwnership(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store.Init(&config.Config{SQLitePath: ":memory:"})
+	src := &store.Connection{OwnerID: 1, Name: "source", DBType: "mysql", Host: "2001:db8::1", Port: 3306, Database: "source_db", Username: "reader", Password: "secret"}
+	dst := &store.Connection{OwnerID: 1, Name: "target", DBType: "postgres", Host: "10.0.0.2", Port: 5432, Database: "target_db", Username: "writer", Password: "secret"}
+	require.NoError(t, store.CreateConnection(src))
+	require.NoError(t, store.CreateConnection(dst))
+	require.NoError(t, store.CreateIncrementalJob(&store.IncrementalMigrationJob{
+		OwnerID: 1, JobID: "detail-owned", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDatabase: "selected_source", TargetSchema: "app", Status: "running", LocatorStrategyVersion: 1,
+	}))
+
+	request := func(ownerID uint) *httptest.ResponseRecorder {
+		router := gin.New()
+		router.GET("/migration/incremental/jobs/:jobID", func(c *gin.Context) {
+			c.Set("userID", ownerID)
+			c.Set("role", "user")
+			GetIncremental(c)
+		})
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/migration/incremental/jobs/detail-owned", nil)
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	owned := request(1)
+	require.Equal(t, http.StatusOK, owned.Code)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(owned.Body.Bytes(), &response))
+	require.Equal(t, "mysql", response["src_db_type"])
+	require.Equal(t, "postgres", response["dst_db_type"])
+	require.Equal(t, "source", response["src_conn"].(map[string]any)["name"])
+	require.Equal(t, "target", response["dst_conn"].(map[string]any)["name"])
+
+	forbidden := request(2)
+	require.Equal(t, http.StatusNotFound, forbidden.Code)
+}
+
 func TestStrictBootstrapFailure(t *testing.T) {
 	success := datamigrate.MigrationReport{
 		Tables:    datamigrate.CategoryReport{Total: 1, Success: 1},

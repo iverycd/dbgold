@@ -28,6 +28,10 @@
           <template #icon><icon-history /></template>
           迁移历史
         </a-menu-item>
+        <a-menu-item key="/query">
+          <template #icon><icon-code-square /></template>
+          查询中心
+        </a-menu-item>
         <a-menu-item v-if="auth.user?.role === 'admin'" key="/users">
           <template #icon><icon-user-group /></template>
           用户管理
@@ -125,6 +129,7 @@ const buildTimeLocal = computed(() => {
 
 const PAGE_TITLES: Record<string, string> = {
   '/connections': '连接管理',
+  '/query': '查询中心',
   '/migration': '迁移生成',
   '/batch-migration': '批量迁移',
   '/history': '迁移历史',
@@ -133,9 +138,13 @@ const PAGE_TITLES: Record<string, string> = {
   '/login-history': '登录历史',
 }
 
-const currentRoute = computed(() => route.path)
+const currentRoute = computed(() => route.path.startsWith('/history/') ? '/history' : route.path)
+const pageTitle = computed(() => {
+  if (route.path.startsWith('/history/incremental/')) return '增量迁移详情'
+  if (route.path.startsWith('/history/data/')) return '数据迁移详情'
+  return PAGE_TITLES[route.path] ?? 'DBGold'
+})
 const userInitial = computed(() => auth.user?.username?.[0]?.toUpperCase() ?? 'U')
-const pageTitle = computed(() => PAGE_TITLES[route.path] ?? 'DBGold')
 
 function navigate(key: string) {
   router.push(key)

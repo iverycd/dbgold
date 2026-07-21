@@ -1,6 +1,6 @@
 <template>
   <div>
-    <a-tabs default-active-key="data">
+    <a-tabs v-model:active-key="activeTab" @change="handleTabChange">
       <!-- ===== 数据迁移历史 ===== -->
       <a-tab-pane key="data" title="数据迁移">
         <div style="display: flex; justify-content: flex-end; margin-bottom: 16px">
@@ -95,47 +95,16 @@
             <a-table-column title="操作" :width="100">
               <template #cell="{ record }">
                 <a-button
-                  v-if="record.status === 'done' || record.status === 'failed'"
                   size="small"
                   @click="viewReport(record)"
                 >
-                  查看报告
+                  详情
                 </a-button>
-                <span v-else style="color: #86909c">—</span>
               </template>
             </a-table-column>
           </template>
         </a-table>
 
-        <a-drawer
-          v-model:visible="reportDrawerVisible"
-          title="迁移报告"
-          :width="800"
-          @close="reportJobId = ''"
-        >
-          <div v-if="reportJob" class="report-conn-info">
-            <div class="report-conn-row">
-              <span class="report-conn-label">源库</span>
-              <a-tag :color="getDbTypeColor(reportJob.src_db_type)" size="small">{{ getDbTypeLabel(reportJob.src_db_type) }}</a-tag>
-              <template v-if="reportJob.src_conn">
-                <span>{{ reportJob.src_conn.name }} · {{ reportJob.src_conn.host }}:{{ reportJob.src_conn.port }}</span>
-                <span class="report-conn-sub">数据库：{{ reportJob.src_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.src_conn.username }}</span>
-              </template>
-              <span v-else style="color: #86909c">已删除</span>
-            </div>
-            <div class="report-conn-row">
-              <span class="report-conn-label">目标库</span>
-              <a-tag :color="getDbTypeColor(reportJob.dst_db_type)" size="small">{{ getDbTypeLabel(reportJob.dst_db_type) }}</a-tag>
-              <template v-if="reportJob.dst_conn">
-                <span>{{ reportJob.dst_conn.name }} · {{ reportJob.dst_conn.host }}:{{ reportJob.dst_conn.port }}</span>
-                <span class="report-conn-sub">数据库：{{ reportJob.dst_conn.database }}&nbsp;&nbsp;账号：{{ reportJob.dst_conn.username }}</span>
-                <span v-if="reportJob.dst_schema" class="report-schema-badge">Schema：{{ reportJob.dst_schema }}</span>
-              </template>
-              <span v-else style="color: #86909c">已删除</span>
-            </div>
-          </div>
-          <MigrationReportPanel v-if="reportJobId" :jobID="reportJobId" />
-        </a-drawer>
       </a-tab-pane>
 
       <a-tab-pane key="incremental" title="增量迁移">
@@ -146,18 +115,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
-import MigrationReportPanel from './MigrationReportPanel.vue'
 import IncrementalHistoryPanel from './IncrementalHistoryPanel.vue'
 import { listDataMigrationJobs, type DataMigrationJob } from '@/api/migration'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 
 const dataJobs = ref<DataMigrationJob[]>([])
 const dataJobsLoading = ref(false)
-const reportDrawerVisible = ref(false)
-const reportJobId = ref('')
-const reportJob = ref<DataMigrationJob | null>(null)
+const route = useRoute()
+const router = useRouter()
+const activeTab = ref(route.query.tab === 'incremental' ? 'incremental' : 'data')
+
+watch(() => route.query.tab, (tab) => {
+  activeTab.value = tab === 'incremental' ? 'incremental' : 'data'
+})
+
+function handleTabChange(key: string | number) {
+  const tab = String(key)
+  router.replace({ path: '/history', query: tab === 'incremental' ? { tab: 'incremental' } : {} })
+}
 
 async function loadDataJobs() {
   dataJobsLoading.value = true
@@ -172,9 +150,7 @@ async function loadDataJobs() {
 }
 
 function viewReport(record: DataMigrationJob) {
-  reportJobId.value = record.job_id
-  reportJob.value = record
-  reportDrawerVisible.value = true
+  router.push(`/history/data/${encodeURIComponent(record.job_id)}`)
 }
 
 function dataJobStatusColor(status: string) {

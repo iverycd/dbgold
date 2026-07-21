@@ -48,11 +48,17 @@ export interface DataMigrationJob {
   dst_conn_id: number
   src_db_type: string
   dst_db_type: string
+  batch_id?: string
   migrate_mode: string
+  migrate_objects?: string
   table_filter: string
   page_size: number
   max_parallel: number
   intra_table_parallel?: number
+  lower_case_names?: boolean
+  char_in_length?: boolean
+  use_nvarchar2?: boolean
+  change_owner?: boolean
   status: 'running' | 'done' | 'failed' | 'cancelled'
   summary: string
   created_at: string
@@ -73,6 +79,9 @@ export const cancelDataMigration = (jobID: string) =>
 
 export const listDataMigrationJobs = () =>
   api.get<DataMigrationJob[]>('/migration/data-migrate/jobs')
+
+export const getDataMigrationJob = (jobID: string) =>
+  api.get<DataMigrationJob>(`/migration/data-migrate/jobs/${jobID}`)
 
 // createDataMigrateEventSource 创建 SSE 连接，返回 EventSource 实例
 // token 通过 query string 传递，因为浏览器 EventSource 不支持自定义 header

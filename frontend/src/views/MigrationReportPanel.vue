@@ -4,7 +4,7 @@
       <a-spin />
     </div>
 
-    <a-alert v-else-if="fetchError" type="error" :content="fetchError" />
+    <a-alert v-else-if="fetchError" type="error">{{ fetchError }}</a-alert>
 
     <template v-else-if="report">
       <div style="display:flex;justify-content:flex-end;margin-bottom:8px">

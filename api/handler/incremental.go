@@ -676,9 +676,15 @@ func ListIncremental(c *gin.Context) {
 }
 func GetIncremental(c *gin.Context) {
 	j, ok := ownedIncremental(c)
-	if ok {
-		c.JSON(200, j)
+	if !ok {
+		return
 	}
+	detail, e := store.GetIncrementalJobWithConn(j.JobID)
+	if e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
+	}
+	c.JSON(200, detail)
 }
 
 func GetIncrementalBootstrapReview(c *gin.Context) {

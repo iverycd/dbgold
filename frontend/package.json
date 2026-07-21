@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@arco-design/web-vue": "^2.55.3",
+    "@codemirror/lang-sql": "^6.10.0",
     "axios": "^1.7.2",
+    "codemirror": "^6.0.2",
     "pinia": "^2.1.7",
     "vue": "^3.4.27",
     "vue-router": "^4.3.3"

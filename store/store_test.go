@@ -216,6 +216,85 @@ func TestListIncrementalJobsWithConnectionSnapshotsAndLegacyFallback(t *testing.
 	assert.Nil(t, byID["cdc-legacy"].DstConn)
 }
 
+func TestGetIncrementalJobWithConnectionSnapshotsAndLegacyFallback(t *testing.T) {
+	setupTestDB(t)
+	src := &Connection{OwnerID: 1, Name: "source-current", DBType: "mysql", Host: "2001:db8::1", Port: 3306,
+		Database: "default_source", Username: "reader", Password: "secret"}
+	dst := &Connection{OwnerID: 1, Name: "target-current", DBType: "postgres", Host: "10.0.0.2", Port: 5432,
+		Database: "target_db", Username: "writer", Password: "secret"}
+	require.NoError(t, CreateConnection(src))
+	require.NoError(t, CreateConnection(dst))
+
+	snapshot := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-detail-snapshot", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDBType: "mysql", DstDBType: "postgres", SrcDatabase: "selected_source", TargetSchema: "app",
+		SrcConnName: "source-at-start", SrcConnHost: "192.0.2.1", SrcConnPort: 3307, SrcConnDatabase: "selected_source", SrcConnUsername: "snapshot_reader",
+		DstConnName: "target-at-start", DstConnHost: "192.0.2.2", DstConnPort: 5433, DstConnDatabase: "snapshot_target", DstConnUsername: "snapshot_writer",
+		Status: "stopped"}
+	legacy := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-detail-legacy", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDatabase: "legacy_selected", TargetSchema: "legacy_schema", Status: "stopped"}
+	require.NoError(t, CreateIncrementalJob(snapshot))
+	require.NoError(t, CreateIncrementalJob(legacy))
+
+	detail, err := GetIncrementalJobWithConn(snapshot.JobID)
+	require.NoError(t, err)
+	require.NotNil(t, detail.SrcConn)
+	assert.Equal(t, "source-at-start", detail.SrcConn.Name)
+	assert.Equal(t, "192.0.2.2", detail.DstConn.Host)
+
+	detail, err = GetIncrementalJobWithConn(legacy.JobID)
+	require.NoError(t, err)
+	require.NotNil(t, detail.SrcConn)
+	assert.Equal(t, "source-current", detail.SrcConn.Name)
+	assert.Equal(t, "legacy_selected", detail.SrcConn.Database)
+	assert.Equal(t, "postgres", detail.DstDBType)
+
+	require.NoError(t, DeleteConnection(src.ID))
+	require.NoError(t, DeleteConnection(dst.ID))
+	detail, err = GetIncrementalJobWithConn(legacy.JobID)
+	require.NoError(t, err)
+	assert.Nil(t, detail.SrcConn)
+	assert.Nil(t, detail.DstConn)
+	assert.Equal(t, "mysql", detail.SrcDBType)
+}
+
+func TestGetDataMigrationJobWithConnectionSnapshotsAndLegacyFallback(t *testing.T) {
+	setupTestDB(t)
+	src := &Connection{OwnerID: 1, Name: "source-current", DBType: "mysql", Host: "2001:db8::1", Port: 3306,
+		Database: "source_current", Username: "reader", Password: "secret"}
+	dst := &Connection{OwnerID: 1, Name: "target-current", DBType: "postgres", Host: "10.0.0.2", Port: 5432,
+		Database: "target_current", Username: "writer", Password: "secret"}
+	require.NoError(t, CreateConnection(src))
+	require.NoError(t, CreateConnection(dst))
+
+	snapshot := &DataMigrationJob{OwnerID: 1, JobID: "data-detail-snapshot", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDBType: "mysql", DstDBType: "postgres", DstSchema: "app", Status: "done",
+		SrcConnName: "source-at-start", SrcConnHost: "192.0.2.1", SrcConnPort: 3307, SrcConnDatabase: "source_snapshot", SrcConnUsername: "snapshot_reader",
+		DstConnName: "target-at-start", DstConnHost: "192.0.2.2", DstConnPort: 5433, DstConnDatabase: "target_snapshot", DstConnUsername: "snapshot_writer"}
+	legacy := &DataMigrationJob{OwnerID: 1, JobID: "data-detail-legacy", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDBType: "mysql", DstDBType: "postgres", DstSchema: "legacy", Status: "done"}
+	require.NoError(t, CreateDataMigrationJob(snapshot))
+	require.NoError(t, CreateDataMigrationJob(legacy))
+
+	detail, err := GetDataMigrationJobWithConn(snapshot.JobID)
+	require.NoError(t, err)
+	require.NotNil(t, detail.SrcConn)
+	assert.Equal(t, "source-at-start", detail.SrcConn.Name)
+	assert.Equal(t, "target_snapshot", detail.DstConn.Database)
+
+	detail, err = GetDataMigrationJobWithConn(legacy.JobID)
+	require.NoError(t, err)
+	require.NotNil(t, detail.SrcConn)
+	assert.Equal(t, "source-current", detail.SrcConn.Name)
+	assert.Equal(t, "target-current", detail.DstConn.Name)
+
+	require.NoError(t, DeleteConnection(src.ID))
+	require.NoError(t, DeleteConnection(dst.ID))
+	detail, err = GetDataMigrationJobWithConn(legacy.JobID)
+	require.NoError(t, err)
+	assert.Nil(t, detail.SrcConn)
+	assert.Nil(t, detail.DstConn)
+}
+
 func TestHasOpenIncrementalTarget(t *testing.T) {
 	setupTestDB(t)
 	open := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-open", SrcConnID: 1, DstConnID: 2, TargetSchema: "app", Status: "paused_restart"}

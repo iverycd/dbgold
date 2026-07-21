@@ -113,6 +113,62 @@ func GetIncrementalJob(jobID string) (*IncrementalMigrationJob, error) {
 	return &j, nil
 }
 
+// GetIncrementalJobWithConn returns the same frozen connection snapshots used
+// by the history list so a detail page can be opened directly and remain
+// meaningful even after the original connection is edited or deleted.
+func GetIncrementalJobWithConn(jobID string) (*IncrementalMigrationJobWithConn, error) {
+	j, err := GetIncrementalJob(jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	var srcCurrent, dstCurrent *Connection
+	if j.SrcConnName == "" || j.SrcDBType == "" {
+		var conn Connection
+		if err = DB.First(&conn, j.SrcConnID).Error; err == nil {
+			srcCurrent = &conn
+		} else if err != gorm.ErrRecordNotFound {
+			return nil, err
+		}
+	}
+	if j.DstConnName == "" || j.DstDBType == "" {
+		var conn Connection
+		if err = DB.First(&conn, j.DstConnID).Error; err == nil {
+			dstCurrent = &conn
+		} else if err != gorm.ErrRecordNotFound {
+			return nil, err
+		}
+	}
+
+	var srcConn, dstConn *ConnSnapshot
+	if j.SrcConnName != "" {
+		srcConn = &ConnSnapshot{ID: j.SrcConnID, Name: j.SrcConnName, Host: j.SrcConnHost, Port: j.SrcConnPort,
+			Database: j.SrcConnDatabase, Username: j.SrcConnUsername}
+	} else if srcCurrent != nil {
+		srcConn = &ConnSnapshot{ID: srcCurrent.ID, Name: srcCurrent.Name, Host: srcCurrent.Host, Port: srcCurrent.Port,
+			Database: j.SrcDatabase, Username: srcCurrent.Username}
+	}
+	if j.DstConnName != "" {
+		dstConn = &ConnSnapshot{ID: j.DstConnID, Name: j.DstConnName, Host: j.DstConnHost, Port: j.DstConnPort,
+			Database: j.DstConnDatabase, Username: j.DstConnUsername}
+	} else if dstCurrent != nil {
+		dstConn = &ConnSnapshot{ID: dstCurrent.ID, Name: dstCurrent.Name, Host: dstCurrent.Host, Port: dstCurrent.Port,
+			Database: dstCurrent.Database, Username: dstCurrent.Username}
+	}
+	if j.SrcDBType == "" {
+		if srcCurrent != nil {
+			j.SrcDBType = srcCurrent.DBType
+		} else {
+			j.SrcDBType = "mysql"
+		}
+	}
+	if j.DstDBType == "" && dstCurrent != nil {
+		j.DstDBType = dstCurrent.DBType
+	}
+
+	return &IncrementalMigrationJobWithConn{IncrementalMigrationJob: *j, SrcConn: srcConn, DstConn: dstConn}, nil
+}
+
 func ListIncrementalJobs(ownerID uint, isAdmin bool) ([]IncrementalMigrationJob, error) {
 	var jobs []IncrementalMigrationJob
 	q := DB.Order("id desc")

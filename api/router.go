@@ -53,12 +53,19 @@ func NewRouter() *gin.Engine {
 		authed.GET("/connections/:id/views", handler.ListConnectionViews)
 		authed.GET("/connections/:id/tables", handler.ListConnectionTables)
 
+		authed.GET("/query/connections/:id/namespaces", handler.ListQueryNamespaces)
+		authed.GET("/query/connections/:id/objects", handler.ListQueryObjects)
+		authed.GET("/query/connections/:id/columns", handler.ListQueryColumns)
+		authed.POST("/query/execute", handler.ExecuteQuery)
+		authed.GET("/query/history", handler.ListQueryHistory)
+
 		authed.GET("/schema/export-routines", handler.ExportRoutines)
 
 		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
 		authed.POST("/migration/data-migrate", handler.StartDataMigration)
 		authed.POST("/migration/data-migrate/:jobID/cancel", handler.CancelDataMigration)
 		authed.GET("/migration/data-migrate/jobs", handler.ListDataMigrationJobs)
+		authed.GET("/migration/data-migrate/jobs/:jobID", handler.GetDataMigrationJobDetail)
 		authed.GET("/migration/data-migrate/:jobID/report", handler.GetDataMigrationReport)
 		authed.POST("/migration/view-migrate", handler.MigrateViews)
 		authed.POST("/migration/object-migrate", handler.StartObjectMigration)
