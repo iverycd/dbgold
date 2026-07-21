@@ -164,11 +164,24 @@ export interface IncrementalPreflight {
   warnings: string[]
 }
 
+export interface IncrementalConnectionSnapshot {
+  id: number
+  name: string
+  host: string
+  port: number
+  database: string
+  username: string
+}
+
 export interface IncrementalJob {
   id: number
   job_id: string
   src_conn_id: number
   dst_conn_id: number
+  src_db_type: string
+  dst_db_type: string
+  src_conn?: IncrementalConnectionSnapshot | null
+  dst_conn?: IncrementalConnectionSnapshot | null
   src_database: string
   target_schema: string
   start_mode: string

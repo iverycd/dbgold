@@ -142,7 +142,10 @@ func StartIncremental(c *gin.Context) {
 	locatorJSON, _ := json.Marshal(locatorStrategies)
 	primaryCount, uniqueCount, fullRowCount := locatorStrategyCounts(locatorStrategies)
 	j := &store.IncrementalMigrationJob{OwnerID: middleware.GetCurrentUserID(c), JobID: jobID, SrcConnID: req.SrcConnID, DstConnID: req.DstConnID,
-		SrcDatabase: req.SrcDatabase, TargetSchema: req.TargetSchema, StartMode: req.StartMode, PositionMode: req.PositionMode, StartGTID: req.StartGTID,
+		SrcDBType: src.DBType, DstDBType: dst.DBType, SrcDatabase: req.SrcDatabase, TargetSchema: req.TargetSchema,
+		SrcConnName: src.Name, SrcConnHost: src.Host, SrcConnPort: src.Port, SrcConnDatabase: req.SrcDatabase, SrcConnUsername: src.Username,
+		DstConnName: dst.Name, DstConnHost: dst.Host, DstConnPort: dst.Port, DstConnDatabase: dst.Database, DstConnUsername: dst.Username,
+		StartMode: req.StartMode, PositionMode: req.PositionMode, StartGTID: req.StartGTID,
 		StartFile: req.StartFile, StartPosition: req.StartPosition, ServerID: req.ServerID, MigrateMode: req.MigrateMode, TableFilter: req.TableFilter,
 		LowerCaseNames: req.LowerCaseNames, BootstrapPolicy: req.BootstrapPolicy, KeylessChangePolicy: req.KeylessChangePolicy,
 		LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategiesJSON: string(locatorJSON), PrimaryLocatorCount: primaryCount,
@@ -664,7 +667,7 @@ func ownedIncremental(c *gin.Context) (*store.IncrementalMigrationJob, bool) {
 	return j, true
 }
 func ListIncremental(c *gin.Context) {
-	j, e := store.ListIncrementalJobs(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	j, e := store.ListIncrementalJobsWithConn(middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return

@@ -31,6 +31,8 @@ func TestIncrementalFailureSummaryColumnsAutoMigrate(t *testing.T) {
 	setupTestDB(t)
 	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "failed_object_count"))
 	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "failed_ddl_count"))
+	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "src_conn_name"))
+	require.True(t, DB.Migrator().HasColumn(&IncrementalMigrationJob{}, "dst_conn_name"))
 }
 
 func TestEnsureAdminExists(t *testing.T) {
@@ -162,6 +164,56 @@ func TestIncrementalOperationalFieldsPersist(t *testing.T) {
 	updated, err = UpdateIncrementalJobIfStatus(job.JobID, []string{"snapshot"}, map[string]any{"status": "validating"})
 	require.NoError(t, err)
 	assert.True(t, updated)
+}
+
+func TestListIncrementalJobsWithConnectionSnapshotsAndLegacyFallback(t *testing.T) {
+	setupTestDB(t)
+	src := &Connection{OwnerID: 1, Name: "source-current", DBType: "mysql", Host: "10.0.0.1", Port: 3306,
+		Database: "default_source", Username: "reader", Password: "secret"}
+	dst := &Connection{OwnerID: 1, Name: "target-current", DBType: "postgres", Host: "10.0.0.2", Port: 5432,
+		Database: "target_db", Username: "writer", Password: "secret"}
+	require.NoError(t, CreateConnection(src))
+	require.NoError(t, CreateConnection(dst))
+
+	snapshot := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-snapshot", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDBType: "mysql", DstDBType: "postgres", SrcDatabase: "selected_source", TargetSchema: "app",
+		SrcConnName: "source-at-start", SrcConnHost: "192.0.2.1", SrcConnPort: 3307, SrcConnDatabase: "selected_source", SrcConnUsername: "snapshot_reader",
+		DstConnName: "target-at-start", DstConnHost: "192.0.2.2", DstConnPort: 5433, DstConnDatabase: "snapshot_target", DstConnUsername: "snapshot_writer",
+		Status: "stopped"}
+	legacy := &IncrementalMigrationJob{OwnerID: 1, JobID: "cdc-legacy", SrcConnID: src.ID, DstConnID: dst.ID,
+		SrcDatabase: "legacy_selected", TargetSchema: "legacy_schema", Status: "stopped"}
+	otherOwner := &IncrementalMigrationJob{OwnerID: 2, JobID: "cdc-other-owner", SrcConnID: src.ID, DstConnID: dst.ID, Status: "stopped"}
+	for _, job := range []*IncrementalMigrationJob{snapshot, legacy, otherOwner} {
+		require.NoError(t, CreateIncrementalJob(job))
+	}
+
+	jobs, err := ListIncrementalJobsWithConn(1, false)
+	require.NoError(t, err)
+	require.Len(t, jobs, 2)
+	byID := make(map[string]IncrementalMigrationJobWithConn, len(jobs))
+	for _, job := range jobs {
+		byID[job.JobID] = job
+	}
+	require.NotNil(t, byID["cdc-snapshot"].SrcConn)
+	assert.Equal(t, "source-at-start", byID["cdc-snapshot"].SrcConn.Name)
+	assert.Equal(t, "192.0.2.2", byID["cdc-snapshot"].DstConn.Host)
+	require.NotNil(t, byID["cdc-legacy"].SrcConn)
+	assert.Equal(t, "source-current", byID["cdc-legacy"].SrcConn.Name)
+	assert.Equal(t, "legacy_selected", byID["cdc-legacy"].SrcConn.Database)
+	assert.Equal(t, "postgres", byID["cdc-legacy"].DstDBType)
+
+	require.NoError(t, DeleteConnection(src.ID))
+	require.NoError(t, DeleteConnection(dst.ID))
+	jobs, err = ListIncrementalJobsWithConn(1, false)
+	require.NoError(t, err)
+	byID = make(map[string]IncrementalMigrationJobWithConn, len(jobs))
+	for _, job := range jobs {
+		byID[job.JobID] = job
+	}
+	assert.NotNil(t, byID["cdc-snapshot"].SrcConn)
+	assert.Equal(t, "source-at-start", byID["cdc-snapshot"].SrcConn.Name)
+	assert.Nil(t, byID["cdc-legacy"].SrcConn)
+	assert.Nil(t, byID["cdc-legacy"].DstConn)
 }
 
 func TestHasOpenIncrementalTarget(t *testing.T) {

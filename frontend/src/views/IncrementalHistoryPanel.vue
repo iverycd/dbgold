@@ -1,10 +1,75 @@
 <template>
   <div class="toolbar"><a-button :loading="loading" @click="load"><template #icon><icon-refresh /></template>刷新</a-button></div>
-  <a-table :data="jobs" :loading="loading" row-key="id" :pagination="{ pageSize: 20 }" :scroll="{ x: 1450 }">
+  <a-table :data="jobs" :loading="loading" row-key="id" :pagination="{ pageSize: 20 }" :scroll="{ x: 1800 }">
     <template #columns>
       <a-table-column title="Job ID" :width="100"><template #cell="{ record }"><a-tooltip :content="record.job_id"><code>{{ record.job_id.slice(0, 6) }}…</code></a-tooltip></template></a-table-column>
-      <a-table-column title="源库" data-index="src_database" :width="150" />
-      <a-table-column title="目标 Schema" data-index="target_schema" :width="150" />
+      <a-table-column title="源连接" :width="290">
+        <template #cell="{ record }">
+          <div class="history-conn-cell">
+            <a-tag v-if="record.src_db_type" :color="getDbTypeColor(record.src_db_type)" size="small">{{ getDbTypeLabel(record.src_db_type) }}</a-tag>
+            <a-tooltip v-if="record.src_conn" :content="record.src_conn.name" mini>
+              <span class="conn-name">{{ record.src_conn.name }}</span>
+            </a-tooltip>
+            <span v-else class="conn-deleted">连接已删除</span>
+          </div>
+          <div v-if="record.src_conn" class="conn-detail">
+            <span class="conn-label">地址</span>
+            <a-tooltip :content="endpoint(record.src_conn)" mini>
+              <span class="conn-detail-val address-val">{{ endpoint(record.src_conn) }}</span>
+            </a-tooltip>
+          </div>
+          <div class="conn-detail">
+            <span class="conn-label">库</span>
+            <a-tooltip :content="record.src_conn?.database || record.src_database" mini>
+              <span class="conn-detail-val">{{ record.src_conn?.database || record.src_database || '—' }}</span>
+            </a-tooltip>
+            <template v-if="record.src_conn?.username">
+              <span class="conn-detail-sep">·</span>
+              <span class="conn-label">账号</span>
+              <a-tooltip :content="record.src_conn.username" mini>
+                <span class="conn-detail-val">{{ record.src_conn.username }}</span>
+              </a-tooltip>
+            </template>
+          </div>
+        </template>
+      </a-table-column>
+      <a-table-column title="目标连接" :width="320">
+        <template #cell="{ record }">
+          <div class="history-conn-cell">
+            <a-tag v-if="record.dst_db_type" :color="getDbTypeColor(record.dst_db_type)" size="small">{{ getDbTypeLabel(record.dst_db_type) }}</a-tag>
+            <a-tooltip v-if="record.dst_conn" :content="record.dst_conn.name" mini>
+              <span class="conn-name">{{ record.dst_conn.name }}</span>
+            </a-tooltip>
+            <span v-else class="conn-deleted">连接已删除</span>
+          </div>
+          <div v-if="record.dst_conn" class="conn-detail">
+            <span class="conn-label">地址</span>
+            <a-tooltip :content="endpoint(record.dst_conn)" mini>
+              <span class="conn-detail-val address-val">{{ endpoint(record.dst_conn) }}</span>
+            </a-tooltip>
+          </div>
+          <div class="conn-detail">
+            <template v-if="record.dst_conn?.database">
+              <span class="conn-label">库</span>
+              <a-tooltip :content="record.dst_conn.database" mini>
+                <span class="conn-detail-val">{{ record.dst_conn.database }}</span>
+              </a-tooltip>
+              <span class="conn-detail-sep">·</span>
+            </template>
+            <span class="conn-label">Schema</span>
+            <a-tooltip :content="record.target_schema" mini>
+              <span class="conn-detail-val schema-val">{{ record.target_schema || '—' }}</span>
+            </a-tooltip>
+            <template v-if="record.dst_conn?.username">
+              <span class="conn-detail-sep">·</span>
+              <span class="conn-label">账号</span>
+              <a-tooltip :content="record.dst_conn.username" mini>
+                <span class="conn-detail-val">{{ record.dst_conn.username }}</span>
+              </a-tooltip>
+            </template>
+          </div>
+        </template>
+      </a-table-column>
       <a-table-column title="模式" :width="120"><template #cell="{ record }">{{ record.start_mode === 'full_then_cdc' ? '全量 + 增量' : '仅增量' }}</template></a-table-column>
       <a-table-column title="状态" :width="150"><template #cell="{ record }"><a-tag :color="color(record.status)">{{ record.locator_strategy_version !== 1 ? '版本升级后已废弃' : text(record.status) }}</a-tag></template></a-table-column>
       <a-table-column title="同步" :width="100"><template #cell="{ record }"><a-tag :color="record.caught_up ? 'green' : 'orange'">{{ record.caught_up ? '已追平' : '追赶中' }}</a-tag></template></a-table-column>
@@ -35,6 +100,34 @@
 
   <a-drawer v-model:visible="drawer" title="增量任务详情" :width="1000" @close="closeDetail">
     <template v-if="detail">
+      <div class="route-summary">
+        <div class="route-row">
+          <span class="route-label">源连接</span>
+          <a-tag v-if="detail.src_db_type" :color="getDbTypeColor(detail.src_db_type)" size="small">{{ getDbTypeLabel(detail.src_db_type) }}</a-tag>
+          <template v-if="detail.src_conn">
+            <a-tooltip :content="detail.src_conn.name" mini><strong class="route-name">{{ detail.src_conn.name }}</strong></a-tooltip>
+            <a-tooltip :content="endpoint(detail.src_conn)" mini><span class="route-endpoint">{{ endpoint(detail.src_conn) }}</span></a-tooltip>
+            <span class="route-meta">数据库：{{ detail.src_conn.database }}　账号：{{ detail.src_conn.username }}</span>
+          </template>
+          <template v-else>
+            <span class="conn-deleted">连接已删除</span>
+            <span class="route-meta">数据库：{{ detail.src_database || '—' }}</span>
+          </template>
+        </div>
+        <div class="route-row">
+          <span class="route-label">目标连接</span>
+          <a-tag v-if="detail.dst_db_type" :color="getDbTypeColor(detail.dst_db_type)" size="small">{{ getDbTypeLabel(detail.dst_db_type) }}</a-tag>
+          <template v-if="detail.dst_conn">
+            <a-tooltip :content="detail.dst_conn.name" mini><strong class="route-name">{{ detail.dst_conn.name }}</strong></a-tooltip>
+            <a-tooltip :content="endpoint(detail.dst_conn)" mini><span class="route-endpoint">{{ endpoint(detail.dst_conn) }}</span></a-tooltip>
+            <span class="route-meta">数据库：{{ detail.dst_conn.database }}　账号：{{ detail.dst_conn.username }}</span>
+          </template>
+          <span v-else class="conn-deleted">连接已删除</span>
+          <a-tooltip :content="detail.target_schema" mini>
+            <span class="route-schema">Schema：{{ detail.target_schema || '—' }}</span>
+          </a-tooltip>
+        </div>
+      </div>
       <a-descriptions :column="2" bordered>
         <a-descriptions-item label="Job ID" :span="2">{{ detail.job_id }}</a-descriptions-item>
         <a-descriptions-item label="状态">{{ text(detail.status) }}</a-descriptions-item>
@@ -130,6 +223,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import IncrementalMigrationLogPanel from '@/components/IncrementalMigrationLogPanel.vue'
+import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import {
   acceptIncrementalBootstrapExclusions,
   abortIncrementalJob,
@@ -283,6 +377,10 @@ function position(file: string, pos: number, gtid: string) {
   const filePos = file ? `${file}:${pos || 0}` : '—'
   return gtid ? `${filePos} · GTID ${gtid}` : filePos
 }
+function endpoint(conn: { host: string; port: number }) {
+  const host = conn.host.includes(':') && !conn.host.startsWith('[') ? `[${conn.host}]` : conn.host
+  return `${host}:${conn.port}`
+}
 
 const labels: Record<string, string> = {
   initializing: '初始化', snapshot: '全量快照', catching_up: '追赶', running: '运行中', reconnecting: '重连中',
@@ -313,6 +411,72 @@ onUnmounted(() => {
 
 <style scoped>
 .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.history-conn-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.conn-name {
+  max-width: 190px;
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.conn-deleted { color: #86909c; font-size: 12px; }
+.conn-detail {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  margin-top: 3px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.conn-label { flex-shrink: 0; color: var(--fg-muted); }
+.conn-detail-val {
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.address-val { max-width: 225px; }
+.schema-val { max-width: 76px; color: #165dff; font-weight: 500; }
+.conn-detail-sep { flex-shrink: 0; color: var(--border-strong); }
+.route-summary {
+  padding: 12px 0 16px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+.route-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-bottom: 7px; font-size: 13px; }
+.route-row:last-child { margin-bottom: 0; }
+.route-label { min-width: 52px; color: var(--color-text-2); font-weight: 600; }
+.route-name, .route-endpoint {
+  display: inline-block;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  cursor: default;
+}
+.route-meta { min-width: 0; margin-left: 4px; color: var(--color-text-3); font-size: 12px; overflow-wrap: anywhere; }
+.route-schema {
+  display: inline-block;
+  max-width: 210px;
+  overflow: hidden;
+  padding: 1px 8px;
+  margin-left: 4px;
+  border: 1px solid #bedaff;
+  border-radius: 4px;
+  background: #e8f3ff;
+  color: #165dff;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 .ddl { padding: 12px; background: #f2f3f5; border-radius: 4px; white-space: pre-wrap; }
 .ddl-popover { max-width: 680px; max-height: 360px; overflow: auto; }
 .review-confirm { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding: 10px 12px; background: var(--color-warning-light-1); border-radius: 4px; }

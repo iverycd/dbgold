@@ -8,14 +8,32 @@ import (
 
 // IncrementalMigrationJob stores CDC configuration and operational state. The
 // authoritative apply checkpoint lives in the target PostgreSQL transaction.
+type IncrementalMigrationJobWithConn struct {
+	IncrementalMigrationJob
+	SrcConn *ConnSnapshot `json:"src_conn"`
+	DstConn *ConnSnapshot `json:"dst_conn"`
+}
+
 type IncrementalMigrationJob struct {
 	ID                     uint       `gorm:"primaryKey" json:"id"`
 	OwnerID                uint       `gorm:"index;not null" json:"owner_id"`
 	JobID                  string     `gorm:"uniqueIndex;not null" json:"job_id"`
 	SrcConnID              uint       `json:"src_conn_id"`
 	DstConnID              uint       `json:"dst_conn_id"`
+	SrcDBType              string     `json:"src_db_type"`
+	DstDBType              string     `json:"dst_db_type"`
 	SrcDatabase            string     `json:"src_database"`
 	TargetSchema           string     `json:"target_schema"`
+	SrcConnName            string     `json:"src_conn_name"`
+	SrcConnHost            string     `json:"src_conn_host"`
+	SrcConnPort            int        `json:"src_conn_port"`
+	SrcConnDatabase        string     `json:"src_conn_database"`
+	SrcConnUsername        string     `json:"src_conn_username"`
+	DstConnName            string     `json:"dst_conn_name"`
+	DstConnHost            string     `json:"dst_conn_host"`
+	DstConnPort            int        `json:"dst_conn_port"`
+	DstConnDatabase        string     `json:"dst_conn_database"`
+	DstConnUsername        string     `json:"dst_conn_username"`
 	StartMode              string     `json:"start_mode"`    // full_then_cdc | incremental_only
 	PositionMode           string     `json:"position_mode"` // auto | gtid | file
 	StartGTID              string     `gorm:"column:start_gtid" json:"start_gtid"`
@@ -102,6 +120,70 @@ func ListIncrementalJobs(ownerID uint, isAdmin bool) ([]IncrementalMigrationJob,
 		q = q.Where("owner_id = ?", ownerID)
 	}
 	return jobs, q.Find(&jobs).Error
+}
+
+func ListIncrementalJobsWithConn(ownerID uint, isAdmin bool) ([]IncrementalMigrationJobWithConn, error) {
+	jobs, err := ListIncrementalJobs(ownerID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+
+	idSet := make(map[uint]struct{})
+	for _, j := range jobs {
+		if j.SrcConnName == "" || j.SrcDBType == "" {
+			idSet[j.SrcConnID] = struct{}{}
+		}
+		if j.DstConnName == "" || j.DstDBType == "" {
+			idSet[j.DstConnID] = struct{}{}
+		}
+	}
+	connMap := make(map[uint]*Connection)
+	if len(idSet) > 0 {
+		ids := make([]uint, 0, len(idSet))
+		for id := range idSet {
+			ids = append(ids, id)
+		}
+		var conns []Connection
+		if err = DB.Where("id IN ?", ids).Find(&conns).Error; err != nil {
+			return nil, err
+		}
+		for i := range conns {
+			connMap[conns[i].ID] = &conns[i]
+		}
+	}
+
+	result := make([]IncrementalMigrationJobWithConn, len(jobs))
+	for i, j := range jobs {
+		var srcConn, dstConn *ConnSnapshot
+		if j.SrcConnName != "" {
+			srcConn = &ConnSnapshot{ID: j.SrcConnID, Name: j.SrcConnName, Host: j.SrcConnHost, Port: j.SrcConnPort,
+				Database: j.SrcConnDatabase, Username: j.SrcConnUsername}
+		} else if conn := connMap[j.SrcConnID]; conn != nil {
+			srcConn = &ConnSnapshot{ID: conn.ID, Name: conn.Name, Host: conn.Host, Port: conn.Port,
+				Database: j.SrcDatabase, Username: conn.Username}
+		}
+		if j.DstConnName != "" {
+			dstConn = &ConnSnapshot{ID: j.DstConnID, Name: j.DstConnName, Host: j.DstConnHost, Port: j.DstConnPort,
+				Database: j.DstConnDatabase, Username: j.DstConnUsername}
+		} else if conn := connMap[j.DstConnID]; conn != nil {
+			dstConn = &ConnSnapshot{ID: conn.ID, Name: conn.Name, Host: conn.Host, Port: conn.Port,
+				Database: conn.Database, Username: conn.Username}
+		}
+		if j.SrcDBType == "" {
+			if conn := connMap[j.SrcConnID]; conn != nil {
+				j.SrcDBType = conn.DBType
+			} else {
+				j.SrcDBType = "mysql"
+			}
+		}
+		if j.DstDBType == "" {
+			if conn := connMap[j.DstConnID]; conn != nil {
+				j.DstDBType = conn.DBType
+			}
+		}
+		result[i] = IncrementalMigrationJobWithConn{IncrementalMigrationJob: j, SrcConn: srcConn, DstConn: dstConn}
+	}
+	return result, nil
 }
 
 func HasOpenIncrementalTarget(dstConnID uint, targetSchema string) (bool, error) {
