@@ -1,0 +1,21 @@
+services:
+  dbgold:
+    image: dbgold:${DBGOLD_VERSION:?DBGOLD_VERSION must be set}
+    container_name: dbgold
+    restart: unless-stopped
+    env_file:
+      - config/dbgold.env
+    ports:
+      - "0.0.0.0:${PORT:-18089}:${PORT:-18089}"
+    volumes:
+      - ./data:/app/data:Z
+      - ./uploads:/app/uploads:Z
+      - ./logs:/app/logs:Z
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

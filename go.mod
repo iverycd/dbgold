@@ -19,6 +19,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/crypto v0.48.0
+	golang.org/x/sys v0.41.0
 	golang.org/x/time v0.15.0
 	gorm.io/gorm v1.25.10
 )
@@ -72,7 +73,6 @@ require (
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/image v0.25.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect

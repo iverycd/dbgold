@@ -3,12 +3,34 @@ package api
 import (
 	"dbgold/api/handler"
 	"dbgold/middleware"
+	"dbgold/store"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
+type RouterOptions struct {
+	StaticDir      string
+	TrustedProxies []string
+}
+
 func NewRouter() *gin.Engine {
+	r, err := NewRouterWithOptions(RouterOptions{})
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 	r := gin.New()
+	if err := r.SetTrustedProxies(options.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestLogger())
 
@@ -30,6 +52,10 @@ func NewRouter() *gin.Engine {
 
 	// 公开端点：系统版本信息，登录页也能取到，本身无敏感性。
 	r.GET("/api/version", handler.GetVersion)
+	r.GET("/api/health/live", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	r.GET("/api/health/ready", readinessHandler(options.StaticDir))
 
 	// 公开端点：前台用户无需登录即可提交迁移工单 / 上传源库离线文件。
 	// 均按客户端 IP 限流，提交接口额外要求图形验证码，防止滥用。
@@ -116,5 +142,62 @@ func NewRouter() *gin.Engine {
 		admin.DELETE("/tickets/:id", handler.DeleteTicket)
 	}
 
-	return r
+	if options.StaticDir != "" {
+		indexPath := filepath.Join(options.StaticDir, "index.html")
+		if info, err := os.Stat(indexPath); err != nil || info.IsDir() {
+			return nil, fmt.Errorf("static site index not found: %s", indexPath)
+		}
+		configureStaticSite(r, options.StaticDir)
+	}
+
+	return r, nil
+}
+
+func readinessHandler(staticDir string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if store.DB == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "error": "database is not initialized"})
+			return
+		}
+		sqlDB, err := store.DB.DB()
+		if err != nil || sqlDB.PingContext(c.Request.Context()) != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "error": "database is unavailable"})
+			return
+		}
+		if staticDir != "" {
+			if info, statErr := os.Stat(filepath.Join(staticDir, "index.html")); statErr != nil || info.IsDir() {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "error": "static site is unavailable"})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
+}
+
+func configureStaticSite(r *gin.Engine, staticDir string) {
+	staticRoot, _ := filepath.Abs(staticDir)
+	r.NoRoute(func(c *gin.Context) {
+		requestPath := c.Request.URL.Path
+		if requestPath == "/api" || strings.HasPrefix(requestPath, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+
+		relPath := strings.TrimPrefix(filepath.Clean("/"+requestPath), string(filepath.Separator))
+		candidate := filepath.Join(staticRoot, relPath)
+		if rel, err := filepath.Rel(staticRoot, candidate); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				if filepath.Base(candidate) == "index.html" {
+					c.Header("Cache-Control", "no-cache")
+				} else if strings.HasPrefix(requestPath, "/assets/") {
+					c.Header("Cache-Control", "public, max-age=31536000, immutable")
+				}
+				c.File(candidate)
+				return
+			}
+		}
+
+		c.Header("Cache-Control", "no-cache")
+		c.File(filepath.Join(staticRoot, "index.html"))
+	})
 }

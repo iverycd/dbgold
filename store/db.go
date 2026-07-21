@@ -2,6 +2,7 @@ package store
 
 import (
 	"dbgold/config"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -58,14 +59,31 @@ type BatchMigration struct {
 }
 
 func Init(cfg *config.Config) {
+	if err := InitWithError(cfg); err != nil {
+		slog.Error("failed to initialize database", "err", err)
+		os.Exit(1)
+	}
+}
+
+func InitWithError(cfg *config.Config) error {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(cfg.SQLitePath), &gorm.Config{})
 	if err != nil {
-		slog.Error("failed to open sqlite", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open sqlite: %w", err)
 	}
 	if err := DB.AutoMigrate(&User{}, &Connection{}, &DataMigrationJob{}, &DataMigrationReport{}, &IncrementalMigrationJob{}, &IncrementalMigrationLog{}, &LoginHistory{}, &BatchMigration{}, &MigrationTicket{}, &QueryAudit{}); err != nil {
-		slog.Error("failed to migrate", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("migrate sqlite: %w", err)
 	}
+	return nil
+}
+
+func Close() error {
+	if DB == nil {
+		return nil
+	}
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }

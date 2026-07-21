@@ -24,7 +24,7 @@ USER=""
 PASS=""
 SSH_PORT=22
 DEPLOY_DIR="/opt/dbgold"
-REMOTE_PORT=8080
+REMOTE_PORT=18089
 
 usage() {
   cat <<'EOF'
@@ -35,10 +35,10 @@ usage() {
   -p   远程密码                (必填)
   -P   SSH 端口                (可选, 默认 22)
   -d   远程部署目录            (可选, 默认 /opt/dbgold)
-  -r   远程 dbgold 监听端口    (可选, 默认 8080, 传给远程 PORT 环境变量)
+  -r   远程 dbgold 监听端口    (可选, 默认 18089, 传给远程 PORT 环境变量)
 
 示例:
-  ./deploy.sh -h 192.168.1.10 -u root -p 'secret' -P 22 -d /opt/dbgold -r 8080
+  ./deploy.sh -h 192.168.1.10 -u root -p 'secret' -P 22 -d /opt/dbgold -r 18089
 EOF
 }
 

@@ -22,12 +22,12 @@ func TestDaMengCreateTable_Golden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	want := `DROP TABLE "APP"."users" CASCADE CONSTRAINTS;
-CREATE TABLE "APP"."users" (
-  "id" BIGINT IDENTITY(1, 1) NOT NULL,
-  "name" VARCHAR2(100) NOT NULL,
-  "age" INT DEFAULT '0',
-  "created" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	want := `DROP TABLE "APP"."USERS" CASCADE CONSTRAINTS;
+CREATE TABLE "APP"."USERS" (
+  "ID" BIGINT IDENTITY(1, 1) NOT NULL,
+  "NAME" VARCHAR2(100) NOT NULL,
+  "AGE" INT DEFAULT '0',
+  "CREATED" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`
 	if got := JoinSQL(stmts); got != want {
 		t.Errorf("dameng create table mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -38,12 +38,12 @@ func TestDaMengIndexAndFK_Golden(t *testing.T) {
 	d := NewDaMeng()
 	// 主键
 	pk := source.IndexInfo{TableName: "t", IsPrimary: true, Columns: []string{"id"}}
-	if got := JoinSQL(d.IndexStatements("APP", pk)); got != `ALTER TABLE "APP"."t" ADD PRIMARY KEY ("id")` {
+	if got := JoinSQL(d.IndexStatements("APP", pk)); got != `ALTER TABLE "APP"."T" ADD PRIMARY KEY ("ID")` {
 		t.Errorf("pk mismatch: %s", got)
 	}
 	// 唯一索引(无 IF NOT EXISTS,索引名加表名前缀去重)
 	uq := source.IndexInfo{TableName: "t", IndexName: "uq", IsUnique: true, Columns: []string{"x"}}
-	if got := JoinSQL(d.IndexStatements("APP", uq)); got != `CREATE UNIQUE INDEX "t_uq" ON "APP"."t" ("x")` {
+	if got := JoinSQL(d.IndexStatements("APP", uq)); got != `CREATE UNIQUE INDEX "T_UQ" ON "APP"."T" ("X")` {
 		t.Errorf("unique mismatch: %s", got)
 	}
 	// 外键:有 ON UPDATE 应被丢弃,ON DELETE CASCADE 保留
@@ -52,13 +52,13 @@ func TestDaMengIndexAndFK_Golden(t *testing.T) {
 		Columns: []string{"pid"}, RefTable: "parent", RefColumns: []string{"id"},
 		OnDelete: "CASCADE", OnUpdate: "RESTRICT",
 	}
-	want := `ALTER TABLE "APP"."child" ADD CONSTRAINT "fk1" FOREIGN KEY ("pid") REFERENCES "APP"."parent" ("id") ON DELETE CASCADE`
+	want := `ALTER TABLE "APP"."CHILD" ADD CONSTRAINT "FK1" FOREIGN KEY ("PID") REFERENCES "APP"."PARENT" ("ID") ON DELETE CASCADE`
 	if got := JoinSQL(d.ForeignKeyStatements("APP", fk)); got != want {
 		t.Errorf("fk mismatch:\n got: %s\nwant: %s", got, want)
 	}
 	// 外键 ON DELETE NO ACTION 应省略
 	fk2 := source.FKInfo{TableName: "c", ConstraintName: "fk2", Columns: []string{"a"}, RefTable: "p", RefColumns: []string{"b"}, OnDelete: "NO ACTION"}
-	want2 := `ALTER TABLE "APP"."c" ADD CONSTRAINT "fk2" FOREIGN KEY ("a") REFERENCES "APP"."p" ("b")`
+	want2 := `ALTER TABLE "APP"."C" ADD CONSTRAINT "FK2" FOREIGN KEY ("A") REFERENCES "APP"."P" ("B")`
 	if got := JoinSQL(d.ForeignKeyStatements("APP", fk2)); got != want2 {
 		t.Errorf("fk2 mismatch:\n got: %s\nwant: %s", got, want2)
 	}

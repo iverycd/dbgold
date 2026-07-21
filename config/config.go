@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -9,7 +11,11 @@ import (
 )
 
 type Config struct {
+	AppEnv                  string
+	ListenHost              string
 	Port                    string
+	StaticDir               string
+	TrustedProxies          []string
 	SQLitePath              string
 	JWTSecret               string
 	AdminUser               string
@@ -27,50 +33,105 @@ type Config struct {
 }
 
 func Load() *Config {
-	// 自动加载 .env 文件（若存在）。godotenv.Load 不会覆盖已存在的真实环境变量，
-	// 因此 systemd/容器注入的变量优先级高于 .env 文件。文件不存在时静默跳过。
-	_ = godotenv.Load()
+	cfg, _ := LoadFromFile("")
+	return cfg
+}
+
+// LoadFromFile loads configuration without mutating the process environment.
+// Real environment variables take precedence over values from the env file.
+// An empty path means ".env" is optional; an explicit path must exist.
+func LoadFromFile(path string) (*Config, error) {
+	values := map[string]string{}
+	if path == "" {
+		if parsed, err := godotenv.Read(); err == nil {
+			values = parsed
+		}
+	} else {
+		parsed, err := godotenv.Read(path)
+		if err != nil {
+			return nil, fmt.Errorf("load config file %s: %w", path, err)
+		}
+		values = parsed
+	}
+
+	lookup := func(key, fallback string) string {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+		if value := strings.TrimSpace(values[key]); value != "" {
+			return value
+		}
+		return fallback
+	}
+	lookupInt := func(key string, fallback int) int {
+		value := lookup(key, "")
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			return n
+		}
+		return fallback
+	}
+	lookupInt64 := func(key string, fallback int64) int64 {
+		value := lookup(key, "")
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil && n > 0 {
+			return n
+		}
+		return fallback
+	}
+	trustedProxies := splitCSV(lookup("TRUSTED_PROXIES", ""))
 
 	return &Config{
-		Port:                    getEnv("PORT", "8080"),
-		SQLitePath:              getEnv("SQLITE_PATH", "dbgold.db"),
-		JWTSecret:               getEnv("JWT_SECRET", "change-me-in-production"),
-		AdminUser:               getEnv("ADMIN_USER", "admin"),
-		AdminPass:               getEnv("ADMIN_PASS", "Admin@123"),
-		LogDir:                  getEnv("LOG_DIR", "log"),
-		LogLevel:                getEnv("LOG_LEVEL", "info"),
-		LogMaxFiles:             getEnvInt("LOG_MAX_FILES", 7),
-		LogMaxTotalMB:           getEnvInt64("LOG_MAX_TOTAL_MB", 2048),
-		UploadDir:               getEnv("UPLOAD_DIR", "uploads"),
-		MaxUploadBytes:          getEnvInt64("MAX_UPLOAD_BYTES", 50<<30), // 默认 50GB
-		JWTExpireHours:          getEnvInt("JWT_EXPIRE_HOURS", 240),
-		QueryTimeoutSeconds:     getEnvInt("QUERY_TIMEOUT_SECONDS", 30),
-		QueryMaxRows:            getEnvInt("QUERY_MAX_ROWS", 1000),
-		QueryAuditRetentionDays: getEnvInt("QUERY_AUDIT_RETENTION_DAYS", 90),
-	}
+		AppEnv:                  lookup("APP_ENV", "development"),
+		ListenHost:              lookup("LISTEN_HOST", "0.0.0.0"),
+		Port:                    lookup("PORT", "18089"),
+		StaticDir:               lookup("STATIC_DIR", "frontend/dist"),
+		TrustedProxies:          trustedProxies,
+		SQLitePath:              lookup("SQLITE_PATH", "dbgold.db"),
+		JWTSecret:               lookup("JWT_SECRET", "change-me-in-production"),
+		AdminUser:               lookup("ADMIN_USER", "admin"),
+		AdminPass:               lookup("ADMIN_PASS", "Admin@123"),
+		LogDir:                  lookup("LOG_DIR", "log"),
+		LogLevel:                lookup("LOG_LEVEL", "info"),
+		LogMaxFiles:             lookupInt("LOG_MAX_FILES", 7),
+		LogMaxTotalMB:           lookupInt64("LOG_MAX_TOTAL_MB", 2048),
+		UploadDir:               lookup("UPLOAD_DIR", "uploads"),
+		MaxUploadBytes:          lookupInt64("MAX_UPLOAD_BYTES", 50<<30), // 默认 50GB
+		JWTExpireHours:          lookupInt("JWT_EXPIRE_HOURS", 240),
+		QueryTimeoutSeconds:     lookupInt("QUERY_TIMEOUT_SECONDS", 30),
+		QueryMaxRows:            lookupInt("QUERY_MAX_ROWS", 1000),
+		QueryAuditRetentionDays: lookupInt("QUERY_AUDIT_RETENTION_DAYS", 90),
+	}, nil
 }
 
-func getEnv(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
+func (c *Config) Validate() error {
+	port, err := strconv.Atoi(c.Port)
+	if err != nil || port < 1024 || port > 65535 {
+		return fmt.Errorf("PORT must be an integer between 1024 and 65535")
 	}
-	return fallback
-}
-
-func getEnvInt(key string, fallback int) int {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
+	ip := net.ParseIP(c.ListenHost)
+	if strings.Contains(c.ListenHost, ":") || ip == nil || ip.To4() == nil {
+		return fmt.Errorf("LISTEN_HOST must be an IPv4 address")
+	}
+	if strings.EqualFold(c.AppEnv, "production") {
+		if c.JWTSecret == "change-me-in-production" || len(c.JWTSecret) < 32 {
+			return fmt.Errorf("production JWT_SECRET must be changed and contain at least 32 characters")
+		}
+		if c.AdminPass == "Admin@123" || len(c.AdminPass) < 8 {
+			return fmt.Errorf("production ADMIN_PASS must be changed and contain at least 8 characters")
 		}
 	}
-	return fallback
+	return nil
 }
 
-func getEnvInt64(key string, fallback int64) int64 {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
 		}
 	}
-	return fallback
+	return result
 }

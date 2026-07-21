@@ -48,11 +48,15 @@ func Init(cfg *Config) (cleanup func(), err error) {
 	slog.SetDefault(slog.New(handler))
 
 	// 同步标准库 log 包的输出到 slog，避免遗漏的 log.Printf 调用丢失
+	originalLogOutput := log.Writer()
 	log.SetOutput(io.Discard) // slog 接管，标准库 log 不再重复输出
 
 	rot.startDailyRotation()
 
-	return func() { rot.close() }, nil
+	return func() {
+		rot.close()
+		log.SetOutput(originalLogOutput)
+	}, nil
 }
 
 func parseLevel(s string) slog.Level {
