@@ -73,7 +73,6 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 	if err != nil {
 		r.Errors = append(r.Errors, err.Error())
 	} else {
-		r.Tables = tables
 		for _, t := range tables {
 			targetName := t.Name
 			if cfg.LowerCaseNames {
@@ -85,10 +84,10 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			if !incrementalOnly && !strings.EqualFold(t.Engine, "InnoDB") {
 				r.Errors = append(r.Errors, fmt.Sprintf("全量一致快照仅支持 InnoDB 表: %s (engine=%s)", t.Name, t.Engine))
 			}
-			if len(t.PrimaryKey) == 0 {
-				r.NoPrimaryKey = append(r.NoPrimaryKey, t.Name)
-			}
 		}
+	}
+	if !incrementalOnly && len(cfg.RequestedExclusions) > 0 {
+		r.Errors = append(r.Errors, "仅从指定位点开始时可以确认排除缺失目标表")
 	}
 	if incrementalOnly {
 		if cfg.Start.GTID == "" && (cfg.Start.File == "" || cfg.Start.Pos < 4) {
@@ -126,30 +125,53 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 	}
-	dst, e := openTargetDB(cfg)
-	if e != nil {
-		r.Errors = append(r.Errors, "连接目标库失败: "+e.Error())
+	dst, dstErr := openTargetDB(cfg)
+	if dstErr != nil {
+		r.Errors = append(r.Errors, "连接目标库失败: "+dstErr.Error())
 	} else {
 		defer dst.Close()
-		if e = dst.PingContext(ctx); e != nil {
-			r.Errors = append(r.Errors, "连接目标库失败: "+e.Error())
+		if dstErr = dst.PingContext(ctx); dstErr != nil {
+			r.Errors = append(r.Errors, "连接目标库失败: "+dstErr.Error())
 		} else {
 			var schemaExists bool
-			if e = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, cfg.TargetSchema).Scan(&schemaExists); e != nil || !schemaExists {
+			if dstErr = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, cfg.TargetSchema).Scan(&schemaExists); dstErr != nil || !schemaExists {
 				r.Errors = append(r.Errors, "目标 Schema 不存在: "+cfg.TargetSchema)
 			}
 		}
-		if incrementalOnly {
-			for _, t := range tables {
-				name := t.Name
+		if incrementalOnly && dstErr == nil {
+			missing := make(map[string]TargetTableIssue)
+			for _, table := range tables {
+				name := table.Name
 				if cfg.LowerCaseNames {
 					name = strings.ToLower(name)
 				}
 				var exists bool
-				e = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2)`, cfg.TargetSchema, name).Scan(&exists)
-				if e != nil || !exists {
-					r.Errors = append(r.Errors, fmt.Sprintf("目标表不存在: %s.%s", cfg.TargetSchema, name))
+				queryErr := dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2)`, cfg.TargetSchema, name).Scan(&exists)
+				if queryErr != nil {
+					r.Errors = append(r.Errors, fmt.Sprintf("检查目标表失败 %s.%s: %v", cfg.TargetSchema, name, queryErr))
 					continue
+				}
+				if !exists {
+					missing[table.Name] = TargetTableIssue{SourceTable: table.Name, TargetSchema: cfg.TargetSchema, TargetTable: name}
+				}
+			}
+
+			effective, unresolved, accepted, exclusionErrors := applyMissingTargetExclusions(tables, missing, cfg.RequestedExclusions)
+			r.MissingTargetTables = append(r.MissingTargetTables, unresolved...)
+			r.ExcludedTables = append(r.ExcludedTables, accepted...)
+			r.Errors = append(r.Errors, exclusionErrors...)
+			for _, issue := range unresolved {
+				r.Errors = append(r.Errors, fmt.Sprintf("目标表不存在: %s.%s", issue.TargetSchema, issue.TargetTable))
+			}
+			if len(r.ExcludedTables) > 0 {
+				r.Warnings = append(r.Warnings, fmt.Sprintf("已确认排除 %d 张缺失目标表；这些表后续的 INSERT/UPDATE/DELETE 均不会同步", len(r.ExcludedTables)))
+			}
+			tables = effective
+			r.Tables = effective
+			for _, t := range effective {
+				name := t.Name
+				if cfg.LowerCaseNames {
+					name = strings.ToLower(name)
 				}
 				colRows, colErr := dst.QueryContext(ctx, `SELECT column_name, is_nullable, column_default, is_identity
 					FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2`, cfg.TargetSchema, name)
@@ -213,7 +235,7 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 				}
 			}
 		}
-		if len(tables) > 0 && e == nil {
+		if len(tables) > 0 && dstErr == nil {
 			resolved, resolveErr := ResolveLocatorStrategies(ctx, cfg, tables)
 			if resolveErr != nil {
 				r.Errors = append(r.Errors, "解析 CDC 行定位策略失败: "+resolveErr.Error())
@@ -231,8 +253,62 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 	}
+	if !incrementalOnly && len(tables) > 0 && len(r.Tables) == 0 {
+		r.Tables = tables
+	}
+	r.NoPrimaryKey = nil
+	for _, table := range r.Tables {
+		if len(table.PrimaryKey) == 0 {
+			r.NoPrimaryKey = append(r.NoPrimaryKey, table.Name)
+		}
+	}
 	r.OK = len(r.Errors) == 0
 	return r
+}
+
+func applyMissingTargetExclusions(tables []TableInfo, missing map[string]TargetTableIssue, requested []string) ([]TableInfo, []TargetTableIssue, []TargetTableIssue, []string) {
+	selected := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		selected[table.Name] = true
+	}
+	seen := make(map[string]bool, len(requested))
+	acceptedNames := make(map[string]bool, len(requested))
+	accepted := make([]TargetTableIssue, 0, len(requested))
+	var errors []string
+	for _, sourceName := range requested {
+		if seen[sourceName] {
+			errors = append(errors, "排除表重复: "+sourceName)
+			continue
+		}
+		seen[sourceName] = true
+		if !selected[sourceName] {
+			errors = append(errors, "排除表不在当前迁移范围内: "+sourceName)
+			continue
+		}
+		issue, isMissing := missing[sourceName]
+		if !isMissing {
+			errors = append(errors, "只能确认排除当前不存在的目标表: "+sourceName)
+			continue
+		}
+		acceptedNames[sourceName] = true
+		accepted = append(accepted, issue)
+	}
+	effective := make([]TableInfo, 0, len(tables)-len(accepted))
+	unresolved := make([]TargetTableIssue, 0, len(missing)-len(accepted))
+	for _, table := range tables {
+		if issue, isMissing := missing[table.Name]; isMissing {
+			if acceptedNames[table.Name] {
+				continue
+			}
+			unresolved = append(unresolved, issue)
+			continue
+		}
+		effective = append(effective, table)
+	}
+	if len(effective) == 0 {
+		errors = append(errors, "排除后有效 CDC 表清单为空")
+	}
+	return effective, unresolved, accepted, errors
 }
 
 type globalVariableLookup func(context.Context, string) (string, error)

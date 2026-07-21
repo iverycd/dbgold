@@ -12,6 +12,7 @@ import (
 
 	"dbgold/config"
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/cdc"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
 	"dbgold/store"
@@ -43,6 +44,26 @@ func TestConfigFromIncrementalUsesFrozenEffectiveTables(t *testing.T) {
 	cfg = configFromIncremental(job, src, dst)
 	require.NotNil(t, cfg.TableNames)
 	require.Empty(t, cfg.TableNames, "a corrupt frozen manifest must fail closed")
+}
+
+func TestConfigFromIncrementalUsesConfirmedIncrementalOnlyScope(t *testing.T) {
+	job := &store.IncrementalMigrationJob{
+		JobID: "job-scope", StartMode: "incremental_only", SrcDatabase: "source_db", TargetSchema: "admin",
+		MigrateMode: "all", ManifestHash: "manifest", EffectiveJSON: `["kept"]`,
+		ExcludedJSON: `[{"table":"missing","stage":"target_missing","error":"目标表不存在: admin.missing"}]`,
+	}
+	src := &store.Connection{DBType: "mysql", Host: "127.0.0.1", Port: 3306, Username: "root"}
+	dst := &store.Connection{DBType: "postgres", Host: "127.0.0.1", Port: 5432, Username: "postgres", Database: "target"}
+
+	cfg := configFromIncremental(job, src, dst)
+	require.Equal(t, []string{"kept"}, cfg.TableNames)
+	require.Equal(t, "manifest", cfg.ScopeManifestHash)
+	require.Equal(t, []cdc.BootstrapIssue{{Table: "missing", Stage: "target_missing", Error: "目标表不存在: admin.missing"}}, cfg.ScopeExclusions)
+
+	job.EffectiveJSON = "not-json"
+	cfg = configFromIncremental(job, src, dst)
+	require.NotNil(t, cfg.TableNames)
+	require.Empty(t, cfg.TableNames, "a corrupt confirmed scope must fail closed")
 }
 
 func TestIncrementalTargetTypesAndConfig(t *testing.T) {

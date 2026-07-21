@@ -150,6 +150,34 @@
             </div>
           </a-tab-pane>
 
+          <a-tab-pane v-if="job.start_mode === 'incremental_only' && job.excluded_table_count > 0" key="scope" title="同步范围">
+            <div class="tab-toolbar">
+              <div>
+                <h2>仅增量有效范围</h2>
+                <p>以下排除由用户在启动前明确确认，任务恢复和最终校验都会沿用该范围。</p>
+              </div>
+            </div>
+            <a-alert type="warning" class="inline-alert">
+              该任务已人为缩小同步范围；排除表的 INSERT、UPDATE、DELETE 均不会写入目标端。
+            </a-alert>
+            <a-alert v-if="bootstrapReviewError" type="warning" class="inline-alert">{{ bootstrapReviewError }}</a-alert>
+            <template v-if="bootstrapReview">
+              <div class="scope-stats">
+                <div><span>原始范围</span><strong>{{ bootstrapReview.requested_count }}</strong></div>
+                <div><span>有效表</span><strong>{{ bootstrapReview.effective_tables.length }}</strong></div>
+                <div><span>排除表</span><strong>{{ bootstrapReview.excluded_tables.length }}</strong></div>
+              </div>
+              <PositionRow label="增量起始位点" :value="positionText(bootstrapReview.position.file, bootstrapReview.position.position, bootstrapReview.position.gtid)" @copy="copy" />
+              <a-table :data="bootstrapReview.excluded_tables" row-key="table" size="small" :pagination="false">
+                <template #columns>
+                  <a-table-column title="源表" data-index="table" :width="260" />
+                  <a-table-column title="原因"><template #cell="{ record }">{{ record.error }}</template></a-table-column>
+                  <a-table-column title="阶段" :width="140"><template #cell="{ record }">{{ bootstrapStageText(record.stage) }}</template></a-table-column>
+                </template>
+              </a-table>
+            </template>
+          </a-tab-pane>
+
           <a-tab-pane v-if="job.start_mode === 'full_then_cdc'" key="scope" title="全量与失败对象">
             <div class="tab-toolbar">
               <div>
@@ -353,6 +381,10 @@ const failedObjectExpandable = { icon: (_: boolean, record: any) => hasFailureDe
 const risks = computed<RiskItem[]>(() => {
   if (!job.value) return []
   const items: RiskItem[] = []
+  if (job.value.start_mode === 'incremental_only' && job.value.excluded_table_count > 0) items.push({
+    key: 'incremental-scope', level: 'warning', title: `已排除 ${job.value.excluded_table_count} 张缺失目标表`,
+    description: '这些表的后续变更不会同步；任务恢复与最终校验将继续沿用当前有效范围。',
+  })
   if (unsafeBootstrap(job.value)) items.push({ key: 'bootstrap', level: 'danger', title: '全量完成状态不安全', description: '恢复前会检查目标 Checkpoint；没有完成位点时任务将拒绝恢复。' })
   if (job.value.locator_strategy_version !== 1) items.push({ key: 'legacy', level: 'warning', title: '旧版定位策略任务已废弃', description: '该任务不能恢复，目标表、Checkpoint、日志和迁移数据均未自动删除。' })
   if (job.value.last_error) items.push({ key: 'last-error', level: 'danger', title: '最近一次错误', description: '请根据错误信息修复环境或数据后再执行恢复。', detail: job.value.last_error })
@@ -391,7 +423,9 @@ async function copy(value: string, label = '内容') {
 
 async function loadBootstrapReview(current: IncrementalJob) {
   bootstrapReviewError.value = ''
-  if (current.start_mode !== 'full_then_cdc' || (current.status !== 'paused_bootstrap_review' && current.excluded_table_count <= 0 && current.failed_object_count <= 0)) {
+  const needsIncrementalScope = current.start_mode === 'incremental_only' && current.excluded_table_count > 0
+  const needsBootstrapReview = current.start_mode === 'full_then_cdc' && (current.status === 'paused_bootstrap_review' || current.excluded_table_count > 0 || current.failed_object_count > 0)
+  if (!needsIncrementalScope && !needsBootstrapReview) {
     bootstrapReview.value = null
     return
   }
@@ -401,7 +435,7 @@ async function loadBootstrapReview(current: IncrementalJob) {
   } catch (error: any) {
     if (!disposed && job.value?.job_id === current.job_id) {
       bootstrapReview.value = null
-      bootstrapReviewError.value = error?.response?.data?.error || '全量审阅数据暂时无法加载'
+      bootstrapReviewError.value = error?.response?.data?.error || '同步范围数据暂时无法加载'
     }
   }
 }

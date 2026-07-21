@@ -127,9 +127,47 @@ func TestCompactError(t *testing.T) {
 func TestPreflightRetentionJSONDistinguishesUnknownAndDisabled(t *testing.T) {
 	unknown, err := json.Marshal(PreflightResult{})
 	require.NoError(t, err)
-	require.JSONEq(t, `{"ok":false,"log_bin":false,"binlog_format":"","binlog_row_image":"","gtid_mode":"","binlog_retention_seconds":null,"current_position":{"file":"","position":0,"gtid":""},"tables":null,"no_primary_key_tables":null,"errors":null,"warnings":null}`, string(unknown))
+	require.JSONEq(t, `{"ok":false,"log_bin":false,"binlog_format":"","binlog_row_image":"","gtid_mode":"","binlog_retention_seconds":null,"current_position":{"file":"","position":0,"gtid":""},"tables":null,"no_primary_key_tables":null,"missing_target_tables":null,"excluded_tables":null,"errors":null,"warnings":null}`, string(unknown))
 
 	disabled, err := json.Marshal(PreflightResult{RetentionSecs: int64Ptr(0)})
 	require.NoError(t, err)
 	require.Contains(t, string(disabled), `"binlog_retention_seconds":0`)
+}
+
+func TestApplyMissingTargetExclusions(t *testing.T) {
+	tables := []TableInfo{{Name: "present"}, {Name: "missing_a"}, {Name: "missing_b"}}
+	missing := map[string]TargetTableIssue{
+		"missing_a": {SourceTable: "missing_a", TargetSchema: "admin", TargetTable: "missing_a"},
+		"missing_b": {SourceTable: "missing_b", TargetSchema: "admin", TargetTable: "missing_b"},
+	}
+
+	effective, unresolved, accepted, errs := applyMissingTargetExclusions(tables, missing, []string{"missing_a"})
+	require.Equal(t, []TableInfo{{Name: "present"}}, effective)
+	require.Equal(t, []TargetTableIssue{missing["missing_b"]}, unresolved)
+	require.Equal(t, []TargetTableIssue{missing["missing_a"]}, accepted)
+	require.Empty(t, errs)
+}
+
+func TestApplyMissingTargetExclusionsRejectsInvalidRequests(t *testing.T) {
+	tables := []TableInfo{{Name: "present"}, {Name: "missing"}}
+	missing := map[string]TargetTableIssue{"missing": {SourceTable: "missing", TargetSchema: "admin", TargetTable: "missing"}}
+
+	effective, _, accepted, errs := applyMissingTargetExclusions(tables, missing, []string{"missing", "missing", "present", "unknown"})
+	require.Equal(t, []TableInfo{{Name: "present"}}, effective)
+	require.Len(t, accepted, 1)
+	require.Len(t, errs, 3)
+	require.Contains(t, errs, "排除表重复: missing")
+	require.Contains(t, errs, "只能确认排除当前不存在的目标表: present")
+	require.Contains(t, errs, "排除表不在当前迁移范围内: unknown")
+}
+
+func TestApplyMissingTargetExclusionsRejectsEmptyEffectiveScope(t *testing.T) {
+	tables := []TableInfo{{Name: "missing"}}
+	missing := map[string]TargetTableIssue{"missing": {SourceTable: "missing", TargetSchema: "admin", TargetTable: "missing"}}
+
+	effective, unresolved, accepted, errs := applyMissingTargetExclusions(tables, missing, []string{"missing"})
+	require.Empty(t, effective)
+	require.Empty(t, unresolved)
+	require.Len(t, accepted, 1)
+	require.Contains(t, errs, "排除后有效 CDC 表清单为空")
 }

@@ -23,21 +23,22 @@ import (
 )
 
 type incrementalRequest struct {
-	SrcConnID           uint   `json:"src_conn_id" binding:"required"`
-	DstConnID           uint   `json:"dst_conn_id" binding:"required"`
-	SrcDatabase         string `json:"src_database" binding:"required"`
-	TargetSchema        string `json:"target_schema" binding:"required"`
-	StartMode           string `json:"start_mode" binding:"required,oneof=full_then_cdc incremental_only"`
-	PositionMode        string `json:"position_mode" binding:"omitempty,oneof=auto gtid file"`
-	StartGTID           string `json:"start_gtid"`
-	StartFile           string `json:"start_file"`
-	StartPosition       uint32 `json:"start_position"`
-	ServerID            uint32 `json:"server_id"`
-	MigrateMode         string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
-	TableFilter         string `json:"table_filter"`
-	LowerCaseNames      bool   `json:"lower_case_names"`
-	BootstrapPolicy     string `json:"bootstrap_failure_policy" binding:"omitempty,oneof=review_and_exclude fail_all"`
-	KeylessChangePolicy string `json:"keyless_change_policy" binding:"omitempty,oneof=full_row_match"`
+	SrcConnID           uint     `json:"src_conn_id" binding:"required"`
+	DstConnID           uint     `json:"dst_conn_id" binding:"required"`
+	SrcDatabase         string   `json:"src_database" binding:"required"`
+	TargetSchema        string   `json:"target_schema" binding:"required"`
+	StartMode           string   `json:"start_mode" binding:"required,oneof=full_then_cdc incremental_only"`
+	PositionMode        string   `json:"position_mode" binding:"omitempty,oneof=auto gtid file"`
+	StartGTID           string   `json:"start_gtid"`
+	StartFile           string   `json:"start_file"`
+	StartPosition       uint32   `json:"start_position"`
+	ServerID            uint32   `json:"server_id"`
+	MigrateMode         string   `json:"migrate_mode" binding:"required,oneof=all include exclude"`
+	TableFilter         string   `json:"table_filter"`
+	ExcludedTables      []string `json:"excluded_tables"`
+	LowerCaseNames      bool     `json:"lower_case_names"`
+	BootstrapPolicy     string   `json:"bootstrap_failure_policy" binding:"omitempty,oneof=review_and_exclude fail_all"`
+	KeylessChangePolicy string   `json:"keyless_change_policy" binding:"omitempty,oneof=full_row_match"`
 }
 
 var incrementalStartMu sync.Mutex
@@ -59,7 +60,7 @@ func incrementalConfig(req incrementalRequest, jobID string, src, dst *store.Con
 	srcCopy.Database = req.SrcDatabase
 	return cdc.Config{JobID: jobID, SourceDSN: buildDSN(&srcCopy), SourceHost: src.Host, SourcePort: uint16(src.Port), SourceUser: src.Username,
 		SourcePassword: src.Password, SourceDatabase: req.SrcDatabase, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: req.TargetSchema,
-		Mode: req.MigrateMode, Filter: req.TableFilter, LowerCaseNames: req.LowerCaseNames, ServerID: req.ServerID,
+		Mode: req.MigrateMode, Filter: req.TableFilter, RequestedExclusions: req.ExcludedTables, LowerCaseNames: req.LowerCaseNames, ServerID: req.ServerID,
 		Start: cdc.Position{File: req.StartFile, Pos: req.StartPosition, GTID: req.StartGTID}, KeylessChangePolicy: "full_row_match"}
 }
 
@@ -141,6 +142,24 @@ func StartIncremental(c *gin.Context) {
 	locatorStrategies := cdc.LocatorStrategiesFromTables(pf.Tables)
 	locatorJSON, _ := json.Marshal(locatorStrategies)
 	primaryCount, uniqueCount, fullRowCount := locatorStrategyCounts(locatorStrategies)
+	var scopeRecord cdc.BootstrapRecord
+	if req.StartMode == "incremental_only" {
+		scopeRecord = cdc.BootstrapRecord{State: "completed", Position: cfg.Start, EffectiveTables: make([]string, 0, len(pf.Tables)),
+			LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategies: locatorStrategies}
+		for _, table := range pf.Tables {
+			scopeRecord.EffectiveTables = append(scopeRecord.EffectiveTables, table.Name)
+		}
+		for _, table := range pf.ExcludedTables {
+			scopeRecord.ExcludedTables = append(scopeRecord.ExcludedTables, cdc.BootstrapIssue{Table: table.SourceTable, Stage: "target_missing", Error: fmt.Sprintf("目标表不存在: %s.%s", table.TargetSchema, table.TargetTable)})
+		}
+		scopeRecord.ManifestHash = cdc.HashBootstrapManifest(scopeRecord)
+	}
+	effectiveJSON, excludedJSON := "", ""
+	if req.StartMode == "incremental_only" {
+		effectiveBytes, _ := json.Marshal(scopeRecord.EffectiveTables)
+		excludedBytes, _ := json.Marshal(scopeRecord.ExcludedTables)
+		effectiveJSON, excludedJSON = string(effectiveBytes), string(excludedBytes)
+	}
 	j := &store.IncrementalMigrationJob{OwnerID: middleware.GetCurrentUserID(c), JobID: jobID, SrcConnID: req.SrcConnID, DstConnID: req.DstConnID,
 		SrcDBType: src.DBType, DstDBType: dst.DBType, SrcDatabase: req.SrcDatabase, TargetSchema: req.TargetSchema,
 		SrcConnName: src.Name, SrcConnHost: src.Host, SrcConnPort: src.Port, SrcConnDatabase: req.SrcDatabase, SrcConnUsername: src.Username,
@@ -149,7 +168,8 @@ func StartIncremental(c *gin.Context) {
 		StartFile: req.StartFile, StartPosition: req.StartPosition, ServerID: req.ServerID, MigrateMode: req.MigrateMode, TableFilter: req.TableFilter,
 		LowerCaseNames: req.LowerCaseNames, BootstrapPolicy: req.BootstrapPolicy, KeylessChangePolicy: req.KeylessChangePolicy,
 		LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategiesJSON: string(locatorJSON), PrimaryLocatorCount: primaryCount,
-		UniqueLocatorCount: uniqueCount, FullRowLocatorCount: fullRowCount, BootstrapState: "pending", Status: "initializing", Phase: "initializing"}
+		UniqueLocatorCount: uniqueCount, FullRowLocatorCount: fullRowCount, BootstrapState: "pending", Status: "initializing", Phase: "initializing",
+		EffectiveJSON: effectiveJSON, ExcludedJSON: excludedJSON, EffectiveCount: len(scopeRecord.EffectiveTables), ExcludedCount: len(scopeRecord.ExcludedTables), ManifestHash: scopeRecord.ManifestHash}
 	incrementalStartMu.Lock()
 	defer incrementalStartMu.Unlock()
 	if exists, e := store.HasOpenIncrementalTarget(req.DstConnID, req.TargetSchema); e != nil {
@@ -162,6 +182,13 @@ func StartIncremental(c *gin.Context) {
 	if e := store.CreateIncrementalJob(j); e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
+	}
+	if len(scopeRecord.ExcludedTables) > 0 {
+		names := make([]string, 0, len(scopeRecord.ExcludedTables))
+		for _, issue := range scopeRecord.ExcludedTables {
+			names = append(names, issue.Table)
+		}
+		appendIncrementalLifecycleLog(jobID, "preflight", "warn", fmt.Sprintf("用户确认排除 %d 张缺失目标表: %s", len(names), strings.Join(names, ", ")))
 	}
 	launchIncremental(j, src, dst)
 	c.JSON(200, gin.H{"job_id": jobID, "preflight": pf})
@@ -554,7 +581,7 @@ func configFromIncremental(j *store.IncrementalMigrationJob, src, dst *store.Con
 	cfg.KeylessChangePolicy = j.KeylessChangePolicy
 	cfg.LocatorStrategyVersion = j.LocatorStrategyVersion
 	_ = json.Unmarshal([]byte(j.LocatorStrategiesJSON), &cfg.LocatorStrategies)
-	if j.BootstrapDone && j.EffectiveJSON != "" {
+	if (j.BootstrapDone || (j.StartMode == "incremental_only" && j.ManifestHash != "")) && j.EffectiveJSON != "" {
 		var tables []string
 		if json.Unmarshal([]byte(j.EffectiveJSON), &tables) == nil && tables != nil {
 			cfg.TableNames = tables
@@ -563,6 +590,10 @@ func configFromIncremental(j *store.IncrementalMigrationJob, src, dst *store.Con
 			// wildcard filter, because that could re-include excluded tables.
 			cfg.TableNames = []string{}
 		}
+	}
+	if j.StartMode == "incremental_only" && j.ManifestHash != "" {
+		_ = json.Unmarshal([]byte(j.ExcludedJSON), &cfg.ScopeExclusions)
+		cfg.ScopeManifestHash = j.ManifestHash
 	}
 	return cfg
 }
@@ -707,6 +738,14 @@ func GetIncrementalBootstrapReview(c *gin.Context) {
 	if e != nil {
 		c.JSON(500, gin.H{"error": "读取目标 bootstrap checkpoint 失败: " + e.Error()})
 		return
+	}
+	if !exists && j.StartMode == "incremental_only" && j.ManifestHash != "" {
+		record = cdc.BootstrapRecord{State: "completed", Position: cdc.Position{File: j.StartFile, Pos: j.StartPosition, GTID: j.StartGTID},
+			ManifestHash: j.ManifestHash, LocatorStrategyVersion: j.LocatorStrategyVersion}
+		_ = json.Unmarshal([]byte(j.EffectiveJSON), &record.EffectiveTables)
+		_ = json.Unmarshal([]byte(j.ExcludedJSON), &record.ExcludedTables)
+		_ = json.Unmarshal([]byte(j.LocatorStrategiesJSON), &record.LocatorStrategies)
+		exists = len(record.EffectiveTables) > 0
 	}
 	if !exists {
 		c.JSON(404, gin.H{"error": "该任务没有可用的 bootstrap 审阅记录"})

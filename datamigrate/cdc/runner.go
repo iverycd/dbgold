@@ -64,8 +64,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err = ApplyLocatorStrategies(tables, r.cfg.LocatorStrategies); err != nil {
 			return err
 		}
-		record = BootstrapRecord{State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables),
-			LocatorStrategyVersion: LocatorStrategyVersion, LocatorStrategies: r.cfg.LocatorStrategies}
+		record = BootstrapRecord{State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables), ExcludedTables: r.cfg.ScopeExclusions,
+			ManifestHash: r.cfg.ScopeManifestHash, LocatorStrategyVersion: LocatorStrategyVersion, LocatorStrategies: r.cfg.LocatorStrategies}
+		if record.ManifestHash == "" {
+			record.ManifestHash = HashBootstrapManifest(record)
+		}
 		if err = applier.SaveBootstrapRecord(ctx, record); err != nil {
 			return fmt.Errorf("保存 CDC 定位策略失败: %w", err)
 		}

@@ -161,6 +161,7 @@ export interface IncrementalRequest {
   server_id?: number
   migrate_mode: 'all' | 'include' | 'exclude'
   table_filter?: string
+  excluded_tables?: string[]
   lower_case_names?: boolean
   bootstrap_failure_policy?: 'review_and_exclude' | 'fail_all'
   keyless_change_policy?: 'full_row_match'
@@ -177,6 +178,11 @@ export interface CDCTableInfo {
   locator_columns: string[]
   locator_warning?: string
 }
+export interface TargetTableIssue {
+  source_table: string
+  target_schema: string
+  target_table: string
+}
 export interface IncrementalPreflight {
   ok: boolean
   log_bin: boolean
@@ -187,6 +193,8 @@ export interface IncrementalPreflight {
   current_position: CDCPosition
   tables: CDCTableInfo[]
   no_primary_key_tables: string[]
+  missing_target_tables: TargetTableIssue[]
+  excluded_tables: TargetTableIssue[]
   errors: string[]
   warnings: string[]
 }
@@ -267,7 +275,7 @@ export interface IncrementalJob {
 
 export interface BootstrapIssue {
   table: string
-  stage: 'schema' | 'data' | 'row_count' | 'cdc_compatibility'
+  stage: 'schema' | 'data' | 'row_count' | 'cdc_compatibility' | 'target_missing'
   error: string
   ddl?: string
 }

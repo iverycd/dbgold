@@ -45,17 +45,25 @@ type LocatorStrategy struct {
 }
 
 type PreflightResult struct {
-	OK              bool        `json:"ok"`
-	LogBin          bool        `json:"log_bin"`
-	BinlogFormat    string      `json:"binlog_format"`
-	BinlogRowImage  string      `json:"binlog_row_image"`
-	GTIDMode        string      `json:"gtid_mode"`
-	RetentionSecs   *int64      `json:"binlog_retention_seconds"`
-	CurrentPosition Position    `json:"current_position"`
-	Tables          []TableInfo `json:"tables"`
-	NoPrimaryKey    []string    `json:"no_primary_key_tables"`
-	Errors          []string    `json:"errors"`
-	Warnings        []string    `json:"warnings"`
+	OK                  bool               `json:"ok"`
+	LogBin              bool               `json:"log_bin"`
+	BinlogFormat        string             `json:"binlog_format"`
+	BinlogRowImage      string             `json:"binlog_row_image"`
+	GTIDMode            string             `json:"gtid_mode"`
+	RetentionSecs       *int64             `json:"binlog_retention_seconds"`
+	CurrentPosition     Position           `json:"current_position"`
+	Tables              []TableInfo        `json:"tables"`
+	NoPrimaryKey        []string           `json:"no_primary_key_tables"`
+	MissingTargetTables []TargetTableIssue `json:"missing_target_tables"`
+	ExcludedTables      []TargetTableIssue `json:"excluded_tables"`
+	Errors              []string           `json:"errors"`
+	Warnings            []string           `json:"warnings"`
+}
+
+type TargetTableIssue struct {
+	SourceTable  string `json:"source_table"`
+	TargetSchema string `json:"target_schema"`
+	TargetTable  string `json:"target_table"`
 }
 
 type Config struct {
@@ -72,6 +80,9 @@ type Config struct {
 	Mode                   string
 	Filter                 string
 	TableNames             []string
+	RequestedExclusions    []string
+	ScopeExclusions        []BootstrapIssue
+	ScopeManifestHash      string
 	LowerCaseNames         bool
 	ServerID               uint32
 	Start                  Position

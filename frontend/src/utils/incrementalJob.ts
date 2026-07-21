@@ -27,6 +27,7 @@ export const bootstrapStageLabels: Record<string, string> = {
   data: '数据复制',
   row_count: '行数校验',
   cdc_compatibility: 'CDC 兼容性',
+  target_missing: '目标表缺失',
   objects: '对象创建',
   validation: '校验',
 }

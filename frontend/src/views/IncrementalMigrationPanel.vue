@@ -150,6 +150,25 @@
         以下表将按更新前完整行同步 UPDATE/DELETE，目标端可能全表扫描：{{ preflightFullRowTables.join(', ') }}
       </a-alert>
     </a-card>
+
+    <a-modal v-model:visible="missingTableModalVisible" title="目标表不存在" :mask-closable="false" :footer="false">
+      <a-alert type="error">
+        从指定位点开始不会自动建表。确认排除后，这些表后续所有 INSERT、UPDATE、DELETE 都不会同步。
+      </a-alert>
+      <a-checkbox-group v-model="selectedMissingTables" class="missing-table-list">
+        <a-checkbox v-for="table in preflightResult?.missing_target_tables || []" :key="table.source_table" :value="table.source_table">
+          <span class="missing-table-name">{{ table.source_table }}</span>
+          <span class="missing-table-target">→ {{ table.target_schema }}.{{ table.target_table }}</span>
+        </a-checkbox>
+      </a-checkbox-group>
+      <div class="missing-table-actions">
+        <a-button @click="missingTableModalVisible = false">暂不处理</a-button>
+        <a-button :loading="checking" @click="retryAfterRepair">我已修复，重新预检</a-button>
+        <a-button type="primary" status="danger" :loading="checking" :disabled="selectedMissingTables.length === 0" @click="excludeMissingAndRetry">
+          排除所选并重新预检
+        </a-button>
+      </div>
+    </a-modal>
   </a-form>
 </template>
 
@@ -190,6 +209,7 @@ const form = reactive<IncrementalForm>({
   start_position: 4,
   migrate_mode: 'all',
   table_filter: '',
+  excluded_tables: [],
   lower_case_names: true,
   bootstrap_failure_policy: 'review_and_exclude',
   keyless_change_policy: 'full_row_match',
@@ -226,7 +246,24 @@ const preflightLocatorCounts = computed(() => {
 const preflightFullRowTables = computed(() => (preflightResult.value?.tables || [])
   .filter(table => table.locator_strategy === 'full_row').map(table => table.name))
 
-watch(form, () => { preflightResult.value = null }, { deep: true })
+const missingTableModalVisible = ref(false)
+const selectedMissingTables = ref<string[]>([])
+
+function resetPreflightState() {
+  preflightResult.value = null
+  missingTableModalVisible.value = false
+  selectedMissingTables.value = []
+}
+
+watch(() => [
+  form.src_conn_id, form.dst_conn_id, form.src_database, form.target_schema, form.start_mode, form.position_mode,
+  form.start_gtid, form.start_file, form.start_position, form.migrate_mode, form.table_filter, form.lower_case_names,
+  form.bootstrap_failure_policy, form.keyless_change_policy,
+], () => {
+  form.excluded_tables = []
+  resetPreflightState()
+})
+watch(() => form.excluded_tables, resetPreflightState, { deep: true })
 
 async function loadDatabases() {
   form.src_database = ''
@@ -250,6 +287,12 @@ async function preflight() {
   checking.value = true
   try {
     preflightResult.value = (await preflightIncremental(request)).data
+    if (preflightResult.value.missing_target_tables?.length) {
+      selectedMissingTables.value = []
+      missingTableModalVisible.value = true
+    } else {
+      missingTableModalVisible.value = false
+    }
     if (preflightResult.value.ok) Message.success('预检通过')
     else Message.error('预检未通过')
   } catch (e: any) {
@@ -258,6 +301,16 @@ async function preflight() {
   } finally {
     checking.value = false
   }
+}
+async function retryAfterRepair() {
+  form.excluded_tables = []
+  missingTableModalVisible.value = false
+  await preflight()
+}
+async function excludeMissingAndRetry() {
+  form.excluded_tables = Array.from(new Set([...(form.excluded_tables || []), ...selectedMissingTables.value]))
+  missingTableModalVisible.value = false
+  await preflight()
 }
 async function start() {
   const request = buildRequest()
@@ -299,4 +352,8 @@ onMounted(async () => {
 .conn-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
 .conn-meta-item { font-size: 12px; color: var(--color-text-3); }
 .conn-meta-label { color: var(--color-text-4); margin-right: 3px; }
+.missing-table-list { display: flex; flex-direction: column; gap: 10px; max-height: 320px; margin-top: 16px; overflow-y: auto; }
+.missing-table-name { font-family: var(--font-mono); }
+.missing-table-target { margin-left: 8px; color: var(--color-text-3); font-family: var(--font-mono); font-size: 12px; }
+.missing-table-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 </style>
