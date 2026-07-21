@@ -209,7 +209,7 @@ function exportReport() {
   const r = report.value
   const lines: string[] = []
 
-  lines.push('数据迁移报告')
+  lines.push('单次迁移报告')
   lines.push(`Job ID: ${props.jobID}`)
   lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
   lines.push('')

@@ -1,8 +1,8 @@
 <template>
   <div>
     <a-tabs v-model:active-key="activeTab" @change="handleTabChange">
-      <!-- ===== 数据迁移历史 ===== -->
-      <a-tab-pane key="data" title="数据迁移">
+      <!-- ===== 单次迁移任务 ===== -->
+      <a-tab-pane key="data" title="单次迁移">
         <div style="display: flex; justify-content: flex-end; margin-bottom: 16px">
           <a-button @click="loadDataJobs" :loading="dataJobsLoading">
             <template #icon><icon-refresh /></template>

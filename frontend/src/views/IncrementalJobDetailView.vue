@@ -5,7 +5,7 @@
     <a-result v-else-if="loadError && !job" status="error" title="无法加载增量任务" :subtitle="loadError">
       <template #extra>
         <a-space>
-          <a-button @click="backToHistory">返回迁移历史</a-button>
+          <a-button @click="backToHistory">返回任务中心</a-button>
           <a-button type="primary" @click="loadJob()">重试</a-button>
         </a-space>
       </template>

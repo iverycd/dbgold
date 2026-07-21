@@ -266,7 +266,7 @@ async function start() {
   try {
     await startIncremental(request)
     preflightResult.value = null
-    Message.success('增量任务已启动，请到迁移历史的增量迁移中查看及操作')
+    Message.success('增量任务已启动，请到任务中心的增量迁移中查看及操作')
   } catch (e: any) {
     const errorMessage = e?.response?.data?.error || '启动失败'
     if (e?.response?.status === 409) {

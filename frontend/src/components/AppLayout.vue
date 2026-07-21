@@ -26,7 +26,7 @@
         </a-menu-item>
         <a-menu-item key="/history">
           <template #icon><icon-history /></template>
-          迁移历史
+          任务中心
         </a-menu-item>
         <a-menu-item key="/query">
           <template #icon><icon-code-square /></template>
@@ -132,7 +132,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/query': '查询中心',
   '/migration': '迁移生成',
   '/batch-migration': '批量迁移',
-  '/history': '迁移历史',
+  '/history': '任务中心',
   '/users': '用户管理',
   '/tickets': '工单管理',
   '/login-history': '登录历史',
@@ -141,7 +141,7 @@ const PAGE_TITLES: Record<string, string> = {
 const currentRoute = computed(() => route.path.startsWith('/history/') ? '/history' : route.path)
 const pageTitle = computed(() => {
   if (route.path.startsWith('/history/incremental/')) return '增量迁移详情'
-  if (route.path.startsWith('/history/data/')) return '数据迁移详情'
+  if (route.path.startsWith('/history/data/')) return '单次迁移详情'
   return PAGE_TITLES[route.path] ?? 'DBGold'
 })
 const userInitial = computed(() => auth.user?.username?.[0]?.toUpperCase() ?? 'U')

@@ -2,7 +2,7 @@
   <div>
     <h2>迁移 SQL 生成</h2>
     <a-tabs v-model:active-key="activeTab">
-      <a-tab-pane key="data-migrate" title="数据迁移">
+      <a-tab-pane key="data-migrate" title="单次迁移">
         <a-form :model="dataMigrate" layout="vertical" style="margin-top: 12px">
           <!-- 源库 / 目标库选择 -->
           <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">

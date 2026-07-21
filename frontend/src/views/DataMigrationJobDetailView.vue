@@ -2,10 +2,10 @@
   <div class="detail-page">
     <a-spin v-if="loading && !job" class="page-loading" />
 
-    <a-result v-else-if="loadError && !job" status="error" title="无法加载数据迁移任务" :subtitle="loadError">
+    <a-result v-else-if="loadError && !job" status="error" title="无法加载单次迁移任务" :subtitle="loadError">
       <template #extra>
         <a-space>
-          <a-button @click="backToHistory">返回迁移历史</a-button>
+          <a-button @click="backToHistory">返回任务中心</a-button>
           <a-button type="primary" @click="load">重试</a-button>
         </a-space>
       </template>
@@ -16,10 +16,10 @@
         <div class="task-heading">
           <a-button type="text" class="back-button" @click="backToHistory">
             <template #icon><icon-left /></template>
-            返回数据迁移
+            返回单次迁移
           </a-button>
           <div class="title-line">
-            <h1>数据迁移报告</h1>
+            <h1>单次迁移报告</h1>
             <a-tag :color="statusColor(job.status)">{{ statusText(job.status) }}</a-tag>
             <span v-if="refreshing" class="refreshing"><icon-loading /> 正在刷新</span>
           </div>
@@ -299,10 +299,10 @@ const filteredRowCounts = computed(() => {
   return allRowCounts.value.filter(row => (rowCountFilter.value === 'all' || !row.match) && (!keyword || row.table.toLowerCase().includes(keyword)))
 })
 
-const migrationTypeText = computed(() => job.value?.migrate_objects ? '仅对象迁移' : '数据迁移')
+const migrationTypeText = computed(() => job.value?.migrate_objects ? '仅对象迁移' : '单次迁移')
 const migrationModeText = computed(() => {
   if (job.value?.migrate_objects) return '对象迁移'
-  return ({ all: '全部表', include: '仅包含指定表', exclude: '排除指定表' } as Record<string, string>)[job.value?.migrate_mode || ''] || job.value?.migrate_mode || '数据迁移'
+  return ({ all: '全部表', include: '仅包含指定表', exclude: '排除指定表' } as Record<string, string>)[job.value?.migrate_mode || ''] || job.value?.migrate_mode || '单次迁移'
 })
 const durationText = computed(() => {
   if (!job.value?.finished_at) return job.value?.status === 'running' ? '进行中' : '—'
@@ -372,7 +372,7 @@ async function load() {
       timer = undefined
     }
   } catch (error: any) {
-    loadError.value = error?.response?.data?.error || '数据迁移任务不存在或无权访问'
+    loadError.value = error?.response?.data?.error || '单次迁移任务不存在或无权访问'
   } finally {
     requestRunning = false
     loading.value = false
@@ -382,7 +382,7 @@ async function load() {
 
 function exportReport() {
   if (!report.value || !job.value) return
-  const lines = ['数据迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '', '=== 迁移概览 ===']
+  const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '', '=== 迁移概览 ===']
   for (const row of categoryRows.value) {
     lines.push(row.isTrigger
       ? `${row.label.padEnd(6)}总计 ${row.total === -1 ? '获取失败' : row.total}（未迁移）`
