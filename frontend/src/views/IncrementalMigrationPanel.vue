@@ -155,7 +155,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Message } from '@arco-design/web-vue'
+import { Message, Modal } from '@arco-design/web-vue'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
 import {
   preflightIncremental,
@@ -268,7 +268,18 @@ async function start() {
     preflightResult.value = null
     Message.success('增量任务已启动，请到迁移历史的增量迁移中查看及操作')
   } catch (e: any) {
-    Message.error(e?.response?.data?.error || '启动失败')
+    const errorMessage = e?.response?.data?.error || '启动失败'
+    if (e?.response?.status === 409) {
+      Modal.error({
+        title: '无法启动增量任务',
+        content: errorMessage,
+        okText: '知道了',
+        hideCancel: true,
+        maskClosable: false,
+      })
+    } else {
+      Message.error(errorMessage)
+    }
   } finally {
     starting.value = false
   }
