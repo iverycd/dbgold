@@ -502,21 +502,68 @@ func requireOneFullRow(t *TableInfo, action string, before []any, result sql.Res
 	return &RowConflictError{Table: t.Name, Action: action, BeforeHash: fmt.Sprintf("%x", hash[:]), Reason: fmt.Sprintf("期望影响 1 行，实际影响 %d 行", affected)}
 }
 
-// SyncSequences moves PostgreSQL sequences to at least MAX(column)+1.
+const sequenceCatalogQuery = `SELECT EXISTS (
+	SELECT 1
+	FROM pg_catalog.pg_class c
+	JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'S'
+)`
+
+func qualifiedIdent(schema, object string) string {
+	if schema == "" {
+		return quoteIdent(object)
+	}
+	return quoteIdent(schema) + "." + quoteIdent(object)
+}
+
+func (a *PostgresApplier) sequenceCandidate(t *TableInfo, columnIndex int) (string, string) {
+	table := a.name(t.Name)
+	column := a.name(t.Columns[columnIndex])
+	return "seq_" + table + "_" + column, column
+}
+
+// resolveSequence first asks the database for a sequence owned by the column.
+// Older migrations did not create OWNED BY dependencies, so a catalog lookup by
+// the migration naming convention remains necessary for backwards compatibility.
+func (a *PostgresApplier) resolveSequence(ctx context.Context, t *TableInfo, columnIndex int) (string, error) {
+	candidate, column := a.sequenceCandidate(t, columnIndex)
+	targetTable := qualifiedIdent(a.schema, a.name(t.Name))
+	qualifiedCandidate := qualifiedIdent(a.schema, candidate)
+
+	var ownedSequence sql.NullString
+	ownedErr := a.db.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, targetTable, column).Scan(&ownedSequence)
+	if ownedErr == nil && ownedSequence.Valid && ownedSequence.String != "" {
+		return ownedSequence.String, nil
+	}
+
+	var exists bool
+	if err := a.db.QueryRowContext(ctx, sequenceCatalogQuery, a.schema, candidate).Scan(&exists); err != nil {
+		if ownedErr != nil {
+			return "", fmt.Errorf("查询自增列序列失败 [%s.%s，候选 %s]: pg_get_serial_sequence: %v; 系统目录查询: %w",
+				t.Name, t.Columns[columnIndex], qualifiedCandidate, ownedErr, err)
+		}
+		return "", fmt.Errorf("查询自增列序列失败 [%s.%s，候选 %s]: 系统目录查询: %w",
+			t.Name, t.Columns[columnIndex], qualifiedCandidate, err)
+	}
+	if !exists {
+		return "", fmt.Errorf("未找到自增列对应序列 [%s.%s]: 目标 schema=%s，候选序列=%s",
+			t.Name, t.Columns[columnIndex], quoteIdent(a.schema), qualifiedCandidate)
+	}
+	return qualifiedCandidate, nil
+}
+
+// SyncSequences moves PostgreSQL-compatible sequences to at least MAX(column)+1.
 func (a *PostgresApplier) SyncSequences(ctx context.Context, tables []TableInfo) error {
-	for _, t := range tables {
+	for i := range tables {
+		t := &tables[i]
 		for _, idx := range t.AutoIncrement {
-			var seq sql.NullString
-			err := a.db.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, a.schema+"."+a.name(t.Name), a.name(t.Columns[idx])).Scan(&seq)
-			if err != nil || !seq.Valid {
-				candidate := a.schema + ".seq_" + a.name(t.Name) + "_" + a.name(t.Columns[idx])
-				if e := a.db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, candidate).Scan(&seq); e != nil || !seq.Valid {
-					return fmt.Errorf("未找到自增列对应序列: %s.%s", t.Name, t.Columns[idx])
-				}
-			}
-			_, err = a.db.ExecContext(ctx, fmt.Sprintf(`SELECT setval($1::regclass, COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)`, quoteIdent(a.name(t.Columns[idx])), a.qualified(t.Name)), seq.String)
+			seq, err := a.resolveSequence(ctx, t, idx)
 			if err != nil {
 				return err
+			}
+			_, err = a.db.ExecContext(ctx, fmt.Sprintf(`SELECT setval($1::regclass, COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)`, quoteIdent(a.name(t.Columns[idx])), a.qualified(t.Name)), seq)
+			if err != nil {
+				return fmt.Errorf("校正自增列序列失败 [%s.%s，序列 %s]: %w", t.Name, t.Columns[idx], seq, err)
 			}
 		}
 	}

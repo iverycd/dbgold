@@ -96,9 +96,21 @@ func TestPostgresSequence_Golden(t *testing.T) {
 	d := NewPostgres("postgres")
 	seq := source.SequenceInfo{TableName: "t", ColumnName: "id", StartValue: 100}
 	want := `CREATE SEQUENCE IF NOT EXISTS "s"."seq_t_id" INCREMENT BY 1 START 100;
-ALTER TABLE "s"."t" ALTER COLUMN "id" SET DEFAULT nextval('s."seq_t_id"')`
+ALTER TABLE "s"."t" ALTER COLUMN "id" SET DEFAULT nextval('"s"."seq_t_id"');
+ALTER SEQUENCE "s"."seq_t_id" OWNED BY "s"."t"."id"`
 	if got := JoinSQL(d.SequenceStatements("s", seq)); got != want {
 		t.Errorf("sequence mismatch:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestPostgresSequence_QuotedNames(t *testing.T) {
+	d := NewPostgres("gaussdb")
+	seq := source.SequenceInfo{TableName: "Code_ItemLev", ColumnName: "SYSID", StartValue: 1}
+	want := `CREATE SEQUENCE IF NOT EXISTS "TargetSchema"."seq_Code_ItemLev_SYSID" INCREMENT BY 1 START 1;
+ALTER TABLE "TargetSchema"."Code_ItemLev" ALTER COLUMN "SYSID" SET DEFAULT nextval('"TargetSchema"."seq_Code_ItemLev_SYSID"');
+ALTER SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" OWNED BY "TargetSchema"."Code_ItemLev"."SYSID"`
+	if got := JoinSQL(d.SequenceStatements("TargetSchema", seq)); got != want {
+		t.Errorf("quoted sequence mismatch:\n got: %s\nwant: %s", got, want)
 	}
 }
 
