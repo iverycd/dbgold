@@ -35,7 +35,7 @@ VITE_API_TARGET=http://localhost:18089
 
 ## 生成离线发布包
 
-开发机需要 Go 1.25.5、Node/npm、Docker Buildx、zip、tar。版本化发布默认要求 Git 工作区干净：
+开发机需要 Go 1.25.5、Node/npm、Docker Buildx、curl、zip、tar。版本化发布默认要求 Git 工作区干净：
 
 ```bash
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
@@ -49,13 +49,15 @@ GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
 - `SHA256SUMS`
 - `release-manifest.json`（版本、提交、构建时间和平台清单）
 
-Linux 镜像按架构分别导出为 Docker archive，目标服务器不需要访问镜像仓库。
+三个压缩包解压后都会生成一个与压缩包同名的外层目录。Linux 镜像按架构分别导出为 Docker archive，并内置对应架构的 Docker Compose，目标服务器不需要访问镜像仓库或预装 Compose。
 
 ## Linux 安装
 
-目标服务器需要 Docker Engine 和 Docker Compose v2。选择与 `uname -m` 对应的发布包，解压后执行：
+目标服务器只需要已启动且可访问的 Docker Engine。选择与 `uname -m` 对应的发布包，解压并进入生成的目录后执行：
 
 ```bash
+tar -xzf dbgold-v1.2.3-linux-amd64.tar.gz
+cd dbgold-v1.2.3-linux-amd64
 sudo ./install.sh --port 18089 --allow-cidr 192.168.1.0/24
 ```
 
@@ -63,6 +65,7 @@ sudo ./install.sh --port 18089 --allow-cidr 192.168.1.0/24
 
 ```text
 /opt/dbgold/config/dbgold.env
+/opt/dbgold/bin/docker-compose
 /opt/dbgold/data/
 /opt/dbgold/uploads/
 /opt/dbgold/logs/
@@ -83,7 +86,7 @@ sudo /opt/dbgold/set-port.sh --port 19089 --allow-cidr 192.168.1.0/24
 
 ```bash
 cd /opt/dbgold
-sudo docker compose --env-file config/dbgold.env -f compose.yaml up -d --force-recreate
+sudo /opt/dbgold/bin/docker-compose --env-file config/dbgold.env -f compose.yaml up -d --force-recreate
 ```
 
 Compose 必须带 `--env-file`，这样宿主机映射和容器监听端口才会同步变化。
@@ -110,9 +113,11 @@ sudo /opt/dbgold/restore.sh --backup /opt/dbgold/backups/dbgold-时间.tar.gz --
 
 ## Windows x64 安装
 
-解压 Windows 发布包，在管理员 PowerShell 中执行：
+解压 Windows 发布包后会得到同名外层目录。进入该目录，在管理员 PowerShell 中执行：
 
 ```powershell
+Expand-Archive .\dbgold-v1.2.3-windows-amd64.zip -DestinationPath .
+Set-Location .\dbgold-v1.2.3-windows-amd64
 Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1 -Port 18089
 ```

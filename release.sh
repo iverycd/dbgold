@@ -7,7 +7,7 @@ if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "Usage: $0 <version>, for example $0 v1.2.3" >&2
   exit 2
 fi
-for command_name in docker npm zip tar shasum; do
+for command_name in curl docker npm zip tar shasum; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "Missing required command: $command_name" >&2; exit 1; }
 done
 GO_BIN="${GO_BIN:-$(command -v go || true)}"
@@ -36,6 +36,37 @@ fi
 OUTPUT_DIR="$WORK_DIR/output"
 mkdir -p "$OUTPUT_DIR"
 
+COMPOSE_VERSION="v5.1.4"
+download_compose() {
+  local arch="$1"
+  local destination="$2"
+  local asset_arch expected_sha
+  case "$arch" in
+    amd64)
+      asset_arch="x86_64"
+      expected_sha="33b208d7e76639db742fae84b966cc01dacae58ca3fc4dabbc907045aefdf0c4"
+      ;;
+    arm64)
+      asset_arch="aarch64"
+      expected_sha="d4fb48b72857810314d3ee77123c89954101844efa4788031221f4c370495946"
+      ;;
+    *)
+      echo "Unsupported Docker Compose architecture: $arch" >&2
+      return 1
+      ;;
+  esac
+  curl -fL --retry 3 \
+    "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-$asset_arch" \
+    -o "$destination"
+  local actual_sha
+  actual_sha="$(shasum -a 256 "$destination" | awk '{print $1}')"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo "Docker Compose checksum mismatch for linux/$arch: expected $expected_sha, got $actual_sha" >&2
+    return 1
+  fi
+  chmod 0755 "$destination"
+}
+
 cd "$ROOT_DIR/frontend"
 npm ci
 npm audit --omit=dev --audit-level=high
@@ -48,8 +79,10 @@ LDFLAGS="-s -w -X dbgold/api/handler.Version=$VERSION -X dbgold/api/handler.GitC
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$WORK_DIR/dbgold.exe" .
 
 for ARCH in amd64 arm64; do
-  PACKAGE_DIR="$WORK_DIR/linux-$ARCH"
-  mkdir -p "$PACKAGE_DIR"
+  PACKAGE_NAME="dbgold-$VERSION-linux-$ARCH"
+  PACKAGE_DIR="$WORK_DIR/$PACKAGE_NAME"
+  mkdir -p "$PACKAGE_DIR/bin"
+  download_compose "$ARCH" "$PACKAGE_DIR/bin/docker-compose"
   docker buildx build \
     --builder "$BUILDER_NAME" \
     --platform "linux/$ARCH" \
@@ -61,16 +94,18 @@ for ARCH in amd64 arm64; do
     "$ROOT_DIR"
   cp "$ROOT_DIR/README.md" "$PACKAGE_DIR/README.md"
   cp "$ROOT_DIR/deploy/linux/compose.yaml" "$ROOT_DIR/deploy/linux/dbgold.env.example" "$ROOT_DIR/deploy/linux/"*.sh "$PACKAGE_DIR/"
+  cp -R "$ROOT_DIR/deploy/linux/licenses" "$PACKAGE_DIR/licenses"
   printf '%s\n' "$VERSION" > "$PACKAGE_DIR/VERSION"
   printf '%s\n' "$ARCH" > "$PACKAGE_DIR/ARCH"
-  printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "linux",\n  "architecture": "%s"\n}\n' \
-    "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" "$ARCH" > "$PACKAGE_DIR/release-manifest.json"
+  printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "linux",\n  "architecture": "%s",\n  "docker_compose_version": "%s"\n}\n' \
+    "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" "$ARCH" "$COMPOSE_VERSION" > "$PACKAGE_DIR/release-manifest.json"
   chmod +x "$PACKAGE_DIR/"*.sh
-  (cd "$PACKAGE_DIR" && for file in ARCH VERSION README.md compose.yaml dbgold.env.example image.tar release-manifest.json *.sh; do shasum -a 256 "$file"; done > manifest.sha256)
-  tar -C "$PACKAGE_DIR" -czf "$OUTPUT_DIR/dbgold-$VERSION-linux-$ARCH.tar.gz" .
+  (cd "$PACKAGE_DIR" && find . -type f ! -name manifest.sha256 -print | LC_ALL=C sort | while read -r file; do shasum -a 256 "${file#./}"; done > manifest.sha256)
+  tar -C "$WORK_DIR" -czf "$OUTPUT_DIR/$PACKAGE_NAME.tar.gz" "$PACKAGE_NAME"
 done
 
-WINDOWS_DIR="$WORK_DIR/windows-amd64"
+WINDOWS_PACKAGE_NAME="dbgold-$VERSION-windows-amd64"
+WINDOWS_DIR="$WORK_DIR/$WINDOWS_PACKAGE_NAME"
 mkdir -p "$WINDOWS_DIR/web"
 cp "$WORK_DIR/dbgold.exe" "$WINDOWS_DIR/dbgold.exe"
 cp -R "$ROOT_DIR/frontend/dist/." "$WINDOWS_DIR/web/"
@@ -80,11 +115,11 @@ printf '%s\n' "$VERSION" > "$WINDOWS_DIR/VERSION"
 printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "windows",\n  "architecture": "amd64"\n}\n' \
   "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" > "$WINDOWS_DIR/release-manifest.json"
 (cd "$WINDOWS_DIR" && find . -type f ! -name manifest.sha256 -print | LC_ALL=C sort | while read -r file; do shasum -a 256 "${file#./}"; done > manifest.sha256)
-(cd "$WINDOWS_DIR" && zip -qr "$OUTPUT_DIR/dbgold-$VERSION-windows-amd64.zip" .)
+(cd "$WORK_DIR" && zip -qr "$OUTPUT_DIR/$WINDOWS_PACKAGE_NAME.zip" "$WINDOWS_PACKAGE_NAME")
 
 (cd "$OUTPUT_DIR" && shasum -a 256 dbgold-* > SHA256SUMS)
-printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "artifacts": ["linux/amd64", "linux/arm64", "windows/amd64"]\n}\n' \
-  "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" > "$OUTPUT_DIR/release-manifest.json"
+printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "docker_compose_version": "%s",\n  "artifacts": ["linux/amd64", "linux/arm64", "windows/amd64"]\n}\n' \
+  "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" "$COMPOSE_VERSION" > "$OUTPUT_DIR/release-manifest.json"
 mkdir -p "$ROOT_DIR/release"
 mv "$OUTPUT_DIR" "$FINAL_OUTPUT_DIR"
 echo "Release artifacts are available in $FINAL_OUTPUT_DIR"

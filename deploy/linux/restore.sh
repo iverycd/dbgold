@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DEPLOY_DIR="/opt/dbgold"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_FILE=""
 CONFIRMED=0
 while [[ $# -gt 0 ]]; do
@@ -16,14 +17,25 @@ done
 [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]] || { echo "A valid --backup file is required." >&2; exit 1; }
 (( CONFIRMED == 1 )) || { echo "Restore replaces current data. Re-run with --yes." >&2; exit 1; }
 [[ -f "$DEPLOY_DIR/compose.yaml" ]] || { echo "Invalid deployment directory: $DEPLOY_DIR" >&2; exit 1; }
+if [[ -x "$DEPLOY_DIR/bin/docker-compose" ]]; then
+  COMPOSE_BIN="$DEPLOY_DIR/bin/docker-compose"
+elif [[ -x "$SCRIPT_DIR/bin/docker-compose" ]]; then
+  COMPOSE_BIN="$SCRIPT_DIR/bin/docker-compose"
+else
+  echo "Bundled Docker Compose is missing or not executable." >&2
+  exit 1
+fi
 if tar -tzf "$BACKUP_FILE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   echo "Backup contains an unsafe path and will not be restored." >&2
   exit 1
 fi
 
 cd "$DEPLOY_DIR"
+compose() {
+  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
+}
 if [[ -f config/dbgold.env ]]; then
-  docker compose --env-file config/dbgold.env -f compose.yaml stop || true
+  compose stop || true
 fi
 SAFETY_DIR="$DEPLOY_DIR/backups/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$SAFETY_DIR"
@@ -44,15 +56,15 @@ if ! tar -xzf "$BACKUP_FILE" -C "$DEPLOY_DIR"; then
   exit 1
 fi
 chown -R 65532:65532 "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" 2>/dev/null || true
-docker compose --env-file config/dbgold.env -f compose.yaml up -d
+compose up -d
 for _ in $(seq 1 30); do
-  if docker compose --env-file config/dbgold.env -f compose.yaml exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
+  if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
     echo "Restore completed. Pre-restore data is retained at $SAFETY_DIR"
     exit 0
   fi
   sleep 1
 done
-docker compose --env-file config/dbgold.env -f compose.yaml stop || true
+compose stop || true
 FAILED_DIR="$SAFETY_DIR/failed-readiness"
 mkdir -p "$FAILED_DIR"
 for item in data uploads config; do
@@ -60,6 +72,6 @@ for item in data uploads config; do
   [[ -e "$SAFETY_DIR/$item" ]] && mv "$SAFETY_DIR/$item" "$DEPLOY_DIR/$item"
 done
 chown -R 65532:65532 "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" 2>/dev/null || true
-docker compose --env-file config/dbgold.env -f compose.yaml up -d || true
+compose up -d || true
 echo "Restored version failed readiness; the pre-restore data was put back. Failed data is at $FAILED_DIR" >&2
 exit 1

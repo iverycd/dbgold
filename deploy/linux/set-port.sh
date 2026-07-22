@@ -22,6 +22,8 @@ if [[ -n "$ALLOW_CIDR" && ! "$ALLOW_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]
 fi
 CONFIG_FILE="$DEPLOY_DIR/config/dbgold.env"
 [[ -f "$CONFIG_FILE" ]] || { echo "Configuration not found: $CONFIG_FILE" >&2; exit 1; }
+COMPOSE_BIN="$DEPLOY_DIR/bin/docker-compose"
+[[ -x "$COMPOSE_BIN" ]] || { echo "Bundled Docker Compose is missing or not executable: $COMPOSE_BIN" >&2; exit 1; }
 CURRENT_PORT="$(awk -F= '$1=="PORT" {print $2; exit}' "$CONFIG_FILE")"
 if [[ "$CURRENT_PORT" == "$PORT_VALUE" ]]; then
   echo "dbgold is already configured for port $PORT_VALUE"
@@ -34,9 +36,12 @@ fi
 sed -i "s/^PORT=.*/PORT=$PORT_VALUE/" "$CONFIG_FILE"
 
 cd "$DEPLOY_DIR"
-docker compose --env-file config/dbgold.env -f compose.yaml up -d --force-recreate
+compose() {
+  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
+}
+compose up -d --force-recreate
 for _ in $(seq 1 30); do
-  if docker compose --env-file config/dbgold.env -f compose.yaml exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
+  if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
     if [[ -n "$ALLOW_CIDR" ]]; then
       if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
         firewall-cmd --permanent --remove-rich-rule="rule family=ipv4 source address=$ALLOW_CIDR port port=$CURRENT_PORT protocol=tcp accept" >/dev/null 2>&1 || true
@@ -53,6 +58,6 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 sed -i "s/^PORT=.*/PORT=$CURRENT_PORT/" "$CONFIG_FILE"
-docker compose --env-file config/dbgold.env -f compose.yaml up -d --force-recreate >/dev/null 2>&1 || true
+compose up -d --force-recreate >/dev/null 2>&1 || true
 echo "dbgold failed its readiness check after changing the port." >&2
 exit 1

@@ -16,8 +16,18 @@ done
 [[ -f "$SOURCE_DIR/image.tar" && -f "$SOURCE_DIR/VERSION" ]] || { echo "Run upgrade.sh from an extracted release package." >&2; exit 1; }
 [[ -f "$DEPLOY_DIR/config/dbgold.env" ]] || { echo "No existing deployment found at $DEPLOY_DIR" >&2; exit 1; }
 (cd "$SOURCE_DIR" && sha256sum -c manifest.sha256)
+COMPOSE_BIN="$SOURCE_DIR/bin/docker-compose"
+[[ -x "$COMPOSE_BIN" ]] || { echo "Bundled Docker Compose is missing or not executable: $COMPOSE_BIN" >&2; exit 1; }
+if ! COMPOSE_VERSION_OUTPUT="$("$COMPOSE_BIN" version 2>&1)"; then
+  echo "Bundled Docker Compose cannot run on this server. Verify that the release package matches this server's architecture." >&2
+  echo "$COMPOSE_VERSION_OUTPUT" >&2
+  exit 1
+fi
 
 cd "$DEPLOY_DIR"
+compose() {
+  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
+}
 OLD_VERSION="$(awk -F= '$1=="DBGOLD_VERSION" {print $2; exit}' config/dbgold.env)"
 NEW_VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/VERSION")"
 BACKUP_FILE=""
@@ -29,22 +39,24 @@ rollback_on_error() {
   if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
     "$SOURCE_DIR/restore.sh" --deploy-dir "$DEPLOY_DIR" --backup "$BACKUP_FILE" --yes || true
   else
-    docker compose --env-file config/dbgold.env -f compose.yaml up -d || true
+    compose up -d || true
   fi
   exit "$STATUS"
 }
 trap rollback_on_error ERR
 
-docker compose --env-file config/dbgold.env -f compose.yaml stop
+compose stop
 BACKUP_FILE="$($SOURCE_DIR/backup.sh --deploy-dir "$DEPLOY_DIR" --already-stopped)"
 docker load -i "$SOURCE_DIR/image.tar"
 install -m 0644 "$SOURCE_DIR/compose.yaml" compose.yaml
+mkdir -p bin
+install -m 0755 "$COMPOSE_BIN" bin/docker-compose
 for script in backup.sh restore.sh upgrade.sh set-port.sh; do install -m 0755 "$SOURCE_DIR/$script" "$script"; done
 sed -i "s/^DBGOLD_VERSION=.*/DBGOLD_VERSION=$NEW_VERSION/" config/dbgold.env
 
-if docker compose --env-file config/dbgold.env -f compose.yaml up -d; then
+if compose up -d; then
   for _ in $(seq 1 30); do
-    if docker compose --env-file config/dbgold.env -f compose.yaml exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
+    if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
       trap - ERR
       echo "Upgrade completed: $OLD_VERSION -> $NEW_VERSION"
       echo "Cold backup: $BACKUP_FILE"

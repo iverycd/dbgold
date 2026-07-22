@@ -35,7 +35,6 @@ fi
 for command_name in docker sha256sum tar; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "Missing required command: $command_name" >&2; exit 1; }
 done
-docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required." >&2; exit 1; }
 
 case "$(uname -m)" in
   x86_64|amd64) DETECTED_ARCH="amd64" ;;
@@ -47,7 +46,30 @@ if [[ "$DETECTED_ARCH" != "$PACKAGE_ARCH" ]]; then
   echo "Package architecture is $PACKAGE_ARCH, but this server is $DETECTED_ARCH." >&2
   exit 1
 fi
+SOURCE_COMPOSE="$SOURCE_DIR/bin/docker-compose"
+if [[ ! -f "$SOURCE_COMPOSE" ]]; then
+  echo "Bundled Docker Compose is missing: $SOURCE_COMPOSE" >&2
+  exit 1
+fi
+if [[ ! -x "$SOURCE_COMPOSE" ]]; then
+  echo "Bundled Docker Compose is not executable: $SOURCE_COMPOSE" >&2
+  exit 1
+fi
 (cd "$SOURCE_DIR" && sha256sum -c manifest.sha256)
+if ! COMPOSE_VERSION_OUTPUT="$("$SOURCE_COMPOSE" version 2>&1)"; then
+  echo "Bundled Docker Compose cannot run on this server. Verify that the release package matches $DETECTED_ARCH." >&2
+  echo "$COMPOSE_VERSION_OUTPUT" >&2
+  exit 1
+fi
+if ! DOCKER_INFO_OUTPUT="$(docker info 2>&1)"; then
+  if grep -qiE 'permission denied|access denied' <<<"$DOCKER_INFO_OUTPUT"; then
+    echo "Docker is installed, but the current user cannot access the Docker daemon." >&2
+  else
+    echo "Docker is installed, but the Docker daemon is not reachable. Start Docker and run the installer again." >&2
+  fi
+  echo "$DOCKER_INFO_OUTPUT" >&2
+  exit 1
+fi
 
 if command -v ss >/dev/null 2>&1 && ss -ltnH | awk '{print $4}' | grep -Eq "[:.]${PORT_VALUE}$"; then
   echo "Port $PORT_VALUE is already in use. Choose another port with --port." >&2
@@ -63,8 +85,9 @@ if (( AVAILABLE_KB < REQUIRED_KB )); then
 fi
 
 VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/VERSION")"
-mkdir -p "$DEPLOY_DIR" "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/config" "$DEPLOY_DIR/backups"
+mkdir -p "$DEPLOY_DIR" "$DEPLOY_DIR/bin" "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/config" "$DEPLOY_DIR/backups"
 install -m 0644 "$SOURCE_DIR/compose.yaml" "$DEPLOY_DIR/compose.yaml"
+install -m 0755 "$SOURCE_COMPOSE" "$DEPLOY_DIR/bin/docker-compose"
 for script in backup.sh restore.sh upgrade.sh set-port.sh; do
   install -m 0755 "$SOURCE_DIR/$script" "$DEPLOY_DIR/$script"
 done
@@ -115,15 +138,19 @@ else
 fi
 
 cd "$DEPLOY_DIR"
-docker compose --env-file config/dbgold.env -f compose.yaml up -d
+COMPOSE_BIN="$DEPLOY_DIR/bin/docker-compose"
+compose() {
+  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
+}
+compose up -d
 for _ in $(seq 1 30); do
-  if docker compose --env-file config/dbgold.env -f compose.yaml exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
+  if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
     ACTIVE_PORT="$(awk -F= '$1=="PORT" {print $2; exit}' config/dbgold.env)"
     echo "dbgold $VERSION is ready on 0.0.0.0:$ACTIVE_PORT"
     exit 0
   fi
   sleep 1
 done
-docker compose --env-file config/dbgold.env -f compose.yaml logs --tail=100 dbgold >&2 || true
+compose logs --tail=100 dbgold >&2 || true
 echo "dbgold failed its readiness check." >&2
 exit 1
