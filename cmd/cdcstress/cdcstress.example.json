@@ -1,0 +1,48 @@
+{
+  "api": {
+    "base_url": "http://127.0.0.1:8080",
+    "source_connection_name": "cdc-mysql",
+    "target_connection_name": "cdc-gaussdb"
+  },
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "cdc_stress_admin",
+    "database": "dbgold_cdc_stress"
+  },
+  "gaussdb": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "user": "cdc_stress_admin",
+    "database": "postgres",
+    "schema": "dbgold_cdc_stress",
+    "sslmode": "disable"
+  },
+  "profile": {
+    "name": "small",
+    "batch_size": 500,
+    "workers": 4,
+    "seed": 20260722,
+    "lower_case_names": true
+  },
+  "workload": {
+    "tps_steps": [50, 100, 250, 500, 1000],
+    "step_duration": "2m",
+    "pause_write_duration": "10s",
+    "idle_duration": "15s",
+    "catch_up_timeout": "30m",
+    "poll_interval": "1s",
+    "workers": 8,
+    "enable_pause_resume": true,
+    "enable_ddl": true,
+    "enable_conflict": true,
+    "enable_binlog_rotate": true
+  },
+  "database_pool": {
+    "max_open_conns": 12,
+    "max_idle_conns": 12,
+    "conn_max_lifetime": "30m",
+    "conn_max_idle_time": "5m"
+  },
+  "output_dir": "cdcstress-results"
+}

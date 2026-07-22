@@ -39,7 +39,7 @@ export function incrementalStatusColor(status: string) {
   if (['running', 'ready_to_cutover', 'stopped'].includes(status)) return 'green'
   if (['failed', 'cutover_blocked'].includes(status)) return 'red'
   if (status.startsWith('paused') || status === 'ready_with_warnings') return 'orange'
-  if (status === 'aborted') return 'gray'
+  if (status === 'aborted') return 'orangered'
   return 'blue'
 }
 
