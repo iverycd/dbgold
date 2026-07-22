@@ -35,7 +35,7 @@ VITE_API_TARGET=http://localhost:18089
 
 ## 生成离线发布包
 
-开发机需要 Go 1.25.5、Node/npm、Docker Buildx、curl、zip、tar。版本化发布默认要求 Git 工作区干净：
+开发机需要 Go 1.25.5、Node/npm、Docker Buildx、zip、tar。版本化发布默认要求 Git 工作区干净：
 
 ```bash
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
@@ -49,7 +49,7 @@ GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
 - `SHA256SUMS`
 - `release-manifest.json`（版本、提交、构建时间和平台清单）
 
-三个压缩包解压后都会生成一个与压缩包同名的外层目录。Linux 镜像按架构分别导出为 Docker archive，并内置对应架构的 Docker Compose，目标服务器不需要访问镜像仓库或预装 Compose。
+三个压缩包解压后都会生成一个与压缩包同名的外层目录。Linux 镜像按架构分别导出为 Docker archive，目标服务器不需要访问镜像仓库，也不需要安装 Docker Compose。
 
 ## Linux 安装
 
@@ -65,14 +65,13 @@ sudo ./install.sh --port 18089 --allow-cidr 192.168.1.0/24
 
 ```text
 /opt/dbgold/config/dbgold.env
-/opt/dbgold/bin/docker-compose
 /opt/dbgold/data/
 /opt/dbgold/uploads/
 /opt/dbgold/logs/
 /opt/dbgold/backups/
 ```
 
-容器以非 root 用户运行，根文件系统只读，仅 `data`、`uploads`、`logs` 可写。安装脚本首次运行时生成 JWT 密钥和管理员密码，并只显示一次初始密码。
+Linux 容器固定使用 Docker host 网络，应用直接在宿主机监听 `0.0.0.0:PORT`，没有 Docker 端口映射层。容器以非 root 用户运行，根文件系统只读，仅 `data`、`uploads`、`logs` 可写。安装脚本首次运行时生成 JWT 密钥和管理员密码，并只显示一次初始密码。
 
 ### 修改端口
 
@@ -82,14 +81,19 @@ sudo ./install.sh --port 18089 --allow-cidr 192.168.1.0/24
 sudo /opt/dbgold/set-port.sh --port 19089 --allow-cidr 192.168.1.0/24
 ```
 
-也可以编辑 `/opt/dbgold/config/dbgold.env` 中的 `PORT`，然后执行：
+修改端口必须使用 `set-port.sh`，它会同步修改配置、重建 host 网络容器并检查健康状态。还需要同步调整 firewalld、UFW 或云安全组规则。
+
+### 容器管理
 
 ```bash
-cd /opt/dbgold
-sudo /opt/dbgold/bin/docker-compose --env-file config/dbgold.env -f compose.yaml up -d --force-recreate
+sudo docker ps --filter name=dbgold
+sudo docker logs --tail 100 dbgold
+sudo docker stop dbgold
+sudo docker start dbgold
+sudo docker restart dbgold
 ```
 
-Compose 必须带 `--env-file`，这样宿主机映射和容器监听端口才会同步变化。
+`docker restart` 不会重新读取环境文件；配置或端口发生变化时应使用部署辅助脚本重建容器。
 
 ### 备份与升级
 

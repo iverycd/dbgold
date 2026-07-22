@@ -12,37 +12,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -f "$DEPLOY_DIR/compose.yaml" && -f "$DEPLOY_DIR/config/dbgold.env" ]] || { echo "Invalid deployment directory: $DEPLOY_DIR" >&2; exit 1; }
-if [[ -x "$DEPLOY_DIR/bin/docker-compose" ]]; then
-  COMPOSE_BIN="$DEPLOY_DIR/bin/docker-compose"
-elif [[ -x "$SCRIPT_DIR/bin/docker-compose" ]]; then
-  COMPOSE_BIN="$SCRIPT_DIR/bin/docker-compose"
-else
-  echo "Bundled Docker Compose is missing or not executable." >&2
-  exit 1
-fi
+[[ -f "$DEPLOY_DIR/config/dbgold.env" ]] || { echo "Invalid deployment directory: $DEPLOY_DIR" >&2; exit 1; }
+[[ -f "$SCRIPT_DIR/docker-runtime.sh" ]] || { echo "Docker runtime helper is missing." >&2; exit 1; }
+source "$SCRIPT_DIR/docker-runtime.sh"
+docker_container_assert_replaceable
 mkdir -p "$DEPLOY_DIR/backups"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_FILE="$DEPLOY_DIR/backups/dbgold-$TIMESTAMP.tar.gz"
 WAS_RUNNING=0
 
-cd "$DEPLOY_DIR"
-compose() {
-  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
-}
 if (( ALREADY_STOPPED == 0 )); then
-  if [[ -n "$(compose ps --status running -q)" ]]; then
+  if docker_container_exists && docker_container_is_running; then
     WAS_RUNNING=1
-    compose stop
+    docker_container_stop
   fi
 fi
 
 restart_if_needed() {
   if (( WAS_RUNNING == 1 )); then
-    compose up -d
+    docker_container_start
   fi
 }
 trap restart_if_needed EXIT
+cd "$DEPLOY_DIR"
 tar -czf "$BACKUP_FILE" data uploads config
 chmod 0600 "$BACKUP_FILE"
 trap - EXIT

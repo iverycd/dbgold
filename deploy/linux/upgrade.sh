@@ -16,19 +16,11 @@ done
 [[ -f "$SOURCE_DIR/image.tar" && -f "$SOURCE_DIR/VERSION" ]] || { echo "Run upgrade.sh from an extracted release package." >&2; exit 1; }
 [[ -f "$DEPLOY_DIR/config/dbgold.env" ]] || { echo "No existing deployment found at $DEPLOY_DIR" >&2; exit 1; }
 (cd "$SOURCE_DIR" && sha256sum -c manifest.sha256)
-COMPOSE_BIN="$SOURCE_DIR/bin/docker-compose"
-[[ -x "$COMPOSE_BIN" ]] || { echo "Bundled Docker Compose is missing or not executable: $COMPOSE_BIN" >&2; exit 1; }
-if ! COMPOSE_VERSION_OUTPUT="$("$COMPOSE_BIN" version 2>&1)"; then
-  echo "Bundled Docker Compose cannot run on this server. Verify that the release package matches this server's architecture." >&2
-  echo "$COMPOSE_VERSION_OUTPUT" >&2
-  exit 1
-fi
+[[ -f "$SOURCE_DIR/docker-runtime.sh" ]] || { echo "Docker runtime helper is missing." >&2; exit 1; }
+source "$SOURCE_DIR/docker-runtime.sh"
+docker_container_assert_replaceable
 
-cd "$DEPLOY_DIR"
-compose() {
-  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
-}
-OLD_VERSION="$(awk -F= '$1=="DBGOLD_VERSION" {print $2; exit}' config/dbgold.env)"
+OLD_VERSION="$(awk -F= '$1=="DBGOLD_VERSION" {print $2; exit}' "$DEPLOY_DIR/config/dbgold.env")"
 NEW_VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/VERSION")"
 BACKUP_FILE=""
 
@@ -39,30 +31,24 @@ rollback_on_error() {
   if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
     "$SOURCE_DIR/restore.sh" --deploy-dir "$DEPLOY_DIR" --backup "$BACKUP_FILE" --yes || true
   else
-    compose up -d || true
+    docker_container_start || true
   fi
   exit "$STATUS"
 }
 trap rollback_on_error ERR
 
-compose stop
-BACKUP_FILE="$($SOURCE_DIR/backup.sh --deploy-dir "$DEPLOY_DIR" --already-stopped)"
+docker_container_stop
+BACKUP_FILE="$("$SOURCE_DIR/backup.sh" --deploy-dir "$DEPLOY_DIR" --already-stopped)"
 docker load -i "$SOURCE_DIR/image.tar"
-install -m 0644 "$SOURCE_DIR/compose.yaml" compose.yaml
-mkdir -p bin
-install -m 0755 "$COMPOSE_BIN" bin/docker-compose
-for script in backup.sh restore.sh upgrade.sh set-port.sh; do install -m 0755 "$SOURCE_DIR/$script" "$script"; done
-sed -i "s/^DBGOLD_VERSION=.*/DBGOLD_VERSION=$NEW_VERSION/" config/dbgold.env
+for script in backup.sh restore.sh upgrade.sh set-port.sh docker-runtime.sh; do install -m 0755 "$SOURCE_DIR/$script" "$DEPLOY_DIR/$script"; done
+sed -i "s/^DBGOLD_VERSION=.*/DBGOLD_VERSION=$NEW_VERSION/" "$DEPLOY_DIR/config/dbgold.env"
 
-if compose up -d; then
-  for _ in $(seq 1 30); do
-    if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
-      trap - ERR
-      echo "Upgrade completed: $OLD_VERSION -> $NEW_VERSION"
-      echo "Cold backup: $BACKUP_FILE"
-      exit 0
-    fi
-    sleep 1
-  done
+if docker_container_recreate && docker_container_wait_ready 30; then
+  docker_cleanup_legacy_compose
+  trap - ERR
+  echo "Upgrade completed: $OLD_VERSION -> $NEW_VERSION"
+  echo "Cold backup: $BACKUP_FILE"
+  exit 0
 fi
+docker_container_logs 100 >&2 || true
 false

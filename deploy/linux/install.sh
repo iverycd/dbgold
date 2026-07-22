@@ -32,7 +32,7 @@ if [[ -n "$ALLOW_CIDR" && ! "$ALLOW_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]
   echo "--allow-cidr must be an IPv4 CIDR, for example 192.168.1.0/24." >&2
   exit 1
 fi
-for command_name in docker sha256sum tar; do
+for command_name in docker sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "Missing required command: $command_name" >&2; exit 1; }
 done
 
@@ -46,21 +46,9 @@ if [[ "$DETECTED_ARCH" != "$PACKAGE_ARCH" ]]; then
   echo "Package architecture is $PACKAGE_ARCH, but this server is $DETECTED_ARCH." >&2
   exit 1
 fi
-SOURCE_COMPOSE="$SOURCE_DIR/bin/docker-compose"
-if [[ ! -f "$SOURCE_COMPOSE" ]]; then
-  echo "Bundled Docker Compose is missing: $SOURCE_COMPOSE" >&2
-  exit 1
-fi
-if [[ ! -x "$SOURCE_COMPOSE" ]]; then
-  echo "Bundled Docker Compose is not executable: $SOURCE_COMPOSE" >&2
-  exit 1
-fi
 (cd "$SOURCE_DIR" && sha256sum -c manifest.sha256)
-if ! COMPOSE_VERSION_OUTPUT="$("$SOURCE_COMPOSE" version 2>&1)"; then
-  echo "Bundled Docker Compose cannot run on this server. Verify that the release package matches $DETECTED_ARCH." >&2
-  echo "$COMPOSE_VERSION_OUTPUT" >&2
-  exit 1
-fi
+[[ -f "$SOURCE_DIR/docker-runtime.sh" ]] || { echo "Docker runtime helper is missing." >&2; exit 1; }
+source "$SOURCE_DIR/docker-runtime.sh"
 if ! DOCKER_INFO_OUTPUT="$(docker info 2>&1)"; then
   if grep -qiE 'permission denied|access denied' <<<"$DOCKER_INFO_OUTPUT"; then
     echo "Docker is installed, but the current user cannot access the Docker daemon." >&2
@@ -70,9 +58,18 @@ if ! DOCKER_INFO_OUTPUT="$(docker info 2>&1)"; then
   echo "$DOCKER_INFO_OUTPUT" >&2
   exit 1
 fi
+docker_container_assert_replaceable
 
-if command -v ss >/dev/null 2>&1 && ss -ltnH | awk '{print $4}' | grep -Eq "[:.]${PORT_VALUE}$"; then
-  echo "Port $PORT_VALUE is already in use. Choose another port with --port." >&2
+EFFECTIVE_PORT="$PORT_VALUE"
+if [[ -f "$DEPLOY_DIR/config/dbgold.env" ]]; then
+  EFFECTIVE_PORT="$(awk -F= '$1=="PORT" {print $2; exit}' "$DEPLOY_DIR/config/dbgold.env")"
+  if [[ ! "$EFFECTIVE_PORT" =~ ^[0-9]+$ ]] || (( EFFECTIVE_PORT < 1024 || EFFECTIVE_PORT > 65535 )); then
+    echo "Invalid PORT in existing configuration: $EFFECTIVE_PORT" >&2
+    exit 1
+  fi
+fi
+if docker_port_is_listening "$EFFECTIVE_PORT"; then
+  echo "Port $EFFECTIVE_PORT is already in use. Choose another port with --port." >&2
   exit 1
 fi
 
@@ -85,10 +82,8 @@ if (( AVAILABLE_KB < REQUIRED_KB )); then
 fi
 
 VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/VERSION")"
-mkdir -p "$DEPLOY_DIR" "$DEPLOY_DIR/bin" "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/config" "$DEPLOY_DIR/backups"
-install -m 0644 "$SOURCE_DIR/compose.yaml" "$DEPLOY_DIR/compose.yaml"
-install -m 0755 "$SOURCE_COMPOSE" "$DEPLOY_DIR/bin/docker-compose"
-for script in backup.sh restore.sh upgrade.sh set-port.sh; do
+mkdir -p "$DEPLOY_DIR" "$DEPLOY_DIR/data" "$DEPLOY_DIR/uploads" "$DEPLOY_DIR/logs" "$DEPLOY_DIR/config" "$DEPLOY_DIR/backups"
+for script in backup.sh restore.sh upgrade.sh set-port.sh docker-runtime.sh; do
   install -m 0755 "$SOURCE_DIR/$script" "$DEPLOY_DIR/$script"
 done
 
@@ -126,31 +121,23 @@ docker load -i "$SOURCE_DIR/image.tar"
 
 if [[ -n "$ALLOW_CIDR" ]]; then
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$ALLOW_CIDR port port=$PORT_VALUE protocol=tcp accept"
+    firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$ALLOW_CIDR port port=$EFFECTIVE_PORT protocol=tcp accept"
     firewall-cmd --reload
   elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-    ufw allow from "$ALLOW_CIDR" to any port "$PORT_VALUE" proto tcp
+    ufw allow from "$ALLOW_CIDR" to any port "$EFFECTIVE_PORT" proto tcp
   else
-    echo "No active firewalld/UFW detected; verify the host firewall allows $ALLOW_CIDR to TCP $PORT_VALUE."
+    echo "No active firewalld/UFW detected; verify the host firewall allows $ALLOW_CIDR to TCP $EFFECTIVE_PORT."
   fi
 else
-  echo "No firewall rule was added. Use --allow-cidr on first install or configure TCP $PORT_VALUE manually."
+  echo "No firewall rule was added. Use --allow-cidr on first install or configure TCP $EFFECTIVE_PORT manually."
 fi
 
-cd "$DEPLOY_DIR"
-COMPOSE_BIN="$DEPLOY_DIR/bin/docker-compose"
-compose() {
-  "$COMPOSE_BIN" --env-file config/dbgold.env -f compose.yaml "$@"
-}
-compose up -d
-for _ in $(seq 1 30); do
-  if compose exec -T dbgold /app/dbgold healthcheck >/dev/null 2>&1; then
-    ACTIVE_PORT="$(awk -F= '$1=="PORT" {print $2; exit}' config/dbgold.env)"
-    echo "dbgold $VERSION is ready on 0.0.0.0:$ACTIVE_PORT"
-    exit 0
-  fi
-  sleep 1
-done
-compose logs --tail=100 dbgold >&2 || true
+if docker_container_recreate && docker_container_wait_ready 30; then
+  docker_cleanup_legacy_compose
+  ACTIVE_PORT="$(docker_config_value PORT)"
+  echo "dbgold $VERSION is ready on 0.0.0.0:$ACTIVE_PORT using Docker host networking"
+  exit 0
+fi
+docker_container_logs 100 >&2 || true
 echo "dbgold failed its readiness check." >&2
 exit 1
