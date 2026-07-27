@@ -126,6 +126,8 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 		}
 	}
 	dst, dstErr := openTargetDB(cfg)
+	targetMetadata := targetSchemaMetadata{}
+	targetMetadataReady := false
 	if dstErr != nil {
 		r.Errors = append(r.Errors, "连接目标库失败: "+dstErr.Error())
 	} else {
@@ -136,22 +138,17 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			var schemaExists bool
 			if dstErr = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, cfg.TargetSchema).Scan(&schemaExists); dstErr != nil || !schemaExists {
 				r.Errors = append(r.Errors, "目标 Schema 不存在: "+cfg.TargetSchema)
+			} else if targetMetadata, dstErr = loadTargetSchemaMetadata(ctx, dst, cfg.TargetSchema); dstErr != nil {
+				r.Errors = append(r.Errors, "读取目标 Schema 元数据失败: "+dstErr.Error())
+			} else {
+				targetMetadataReady = true
 			}
 		}
-		if incrementalOnly && dstErr == nil {
+		if incrementalOnly && targetMetadataReady {
 			missing := make(map[string]TargetTableIssue)
 			for _, table := range tables {
-				name := table.Name
-				if cfg.LowerCaseNames {
-					name = strings.ToLower(name)
-				}
-				var exists bool
-				queryErr := dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2)`, cfg.TargetSchema, name).Scan(&exists)
-				if queryErr != nil {
-					r.Errors = append(r.Errors, fmt.Sprintf("检查目标表失败 %s.%s: %v", cfg.TargetSchema, name, queryErr))
-					continue
-				}
-				if !exists {
+				name := targetTableName(cfg, table.Name)
+				if targetMetadata.Tables[name] == nil {
 					missing[table.Name] = TargetTableIssue{SourceTable: table.Name, TargetSchema: cfg.TargetSchema, TargetTable: name}
 				}
 			}
@@ -169,30 +166,11 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			tables = effective
 			r.Tables = effective
 			for _, t := range effective {
-				name := t.Name
-				if cfg.LowerCaseNames {
-					name = strings.ToLower(name)
-				}
-				colRows, colErr := dst.QueryContext(ctx, `SELECT column_name, is_nullable, column_default, is_identity
-					FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2`, cfg.TargetSchema, name)
-				if colErr != nil {
-					r.Errors = append(r.Errors, fmt.Sprintf("读取目标表列失败 %s: %v", name, colErr))
+				name := targetTableName(cfg, t.Name)
+				target := targetMetadata.Tables[name]
+				if target == nil {
 					continue
 				}
-				targetCols := map[string]bool{}
-				type extraColumn struct {
-					name, nullable, identity string
-					defaultValue             sql.NullString
-				}
-				var targetMetadata []extraColumn
-				for colRows.Next() {
-					var col extraColumn
-					if colRows.Scan(&col.name, &col.nullable, &col.defaultValue, &col.identity) == nil {
-						targetCols[col.name] = true
-						targetMetadata = append(targetMetadata, col)
-					}
-				}
-				colRows.Close()
 				sourceCols := map[string]bool{}
 				for _, sourceCol := range t.Columns {
 					expected := sourceCol
@@ -200,13 +178,13 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 						expected = strings.ToLower(expected)
 					}
 					sourceCols[expected] = true
-					if !targetCols[expected] {
+					if !target.ColumnNames[expected] {
 						r.Errors = append(r.Errors, fmt.Sprintf("目标表缺少列: %s.%s", name, expected))
 					}
 				}
-				for _, col := range targetMetadata {
-					if !sourceCols[col.name] && col.nullable == "NO" && !col.defaultValue.Valid && col.identity != "YES" {
-						r.Errors = append(r.Errors, fmt.Sprintf("目标表存在无默认值的额外必填列: %s.%s", name, col.name))
+				for _, col := range target.Columns {
+					if !sourceCols[col.Name] && col.Nullable == "NO" && !col.DefaultValue.Valid && col.Identity != "YES" {
+						r.Errors = append(r.Errors, fmt.Sprintf("目标表存在无默认值的额外必填列: %s.%s", name, col.Name))
 					}
 				}
 				if len(t.PrimaryKey) > 0 {
@@ -218,38 +196,29 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 						}
 						expectedPK = append(expectedPK, column)
 					}
-					constraintSets, constraintErr := loadPostgresUniqueColumnSets(ctx, dst, cfg.TargetSchema, name)
-					if constraintErr != nil {
-						r.Errors = append(r.Errors, fmt.Sprintf("读取目标表唯一约束失败 %s: %v", name, constraintErr))
-					} else {
-						matched := false
-						for _, columns := range constraintSets {
-							if sameColumnSet(expectedPK, columns) {
-								matched = true
-							}
+					matched := false
+					for _, columns := range target.UniqueSets {
+						if sameColumnSet(expectedPK, columns) {
+							matched = true
 						}
-						if !matched {
-							r.Errors = append(r.Errors, fmt.Sprintf("目标表缺少与源主键列一致的主键/唯一约束: %s", name))
-						}
+					}
+					if !matched {
+						r.Errors = append(r.Errors, fmt.Sprintf("目标表缺少与源主键列一致的主键/唯一约束: %s", name))
 					}
 				}
 			}
 		}
-		if len(tables) > 0 && dstErr == nil {
-			resolved, resolveErr := ResolveLocatorStrategies(ctx, cfg, tables)
-			if resolveErr != nil {
-				r.Errors = append(r.Errors, "解析 CDC 行定位策略失败: "+resolveErr.Error())
-			} else {
-				r.Tables = resolved
-				var fullRow []string
-				for _, table := range resolved {
-					if table.LocatorStrategy == LocatorFullRow {
-						fullRow = append(fullRow, table.Name)
-					}
+		if len(tables) > 0 && targetMetadataReady {
+			resolved := resolveLocatorStrategiesFromMetadata(cfg, tables, targetMetadata)
+			r.Tables = resolved
+			var fullRow []string
+			for _, table := range resolved {
+				if table.LocatorStrategy == LocatorFullRow {
+					fullRow = append(fullRow, table.Name)
 				}
-				if len(fullRow) > 0 {
-					r.Warnings = append(r.Warnings, fmt.Sprintf("%d 张表将使用更新前整行匹配 UPDATE/DELETE，目标端可能发生全表扫描: %s", len(fullRow), strings.Join(fullRow, ", ")))
-				}
+			}
+			if len(fullRow) > 0 {
+				r.Warnings = append(r.Warnings, fmt.Sprintf("%d 张表将使用更新前整行匹配 UPDATE/DELETE，目标端可能发生全表扫描: %s", len(fullRow), strings.Join(fullRow, ", ")))
 			}
 		}
 	}

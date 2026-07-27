@@ -106,12 +106,13 @@ type stageExecution struct {
 }
 
 type workloadEngine struct {
-	cfg    Config
-	state  *RunState
-	source *sql.DB
-	target *sql.DB
-	ledger *ledgerWriter
-	seq    atomic.Int64
+	cfg          Config
+	state        *RunState
+	source       *sql.DB
+	target       *sql.DB
+	ledger       *ledgerWriter
+	tablesByRows []TableSpec
+	seq          atomic.Int64
 }
 
 func newWorkloadEngine(cfg Config, state *RunState, source, target *sql.DB) (*workloadEngine, error) {
@@ -125,7 +126,14 @@ func newWorkloadEngine(cfg Config, state *RunState, source, target *sql.DB) (*wo
 			maxRows = table.Rows
 		}
 	}
-	engine := &workloadEngine{cfg: cfg, state: state, source: source, target: target, ledger: ledger}
+	engine := &workloadEngine{
+		cfg:          cfg,
+		state:        state,
+		source:       source,
+		target:       target,
+		ledger:       ledger,
+		tablesByRows: sortedTablesByRows(state.Tables),
+	}
 	if ledgerMax, readErr := readLedgerMax(cfg, state.RunID); readErr == nil && ledgerMax > maxRows {
 		maxRows = ledgerMax
 	}
@@ -380,7 +388,7 @@ func (w *workloadEngine) applyOperation(ctx context.Context, rng *rand.Rand, seq
 }
 
 func (w *workloadEngine) pickTable(rng *rand.Rand) TableSpec {
-	tables := sortedTablesByRows(w.state.Tables)
+	tables := w.tablesByRows
 	limit := max(1, len(tables)/100)
 	if rng.Intn(100) < 80 {
 		return tables[rng.Intn(limit)]

@@ -30,7 +30,7 @@
     "step_duration": "2m",
     "pause_write_duration": "10s",
     "idle_duration": "15s",
-    "catch_up_timeout": "30m",
+    "catch_up_timeout": "10m",
     "poll_interval": "1s",
     "workers": 8,
     "enable_pause_resume": true,

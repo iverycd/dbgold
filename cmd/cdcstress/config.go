@@ -162,7 +162,7 @@ func (c *Config) applyDefaults() {
 		c.Workload.IdleDuration.Duration = 15 * time.Second
 	}
 	if c.Workload.CatchUpTimeout.Duration == 0 {
-		c.Workload.CatchUpTimeout.Duration = 30 * time.Minute
+		c.Workload.CatchUpTimeout.Duration = 10 * time.Minute
 	}
 	if c.Workload.PollInterval.Duration == 0 {
 		c.Workload.PollInterval.Duration = time.Second

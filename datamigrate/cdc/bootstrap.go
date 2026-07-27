@@ -3,7 +3,6 @@ package cdc
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -206,48 +205,20 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 	if err = db.PingContext(ctx); err != nil {
 		return nil, err
 	}
+	metadata, err := loadTargetSchemaMetadata(ctx, db, cfg.TargetSchema)
+	if err != nil {
+		return nil, err
+	}
+	return validateTargetTableCompatibilityFromMetadata(cfg, tables, metadata), nil
+}
+
+func validateTargetTableCompatibilityFromMetadata(cfg Config, tables []TableInfo, metadata targetSchemaMetadata) map[string]string {
 	failures := make(map[string]string)
 	for _, table := range tables {
-		targetName := table.Name
-		if cfg.LowerCaseNames {
-			targetName = strings.ToLower(targetName)
-		}
-		var exists bool
-		if err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables
-			WHERE table_schema=$1 AND table_name=$2)`, cfg.TargetSchema, targetName).Scan(&exists); err != nil {
-			failures[table.Name] = "检查目标表失败: " + err.Error()
-			continue
-		}
-		if !exists {
+		targetName := targetTableName(cfg, table.Name)
+		target := metadata.Tables[targetName]
+		if target == nil {
 			failures[table.Name] = "目标表不存在"
-			continue
-		}
-		rows, queryErr := db.QueryContext(ctx, `SELECT column_name, is_nullable, column_default, is_identity
-			FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2`, cfg.TargetSchema, targetName)
-		if queryErr != nil {
-			failures[table.Name] = "读取目标列失败: " + queryErr.Error()
-			continue
-		}
-		targetColumns := map[string]bool{}
-		type targetColumn struct {
-			name, nullable, identity string
-			defaultValue             sql.NullString
-		}
-		var targetMetadata []targetColumn
-		for rows.Next() {
-			var col targetColumn
-			if scanErr := rows.Scan(&col.name, &col.nullable, &col.defaultValue, &col.identity); scanErr != nil {
-				queryErr = scanErr
-				break
-			}
-			targetColumns[col.name] = true
-			targetMetadata = append(targetMetadata, col)
-		}
-		if closeErr := rows.Close(); queryErr == nil {
-			queryErr = closeErr
-		}
-		if queryErr != nil {
-			failures[table.Name] = "读取目标列失败: " + queryErr.Error()
 			continue
 		}
 		sourceColumns := map[string]bool{}
@@ -257,7 +228,7 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 				expected = strings.ToLower(expected)
 			}
 			sourceColumns[expected] = true
-			if !targetColumns[expected] {
+			if !target.ColumnNames[expected] {
 				failures[table.Name] = "目标表缺少列: " + expected
 				break
 			}
@@ -265,9 +236,9 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 		if failures[table.Name] != "" {
 			continue
 		}
-		for _, col := range targetMetadata {
-			if !sourceColumns[col.name] && col.nullable == "NO" && !col.defaultValue.Valid && col.identity != "YES" {
-				failures[table.Name] = "目标表存在无默认值的额外必填列: " + col.name
+		for _, col := range target.Columns {
+			if !sourceColumns[col.Name] && col.Nullable == "NO" && !col.DefaultValue.Valid && col.Identity != "YES" {
+				failures[table.Name] = "目标表存在无默认值的额外必填列: " + col.Name
 				break
 			}
 		}
@@ -282,13 +253,8 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 			}
 			expectedPK = append(expectedPK, column)
 		}
-		constraintSets, constraintErr := loadPostgresUniqueColumnSets(ctx, db, cfg.TargetSchema, targetName)
-		if constraintErr != nil {
-			failures[table.Name] = "读取目标唯一约束失败: " + constraintErr.Error()
-			continue
-		}
 		matched := false
-		for _, columns := range constraintSets {
+		for _, columns := range target.UniqueSets {
 			if sameColumnSet(expectedPK, columns) {
 				matched = true
 			}
@@ -297,7 +263,7 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 			failures[table.Name] = "目标表缺少与源主键列一致的主键/唯一约束"
 		}
 	}
-	return failures, nil
+	return failures
 }
 
 func ValidatePositionAvailable(ctx context.Context, cfg Config, position Position) error {

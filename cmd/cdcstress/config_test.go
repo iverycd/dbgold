@@ -36,6 +36,21 @@ func TestProfilePresets(t *testing.T) {
 	}
 }
 
+func TestCatchUpTimeoutDefaultAndExplicitOverride(t *testing.T) {
+	defaultConfig := baseTestConfig()
+	defaultConfig.applyDefaults()
+	if got := defaultConfig.Workload.CatchUpTimeout.Duration; got != 10*time.Minute {
+		t.Fatalf("default catch_up_timeout=%s, want 10m", got)
+	}
+
+	explicitConfig := baseTestConfig()
+	explicitConfig.Workload.CatchUpTimeout = Duration{30 * time.Minute}
+	explicitConfig.applyDefaults()
+	if got := explicitConfig.Workload.CatchUpTimeout.Duration; got != 30*time.Minute {
+		t.Fatalf("explicit catch_up_timeout=%s, want 30m", got)
+	}
+}
+
 func TestNamespaceSafety(t *testing.T) {
 	for _, name := range []string{defaultNamespace, defaultNamespace + "_large", defaultNamespace + "_2"} {
 		if !safeNamespace(name) {

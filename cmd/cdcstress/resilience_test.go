@@ -191,7 +191,10 @@ func TestDeferredStageReturnsWithoutTargetVisibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ledger.close()
-	engine := &workloadEngine{cfg: cfg, state: &state, source: source, target: target, ledger: ledger}
+	engine := &workloadEngine{
+		cfg: cfg, state: &state, source: source, target: target, ledger: ledger,
+		tablesByRows: sortedTablesByRows(state.Tables),
+	}
 	engine.seq.Store(99)
 	sourceMock.ExpectBegin()
 	sourceMock.ExpectExec("INSERT INTO `cs_test`").WillReturnResult(sqlmock.NewResult(100, 1))

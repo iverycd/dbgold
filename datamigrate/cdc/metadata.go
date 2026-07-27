@@ -238,31 +238,11 @@ func ResolveLocatorStrategies(ctx context.Context, cfg Config, tables []TableInf
 	if err = db.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	result := append([]TableInfo(nil), tables...)
-	for i := range result {
-		table := &result[i]
-		if len(table.PrimaryKey) > 0 {
-			table.LocatorStrategy = LocatorPrimaryKey
-			table.LocatorIndex = "PRIMARY"
-			table.LocatorColumns = columnNamesAt(table, table.PrimaryKey)
-			continue
-		}
-		targetName := table.Name
-		if cfg.LowerCaseNames {
-			targetName = strings.ToLower(targetName)
-		}
-		uniqueSets, queryErr := loadPostgresUniqueColumnSets(ctx, db, cfg.TargetSchema, targetName)
-		if queryErr != nil {
-			return nil, fmt.Errorf("读取目标表唯一索引失败 %s: %w", targetName, queryErr)
-		}
-		selectUniqueLocator(table, uniqueSets, cfg.LowerCaseNames)
-		if table.LocatorStrategy == "" {
-			table.LocatorStrategy = LocatorFullRow
-			table.LocatorColumns = append([]string(nil), table.Columns...)
-			table.LocatorWarning = "没有可同时在源端和目标端确认的非空普通唯一键，UPDATE/DELETE 将按更新前整行匹配；大表可能产生全表扫描"
-		}
+	metadata, err := loadTargetSchemaMetadata(ctx, db, cfg.TargetSchema)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	return resolveLocatorStrategiesFromMetadata(cfg, tables, metadata), nil
 }
 
 func selectUniqueLocator(table *TableInfo, targetUniqueSets [][]string, lower bool) bool {
