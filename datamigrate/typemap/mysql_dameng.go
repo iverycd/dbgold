@@ -30,14 +30,23 @@ func MySQLToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 		return "BIGINT"
 	case "decimal", "numeric":
 		if col.Precision > 0 {
-			return fmt.Sprintf("NUMBER(%d,%d)", col.Precision, col.Scale)
+			// 达梦 NUMBER 的精度上限为 38。优先保留源整数位，
+			// 再将剩余精度分配给小数位。
+			integerDigits := col.Precision - col.Scale
+			precision := min(col.Precision, int64(38))
+			availableScale := max(int64(0), precision-integerDigits)
+			scale := min(col.Scale, availableScale)
+			return fmt.Sprintf("NUMBER(%d,%d)", precision, scale)
 		}
 		return "NUMBER"
 	case "real":
 		return "BINARY_DOUBLE"
 	case "float", "double":
 		if col.Precision > 0 {
-			return fmt.Sprintf("DECIMAL(%d,%d)", col.Precision, col.Scale)
+			// 达梦 DECIMAL 的精度上限为 38，且标度不能大于精度。
+			precision := min(col.Precision, int64(38))
+			scale := min(col.Scale, precision)
+			return fmt.Sprintf("DECIMAL(%d,%d)", precision, scale)
 		}
 		return "DECIMAL"
 	case "char":
