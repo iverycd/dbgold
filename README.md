@@ -33,6 +33,33 @@ VITE_API_TARGET=http://localhost:18089
 
 生产构建中，后端直接托管 `frontend/dist`，不再要求目标服务器单独安装 nginx 来提供静态文件。
 
+## 测试/开发服务器一键部署
+
+`deploy.sh` 用于把当前工作区快速部署到可直接运行二进制的测试或开发服务器。脚本会交叉编译 Linux/amd64 后端、执行前端构建，上传 `dbgold` 和 `frontend/dist`，停止旧的远程 `dbgold` 进程后重新启动服务。为保护运行数据，它不会上传或覆盖远程的 `dbgold.db`。
+
+使用前请确认本机已安装 `sshpass`（macOS：`brew install sshpass`）、脚本中固定的 Go 路径 `/Users/kay/sdk/go1.25.5/bin/go` 可用、前端依赖已安装且可以执行 `npm run build`；远程服务器还需允许使用密码进行 SSH 登录。
+
+```bash
+./deploy.sh -h <主机或IP> -u <远程账号> -p <远程密码> [-P <SSH端口>] [-d <部署目录>] [-r <服务端口>]
+```
+
+- `-h`：远程主机或 IP，必填。
+- `-u`：远程账号，必填。
+- `-p`：远程密码，必填。
+- `-P`：SSH 端口，默认 `22`。
+- `-d`：远程部署目录，默认 `/opt/dbgold`。
+- `-r`：远程 dbgold 服务端口，默认 `18089`。
+
+示例：
+
+```bash
+./deploy.sh -h 192.168.1.10 -u root -p 'secret' -P 22 -d /opt/dbgold -r 18089
+```
+
+部署完成后，可通过 `http://服务器IP:服务端口/` 访问服务；远程启动日志位于 `<部署目录>/dbgold.out`，应用日志位于 `<部署目录>/log/`。
+
+> 注意：脚本会通过命令行传递密码，密码可能短暂出现在本机进程列表中；同时为便于首次连接，脚本使用 `StrictHostKeyChecking=no` 放宽 SSH 主机密钥校验。此方式仅适用于直接运行二进制的测试/开发服务器，不能替代下文的 Docker 容器化生产安装或升级流程。
+
 ## 生成离线发布包
 
 开发机需要 Go 1.25.5、Node/npm、Docker Buildx、zip、tar。版本化发布默认要求 Git 工作区干净：
