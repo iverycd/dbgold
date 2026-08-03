@@ -222,7 +222,7 @@ const envHistory = computed(() => {
 const mysqlConnections = computed(() => connections.value.filter(c =>
   c.db_type === 'mysql' && (!srcEnvFilter.value || c.env === srcEnvFilter.value)
 ))
-const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'kingbase', 'seabox'])
+const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'kingbase', 'seabox'])
 const targetConnections = computed(() => connections.value.filter(c =>
   incrementalTargetTypes.has(c.db_type) && (!dstEnvFilter.value || c.env === dstEnvFilter.value)
 ))

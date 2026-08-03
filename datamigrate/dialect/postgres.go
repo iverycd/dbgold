@@ -10,7 +10,7 @@ import (
 	"dbgold/datamigrate/typemap"
 )
 
-// PostgresDialect 实现 PostgreSQL 系目标库(postgres/gaussdb/seabox)的 SQL 生成。
+// PostgresDialect 实现 PostgreSQL 系目标库(postgres/gaussdb/seabox/highgo/vastbase/gbase/kingbase)的 SQL 生成。
 // 行为与重构前散落在 migrator.go / report.go / target 的 PG 拼串逻辑逐字符等价。
 //
 // gaussdb / seabox 与 PG 仅在「函数默认值映射」和「视图 UUID 函数」上有差异,
@@ -19,7 +19,7 @@ type PostgresDialect struct {
 	name string // "postgres" | "gaussdb" | "seabox"
 }
 
-// NewPostgres 创建 PostgreSQL 系方言。dbType 取 "postgres"/"gaussdb"/"seabox"。
+// NewPostgres 创建 PostgreSQL 系方言。
 func NewPostgres(dbType string) *PostgresDialect {
 	if dbType == "" {
 		dbType = "postgres"

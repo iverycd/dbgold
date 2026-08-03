@@ -28,6 +28,10 @@ func NewDriver(dbType string) (Driver, error) {
 		return dameng.New(), nil
 	case "highgo":
 		return postgres.New(), nil
+	case "vastbase":
+		return postgres.New(), nil
+	case "gbase":
+		return postgres.New(), nil
 	case "kingbase":
 		return postgres.New(), nil
 	default:

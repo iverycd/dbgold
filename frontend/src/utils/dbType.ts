@@ -7,6 +7,8 @@ const DB_TYPE_CONFIG: Record<string, { color: string; label: string }> = {
   dameng:        { color: 'purple',     label: '达梦' },
   seabox:        { color: 'arcoblue',   label: 'SeaBox' },
   highgo:        { color: 'blue',       label: 'HighGo 瀚高' },
+  vastbase:      { color: 'arcoblue',   label: 'Vastbase 海量数据库' },
+  gbase:         { color: 'green',      label: 'GBase（PG兼容）' },
   kingbase:      { color: 'green',      label: 'Kingbase 人大金仓' },
   mongodb:       { color: 'lime',       label: 'MongoDB' },
   redis:         { color: 'magenta',    label: 'Redis' },

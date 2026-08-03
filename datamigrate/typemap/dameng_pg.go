@@ -12,6 +12,8 @@ func init() {
 	Register("dameng", "gaussdb", DaMengToPG)
 	Register("dameng", "seabox", DaMengToPG)
 	Register("dameng", "highgo", DaMengToPG)
+	Register("dameng", "vastbase", DaMengToPG)
+	Register("dameng", "gbase", DaMengToPG)
 	Register("dameng", "kingbase", DaMengToPG)
 }
 

@@ -12,7 +12,7 @@ import (
 )
 
 // PostgresReader 实现 Reader 接口，连接到 PostgreSQL 及其兼容库
-// （GaussDB / HighGo / SeaBox / KingBase）。这些库语法与类型均与 PG 兼容，
+// （GaussDB / HighGo / Vastbase / GBase / SeaBox / KingBase）。这些库语法与类型均与 PG 兼容，
 // 共用同一套元数据查询与 PGToDameng 类型映射，仅底层驱动可能不同。
 // PostgreSQL 的迁移单元是「库内的 schema」：连接的 dbname 固定在 DSN 中，
 // schema 字段对应本次迁移的 pg schema（类比达梦/Oracle 的 OWNER）。
@@ -29,7 +29,7 @@ func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresReader, erro
 }
 
 // NewPostgresCompatible 创建 PG 兼容库 Reader，driverName 指定底层驱动：
-// GaussDB 用 "opengauss"，HighGo/SeaBox/KingBase 等复用 "postgres"。
+// GaussDB 用 "opengauss"，HighGo/Vastbase/GBase/SeaBox/KingBase 等复用 "postgres"。
 func NewPostgresCompatible(driverName, dsn, schema string, pool ConnPoolConfig) (*PostgresReader, error) {
 	if driverName == "" {
 		driverName = "postgres"
@@ -54,7 +54,7 @@ func newPostgresWithDriver(driverName, dsn, schema string, pool ConnPoolConfig) 
 
 func (r *PostgresReader) Close() error { return r.db.Close() }
 
-// DBType 统一返回 "postgres"：GaussDB/HighGo/SeaBox/KingBase 与 PG 类型、默认值、
+// DBType 统一返回 "postgres"：GaussDB/HighGo/Vastbase/GBase/SeaBox/KingBase 与 PG 类型、默认值、
 // 值形态完全一致，共用 typemap("postgres","dameng")、coldefault 与 valueconv 分支。
 func (r *PostgresReader) DBType() string { return "postgres" }
 

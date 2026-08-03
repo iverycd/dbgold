@@ -12,6 +12,8 @@ func init() {
 	Register("mysql", "gaussdb", MySQLToPG)
 	Register("mysql", "seabox", MySQLToPG)
 	Register("mysql", "highgo", MySQLToPG)
+	Register("mysql", "vastbase", MySQLToPG)
+	Register("mysql", "gbase", MySQLToPG)
 	Register("mysql", "kingbase", MySQLToPG)
 }
 

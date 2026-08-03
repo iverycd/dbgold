@@ -45,6 +45,14 @@ var supportedPairs = []SupportedPair{
 	{Source: "sqlserver", Target: "highgo"},
 	{Source: "dameng", Target: "highgo"},
 	{Source: "oracle", Target: "highgo"},
+	{Source: "mysql", Target: "vastbase"},
+	{Source: "sqlserver", Target: "vastbase"},
+	{Source: "dameng", Target: "vastbase"},
+	{Source: "oracle", Target: "vastbase"},
+	{Source: "mysql", Target: "gbase"},
+	{Source: "sqlserver", Target: "gbase"},
+	{Source: "dameng", Target: "gbase"},
+	{Source: "oracle", Target: "gbase"},
 	{Source: "mysql", Target: "kingbase"},
 	{Source: "sqlserver", Target: "kingbase"},
 	{Source: "dameng", Target: "kingbase"},
@@ -56,6 +64,8 @@ var supportedPairs = []SupportedPair{
 	{Source: "postgres", Target: "dameng"},
 	{Source: "gaussdb", Target: "dameng"},
 	{Source: "highgo", Target: "dameng"},
+	{Source: "vastbase", Target: "dameng"},
+	{Source: "gbase", Target: "dameng"},
 	{Source: "seabox", Target: "dameng"},
 	{Source: "kingbase", Target: "dameng"},
 }
@@ -595,7 +605,7 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 		return source.NewDaMeng(dsn, db, pool)
 	case "oracle":
 		return source.NewOracle(dsn, db, pool)
-	case "postgres", "highgo", "seabox", "kingbase":
+	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用 lib/pq 驱动。迁移单元是库内 schema，
 		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
 		return source.NewPostgres(dsn, db, pool)
@@ -617,6 +627,10 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 		return target.NewDaMeng(dstDSN, targetSchema, pool)
 	case "highgo":
 		return target.NewHighGo(dstDSN, targetSchema, pool)
+	case "vastbase":
+		return target.NewVastbase(dstDSN, targetSchema, pool)
+	case "gbase":
+		return target.NewGBase(dstDSN, targetSchema, pool)
 	case "kingbase":
 		return target.NewKingbase(dstDSN, targetSchema, pool)
 	case "seabox":

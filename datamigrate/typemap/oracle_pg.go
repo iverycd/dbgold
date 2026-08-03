@@ -12,6 +12,8 @@ func init() {
 	Register("oracle", "gaussdb", OracleToPG)
 	Register("oracle", "seabox", OracleToPG)
 	Register("oracle", "highgo", OracleToPG)
+	Register("oracle", "vastbase", OracleToPG)
+	Register("oracle", "gbase", OracleToPG)
 	Register("oracle", "kingbase", OracleToPG)
 }
 

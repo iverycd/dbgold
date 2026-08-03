@@ -12,6 +12,8 @@ func init() {
 	Register("sqlserver", "gaussdb", SQLServerToPG)
 	Register("sqlserver", "seabox", SQLServerToPG)
 	Register("sqlserver", "highgo", SQLServerToPG)
+	Register("sqlserver", "vastbase", SQLServerToPG)
+	Register("sqlserver", "gbase", SQLServerToPG)
 	Register("sqlserver", "kingbase", SQLServerToPG)
 }
 

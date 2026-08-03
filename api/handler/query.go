@@ -61,7 +61,7 @@ func ownedQueryConnection(c *gin.Context, id uint) (*store.Connection, bool) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return nil, false
 	}
-	if conn.DBType != "mysql" && conn.DBType != "postgres" && conn.DBType != "gaussdb" {
+	if conn.DBType != "mysql" && conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "vastbase" && conn.DBType != "gbase" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("查询中心暂不支持 %s", conn.DBType)})
 		return nil, false
 	}

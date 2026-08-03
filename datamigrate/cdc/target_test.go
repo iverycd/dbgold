@@ -7,6 +7,8 @@ func TestTargetDriverName(t *testing.T) {
 		"":         "postgres",
 		"postgres": "postgres",
 		"highgo":   "postgres",
+		"vastbase": "postgres",
+		"gbase":    "postgres",
 		"kingbase": "postgres",
 		"seabox":   "postgres",
 		"gaussdb":  "opengauss",

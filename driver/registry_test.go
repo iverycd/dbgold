@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewDriver_SupportedTypes(t *testing.T) {
-	types := []string{"mysql", "postgres", "oracle", "sqlserver"}
+	types := []string{"mysql", "postgres", "oracle", "sqlserver", "vastbase", "gbase"}
 	for _, dbType := range types {
 		d, err := driver.NewDriver(dbType)
 		require.NoError(t, err, "dbType=%s", dbType)

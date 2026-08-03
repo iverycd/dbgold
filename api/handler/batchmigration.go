@@ -36,6 +36,8 @@ var dbTypeAlias = map[string]string{
 	"dm":         "dameng",
 	"seabox":     "seabox",
 	"highgo":     "highgo",
+	"vastbase":   "vastbase",
+	"gbase":      "gbase",
 	"kingbase":   "kingbase",
 	"kb":         "kingbase",
 }

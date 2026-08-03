@@ -865,14 +865,14 @@ const envHistory = computed(() => {
 const srcConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle' || c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'highgo' || c.db_type === 'seabox' || c.db_type === 'kingbase') &&
+      (c.db_type === 'mysql' || c.db_type === 'sqlserver' || c.db_type === 'dameng' || c.db_type === 'oracle' || c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'seabox' || c.db_type === 'kingbase') &&
       (!srcEnvFilter.value || c.env === srcEnvFilter.value)
   )
 )
 const pgConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'kingbase' || c.db_type === 'mysql') &&
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql') &&
       (!dstEnvFilter.value || c.env === dstEnvFilter.value)
   )
 )
@@ -954,7 +954,7 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
@@ -1205,7 +1205,7 @@ async function vmLoadDstSchemas(connId: number) {
   viewMigrate.dstSchema = ''
   viewMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
@@ -1370,7 +1370,7 @@ async function omLoadDstSchemas(connId: number) {
   objMigrate.dstSchema = ''
   objMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []

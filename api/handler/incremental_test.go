@@ -67,7 +67,7 @@ func TestConfigFromIncrementalUsesConfirmedIncrementalOnlyScope(t *testing.T) {
 }
 
 func TestIncrementalTargetTypesAndConfig(t *testing.T) {
-	supported := []string{"postgres", "gaussdb", "highgo", "kingbase", "seabox"}
+	supported := []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "kingbase", "seabox"}
 	for _, dbType := range supported {
 		t.Run(dbType, func(t *testing.T) {
 			require.True(t, isSupportedIncrementalTarget(dbType))

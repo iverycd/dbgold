@@ -47,6 +47,8 @@ var incrementalTargetTypes = map[string]bool{
 	"postgres": true,
 	"gaussdb":  true,
 	"highgo":   true,
+	"vastbase": true,
+	"gbase":    true,
 	"kingbase": true,
 	"seabox":   true,
 }
@@ -72,7 +74,7 @@ func validateIncrementalConnections(c *gin.Context, req incrementalRequest) (*st
 	}
 	dst, e := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if e != nil || !isSupportedIncrementalTarget(dst.DBType) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL、GaussDB、HighGo、Kingbase 或 SeaBox 连接"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL、GaussDB、HighGo、Vastbase、GBase（PG兼容）、Kingbase 或 SeaBox 连接"})
 		return nil, nil, false
 	}
 	if req.StartMode == "incremental_only" {

@@ -718,7 +718,7 @@ onMounted(async () => {
   restoreSession()
   try {
     const { data } = await listConnections()
-    connections.value = data.filter((item) => ['mysql', 'postgres', 'gaussdb'].includes(item.db_type))
+    connections.value = data.filter((item) => ['mysql', 'postgres', 'gaussdb', 'vastbase', 'gbase'].includes(item.db_type))
     const available = new Set(connections.value.map((item) => item.id))
     tabs.value.forEach((tab) => {
       if (tab.connectionId && !available.has(tab.connectionId)) {

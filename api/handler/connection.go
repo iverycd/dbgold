@@ -18,7 +18,7 @@ import (
 
 type connectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -29,7 +29,7 @@ type connectionRequest struct {
 
 type updateConnectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo kingbase"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -66,6 +66,12 @@ func buildDSN(c *store.Connection) string {
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "highgo":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
+	case "vastbase":
+		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.Username, c.Password, c.Database)
+	case "gbase":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "kingbase":
@@ -231,7 +237,7 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewDaMeng(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "oracle":
 		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
-	case "postgres", "highgo", "seabox", "kingbase":
+	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
 		reader, err = source.NewPostgres(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "gaussdb":
@@ -278,7 +284,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
-	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" && conn.DBType != "highgo" && conn.DBType != "kingbase" {
+	if conn.DBType != "postgres" && conn.DBType != "gaussdb" && conn.DBType != "seabox" && conn.DBType != "highgo" && conn.DBType != "vastbase" && conn.DBType != "gbase" && conn.DBType != "kingbase" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的 schema", conn.DBType)})
 		return
 	}

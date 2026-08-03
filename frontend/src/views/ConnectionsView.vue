@@ -77,6 +77,8 @@
             <a-option value="dameng">DaMeng（达梦）</a-option>
             <a-option value="seabox">SeaBox</a-option>
             <a-option value="highgo">HighGo（瀚高）</a-option>
+            <a-option value="vastbase">Vastbase（海量数据库）</a-option>
+            <a-option value="gbase">GBase（PG兼容）</a-option>
             <a-option value="kingbase">Kingbase（人大金仓）</a-option>
           </a-select>
         </a-form-item>
@@ -183,6 +185,8 @@ const defaultPortMap: Record<string, number> = {
   dameng: 5236,
   seabox: 5432,
   highgo: 5866,
+  vastbase: 5432,
+  gbase: 15400,
   kingbase: 54321,
 }
 

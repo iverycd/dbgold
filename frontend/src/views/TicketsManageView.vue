@@ -260,6 +260,8 @@ const dbTypeOptions = [
   { value: 'dameng', label: 'DaMeng（达梦）' },
   { value: 'seabox', label: 'SeaBox' },
   { value: 'highgo', label: 'HighGo（瀚高）' },
+  { value: 'vastbase', label: 'Vastbase（海量数据库）' },
+  { value: 'gbase', label: 'GBase（PG兼容）' },
   { value: 'kingbase', label: 'Kingbase（人大金仓）' },
 ]
 

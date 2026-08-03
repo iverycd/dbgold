@@ -247,6 +247,8 @@ const DB_OPTIONS = [
   { value: 'dameng', label: 'DaMeng（达梦）' },
   { value: 'seabox', label: 'SeaBox' },
   { value: 'highgo', label: 'HighGo（瀚高）' },
+  { value: 'vastbase', label: 'Vastbase（海量数据库）' },
+  { value: 'gbase', label: 'GBase（PG兼容）' },
   { value: 'kingbase', label: 'Kingbase（人大金仓）' },
 ]
 
@@ -259,6 +261,8 @@ const defaultPortMap: Record<string, number> = {
   dameng: 5236,
   seabox: 5432,
   highgo: 5866,
+  vastbase: 5432,
+  gbase: 15400,
   kingbase: 54321,
 }
 
