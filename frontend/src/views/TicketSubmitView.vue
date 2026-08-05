@@ -259,7 +259,7 @@ const defaultPortMap: Record<string, number> = {
   sqlserver: 1433,
   gaussdb: 5432,
   dameng: 5236,
-  seabox: 5432,
+  seabox: 7300,
   highgo: 5866,
   vastbase: 5432,
   gbase: 15400,
