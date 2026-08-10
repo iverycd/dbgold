@@ -3,7 +3,7 @@
 FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --audit=false
 COPY frontend/ ./
 RUN npm run build
 
@@ -13,10 +13,17 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
+ARG GOPROXY=https://proxy.golang.org,direct
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    for attempt in 1 2 3; do go mod download && exit 0; sleep $((attempt * 2)); done; exit 1
+    for attempt in 1 2 3; do \
+      echo "Downloading Go modules (attempt ${attempt}/3, timeout 180s, GOPROXY=${GOPROXY})"; \
+      if GOPROXY="${GOPROXY}" timeout 180s go mod download; then exit 0; fi; \
+      if [ "$attempt" -lt 3 ]; then sleep $((attempt * 2)); fi; \
+    done; \
+    echo "Failed to download Go modules after 3 attempts." >&2; \
+    exit 1
 COPY . ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \

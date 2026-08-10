@@ -68,6 +68,14 @@ VITE_API_TARGET=http://localhost:18089
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
 ```
 
+构建机会访问 npm、Go 模块代理和基础镜像仓库；目标服务器无需联网。网络访问 `proxy.golang.org` 较慢时，可显式指定 Go 模块代理：
+
+```bash
+GOPROXY=https://goproxy.cn,direct GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
+```
+
+脚本失败时默认清理临时文件；需要保留现场排查时，可增加 `KEEP_WORK_DIR=1`。开发阶段允许已跟踪文件未提交时，可使用 `ALLOW_DIRTY=1`，此时 manifest 的提交号会带 `-dirty` 标记；正式发布仍应在干净工作区执行。
+
 输出位于 `release/v1.2.3/`：
 
 - `dbgold-v1.2.3-linux-amd64.tar.gz`
