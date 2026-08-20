@@ -84,6 +84,18 @@ func buildDSN(c *store.Connection) string {
 	return ""
 }
 
+// pgCompatibleDriverName 返回各 PostgreSQL 兼容库使用的 database/sql 驱动名。
+func pgCompatibleDriverName(dbType string) string {
+	switch dbType {
+	case "gaussdb":
+		return "opengauss"
+	case "highgo":
+		return "highgo"
+	default:
+		return "postgres"
+	}
+}
+
 // getOwnedConnection 取连接并做归属校验：普通用户只能访问自己的连接，admin 可访问任意。
 // 非归属或不存在统一返回 404（不暴露存在性）。校验失败时已写入响应，调用方应直接 return。
 func getOwnedConnection(c *gin.Context, id uint) (*store.Connection, bool) {
@@ -239,7 +251,7 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
-		reader, err = source.NewPostgres(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+		reader, err = source.NewPostgresCompatible(pgCompatibleDriverName(conn.DBType), buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "gaussdb":
 		reader, err = source.NewPostgresCompatible("opengauss", buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	default:
@@ -289,11 +301,7 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
-	driverName := "postgres"
-	if conn.DBType == "gaussdb" {
-		driverName = "opengauss"
-	}
-	// seabox 使用标准 postgres 驱动
+	driverName := pgCompatibleDriverName(conn.DBType)
 	db, err := sql.Open(driverName, buildDSN(conn))
 	if err != nil {
 		c.Error(err)

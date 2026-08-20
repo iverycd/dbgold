@@ -69,7 +69,7 @@ func DaMengToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "time":
 		return "time"
 	case "timestamp", "datetime":
-		return "timestamp"
+		return "timestamp without time zone"
 	case "bit", "boolean":
 		return "smallint"
 	case "interval year to month":

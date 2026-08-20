@@ -606,9 +606,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	case "oracle":
 		return source.NewOracle(dsn, db, pool)
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
-		// PG 兼容库共用 lib/pq 驱动。迁移单元是库内 schema，
+		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，
 		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
-		return source.NewPostgres(dsn, db, pool)
+		return source.NewPostgresCompatible(pgCompatibleDriverName(conn.DBType), dsn, db, pool)
 	case "gaussdb":
 		// GaussDB 需 opengauss 驱动，其余逻辑与 PG 一致
 		return source.NewPostgresCompatible("opengauss", dsn, db, pool)

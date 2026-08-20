@@ -55,7 +55,7 @@ func SQLServerToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "uniqueidentifier":
 		return "char(36)"
 	case "smalldatetime", "datetime", "datetime2":
-		return "timestamp"
+		return "timestamp without time zone"
 	case "date":
 		return "date"
 	case "time":

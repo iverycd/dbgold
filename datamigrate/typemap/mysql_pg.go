@@ -55,7 +55,7 @@ func MySQLToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "tinytext", "text", "mediumtext", "longtext":
 		return "text"
 	case "datetime", "timestamp":
-		return "timestamp"
+		return "timestamp without time zone"
 	case "date":
 		return "date"
 	case "time":

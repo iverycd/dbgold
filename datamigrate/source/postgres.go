@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	_ "dbgold/internal/highgopq"
 	_ "gitee.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/lib/pq"
 )
@@ -29,7 +30,7 @@ func NewPostgres(dsn, schema string, pool ConnPoolConfig) (*PostgresReader, erro
 }
 
 // NewPostgresCompatible 创建 PG 兼容库 Reader，driverName 指定底层驱动：
-// GaussDB 用 "opengauss"，HighGo/Vastbase/GBase/SeaBox/KingBase 等复用 "postgres"。
+// GaussDB 用 "opengauss"，HighGo 用 "highgo"，其余兼容库复用 "postgres"。
 func NewPostgresCompatible(driverName, dsn, schema string, pool ConnPoolConfig) (*PostgresReader, error) {
 	if driverName == "" {
 		driverName = "postgres"

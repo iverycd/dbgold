@@ -80,12 +80,12 @@ func OracleToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "BLOB", "RAW", "LONG RAW":
 		return "bytea"
 
-	// Oracle DATE 含时分秒，映射到 timestamp
+	// Oracle DATE 含时分秒，映射到不带时区的 timestamp
 	case "DATE":
-		return "timestamp"
+		return "timestamp without time zone"
 
 	case "TIMESTAMP":
-		return "timestamp"
+		return "timestamp without time zone"
 
 	case "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE":
 		return "timestamptz"

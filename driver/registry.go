@@ -3,6 +3,7 @@ package driver
 import (
 	"dbgold/driver/dameng"
 	"dbgold/driver/gaussdb"
+	"dbgold/driver/highgo"
 	"dbgold/driver/mysql"
 	"dbgold/driver/oracle"
 	"dbgold/driver/postgres"
@@ -27,7 +28,7 @@ func NewDriver(dbType string) (Driver, error) {
 	case "dameng":
 		return dameng.New(), nil
 	case "highgo":
-		return postgres.New(), nil
+		return highgo.New(), nil
 	case "vastbase":
 		return postgres.New(), nil
 	case "gbase":

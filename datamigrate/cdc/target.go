@@ -3,6 +3,7 @@ package cdc
 import (
 	"database/sql"
 
+	_ "dbgold/internal/highgopq"
 	_ "gitee.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/lib/pq"
 )
@@ -13,6 +14,9 @@ import (
 func targetDriverName(dbType string) string {
 	if dbType == "gaussdb" {
 		return "opengauss"
+	}
+	if dbType == "highgo" {
+		return "highgo"
 	}
 	return "postgres"
 }

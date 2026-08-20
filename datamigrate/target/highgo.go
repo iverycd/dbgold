@@ -10,11 +10,11 @@ import (
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/valueconv"
-	_ "github.com/lib/pq"
+	_ "dbgold/internal/highgopq"
 )
 
 // HighGoWriter 实现 Writer 接口，写入到瀚高（HighGo）数据库
-// HighGo 与 PostgreSQL 协议兼容，复用 lib/pq 驱动和 PostgreSQL 方言
+// HighGo 与 PostgreSQL 协议兼容，使用瀚高专用驱动和 PostgreSQL 方言
 type HighGoWriter struct {
 	db        *sql.DB
 	schema    string
@@ -28,7 +28,7 @@ func (w *HighGoWriter) Dialect() dialect.Dialect     { return w.dia }
 
 // NewHighGo 创建并连接 HighGo Writer
 func NewHighGo(dsn, schema string, pool ConnPoolConfig) (*HighGoWriter, error) {
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("highgo", dsn)
 	if err != nil {
 		return nil, err
 	}
