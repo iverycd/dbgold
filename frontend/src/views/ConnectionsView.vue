@@ -19,7 +19,14 @@
       />
     </div>
 
-    <a-table :data="filteredConnections" :loading="loading" row-key="id" :pagination="false">
+    <a-table
+      :data="filteredConnections"
+      :loading="loading"
+      row-key="id"
+      :pagination="pagination"
+      @page-change="handlePageChange"
+      @page-size-change="handlePageSizeChange"
+    >
       <template #columns>
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="db_type" :width="100">
@@ -153,6 +160,9 @@ const defaultForm = () => ({
 
 const form = reactive(defaultForm())
 const envFilter = ref<string | undefined>(undefined)
+type PageSize = 20 | 50 | 100
+const page = ref(1)
+const pageSize = ref<PageSize>(20)
 
 // envHistory：从已有连接里去重取出用过的环境值，供筛选下拉和表单联想使用
 const envHistory = computed(() => {
@@ -164,6 +174,15 @@ const filteredConnections = computed(() => {
   if (!envFilter.value) return connections.value
   return connections.value.filter((c) => c.env === envFilter.value)
 })
+
+const pagination = computed(() => ({
+  current: page.value,
+  pageSize: pageSize.value,
+  total: filteredConnections.value.length,
+  showTotal: true,
+  showPageSize: true,
+  pageSizeOptions: [20, 50, 100],
+}))
 
 // getEnvColor：环境是用户自定义文本，没有固定枚举，按内容哈希稳定映射到 Arco 标签色，
 // 保证同一个环境名在列表里始终显示同一种颜色。
@@ -196,11 +215,30 @@ watch(() => form.db_type, (newType) => {
   }
 })
 
+watch(envFilter, () => {
+  page.value = 1
+})
+
+function handlePageChange(nextPage: number) {
+  page.value = nextPage
+}
+
+function handlePageSizeChange(size: number) {
+  pageSize.value = size === 50 || size === 100 ? size : 20
+  page.value = 1
+}
+
+function ensureValidPage() {
+  const maxPage = Math.max(1, Math.ceil(filteredConnections.value.length / pageSize.value))
+  if (page.value > maxPage) page.value = maxPage
+}
+
 async function loadConnections() {
   loading.value = true
   try {
     const res = await listConnections()
     connections.value = res.data
+    ensureValidPage()
   } catch {
     Message.error('加载连接列表失败')
   } finally {
