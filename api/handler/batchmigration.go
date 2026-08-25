@@ -26,6 +26,8 @@ var dbTypeAlias = map[string]string{
 	"postgres":   "postgres",
 	"postgresql": "postgres",
 	"pg":         "postgres",
+	"oscar":      "oscar",
+	"shentong":   "oscar",
 	"oracle":     "oracle",
 	"sqlserver":  "sqlserver",
 	"mssql":      "sqlserver",

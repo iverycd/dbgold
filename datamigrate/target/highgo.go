@@ -49,9 +49,8 @@ func (w *HighGoWriter) qualifiedTable(table string) string {
 func (w *HighGoWriter) Close() error   { return w.db.Close() }
 func (w *HighGoWriter) DBType() string { return "highgo" }
 
-func (w *HighGoWriter) CreateTable(ctx context.Context, ddl string) error {
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+func (w *HighGoWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	return w.execStatements(ctx, stmts)
 }
 
 func (w *HighGoWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {

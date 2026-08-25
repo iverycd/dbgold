@@ -49,9 +49,8 @@ func (w *KingbaseWriter) qualifiedTable(table string) string {
 func (w *KingbaseWriter) Close() error   { return w.db.Close() }
 func (w *KingbaseWriter) DBType() string { return "kingbase" }
 
-func (w *KingbaseWriter) CreateTable(ctx context.Context, ddl string) error {
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+func (w *KingbaseWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	return w.execStatements(ctx, stmts)
 }
 
 func (w *KingbaseWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {

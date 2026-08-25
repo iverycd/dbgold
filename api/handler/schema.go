@@ -60,7 +60,9 @@ func ExportRoutines(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "该源库类型暂不支持导出函数/存储过程/触发器: " + conn.DBType})
 		return
 	}
-	if err := d.Connect(buildDSN(conn)); err != nil {
+	if err := d.Connect(c.Request.Context(), driver.ConnectOptions{
+		DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
+	}); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}

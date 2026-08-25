@@ -87,6 +87,7 @@
             <a-option value="vastbase">Vastbase（海量数据库）</a-option>
             <a-option value="gbase">GBase（PG兼容）</a-option>
             <a-option value="kingbase">Kingbase（人大金仓）</a-option>
+            <a-option value="oscar">Oscar（神通数据库）</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -207,6 +208,7 @@ const defaultPortMap: Record<string, number> = {
   vastbase: 5432,
   gbase: 15400,
   kingbase: 54321,
+  oscar: 2003,
 }
 
 watch(() => form.db_type, (newType) => {

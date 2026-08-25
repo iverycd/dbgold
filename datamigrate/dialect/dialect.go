@@ -22,8 +22,9 @@ type TypeOpt struct {
 	UseNvarchar2 bool
 }
 
-// Statement 一条可执行 SQL。SQL 不含末尾分号(与 writer 单句执行约定一致),
-// 但建表这类需要一次提交多句的场景,SQL 内部可含 ";\n" 分隔(与现状一致)。
+// Statement is one independently executable SQL statement. A Writer executes
+// statement slices one-by-one, which also keeps JDBC drivers from receiving
+// multi-statement strings.
 type Statement struct {
 	SQL string
 }

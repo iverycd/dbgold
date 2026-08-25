@@ -30,10 +30,23 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     -ldflags="-s -w -X dbgold/api/handler.Version=${VERSION} -X dbgold/api/handler.GitCommit=${GIT_COMMIT} -X dbgold/api/handler.BuildTime=${BUILD_TIME}" \
     -o /out/dbgold .
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+FROM --platform=$BUILDPLATFORM eclipse-temurin:17-jdk-jammy AS jdbc-helper
+WORKDIR /src
+COPY jdbcbridge/java/src/ ./src/
+RUN mkdir -p /out/classes && \
+    javac --release 8 -encoding UTF-8 -d /out/classes src/com/dbgold/oscar/BridgeMain.java && \
+    jar --create --file /out/dbgold-oscar-bridge.jar --main-class com.dbgold.oscar.BridgeMain -C /out/classes .
+
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
+RUN groupadd --system dbgold && useradd --system --gid dbgold --home-dir /app --no-create-home dbgold && \
+    mkdir -p /app/data /app/uploads /app/logs /app/lib && chown -R dbgold:dbgold /app
 COPY --from=backend /out/dbgold /app/dbgold
 COPY --from=frontend /src/frontend/dist /app/web
+COPY --from=jdbc-helper /out/dbgold-oscar-bridge.jar /app/lib/dbgold-oscar-bridge.jar
+COPY third_party/oscar/oscarJDBC8.jar /app/lib/oscarJDBC8.jar
+COPY third_party/oscar/README.md /app/lib/OSCAR-JDBC-NOTICE.md
+COPY third_party/oscar/LICENSE /app/lib/OSCAR-JDBC-LICENSE
 ENV APP_ENV=production \
     LISTEN_HOST=0.0.0.0 \
     PORT=18089 \
@@ -41,7 +54,8 @@ ENV APP_ENV=production \
     SQLITE_PATH=/app/data/dbgold.db \
     UPLOAD_DIR=/app/uploads \
     LOG_DIR=/app/logs
-USER nonroot:nonroot
+RUN java -version && java -cp /app/lib/dbgold-oscar-bridge.jar:/app/lib/oscarJDBC8.jar com.dbgold.oscar.BridgeMain </dev/null
+USER dbgold:dbgold
 EXPOSE 18089
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/dbgold", "healthcheck"]
 ENTRYPOINT ["/app/dbgold"]

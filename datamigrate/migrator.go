@@ -166,7 +166,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 				m.log.Warn("任务已取消")
 				return report
 			}
-			ddl, err := m.buildCreateTableDDL(ctx, table)
+			stmts, ddl, err := m.buildCreateTableDDL(ctx, table)
 			if err != nil {
 				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
@@ -174,7 +174,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: "", Error: err.Error()})
 				continue
 			}
-			if err := m.writer.CreateTable(ctx, ddl); err != nil {
+			if err := m.writer.CreateTable(ctx, stmts); err != nil {
 				m.log.Errorf("创建表失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				report.Tables.Failed++
@@ -289,17 +289,17 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 }
 
 // buildCreateTableDDL 通过目标方言生成建表 DDL。
-func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) (string, error) {
+func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dialect.Statement, string, error) {
 	info, err := m.reader.GetTableDDLInfo(ctx, table)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
 	stmts, err := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, info, m.reader.DBType(), opt, m.objName)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	return dialect.JoinSQL(stmts), nil
+	return stmts, dialect.JoinSQL(stmts), nil
 }
 
 // migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）

@@ -55,7 +55,7 @@
         </a-form-item>
         <a-form-item label="数据库类型" field="src_db_type" :rules="[{ required: true, message: '请选择数据库类型' }]">
           <a-select v-model="form.src_db_type" placeholder="选择数据库类型">
-            <a-option v-for="o in DB_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+            <a-option v-for="o in SOURCE_DB_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
           </a-select>
         </a-form-item>
 
@@ -119,7 +119,7 @@
         </a-alert>
         <a-form-item label="数据库类型" field="dst_db_type" :rules="[{ required: true, message: '请选择数据库类型' }]">
           <a-select v-model="form.dst_db_type" placeholder="选择数据库类型">
-            <a-option v-for="o in DB_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+            <a-option v-for="o in TARGET_DB_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
           </a-select>
         </a-form-item>
         <a-row :gutter="12">
@@ -238,7 +238,7 @@ onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
 })
 
-const DB_OPTIONS = [
+const SOURCE_DB_OPTIONS = [
   { value: 'mysql', label: 'MySQL' },
   { value: 'postgres', label: 'PostgreSQL' },
   { value: 'oracle', label: 'Oracle' },
@@ -250,6 +250,10 @@ const DB_OPTIONS = [
   { value: 'vastbase', label: 'Vastbase（海量数据库）' },
   { value: 'gbase', label: 'GBase（PG兼容）' },
   { value: 'kingbase', label: 'Kingbase（人大金仓）' },
+]
+const TARGET_DB_OPTIONS = [
+  ...SOURCE_DB_OPTIONS,
+  { value: 'oscar', label: 'Oscar（神通数据库）' },
 ]
 
 const defaultPortMap: Record<string, number> = {
@@ -264,6 +268,7 @@ const defaultPortMap: Record<string, number> = {
   vastbase: 5432,
   gbase: 15400,
   kingbase: 54321,
+  oscar: 2003,
 }
 
 const defaultForm = (): TicketForm => ({

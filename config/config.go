@@ -30,6 +30,12 @@ type Config struct {
 	QueryTimeoutSeconds     int    // 查询中心单语句超时，默认 30 秒
 	QueryMaxRows            int    // 查询中心最大返回行数，默认 1000
 	QueryAuditRetentionDays int    // 查询中心审计保留天数，默认 90 天
+	OscarJavaBin            string // Oscar JDBC Java 可执行文件；空值时自动查找内置 runtime 或 PATH
+	OscarJDBCJar            string // Oscar JDBC 驱动路径；空值时使用内置 lib/oscarJDBC8.jar
+	OscarBridgeJar          string // 内部 JDBC bridge jar；主要供开发/测试覆盖
+	OscarLoginTimeoutMS     int
+	OscarSocketTimeoutMS    int
+	OscarBridgeXmxMB        int
 }
 
 func Load() *Config {
@@ -77,6 +83,13 @@ func LoadFromFile(path string) (*Config, error) {
 		}
 		return fallback
 	}
+	lookupNonNegativeInt := func(key string, fallback int) int {
+		value := lookup(key, "")
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			return n
+		}
+		return fallback
+	}
 	trustedProxies := splitCSV(lookup("TRUSTED_PROXIES", ""))
 
 	return &Config{
@@ -99,6 +112,12 @@ func LoadFromFile(path string) (*Config, error) {
 		QueryTimeoutSeconds:     lookupInt("QUERY_TIMEOUT_SECONDS", 30),
 		QueryMaxRows:            lookupInt("QUERY_MAX_ROWS", 1000),
 		QueryAuditRetentionDays: lookupInt("QUERY_AUDIT_RETENTION_DAYS", 90),
+		OscarJavaBin:            lookup("OSCAR_JAVA_BIN", ""),
+		OscarJDBCJar:            lookup("OSCAR_JDBC_JAR", ""),
+		OscarBridgeJar:          lookup("OSCAR_BRIDGE_JAR", ""),
+		OscarLoginTimeoutMS:     lookupInt("OSCAR_LOGIN_TIMEOUT_MS", 15000),
+		OscarSocketTimeoutMS:    lookupNonNegativeInt("OSCAR_SOCKET_TIMEOUT_MS", 0),
+		OscarBridgeXmxMB:        lookupInt("OSCAR_BRIDGE_XMX_MB", 512),
 	}, nil
 }
 

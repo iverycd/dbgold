@@ -55,9 +55,8 @@ func (w *GaussDBWriter) qualifiedTable(table string) string {
 func (w *GaussDBWriter) Close() error   { return w.db.Close() }
 func (w *GaussDBWriter) DBType() string { return "gaussdb" }
 
-func (w *GaussDBWriter) CreateTable(ctx context.Context, ddl string) error {
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+func (w *GaussDBWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	return w.execStatements(ctx, stmts)
 }
 
 // CopyData 使用 GaussDB COPY 协议批量写入行数据。

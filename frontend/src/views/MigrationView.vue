@@ -177,7 +177,7 @@
 
                   <div class="adv-section-title">选项</div>
                   <a-row :gutter="16">
-                    <a-col v-if="selectedDst?.db_type !== 'dameng'" :span="12">
+                    <a-col v-if="selectedDst?.db_type !== 'dameng' && selectedDst?.db_type !== 'oscar'" :span="12">
                       <a-checkbox v-model="dataMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                     </a-col>
                     <a-col :span="12">
@@ -190,7 +190,7 @@
                       <a-checkbox v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.distributed" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
                     </a-col>
                   </a-row>
 
@@ -479,7 +479,7 @@
             <a-collapse-item key="advanced" header="高级设置">
               <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
-                <a-col v-if="vmSelectedDst?.db_type !== 'dameng'" :span="12">
+                <a-col v-if="vmSelectedDst?.db_type !== 'dameng' && vmSelectedDst?.db_type !== 'oscar'" :span="12">
                   <a-checkbox v-model="viewMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
                 <a-col :span="12">
@@ -709,14 +709,14 @@
             <a-collapse-item key="advanced" header="高级设置">
               <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
-                <a-col v-if="omSelectedDst?.db_type !== 'dameng'" :span="12">
+                <a-col v-if="omSelectedDst?.db_type !== 'dameng' && omSelectedDst?.db_type !== 'oscar'" :span="12">
                   <a-checkbox v-model="objMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
                 <a-col :span="12">
                   <a-checkbox v-model="objMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.distributed" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
+                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
                 </a-col>
               </a-row>
             </a-collapse-item>
@@ -872,7 +872,7 @@ const srcConnections = computed(() =>
 const pgConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql') &&
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql' || c.db_type === 'oscar') &&
       (!dstEnvFilter.value || c.env === dstEnvFilter.value)
   )
 )
@@ -907,9 +907,10 @@ watch(() => dataMigrate.dstConnId, (newId) => {
     dataMigrate.lowerCaseNames = false
     dataMigrate.charInLength = true
   } else {
-    dataMigrate.lowerCaseNames = true
+    dataMigrate.lowerCaseNames = dst?.db_type !== 'oscar'
     dataMigrate.charInLength = false
   }
+  if (dst?.db_type === 'oscar') dataMigrate.distributed = false
 })
 
 const canStartMigration = computed(() =>
@@ -954,7 +955,7 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
@@ -1168,7 +1169,7 @@ const vmCanMigrate = computed(() =>
 
 watch(() => viewMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
-  viewMigrate.lowerCaseNames = dst?.db_type !== 'dameng'
+  viewMigrate.lowerCaseNames = dst?.db_type !== 'dameng' && dst?.db_type !== 'oscar'
 })
 
 function vmCheckPairSupport() {
@@ -1205,7 +1206,7 @@ async function vmLoadDstSchemas(connId: number) {
   viewMigrate.dstSchema = ''
   viewMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
@@ -1334,7 +1335,8 @@ const omCanMigrate = computed(() =>
 
 watch(() => objMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
-  objMigrate.lowerCaseNames = dst?.db_type !== 'dameng'
+  objMigrate.lowerCaseNames = dst?.db_type !== 'dameng' && dst?.db_type !== 'oscar'
+  if (dst?.db_type === 'oscar') objMigrate.distributed = false
 })
 
 function omCheckPairSupport() {
@@ -1370,7 +1372,7 @@ async function omLoadDstSchemas(connId: number) {
   objMigrate.dstSchema = ''
   objMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []

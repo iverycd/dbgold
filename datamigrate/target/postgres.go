@@ -87,9 +87,8 @@ func (w *PostgresWriter) qualifiedTable(table string) string {
 func (w *PostgresWriter) Close() error   { return w.db.Close() }
 func (w *PostgresWriter) DBType() string { return w.dbType }
 
-func (w *PostgresWriter) CreateTable(ctx context.Context, ddl string) error {
-	_, err := w.db.ExecContext(ctx, ddl)
-	return err
+func (w *PostgresWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	return w.execStatements(ctx, stmts)
 }
 
 // CopyData 使用 PostgreSQL COPY 协议批量写入行数据。

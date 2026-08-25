@@ -5,6 +5,7 @@ import (
 	"dbgold/api"
 	"dbgold/api/handler"
 	"dbgold/config"
+	"dbgold/internal/jdbcbridge"
 	"dbgold/logger"
 	"dbgold/middleware"
 	"dbgold/store"
@@ -143,6 +144,16 @@ func runServer(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
 	defer cleanupLogger()
+
+	jdbcbridge.ConfigureDefault(jdbcbridge.Config{
+		JavaBin:         cfg.OscarJavaBin,
+		JDBCJar:         cfg.OscarJDBCJar,
+		BridgeJar:       cfg.OscarBridgeJar,
+		LoginTimeoutMS:  cfg.OscarLoginTimeoutMS,
+		SocketTimeoutMS: cfg.OscarSocketTimeoutMS,
+		MaxHeapMB:       cfg.OscarBridgeXmxMB,
+	})
+	defer jdbcbridge.Default().Close()
 
 	if err := store.InitWithError(cfg); err != nil {
 		return err

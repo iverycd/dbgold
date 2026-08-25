@@ -88,9 +88,9 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 	} else {
 		qualifiedName = fmt.Sprintf(`"%s"`, tblName)
 	}
-	ddl := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;\nCREATE TABLE %s (\n%s\n);",
-		qualifiedName, qualifiedName, strings.Join(cols, ",\n"))
-	return []Statement{{SQL: ddl}}, nil
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedName)
+	createSQL := fmt.Sprintf("CREATE TABLE %s (\n%s\n);", qualifiedName, strings.Join(cols, ",\n"))
+	return []Statement{{SQL: dropSQL}, {SQL: createSQL}}, nil
 }
 
 // isFunctionDefault 判断默认值是否为函数或关键字(不应加引号)。

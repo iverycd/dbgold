@@ -8,5 +8,6 @@ docs
 log
 uploads
 release
+jdbcbridge/java/build/
 cdcstress-results
 /cmd/cdcstress/build/

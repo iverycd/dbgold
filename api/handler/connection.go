@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"dbgold/datamigrate/source"
 	"dbgold/driver"
@@ -18,7 +19,7 @@ import (
 
 type connectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -29,7 +30,7 @@ type connectionRequest struct {
 
 type updateConnectionRequest struct {
 	Name     string `json:"name" binding:"required"`
-	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	DBType   string `json:"db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	Host     string `json:"host" binding:"required"`
 	Port     int    `json:"port" binding:"required,min=1,max=65535"`
 	Database string `json:"database"`
@@ -80,6 +81,9 @@ func buildDSN(c *store.Connection) string {
 	case "dameng":
 		return fmt.Sprintf("dm://%s:%s@%s:%d",
 			c.Username, c.Password, c.Host, c.Port)
+	case "oscar":
+		// Credentials travel in the private bridge frame, never in the URL or argv.
+		return fmt.Sprintf("jdbc:oscar://%s:%d/%s", c.Host, c.Port, c.Database)
 	}
 	return ""
 }
@@ -221,7 +225,9 @@ func TestConnection(c *gin.Context) {
 		return
 	}
 	defer d.Close()
-	if err := d.Connect(buildDSN(conn)); err != nil {
+	if err := d.Connect(c.Request.Context(), driver.ConnectOptions{
+		DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
+	}); err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -293,6 +299,37 @@ func ListConnectionSchemas(c *gin.Context) {
 	// MySQL 的 schema 即 database,走 information_schema.schemata 查询
 	if conn.DBType == "mysql" {
 		listMySQLSchemas(c, conn)
+		return
+	}
+
+	if conn.DBType == "oscar" {
+		d, err := driver.NewDriver("oscar")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		defer d.Close()
+		if err := d.Connect(c.Request.Context(), driver.ConnectOptions{
+			DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
+		}); err != nil {
+			c.Error(err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		lister, ok := d.(interface {
+			ListSchemas(context.Context) ([]string, error)
+		})
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Oscar 驱动不支持列出 schema"})
+			return
+		}
+		schemas, err := lister.ListSchemas(c.Request.Context())
+		if err != nil {
+			c.Error(err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, schemas)
 		return
 	}
 

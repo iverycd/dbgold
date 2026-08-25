@@ -65,13 +65,8 @@ func (w *MySQLWriter) qualifiedTable(table string) string {
 
 // CreateTable 执行建表 DDL(dialect 用 ";\n" 连接 DROP + CREATE 两句)。
 // DROP TABLE IF EXISTS 不会因表不存在报错。
-func (w *MySQLWriter) CreateTable(ctx context.Context, ddl string) error {
-	for _, stmt := range splitDDL(ddl) {
-		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	return nil
+func (w *MySQLWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	return w.execStatements(ctx, stmts)
 }
 
 func (w *MySQLWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {

@@ -10,6 +10,7 @@ const DB_TYPE_CONFIG: Record<string, { color: string; label: string }> = {
   vastbase:      { color: 'arcoblue',   label: 'Vastbase 海量数据库' },
   gbase:         { color: 'green',      label: 'GBase（PG兼容）' },
   kingbase:      { color: 'green',      label: 'Kingbase 人大金仓' },
+  oscar:         { color: 'purple',     label: 'Oscar（神通数据库）' },
   mongodb:       { color: 'lime',       label: 'MongoDB' },
   redis:         { color: 'magenta',    label: 'Redis' },
   elasticsearch: { color: 'gold',       label: 'Elasticsearch' },

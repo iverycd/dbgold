@@ -62,11 +62,11 @@ type mockWriter struct {
 func (m *mockWriter) DBType() string           { return "postgres" }
 func (m *mockWriter) Dialect() dialect.Dialect { return dialect.NewPostgres("postgres") }
 func (m *mockWriter) Close() error             { return nil }
-func (m *mockWriter) CreateTable(_ context.Context, ddl string) error {
+func (m *mockWriter) CreateTable(_ context.Context, stmts []dialect.Statement) error {
 	if m.createTableFail {
 		return fmt.Errorf("create table failed")
 	}
-	m.created = append(m.created, ddl)
+	m.created = append(m.created, dialect.JoinSQL(stmts))
 	return nil
 }
 func (m *mockWriter) CopyData(_ context.Context, table string, _ []string, _ []string, _ [][]interface{}) error {

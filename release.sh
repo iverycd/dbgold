@@ -8,6 +8,9 @@ GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 KEEP_WORK_DIR="${KEEP_WORK_DIR:-0}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 MIN_FREE_KB=$((4 * 1024 * 1024))
+OSCAR_JDBC_SHA256="50fe16b24ad5b8fb0fb73f9239db3fb1c86a69c887614ddb34528a4a65f30f24"
+TEMURIN_WINDOWS_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_windows_hotspot_17.0.19_10.zip"
+TEMURIN_WINDOWS_SHA256="79a598e1fbb4e16582d92c4ee22280a3c4d72fd52606e1e46b1223c0fe53b0da"
 CURRENT_STAGE="initialization"
 ERROR_REPORTED=0
 WORK_DIR=""
@@ -75,7 +78,7 @@ preflight() {
   fi
 
   local command_name
-  for command_name in docker npm node zip unzip tar shasum git find sort awk sed file; do
+  for command_name in docker npm node zip unzip tar shasum git find sort awk sed file curl javac jar java; do
     require_command "$command_name"
   done
 
@@ -123,10 +126,43 @@ preflight() {
   fi
   docker buildx inspect --bootstrap "$BUILDER_NAME" >/dev/null
 
+  local jdbc_hash
+  if [[ ! -s "$ROOT_DIR/third_party/oscar/LICENSE" ]]; then
+    printf 'Oscar JDBC vendor license is required at third_party/oscar/LICENSE before release.\n' >&2
+    return 1
+  fi
+  jdbc_hash="$(shasum -a 256 "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" | awk '{print $1}')"
+  [[ "$jdbc_hash" == "$OSCAR_JDBC_SHA256" ]] || {
+    printf 'Oscar JDBC JAR checksum mismatch: expected %s, got %s.\n' "$OSCAR_JDBC_SHA256" "$jdbc_hash" >&2
+    return 1
+  }
+
   log "Go: $go_version"
   log "Node: $(node --version); npm: $(npm --version)"
   log "Buildx builder: $BUILDER_NAME"
   log "GOPROXY: $GOPROXY"
+}
+
+build_jdbc_bridge() {
+  cd "$ROOT_DIR"
+  sh jdbcbridge/java/build.sh
+  java -cp "jdbcbridge/java/build/dbgold-oscar-bridge.jar:third_party/oscar/oscarJDBC8.jar" com.dbgold.oscar.BridgeMain </dev/null
+}
+
+prepare_windows_runtime() {
+  local archive="$WORK_DIR/temurin17-windows.zip"
+  local extracted="$WORK_DIR/temurin17-windows"
+  curl --fail --location --retry 3 --output "$archive" "$TEMURIN_WINDOWS_URL"
+  local actual
+  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  [[ "$actual" == "$TEMURIN_WINDOWS_SHA256" ]] || {
+    printf 'Temurin Windows JRE checksum mismatch: expected %s, got %s.\n' "$TEMURIN_WINDOWS_SHA256" "$actual" >&2
+    return 1
+  }
+  mkdir -p "$extracted"
+  unzip -q "$archive" -d "$extracted"
+  WINDOWS_RUNTIME_DIR="$(find "$extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  [[ -f "$WINDOWS_RUNTIME_DIR/bin/java.exe" ]]
 }
 
 prepare_workspace() {
@@ -203,6 +239,12 @@ package_windows() {
   cp -R "$ROOT_DIR/frontend/dist/." "$package_dir/web/"
   cp "$ROOT_DIR/deploy/windows/dbgold.env.example" "$ROOT_DIR/deploy/windows/"*.ps1 "$package_dir/"
   cp "$ROOT_DIR/README.md" "$package_dir/README.md"
+  mkdir -p "$package_dir/runtime" "$package_dir/lib"
+  cp -R "$WINDOWS_RUNTIME_DIR/." "$package_dir/runtime/"
+  cp "$ROOT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.jar" "$package_dir/lib/"
+  cp "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" "$package_dir/lib/"
+  cp "$ROOT_DIR/third_party/oscar/README.md" "$package_dir/lib/OSCAR-JDBC-NOTICE.md"
+  cp "$ROOT_DIR/third_party/oscar/LICENSE" "$package_dir/lib/OSCAR-JDBC-LICENSE"
   printf '%s\n' "$VERSION" > "$package_dir/VERSION"
   printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "windows",\n  "architecture": "amd64"\n}\n' \
     "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" > "$package_dir/release-manifest.json"
@@ -246,6 +288,9 @@ validate_artifacts() {
   unzip -Z1 "$archive" | awk -v expected="$package_name/dbgold.exe" '$0 == expected { found = 1 } END { exit !found }'
   file_output="$(file "$WORK_DIR/$package_name/dbgold.exe")"
   [[ "$file_output" == *"PE32+"* && "$file_output" == *"x86-64"* ]]
+  [[ -f "$WORK_DIR/$package_name/runtime/bin/java.exe" ]]
+  [[ -f "$WORK_DIR/$package_name/lib/dbgold-oscar-bridge.jar" ]]
+  [[ "$(shasum -a 256 "$WORK_DIR/$package_name/lib/oscarJDBC8.jar" | awk '{print $1}')" == "$OSCAR_JDBC_SHA256" ]]
 
   (cd "$OUTPUT_DIR" && shasum -a 256 -c SHA256SUMS)
   [[ -s "$OUTPUT_DIR/release-manifest.json" ]]
@@ -260,6 +305,8 @@ run_stage "Preflight checks" preflight
 run_stage "Prepare temporary workspace" prepare_workspace
 run_stage "Frontend install, security audit, and build" build_frontend
 run_stage "Go vet and tests" validate_go
+run_stage "Oscar JDBC helper build and handshake" build_jdbc_bridge
+run_stage "Pinned Windows Java runtime" prepare_windows_runtime
 run_stage "Windows amd64 build" build_windows
 run_stage "Linux amd64 image and package" build_linux_package amd64
 run_stage "Linux arm64 image and package" build_linux_package arm64

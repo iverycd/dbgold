@@ -16,6 +16,25 @@ func TestLoadFromFileDefaults(t *testing.T) {
 	assert.Equal(t, "0.0.0.0", cfg.ListenHost)
 	assert.Equal(t, "18089", cfg.Port)
 	assert.Equal(t, "frontend/dist", cfg.StaticDir)
+	assert.Equal(t, 15000, cfg.OscarLoginTimeoutMS)
+	assert.Equal(t, 0, cfg.OscarSocketTimeoutMS)
+	assert.Equal(t, 512, cfg.OscarBridgeXmxMB)
+}
+
+func TestOscarBridgeEnvironment(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("OSCAR_JAVA_BIN", "/opt/java/bin/java")
+	t.Setenv("OSCAR_JDBC_JAR", "/opt/oscar.jar")
+	t.Setenv("OSCAR_LOGIN_TIMEOUT_MS", "2500")
+	t.Setenv("OSCAR_SOCKET_TIMEOUT_MS", "0")
+	t.Setenv("OSCAR_BRIDGE_XMX_MB", "256")
+	cfg, err := LoadFromFile("")
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/java/bin/java", cfg.OscarJavaBin)
+	assert.Equal(t, "/opt/oscar.jar", cfg.OscarJDBCJar)
+	assert.Equal(t, 2500, cfg.OscarLoginTimeoutMS)
+	assert.Equal(t, 0, cfg.OscarSocketTimeoutMS)
+	assert.Equal(t, 256, cfg.OscarBridgeXmxMB)
 }
 
 func TestLoadFromFilePrecedence(t *testing.T) {

@@ -59,7 +59,7 @@ type submitTicketRequest struct {
 	SrcFilePath string `json:"src_file_path"`
 	SrcFileSize int64  `json:"src_file_size"`
 
-	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	DstHost     string `json:"dst_host"`
 	DstPort     int    `json:"dst_port" binding:"omitempty,min=1,max=65535"`
 	DstDatabase string `json:"dst_database"`
@@ -85,7 +85,7 @@ type updateTicketInfoRequest struct {
 	SrcUsername string `json:"src_username"`
 	SrcPassword string `json:"src_password"`
 
-	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	DstDBType   string `json:"dst_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	DstHost     string `json:"dst_host"`
 	DstPort     int    `json:"dst_port" binding:"omitempty,min=1,max=65535"`
 	DstDatabase string `json:"dst_database"`

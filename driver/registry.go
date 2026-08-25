@@ -6,6 +6,7 @@ import (
 	"dbgold/driver/highgo"
 	"dbgold/driver/mysql"
 	"dbgold/driver/oracle"
+	"dbgold/driver/oscar"
 	"dbgold/driver/postgres"
 	"dbgold/driver/sqlserver"
 	"fmt"
@@ -35,6 +36,8 @@ func NewDriver(dbType string) (Driver, error) {
 		return postgres.New(), nil
 	case "kingbase":
 		return postgres.New(), nil
+	case "oscar":
+		return oscar.New(), nil
 	default:
 		return nil, fmt.Errorf("unsupported db type: %s", dbType)
 	}

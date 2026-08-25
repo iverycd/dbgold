@@ -65,10 +65,10 @@ func (w *DaMengWriter) qualifiedTable(table string) string {
 
 // CreateTable 执行建表 DDL。达梦不支持 DROP TABLE IF EXISTS,
 // 故 DDL 拆成 DROP + CREATE 两句,DROP 失败(表不存在)忽略。
-func (w *DaMengWriter) CreateTable(ctx context.Context, ddl string) error {
-	for _, stmt := range splitDDL(ddl) {
-		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
-			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt)), "DROP") {
+func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	for _, stmt := range stmts {
+		if _, err := w.db.ExecContext(ctx, stmt.SQL); err != nil {
+			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt.SQL)), "DROP") {
 				continue // 表不存在等,忽略
 			}
 			return err

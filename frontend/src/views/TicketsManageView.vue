@@ -155,7 +155,7 @@
             <template v-else>
               <a-form-item label="类型">
                 <a-select v-model="editForm.src_db_type">
-                  <a-option v-for="opt in dbTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+                  <a-option v-for="opt in sourceDbTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
                 </a-select>
               </a-form-item>
               <a-form-item label="主机">
@@ -178,7 +178,7 @@
             <div class="form-section-title">目标数据库</div>
             <a-form-item label="类型">
               <a-select v-model="editForm.dst_db_type">
-                <a-option v-for="opt in dbTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+                <a-option v-for="opt in targetDbTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
               </a-select>
             </a-form-item>
             <a-form-item label="主机">
@@ -251,7 +251,7 @@ const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
 
 // 数据库类型下拉选项，取值与连接管理（ConnectionsView）保持一致。
-const dbTypeOptions = [
+const sourceDbTypeOptions = [
   { value: 'mysql', label: 'MySQL' },
   { value: 'postgres', label: 'PostgreSQL' },
   { value: 'oracle', label: 'Oracle' },
@@ -263,6 +263,10 @@ const dbTypeOptions = [
   { value: 'vastbase', label: 'Vastbase（海量数据库）' },
   { value: 'gbase', label: 'GBase（PG兼容）' },
   { value: 'kingbase', label: 'Kingbase（人大金仓）' },
+]
+const targetDbTypeOptions = [
+  ...sourceDbTypeOptions,
+  { value: 'oscar', label: 'Oscar（神通数据库）' },
 ]
 
 const tickets = ref<Ticket[]>([])

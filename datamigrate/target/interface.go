@@ -13,8 +13,8 @@ type Writer interface {
 	DBType() string
 	// Dialect 返回该目标库的方言(SQL 生成),供 Migrator 生成报告 DDL 并保证与执行同源
 	Dialect() dialect.Dialect
-	// CreateTable 在目标库执行建表 DDL（先 DROP IF EXISTS，再 CREATE）
-	CreateTable(ctx context.Context, ddl string) error
+	// CreateTable 在目标库逐条执行建表语句（先 DROP，再 CREATE），避免 JDBC 驱动多语句限制。
+	CreateTable(ctx context.Context, stmts []dialect.Statement) error
 	// CopyData 使用批量协议写入一批行数据。
 	// colTypes 为每列的 DatabaseTypeName（大写），Writer 用它经 ValueConverter
 	// 把 Reader 输出的中立值落地成目标驱动能接受的形态。

@@ -68,6 +68,10 @@ var supportedPairs = []SupportedPair{
 	{Source: "gbase", Target: "dameng"},
 	{Source: "seabox", Target: "dameng"},
 	{Source: "kingbase", Target: "dameng"},
+	{Source: "mysql", Target: "oscar"},
+	{Source: "sqlserver", Target: "oscar"},
+	{Source: "oracle", Target: "oscar"},
+	{Source: "dameng", Target: "oscar"},
 }
 
 // GetSupportedPairs 返回支持的迁移组合列表
@@ -637,6 +641,8 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 		return target.NewPostgresCompatible(dstDSN, targetSchema, "seabox", pool)
 	case "mysql":
 		return target.NewMySQL(dstDSN, targetSchema, pool)
+	case "oscar":
+		return target.NewOscar(dstDSN, dstConn.Username, dstConn.Password, targetSchema, pool)
 	default: // postgres
 		return target.NewPostgres(dstDSN, targetSchema, pool)
 	}

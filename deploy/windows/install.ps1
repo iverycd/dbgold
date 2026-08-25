@@ -19,7 +19,7 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { throw "Servi
 if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
     throw "Port $Port is already in use. Choose another value with -Port."
 }
-foreach ($required in @('dbgold.exe', 'VERSION', 'web\index.html')) {
+foreach ($required in @('dbgold.exe', 'VERSION', 'web\index.html', 'runtime\bin\java.exe', 'lib\dbgold-oscar-bridge.jar', 'lib\oscarJDBC8.jar')) {
     if (-not (Test-Path (Join-Path $SourceDir $required))) { throw "Release file is missing: $required" }
 }
 if (-not (Test-Path (Join-Path $SourceDir 'manifest.sha256'))) { throw 'Release checksum manifest is missing.' }
@@ -37,6 +37,11 @@ foreach ($dir in @($InstallDir, $DataRoot, $ConfigDir, (Join-Path $DataRoot 'dat
 }
 Copy-Item (Join-Path $SourceDir 'dbgold.exe') (Join-Path $InstallDir 'dbgold.exe') -Force
 Copy-Item (Join-Path $SourceDir 'VERSION') (Join-Path $InstallDir 'VERSION') -Force
+foreach ($dirName in @('runtime', 'lib')) {
+    $destination = Join-Path $InstallDir $dirName
+    if (Test-Path $destination) { Remove-Item $destination -Recurse -Force }
+    Copy-Item (Join-Path $SourceDir $dirName) $destination -Recurse
+}
 if (Test-Path (Join-Path $InstallDir 'web')) { Remove-Item (Join-Path $InstallDir 'web') -Recurse -Force }
 Copy-Item (Join-Path $SourceDir 'web') (Join-Path $InstallDir 'web') -Recurse
 foreach ($script in @('backup.ps1', 'restore.ps1', 'upgrade.ps1', 'set-port.ps1', 'uninstall.ps1')) {

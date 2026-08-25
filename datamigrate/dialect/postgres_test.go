@@ -34,7 +34,7 @@ CREATE TABLE "users" (
   "id" bigint NOT NULL,
   "name" varchar(100) NOT NULL,
   "age" int DEFAULT '0',
-  "created" timestamp DEFAULT CURRENT_TIMESTAMP,
+  "created" timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
   "flag" bit DEFAULT B'0'
 );`
 	if got := JoinSQL(stmts); got != want {
