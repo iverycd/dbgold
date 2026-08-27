@@ -470,8 +470,15 @@ func (r *OracleReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *OracleReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
+	return r.GetViewsForTarget(ctx, "")
+}
+
+// Oscar's identifier normalization happens at the target boundary. In
+// particular, its input must not have string literals lowercased by the legacy
+// PostgreSQL view conversion path.
+func (r *OracleReader) GetViewsForTarget(ctx context.Context, targetType string) ([]ViewInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT lower(VIEW_NAME) VIEW_NAME, TEXT FROM ALL_VIEWS
+		`SELECT VIEW_NAME, TEXT FROM ALL_VIEWS
 		 WHERE OWNER = :1
 		 ORDER BY VIEW_NAME`,
 		r.owner)
@@ -485,7 +492,10 @@ func (r *OracleReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
 		if err := rows.Scan(&v.ViewName, &v.Definition); err != nil {
 			return nil, err
 		}
-		v.Definition = transformOracleViewDef(strings.ToLower(v.Definition))
+		if targetType != "oscar" {
+			v.Definition = strings.ToLower(v.Definition)
+		}
+		v.Definition = transformOracleViewDef(v.Definition)
 		views = append(views, v)
 	}
 	return views, rows.Err()

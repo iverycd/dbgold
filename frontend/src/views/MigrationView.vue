@@ -180,6 +180,9 @@
                     <a-col v-if="selectedDst?.db_type !== 'dameng' && selectedDst?.db_type !== 'oscar'" :span="12">
                       <a-checkbox v-model="dataMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                     </a-col>
+                    <a-col v-if="selectedDst?.db_type === 'oscar'" :span="12">
+                      <span class="adv-check">Oscar 对象名统一转大写</span>
+                    </a-col>
                     <a-col :span="12">
                       <a-checkbox v-model="dataMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                     </a-col>
@@ -482,6 +485,9 @@
                 <a-col v-if="vmSelectedDst?.db_type !== 'dameng' && vmSelectedDst?.db_type !== 'oscar'" :span="12">
                   <a-checkbox v-model="viewMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
+                <a-col v-if="vmSelectedDst?.db_type === 'oscar'" :span="12">
+                  <span class="adv-check">Oscar 对象名统一转大写</span>
+                </a-col>
                 <a-col :span="12">
                   <a-checkbox v-model="viewMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
@@ -712,6 +718,9 @@
                 <a-col v-if="omSelectedDst?.db_type !== 'dameng' && omSelectedDst?.db_type !== 'oscar'" :span="12">
                   <a-checkbox v-model="objMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
+                <a-col v-if="omSelectedDst?.db_type === 'oscar'" :span="12">
+                  <span class="adv-check">Oscar 对象名统一转大写</span>
+                </a-col>
                 <a-col :span="12">
                   <a-checkbox v-model="objMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
@@ -774,6 +783,7 @@ import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { applyTargetMigrationDefaults } from '@/utils/migrationOptions'
 import { copyText } from '@/utils/clipboard'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
@@ -903,14 +913,8 @@ const selectedDst = computed(() =>
 
 watch(() => dataMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
-  if (dst?.db_type === 'dameng') {
-    dataMigrate.lowerCaseNames = false
-    dataMigrate.charInLength = true
-  } else {
-    dataMigrate.lowerCaseNames = dst?.db_type !== 'oscar'
-    dataMigrate.charInLength = false
-  }
-  if (dst?.db_type === 'oscar') dataMigrate.distributed = false
+  applyTargetMigrationDefaults(dataMigrate, dst?.db_type)
+  dataMigrate.charInLength = dst?.db_type === 'dameng'
 })
 
 const canStartMigration = computed(() =>
@@ -1169,7 +1173,7 @@ const vmCanMigrate = computed(() =>
 
 watch(() => viewMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
-  viewMigrate.lowerCaseNames = dst?.db_type !== 'dameng' && dst?.db_type !== 'oscar'
+  applyTargetMigrationDefaults(viewMigrate, dst?.db_type)
 })
 
 function vmCheckPairSupport() {
@@ -1335,8 +1339,7 @@ const omCanMigrate = computed(() =>
 
 watch(() => objMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
-  objMigrate.lowerCaseNames = dst?.db_type !== 'dameng' && dst?.db_type !== 'oscar'
-  if (dst?.db_type === 'oscar') objMigrate.distributed = false
+  applyTargetMigrationDefaults(objMigrate, dst?.db_type)
 })
 
 function omCheckPairSupport() {

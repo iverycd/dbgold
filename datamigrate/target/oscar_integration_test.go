@@ -48,7 +48,7 @@ func TestOscarIntegrationCapabilityProbe(t *testing.T) {
 	parent := "DBGOLD_PROBE_PARENT_" + suffix
 	child := "DBGOLD_PROBE_CHILD_" + suffix
 	view := "DBGOLD_PROBE_VIEW_" + suffix
-	sequence := "seq_" + parent + "_ID"
+	sequence := dialect.SequenceName(dialect.NewOscar(), source.SequenceInfo{TableName: parent, ColumnName: "ID"})
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
@@ -97,6 +97,13 @@ func TestOscarIntegrationCapabilityProbe(t *testing.T) {
 	}
 	if err := w.CreateIndex(ctx, source.IndexInfo{TableName: child, IsPrimary: true, Columns: []string{"ID"}}); err != nil {
 		t.Fatalf("Oscar child primary key probe: %v", err)
+	}
+	// Both source tables may legitimately use the same local index name.
+	// The target relation names must differ by their table prefix.
+	for _, table := range []string{parent, child} {
+		if err := w.CreateIndex(ctx, source.IndexInfo{TableName: table, IndexName: "IDX_SHARED", Columns: []string{"ID"}}); err != nil {
+			t.Fatalf("Oscar same-name indexes on different tables probe: %v", err)
+		}
 	}
 	if err := w.CreateForeignKey(ctx, source.FKInfo{TableName: child, ConstraintName: "DBGOLD_PROBE_FK_" + suffix, Columns: []string{"PARENT_ID"}, RefTable: parent, RefColumns: []string{"ID"}, OnDelete: "CASCADE", OnUpdate: "NO ACTION"}); err != nil {
 		t.Fatalf("Oscar foreign key action probe: %v", err)

@@ -86,8 +86,19 @@ func (d *OscarDialect) functionDefault(value string) string {
 	}
 }
 
+func (d *OscarDialect) SequenceName(seq source.SequenceInfo) string {
+	return "SEQ_" + seq.TableName + "_" + seq.ColumnName
+}
+
+func (d *OscarDialect) IndexName(idx source.IndexInfo) string {
+	if idx.IsPrimary {
+		return "PK_" + idx.TableName
+	}
+	return idx.TableName + "_" + idx.IndexName
+}
+
 func (d *OscarDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
-	seqName := "seq_" + seq.TableName + "_" + seq.ColumnName
+	seqName := SequenceName(d, seq)
 	qualifiedSeq := d.QualifyTable(schema, seqName)
 	return []Statement{
 		{SQL: "DROP SEQUENCE IF EXISTS " + qualifiedSeq},
@@ -106,14 +117,15 @@ func quotedOscarColumns(d *OscarDialect, columns []string) string {
 
 func (d *OscarDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
 	columns := quotedOscarColumns(d, idx.Columns)
+	name := d.QuoteIdent(IndexName(d, idx))
 	if idx.IsPrimary {
-		return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", d.QualifyTable(schema, idx.TableName), columns)}}
+		return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)", d.QualifyTable(schema, idx.TableName), name, columns)}}
 	}
 	unique := ""
 	if idx.IsUnique {
 		unique = "UNIQUE "
 	}
-	return []Statement{{SQL: fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", unique, d.QuoteIdent(idx.IndexName), d.QualifyTable(schema, idx.TableName), columns)}}
+	return []Statement{{SQL: fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", unique, name, d.QualifyTable(schema, idx.TableName), columns)}}
 }
 
 func (d *OscarDialect) ForeignKeyStatements(schema string, fk source.FKInfo) []Statement {

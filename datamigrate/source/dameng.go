@@ -375,11 +375,19 @@ func (r *DaMengReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *DaMengReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
+	return r.GetViewsForTarget(ctx, "")
+}
+
+func (r *DaMengReader) GetViewsForTarget(ctx context.Context, targetType string) ([]ViewInfo, error) {
+	definition := "lower(DBMS_METADATA.GET_DDL('VIEW', VIEW_NAME, ?))"
+	if targetType == "oscar" {
+		definition = "DBMS_METADATA.GET_DDL('VIEW', VIEW_NAME, ?)"
+	}
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT VIEW_NAME,
-		        lower(DBMS_METADATA.GET_DDL('VIEW', UPPER(VIEW_NAME), UPPER(?))) AS view_ddl
+		        `+definition+` AS view_ddl
 		 FROM ALL_VIEWS
-		 WHERE OWNER = UPPER(?)
+		 WHERE OWNER = ?
 		 ORDER BY VIEW_NAME`,
 		r.schema, r.schema)
 	if err != nil {

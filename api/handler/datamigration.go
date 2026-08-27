@@ -92,7 +92,7 @@ type startDataMigrationRequest struct {
 	CharInLength       bool   `json:"char_in_length"`
 	UseNvarchar2       bool   `json:"use_nvarchar2"`
 	Distributed        bool   `json:"distributed"`
-	ChangeOwner        *bool  `json:"change_owner"`       // nil 时默认 true
+	ChangeOwner        *bool  `json:"change_owner"`       // nil: Oscar false，其他目标 true
 	SrcDatabase        string `json:"src_database"`       // 可选，覆盖连接中的默认数据库
 	TargetSchema       string `json:"target_schema"`      // 可选，目标库 schema，为空时使用连接默认 search_path
 	StripViewSchemas   string `json:"strip_view_schemas"` // 逗号分隔的模式名，迁移视图时从定义中剥离前缀(忽略大小写)
@@ -124,8 +124,6 @@ func StartDataMigration(c *gin.Context) {
 	if req.MigrateContent == "" {
 		req.MigrateContent = "both"
 	}
-	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
-
 	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
@@ -136,6 +134,8 @@ func StartDataMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
+
+	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 
 	// 校验迁移组合是否支持
 	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
@@ -358,7 +358,7 @@ type startObjectMigrationRequest struct {
 	SrcDatabase        string   `json:"src_database"`
 	TargetSchema       string   `json:"target_schema"`
 	LowerCaseNames     bool     `json:"lower_case_names"`
-	ChangeOwner        *bool    `json:"change_owner"` // nil 时默认 true
+	ChangeOwner        *bool    `json:"change_owner"` // nil: Oscar false，其他目标 true
 	Distributed        bool     `json:"distributed"`
 	SrcMaxOpenConns    int      `json:"src_max_open_conns"`
 	SrcMaxIdleConns    int      `json:"src_max_idle_conns"`
@@ -376,8 +376,6 @@ func StartObjectMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
-
 	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
@@ -388,6 +386,7 @@ func StartObjectMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
+	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
@@ -505,8 +504,8 @@ func StartObjectMigration(c *gin.Context) {
 		status := "done"
 		if ctx.Err() != nil {
 			status = "cancelled"
-		} else if report.PrimaryKeys.Failed+report.Indexes.Failed+
-			report.Sequences.Failed+report.Constraints.Failed > 0 {
+		} else if report.Tables.Failed+report.PrimaryKeys.Failed+report.Indexes.Failed+
+			report.Sequences.Failed+report.Constraints.Failed+report.Comments.Failed > 0 {
 			status = "failed"
 		}
 		updateJobStatus(dbJob, status, "")
@@ -725,7 +724,7 @@ type migrateViewsRequest struct {
 	SrcDatabase      string   `json:"src_database"`
 	TargetSchema     string   `json:"target_schema"`
 	LowerCaseNames   bool     `json:"lower_case_names"`
-	ChangeOwner      *bool    `json:"change_owner"` // nil 时默认 true
+	ChangeOwner      *bool    `json:"change_owner"` // nil: Oscar false，其他目标 true
 	StripViewSchemas string   `json:"strip_view_schemas"`
 }
 
@@ -736,8 +735,6 @@ func MigrateViews(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	changeOwner := req.ChangeOwner == nil || *req.ChangeOwner
-
 	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
@@ -756,6 +753,7 @@ func MigrateViews(c *gin.Context) {
 		return
 	}
 
+	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 	reader, err := buildSrcReader(srcConn, req.SrcDatabase, source.ConnPoolConfig{})
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接源库失败: %v", err)})

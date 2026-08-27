@@ -134,8 +134,9 @@
                   </a-col>
                 </a-row>
                 <a-space wrap>
-                  <a-checkbox v-model="options.lower_case_names">对象名转小写</a-checkbox>
-                  <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar 始终转大写）</a-checkbox>
+                  <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar）</a-checkbox>
+                  <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
                   <a-checkbox v-model="options.char_in_length">char 长度单位（CHAR）</a-checkbox>
                   <a-checkbox v-model="options.use_nvarchar2">使用 nvarchar2</a-checkbox>
                   <a-checkbox v-model="options.distributed">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
@@ -249,6 +250,7 @@ import { ref, reactive, computed, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { FileItem } from '@arco-design/web-vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { defaultBatchOwnerOptions } from '@/utils/migrationOptions'
 import {
   validateBatch,
   startBatch,
@@ -278,7 +280,7 @@ const options = reactive<BatchOptions>({
   char_in_length: false,
   use_nvarchar2: false,
   distributed: false,
-  change_owner: true,
+  ...defaultBatchOwnerOptions(),
   strip_view_schemas: '',
 })
 

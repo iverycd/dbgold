@@ -276,12 +276,28 @@ type batchOptions struct {
 	CharInLength       bool
 	UseNvarchar2       bool
 	Distributed        bool
-	ChangeOwner        bool
+	ChangeOwner        *bool
+	OscarChangeOwner   *bool
 	StripViewSchemas   string
+}
+
+func (o batchOptions) changeOwnerFor(targetType string) bool {
+	if targetType == "oscar" && o.OscarChangeOwner != nil {
+		return *o.OscarChangeOwner
+	}
+	return resolveChangeOwner(targetType, o.ChangeOwner)
 }
 
 // parseBatchOptions 从 multipart 表单读取批次迁移选项；字段缺省时回落到单任务默认值。
 func parseBatchOptions(c *gin.Context) batchOptions {
+	optionalBool := func(key string) *bool {
+		v := c.PostForm(key)
+		if v == "" {
+			return nil
+		}
+		b := v == "true" || v == "1"
+		return &b
+	}
 	// 布尔字段：表单缺省（空串）时用默认值，否则按 "true" 解析
 	boolOr := func(key string, def bool) bool {
 		v := c.PostForm(key)
@@ -309,7 +325,8 @@ func parseBatchOptions(c *gin.Context) batchOptions {
 		CharInLength:       boolOr("char_in_length", false),
 		UseNvarchar2:       boolOr("use_nvarchar2", false),
 		Distributed:        boolOr("distributed", false),
-		ChangeOwner:        boolOr("change_owner", true),
+		ChangeOwner:        optionalBool("change_owner"),
+		OscarChangeOwner:   optionalBool("oscar_change_owner"),
 		StripViewSchemas:   c.PostForm("strip_view_schemas"),
 	}
 }
@@ -405,7 +422,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			LowerCaseNames:     opts.LowerCaseNames,
 			CharInLength:       opts.CharInLength,
 			UseNvarchar2:       opts.UseNvarchar2,
-			ChangeOwner:        opts.ChangeOwner,
+			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 			DstSchema:          r.TargetSchema,
 			Status:             "running",
 			SrcConnName:        fmt.Sprintf("%s:%d/%s", r.SrcHost, r.SrcPort, r.SrcDatabase),
@@ -437,7 +454,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			CharInLength:       opts.CharInLength,
 			UseNvarchar2:       opts.UseNvarchar2,
 			Distributed:        opts.Distributed,
-			ChangeOwner:        opts.ChangeOwner,
+			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 		}
 
 		// 后台 drain 日志，避免 LogCh 满后阻塞迁移（无 SSE 订阅者时仍能推进）

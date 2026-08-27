@@ -489,6 +489,7 @@ export interface BatchOptions {
   use_nvarchar2: boolean
   distributed: boolean
   change_owner: boolean
+  oscar_change_owner?: boolean
   strip_view_schemas: string
 }
 
@@ -506,6 +507,9 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   fd.append('use_nvarchar2', String(opts.use_nvarchar2))
   fd.append('distributed', String(opts.distributed))
   fd.append('change_owner', String(opts.change_owner))
+  if (opts.oscar_change_owner !== undefined) {
+    fd.append('oscar_change_owner', String(opts.oscar_change_owner))
+  }
   fd.append('strip_view_schemas', opts.strip_view_schemas)
   return api.post<{ batch_id: string; total: number }>('/migration/batch/start', fd)
 }

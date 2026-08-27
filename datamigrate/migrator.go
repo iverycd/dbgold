@@ -28,7 +28,7 @@ type Config struct {
 	Distributed        bool     // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
 	TargetSchema       string   // 目标库 schema，为空时使用连接默认 search_path
 	ChangeOwner        bool     // 迁移后将表/视图/序列的 owner 改为 TargetSchema
-	TargetDBType       string   // "postgres" | "gaussdb" | "seabox"
+	TargetDBType       string   // 目标库类型；Oscar 命名策略由此字段启用
 	StripViewSchemas   []string // 需从视图定义中剥离的模式名前缀(忽略大小写)
 	// Objects 为"仅对象迁移"模式的对象类型白名单,取值:
 	// "primary_keys" | "indexes" | "sequences" | "foreign_keys" | "comments"。
@@ -74,8 +74,12 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 	}
 }
 
-// objName 根据 LowerCaseNames 配置决定是否将对象名转为小写
+// objName only normalizes target object names; source lookups and schema/owner
+// names must never pass through it. Oscar always uses uppercase identifiers.
 func (m *Migrator) objName(s string) string {
+	if m.isOscar() {
+		return strings.ToUpper(s)
+	}
 	if m.cfg.LowerCaseNames {
 		return strings.ToLower(s)
 	}
@@ -134,6 +138,14 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		}
 	} else {
 		tables = FilterTables(allTables, m.cfg.Mode, m.cfg.Filter)
+	}
+	if m.isOscar() {
+		if err := m.preflightOscarNames(ctx, tables, allTables); err != nil {
+			m.log.Errorf("Oscar 对象命名预检失败，未执行目标 DDL: %v", err)
+			report.Tables.Total = len(tables)
+			recordOscarPreflightError(&report, err)
+			return report
+		}
 	}
 
 	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
@@ -516,11 +528,16 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				pkCopy := pk
 				pkCopy.TableName = m.objName(pk.TableName)
+				pkCopy.IndexName = m.objName(pk.IndexName)
 				cols := make([]string, len(pk.Columns))
 				for i, c := range pk.Columns {
 					cols[i] = m.objName(c)
 				}
 				pkCopy.Columns = cols
+				pkName := pkCopy.TableName
+				if m.isOscar() {
+					pkName = dialect.IndexName(m.writer.Dialect(), pkCopy)
+				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
 				if m.cfg.Distributed {
 					if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
@@ -528,11 +545,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 				}
 				if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
-					m.log.Errorf("创建主键失败 [%s]: %v", pkCopy.TableName, err)
+					m.log.Errorf("创建主键失败 [%s]: %v", pkName, err)
 					report.PrimaryKeys.Failed++
-					report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkCopy.TableName, DDL: ddl, Error: err.Error()})
+					report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkName, DDL: ddl, Error: err.Error()})
 				} else {
-					m.log.Indexf("创建主键 %s ... OK", pkCopy.TableName)
+					m.log.Indexf("创建主键 %s ... OK", pkName)
 					report.PrimaryKeys.Success++
 				}
 			}
@@ -558,20 +575,20 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				seqCopy := seq
 				seqCopy.TableName = m.objName(seq.TableName)
 				seqCopy.ColumnName = m.objName(seq.ColumnName)
+				seqObj := dialect.SequenceName(m.writer.Dialect(), seqCopy)
 				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy))
 				if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
 					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 					report.Sequences.Failed++
 					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
-						Name:  fmt.Sprintf("%s.%s", seqCopy.TableName, seqCopy.ColumnName),
+						Name:  seqObj,
 						DDL:   ddl,
 						Error: err.Error(),
 					})
 				} else {
-					m.log.Indexf("创建序列 seq_%s_%s ... OK", seqCopy.TableName, seqCopy.ColumnName)
+					m.log.Indexf("创建序列 %s ... OK", seqObj)
 					report.Sequences.Success++
 					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-						seqObj := fmt.Sprintf("seq_%s_%s", seqCopy.TableName, seqCopy.ColumnName)
 						if err := m.writer.ChangeOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
 							m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
 						}
@@ -605,17 +622,18 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					cols[i] = m.objName(c)
 				}
 				idxCopy.Columns = cols
+				indexName := dialect.IndexName(m.writer.Dialect(), idxCopy)
 				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
 				if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
-					m.log.Errorf("创建索引失败 [%s]: %v", idxCopy.IndexName, err)
+					m.log.Errorf("创建索引失败 [%s]: %v", indexName, err)
 					report.Indexes.Failed++
 					report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
-						Name:  idxCopy.IndexName,
+						Name:  indexName,
 						DDL:   ddl,
 						Error: err.Error(),
 					})
 				} else {
-					m.log.Indexf("创建索引 %s ... OK", idxCopy.IndexName)
+					m.log.Indexf("创建索引 %s ... OK", indexName)
 					report.Indexes.Success++
 				}
 			}
@@ -676,7 +694,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 
 	// 视图:对象模式不处理(不在对象迁移范围内);非对象模式沿用原逻辑,include 模式跳过
 	if !m.cfg.objectMode() && m.cfg.Mode != "include" {
-		views, err := m.reader.GetViews(ctx)
+		views, err := m.readViews(ctx)
 		if err != nil {
 			m.log.Errorf("获取视图信息失败: %v", err)
 		} else {
@@ -772,11 +790,22 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 		vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
 	}
 	// 去除用户指定的跨库模式名前缀(忽略大小写)
-	vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
+	if m.isOscar() {
+		var err error
+		vCopy.Definition, err = normalizeOscarView(vCopy.Definition, m.cfg.StripViewSchemas)
+		if err != nil {
+			return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
+		}
+	} else {
+		vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
+	}
 	// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
 	viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
 	if m.cfg.TargetSchema != "" {
 		viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
+	}
+	if m.isOscar() {
+		viewDDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
 	}
 	if err := m.writer.CreateView(ctx, vCopy); err != nil {
 		m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
@@ -798,12 +827,25 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	for _, n := range viewNames {
 		want[n] = true
 	}
-	views, err := m.reader.GetViews(ctx)
+	views, err := m.readViews(ctx)
 	if err != nil {
 		m.log.Errorf("获取视图信息失败: %v", err)
 		return nil
 	}
 	results := make([]ObjectResult, 0, len(viewNames))
+	if m.isOscar() {
+		names := make(oscarNames)
+		for _, v := range views {
+			if want[v.ViewName] {
+				if err := names.add(m.objName(v.ViewName), "view "+v.ViewName); err != nil {
+					for _, name := range viewNames {
+						results = append(results, ObjectResult{Name: m.objName(name), Error: err.Error()})
+					}
+					return results
+				}
+			}
+		}
+	}
 	for _, v := range views {
 		if !want[v.ViewName] {
 			continue
