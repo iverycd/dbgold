@@ -576,8 +576,12 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				seqCopy.TableName = m.objName(seq.TableName)
 				seqCopy.ColumnName = m.objName(seq.ColumnName)
 				seqObj := dialect.SequenceName(m.writer.Dialect(), seqCopy)
-				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy))
-				if err := m.writer.CreateSequence(ctx, seqCopy); err != nil {
+				sequenceOwner := ""
+				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
+					sequenceOwner = m.cfg.TargetSchema
+				}
+				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy, sequenceOwner))
+				if err := m.writer.CreateSequence(ctx, seqCopy, sequenceOwner); err != nil {
 					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 					report.Sequences.Failed++
 					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{

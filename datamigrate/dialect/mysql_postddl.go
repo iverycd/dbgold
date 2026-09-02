@@ -15,7 +15,7 @@ import (
 // MySQL 无独立 SEQUENCE 对象,自增已在建表时以 AUTO_INCREMENT 列声明,
 // 这里只生成 ALTER TABLE ... AUTO_INCREMENT=n 修正下一个自增起始值。
 // 若该列实际不是自增列,执行会报错,由 Writer 容错忽略。
-func (d *MySQLDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
+func (d *MySQLDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
 	start := seq.StartValue
 	if start < 1 {
 		start = 1

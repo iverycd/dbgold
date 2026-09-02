@@ -1,6 +1,7 @@
 package dialect
 
 import (
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/source"
@@ -98,7 +99,7 @@ func TestPostgresSequence_Golden(t *testing.T) {
 	want := `CREATE SEQUENCE IF NOT EXISTS "s"."seq_t_id" INCREMENT BY 1 START 100;
 ALTER TABLE "s"."t" ALTER COLUMN "id" SET DEFAULT nextval('"s"."seq_t_id"');
 ALTER SEQUENCE "s"."seq_t_id" OWNED BY "s"."t"."id"`
-	if got := JoinSQL(d.SequenceStatements("s", seq)); got != want {
+	if got := JoinSQL(d.SequenceStatements("s", seq, "")); got != want {
 		t.Errorf("sequence mismatch:\n got: %s\nwant: %s", got, want)
 	}
 }
@@ -108,9 +109,21 @@ func TestPostgresSequence_QuotedNames(t *testing.T) {
 	seq := source.SequenceInfo{TableName: "Code_ItemLev", ColumnName: "SYSID", StartValue: 1}
 	want := `CREATE SEQUENCE IF NOT EXISTS "TargetSchema"."seq_Code_ItemLev_SYSID" INCREMENT BY 1 START 1;
 ALTER TABLE "TargetSchema"."Code_ItemLev" ALTER COLUMN "SYSID" SET DEFAULT nextval('"TargetSchema"."seq_Code_ItemLev_SYSID"');
+ALTER SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" OWNER TO "TargetSchema";
 ALTER SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" OWNED BY "TargetSchema"."Code_ItemLev"."SYSID"`
-	if got := JoinSQL(d.SequenceStatements("TargetSchema", seq)); got != want {
+	if got := JoinSQL(d.SequenceStatements("TargetSchema", seq, "TargetSchema")); got != want {
 		t.Errorf("quoted sequence mismatch:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestPostgresSequenceOwnerPrecedesOwnedBy(t *testing.T) {
+	d := NewPostgres("highgo")
+	seq := source.SequenceInfo{TableName: "Orders", ColumnName: "ID", StartValue: 7}
+	ddl := JoinSQL(d.SequenceStatements("AppSchema", seq, "AppSchema"))
+	ownerPos := strings.Index(ddl, `ALTER SEQUENCE "AppSchema"."seq_Orders_ID" OWNER TO "AppSchema"`)
+	ownedByPos := strings.Index(ddl, `ALTER SEQUENCE "AppSchema"."seq_Orders_ID" OWNED BY`)
+	if ownerPos < 0 || ownedByPos < 0 || ownerPos >= ownedByPos {
+		t.Fatalf("sequence owner must be changed before OWNED BY:\n%s", ddl)
 	}
 }
 

@@ -19,6 +19,7 @@ type mockReader struct {
 	ddl          map[string]*source.TableDDLInfo
 	pk           map[string][]string
 	rows         map[string][][]interface{}
+	sequences    []source.SequenceInfo
 	triggerCount int
 }
 
@@ -41,21 +42,25 @@ func (m *mockReader) ReadPage(_ context.Context, t string, _ []string, offset, _
 	}
 	return []string{"id"}, []string{"INT"}, rows, nil
 }
-func (m *mockReader) GetSequences(_ context.Context) ([]source.SequenceInfo, error) { return nil, nil }
-func (m *mockReader) GetPrimaryKeys(_ context.Context) ([]source.IndexInfo, error)  { return nil, nil }
-func (m *mockReader) GetIndexes(_ context.Context) ([]source.IndexInfo, error)      { return nil, nil }
-func (m *mockReader) GetForeignKeys(_ context.Context) ([]source.FKInfo, error)     { return nil, nil }
-func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)         { return nil, nil }
-func (m *mockReader) GetComments(_ context.Context) ([]source.CommentInfo, error)   { return nil, nil }
-func (m *mockReader) GetTriggerCount(_ context.Context) (int, error)                { return m.triggerCount, nil }
-func (m *mockReader) CountRows(_ context.Context, _ string) (int64, error)          { return 0, nil }
-func (m *mockReader) ListDatabases(_ context.Context) ([]string, error)             { return nil, nil }
+func (m *mockReader) GetSequences(_ context.Context) ([]source.SequenceInfo, error) {
+	return m.sequences, nil
+}
+func (m *mockReader) GetPrimaryKeys(_ context.Context) ([]source.IndexInfo, error) { return nil, nil }
+func (m *mockReader) GetIndexes(_ context.Context) ([]source.IndexInfo, error)     { return nil, nil }
+func (m *mockReader) GetForeignKeys(_ context.Context) ([]source.FKInfo, error)    { return nil, nil }
+func (m *mockReader) GetViews(_ context.Context) ([]source.ViewInfo, error)        { return nil, nil }
+func (m *mockReader) GetComments(_ context.Context) ([]source.CommentInfo, error)  { return nil, nil }
+func (m *mockReader) GetTriggerCount(_ context.Context) (int, error)               { return m.triggerCount, nil }
+func (m *mockReader) CountRows(_ context.Context, _ string) (int64, error)         { return 0, nil }
+func (m *mockReader) ListDatabases(_ context.Context) ([]string, error)            { return nil, nil }
 
 // mockWriter 实现 target.Writer 接口，用于测试
 type mockWriter struct {
 	created         []string
 	copied          []string
+	sequenceOwners  []string
 	createTableFail bool
+	createSeqFail   bool
 	copyDataFail    bool
 }
 
@@ -76,7 +81,13 @@ func (m *mockWriter) CopyData(_ context.Context, table string, _ []string, _ []s
 	m.copied = append(m.copied, table)
 	return nil
 }
-func (m *mockWriter) CreateSequence(_ context.Context, _ source.SequenceInfo) error { return nil }
+func (m *mockWriter) CreateSequence(_ context.Context, _ source.SequenceInfo, owner string) error {
+	m.sequenceOwners = append(m.sequenceOwners, owner)
+	if m.createSeqFail {
+		return fmt.Errorf("create sequence failed")
+	}
+	return nil
+}
 func (m *mockWriter) CreateIndex(_ context.Context, _ source.IndexInfo) error       { return nil }
 func (m *mockWriter) CreateForeignKey(_ context.Context, _ source.FKInfo) error     { return nil }
 func (m *mockWriter) CreateView(_ context.Context, _ source.ViewInfo) error         { return nil }
@@ -208,6 +219,62 @@ func TestMigratorRun_DataWriteFailed(t *testing.T) {
 	assert.Equal(t, "users", report.Data.Items[0].Name)
 	assert.NotEmpty(t, report.Data.Items[0].Error)
 	assert.Empty(t, report.Data.Items[0].DDL)
+}
+
+func TestMigratorSequenceOwnerOption(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		targetSchema string
+		changeOwner  bool
+		wantOwner    string
+	}{
+		{name: "enabled", targetSchema: "AppSchema", changeOwner: true, wantOwner: "AppSchema"},
+		{name: "disabled", targetSchema: "AppSchema", changeOwner: false, wantOwner: ""},
+		{name: "empty schema", targetSchema: "", changeOwner: true, wantOwner: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &mockReader{
+				tables:    []string{"Orders"},
+				sequences: []source.SequenceInfo{{TableName: "Orders", ColumnName: "ID", StartValue: 9}},
+			}
+			writer := &mockWriter{}
+			m, job := newTestMigrator(reader, writer)
+			m.cfg.Objects = []string{"sequences"}
+			m.cfg.TargetSchema = tt.targetSchema
+			m.cfg.ChangeOwner = tt.changeOwner
+
+			report := m.Run(context.Background())
+			drainLogs(job)
+
+			assert.Equal(t, []string{tt.wantOwner}, writer.sequenceOwners)
+			assert.Equal(t, 1, report.Sequences.Success)
+			assert.Equal(t, 0, report.Sequences.Failed)
+		})
+	}
+}
+
+func TestMigratorSequenceFailureDDLIncludesOwnerBeforeOwnedBy(t *testing.T) {
+	reader := &mockReader{
+		tables:    []string{"Orders"},
+		sequences: []source.SequenceInfo{{TableName: "Orders", ColumnName: "ID", StartValue: 9}},
+	}
+	writer := &mockWriter{createSeqFail: true}
+	m, job := newTestMigrator(reader, writer)
+	m.cfg.Objects = []string{"sequences"}
+	m.cfg.TargetSchema = "AppSchema"
+	m.cfg.ChangeOwner = true
+
+	report := m.Run(context.Background())
+	drainLogs(job)
+
+	if assert.Len(t, report.Sequences.Items, 1) {
+		ddl := report.Sequences.Items[0].DDL
+		ownerPos := strings.Index(ddl, `ALTER SEQUENCE "AppSchema"."seq_Orders_ID" OWNER TO "AppSchema"`)
+		ownedByPos := strings.Index(ddl, `ALTER SEQUENCE "AppSchema"."seq_Orders_ID" OWNED BY`)
+		assert.GreaterOrEqual(t, ownerPos, 0)
+		assert.Greater(t, ownedByPos, ownerPos)
+	}
+	assert.Equal(t, 1, report.Sequences.Failed)
 }
 
 func TestMigratorRun_ContextCancelled(t *testing.T) {

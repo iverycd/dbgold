@@ -62,7 +62,8 @@ type Dialect interface {
 	CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error)
 
 	// 以下 PostDDL 方法接收的 *Info 中的名字均已由调用方规整。
-	SequenceStatements(schema string, seq source.SequenceInfo) []Statement
+	// owner 为空时保持目标库默认 owner；非空时由支持的方言在关联序列前修改 owner。
+	SequenceStatements(schema string, seq source.SequenceInfo, owner string) []Statement
 	IndexStatements(schema string, idx source.IndexInfo) []Statement
 	ForeignKeyStatements(schema string, fk source.FKInfo) []Statement
 	ViewStatements(schema string, view source.ViewInfo) []Statement

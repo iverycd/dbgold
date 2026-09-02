@@ -46,7 +46,7 @@ func TestOscarIndexNamesAndSequenceNames(t *testing.T) {
 	require.Equal(t, `ALTER TABLE "MixedSchema"."T" ADD CONSTRAINT "PK_T" PRIMARY KEY ("ID")`, JoinSQL(d.IndexStatements("MixedSchema", pk)))
 	seq := source.SequenceInfo{TableName: "T", ColumnName: "ID", StartValue: 12}
 	require.Equal(t, "SEQ_T_ID", SequenceName(d, seq))
-	ddl := JoinSQL(d.SequenceStatements("MixedSchema", seq))
+	ddl := JoinSQL(d.SequenceStatements("MixedSchema", seq, ""))
 	require.Contains(t, ddl, `CREATE SEQUENCE "MixedSchema"."SEQ_T_ID"`)
 	require.Contains(t, ddl, `SET DEFAULT nextval('"MixedSchema"."SEQ_T_ID"')`)
 	long := source.IndexInfo{TableName: strings.Repeat("T", 200), IndexName: "IDX", Columns: []string{"X"}}

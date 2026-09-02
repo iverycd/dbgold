@@ -10,7 +10,7 @@ import (
 // SequenceStatements 达梦自增列以 IDENTITY 在建表时声明,这里生成「重置种子」语句,
 // 把 IDENTITY 当前值推到源库当前 AUTO_INCREMENT 值,避免后续插入撞已导入的 id。
 // 确切语法依达梦版本而定;失败由 Writer 降级处理(记日志,不使 job 失败)。
-func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
+func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
 	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s RESTART WITH %d`,
 		d.QualifyTable(schema, seq.TableName), d.QuoteIdent(seq.ColumnName), seq.StartValue)
 	return []Statement{{SQL: sql}}

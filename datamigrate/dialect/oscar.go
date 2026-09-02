@@ -97,7 +97,7 @@ func (d *OscarDialect) IndexName(idx source.IndexInfo) string {
 	return idx.TableName + "_" + idx.IndexName
 }
 
-func (d *OscarDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
+func (d *OscarDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
 	seqName := SequenceName(d, seq)
 	qualifiedSeq := d.QualifyTable(schema, seqName)
 	return []Statement{

@@ -62,8 +62,8 @@ func (w *MySQLWriter) convertRow(row []interface{}, colTypes []string) []interfa
 
 // CreateSequence 修正自增列种子(MySQL 自增已在建表声明 AUTO_INCREMENT)。
 // 若该列实际非自增,ALTER 会失败,降级忽略(种子未修正只影响后续应用插入)。
-func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	stmts := w.dia.SequenceStatements(w.schema, seq)
+func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	stmts := w.dia.SequenceStatements(w.schema, seq, owner)
 	for _, s := range stmts {
 		_, _ = w.db.ExecContext(ctx, s.SQL) // 降级:忽略错误
 	}

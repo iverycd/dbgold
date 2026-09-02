@@ -20,7 +20,7 @@ type Writer interface {
 	// 把 Reader 输出的中立值落地成目标驱动能接受的形态。
 	CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error
 	// CreateSequence 创建序列并绑定到列的默认值
-	CreateSequence(ctx context.Context, seq source.SequenceInfo) error
+	CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error
 	// CreateIndex 创建索引或唯一约束
 	CreateIndex(ctx context.Context, idx source.IndexInfo) error
 	// CreateForeignKey 创建外键约束

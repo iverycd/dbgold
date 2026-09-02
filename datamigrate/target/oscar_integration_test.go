@@ -86,7 +86,7 @@ func TestOscarIntegrationCapabilityProbe(t *testing.T) {
 	if err := w.CreateTable(ctx, childDDL); err != nil {
 		t.Fatalf("Oscar child table probe: %v", err)
 	}
-	if err := w.CreateSequence(ctx, source.SequenceInfo{TableName: parent, ColumnName: "ID", StartValue: 1}); err != nil {
+	if err := w.CreateSequence(ctx, source.SequenceInfo{TableName: parent, ColumnName: "ID", StartValue: 1}, ""); err != nil {
 		t.Fatalf("Oscar sequence/nextval/default probe: %v", err)
 	}
 	if err := w.CreateIndex(ctx, source.IndexInfo{TableName: parent, IsPrimary: true, Columns: []string{"ID"}}); err != nil {

@@ -80,8 +80,8 @@ func (w *recordingOscarWriter) CreateIndex(_ context.Context, idx source.IndexIn
 	}
 	return nil
 }
-func (w *recordingOscarWriter) CreateSequence(_ context.Context, seq source.SequenceInfo) error {
-	return w.record(w.Dialect().SequenceStatements("MixedSchema", seq))
+func (w *recordingOscarWriter) CreateSequence(_ context.Context, seq source.SequenceInfo, owner string) error {
+	return w.record(w.Dialect().SequenceStatements("MixedSchema", seq, owner))
 }
 func (w *recordingOscarWriter) CreateForeignKey(_ context.Context, fk source.FKInfo) error {
 	return w.record(w.Dialect().ForeignKeyStatements("MixedSchema", fk))

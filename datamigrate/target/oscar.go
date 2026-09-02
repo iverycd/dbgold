@@ -171,8 +171,8 @@ func estimateOscarValueSize(value any) int {
 	}
 }
 
-func (w *OscarWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq))
+func (w *OscarWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
 }
 func (w *OscarWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
 	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))

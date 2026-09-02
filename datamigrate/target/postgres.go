@@ -152,8 +152,8 @@ func (w *PostgresWriter) execStatements(ctx context.Context, stmts []dialect.Sta
 	return nil
 }
 
-func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq))
+func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
 }
 
 func (w *PostgresWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {

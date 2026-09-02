@@ -18,7 +18,7 @@ func (d *PostgresDialect) qualified(schema, table string) string {
 }
 
 // SequenceStatements 复刻 PostgresWriter.CreateSequence(postgres.go:111-130)。
-func (d *PostgresDialect) SequenceStatements(schema string, seq source.SequenceInfo) []Statement {
+func (d *PostgresDialect) SequenceStatements(schema string, seq source.SequenceInfo, owner string) []Statement {
 	seqBase := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
 	quotedSeq := d.qualified(schema, seqBase)
 	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
@@ -26,7 +26,11 @@ func (d *PostgresDialect) SequenceStatements(schema string, seq source.SequenceI
 		d.qualified(schema, seq.TableName), seq.ColumnName, quotedSeq)
 	ownedBySQL := fmt.Sprintf(`ALTER SEQUENCE %s OWNED BY %s."%s"`,
 		quotedSeq, d.qualified(schema, seq.TableName), seq.ColumnName)
-	return []Statement{{SQL: createSQL}, {SQL: alterSQL}, {SQL: ownedBySQL}}
+	stmts := []Statement{{SQL: createSQL}, {SQL: alterSQL}}
+	if owner != "" {
+		stmts = append(stmts, Statement{SQL: fmt.Sprintf("ALTER SEQUENCE %s OWNER TO %s", quotedSeq, d.QuoteIdent(owner))})
+	}
+	return append(stmts, Statement{SQL: ownedBySQL})
 }
 
 // IndexStatements 复刻 PostgresWriter.CreateIndex(postgres.go:132-150)。

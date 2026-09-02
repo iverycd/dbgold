@@ -120,8 +120,8 @@ func (w *GaussDBWriter) execStatements(ctx context.Context, stmts []dialect.Stat
 	return nil
 }
 
-func (w *GaussDBWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo) error {
-	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq))
+func (w *GaussDBWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
 }
 
 func (w *GaussDBWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
