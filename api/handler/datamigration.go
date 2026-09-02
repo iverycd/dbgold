@@ -92,7 +92,7 @@ type startDataMigrationRequest struct {
 	CharInLength       bool   `json:"char_in_length"`
 	UseNvarchar2       bool   `json:"use_nvarchar2"`
 	Distributed        bool   `json:"distributed"`
-	ChangeOwner        *bool  `json:"change_owner"`       // nil: Oscar false，其他目标 true
+	ChangeOwner        *bool  `json:"change_owner"`       // nil: PG 兼容目标 true，其他目标 false
 	SrcDatabase        string `json:"src_database"`       // 可选，覆盖连接中的默认数据库
 	TargetSchema       string `json:"target_schema"`      // 可选，目标库 schema，为空时使用连接默认 search_path
 	StripViewSchemas   string `json:"strip_view_schemas"` // 逗号分隔的模式名，迁移视图时从定义中剥离前缀(忽略大小写)
@@ -358,7 +358,7 @@ type startObjectMigrationRequest struct {
 	SrcDatabase        string   `json:"src_database"`
 	TargetSchema       string   `json:"target_schema"`
 	LowerCaseNames     bool     `json:"lower_case_names"`
-	ChangeOwner        *bool    `json:"change_owner"` // nil: Oscar false，其他目标 true
+	ChangeOwner        *bool    `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
 	Distributed        bool     `json:"distributed"`
 	SrcMaxOpenConns    int      `json:"src_max_open_conns"`
 	SrcMaxIdleConns    int      `json:"src_max_idle_conns"`
@@ -724,7 +724,7 @@ type migrateViewsRequest struct {
 	SrcDatabase      string   `json:"src_database"`
 	TargetSchema     string   `json:"target_schema"`
 	LowerCaseNames   bool     `json:"lower_case_names"`
-	ChangeOwner      *bool    `json:"change_owner"` // nil: Oscar false，其他目标 true
+	ChangeOwner      *bool    `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
 	StripViewSchemas string   `json:"strip_view_schemas"`
 }
 

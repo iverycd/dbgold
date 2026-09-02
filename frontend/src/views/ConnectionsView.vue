@@ -8,7 +8,7 @@
       </a-button>
     </div>
 
-    <div style="margin-bottom: 12px">
+    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px">
       <a-select
         v-model="envFilter"
         placeholder="按环境筛选"
@@ -16,6 +16,13 @@
         allow-search
         style="width: 180px"
         :options="envHistory"
+      />
+      <a-input-search
+        v-model="searchKeyword"
+        placeholder="搜索名称、主机或数据库"
+        aria-label="搜索名称、主机或数据库"
+        allow-clear
+        style="width: 300px; max-width: 100%"
       />
     </div>
 
@@ -27,6 +34,7 @@
       @page-change="handlePageChange"
       @page-size-change="handlePageSizeChange"
     >
+      <template #empty>暂无匹配的连接</template>
       <template #columns>
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="db_type" :width="100">
@@ -161,6 +169,7 @@ const defaultForm = () => ({
 
 const form = reactive(defaultForm())
 const envFilter = ref<string | undefined>(undefined)
+const searchKeyword = ref('')
 type PageSize = 20 | 50 | 100
 const page = ref(1)
 const pageSize = ref<PageSize>(20)
@@ -172,8 +181,13 @@ const envHistory = computed(() => {
 })
 
 const filteredConnections = computed(() => {
-  if (!envFilter.value) return connections.value
-  return connections.value.filter((c) => c.env === envFilter.value)
+  const keyword = searchKeyword.value.trim().toLowerCase()
+  return connections.value.filter((c) => {
+    if (envFilter.value && c.env !== envFilter.value) return false
+    return !keyword || [c.name, c.host, c.database].some((value) =>
+      (value ?? '').toLowerCase().includes(keyword),
+    )
+  })
 })
 
 const pagination = computed(() => ({
@@ -217,7 +231,7 @@ watch(() => form.db_type, (newType) => {
   }
 })
 
-watch(envFilter, () => {
+watch([envFilter, searchKeyword], () => {
   page.value = 1
 })
 

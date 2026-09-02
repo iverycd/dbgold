@@ -1,10 +1,15 @@
 package handler
 
-// resolveChangeOwner preserves explicit choices, including false. Oscar alone
-// defaults to keeping the connected role as owner of newly created objects.
+// resolveChangeOwner preserves explicit choices, including false. Only PostgreSQL
+// compatible targets default to changing the owner to the schema's namesake role.
 func resolveChangeOwner(targetType string, requested *bool) bool {
 	if requested != nil {
 		return *requested
 	}
-	return targetType != "oscar"
+	switch targetType {
+	case "postgres", "gaussdb", "seabox", "highgo", "vastbase", "gbase", "kingbase":
+		return true
+	default:
+		return false
+	}
 }
