@@ -16,6 +16,8 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
+	ExcludedObjects    []ObjectRef
+	ViewNames          []string
 	PageSize           int
 	MaxParallel        int
 	IntraTableParallel int // 单表内部分页并发数，<=1 表示串行
@@ -61,6 +63,18 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if cfg.TargetDBType == "oracle" {
+		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed, cfg.CharInLength = "oracle", false, false, false, true
+		if s, ok := writer.(interface{ EffectiveSchema() string }); ok {
+			cfg.TargetSchema = s.EffectiveSchema()
+		}
+		if cfg.PageSize <= 0 {
+			cfg.PageSize = 20000
+		}
+		if cfg.MaxParallel <= 0 {
+			cfg.MaxParallel = 10
+		}
+	}
 	// 若 Writer 支持,注入源库类型供其 ValueConverter 落地中立值
 	if s, ok := writer.(sourceTypeSetter); ok {
 		s.SetSourceType(reader.DBType())
@@ -77,7 +91,7 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 // objName only normalizes target object names; source lookups and schema/owner
 // names must never pass through it. Oscar always uses uppercase identifiers.
 func (m *Migrator) objName(s string) string {
-	if m.isOscar() {
+	if m.isOscar() || m.isOracle() {
 		return strings.ToUpper(s)
 	}
 	if m.cfg.LowerCaseNames {
@@ -104,6 +118,12 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	if m.isOracle() {
+		return m.runOracle(ctx)
+	}
+	if m.isPGMySQL() {
+		return m.runPGMySQL(ctx)
+	}
 	report := newMigrationReport()
 	start := time.Now()
 
@@ -122,6 +142,9 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	allTables, err := m.reader.ListTables(ctx)
 	if err != nil {
 		m.log.Errorf("获取表列表失败: %v", err)
+		report.Tables.Total++
+		report.Tables.Failed++
+		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "源表列表", Error: err.Error()})
 		return report
 	}
 	var tables []string
@@ -343,6 +366,9 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
+			if m.isOracle() {
+				return false, fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
+			}
 			return false, err.Error()
 		}
 		if len(rows) == 0 {
@@ -358,6 +384,9 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		}
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
+			if m.isOracle() {
+				return false, fmt.Sprintf("表 %s 第 %d 页写入失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
+			}
 			if !hasError {
 				firstErr = err.Error()
 				hasError = true
@@ -398,6 +427,9 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	cols, colTypes, firstRows, err := m.reader.ReadPage(ctx, table, pks, 0, pageSize)
 	if err != nil {
 		m.log.Errorf("读取数据失败 [%s] 第 1 页: %v", table, err)
+		if m.isOracle() {
+			return false, fmt.Sprintf("表 %s 第 1 页读取失败: %v", table, err)
+		}
 		return false, err.Error()
 	}
 	dstCols := make([]string, len(cols))
@@ -415,6 +447,9 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 			mu.Lock()
 			if !hasError {
 				firstErr = err.Error()
+				if m.isOracle() {
+					firstErr = fmt.Sprintf("表 %s 第 %d 页写入失败: %v", table, pageNum, err)
+				}
 				hasError = true
 			}
 			mu.Unlock()
@@ -453,6 +488,9 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 				mu.Lock()
 				if !hasError {
 					firstErr = err.Error()
+					if m.isOracle() {
+						firstErr = fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, pn, err)
+					}
 					hasError = true
 				}
 				mu.Unlock()
@@ -514,6 +552,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		pks, err := m.reader.GetPrimaryKeys(ctx)
 		if err != nil {
 			m.log.Errorf("获取主键信息失败: %v", err)
+			report.PrimaryKeys.Total++
+			report.PrimaryKeys.Failed++
+			report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(pks))
 			for _, pk := range pks {
@@ -560,6 +601,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		seqs, err := m.reader.GetSequences(ctx)
 		if err != nil {
 			m.log.Errorf("获取序列信息失败: %v", err)
+			report.Sequences.Total++
+			report.Sequences.Failed++
+			report.Sequences.Items = append(report.Sequences.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			filtered := make([]source.SequenceInfo, 0, len(seqs))
 			for _, seq := range seqs {
@@ -606,6 +650,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		indexes, err := m.reader.GetIndexes(ctx)
 		if err != nil {
 			m.log.Errorf("获取索引信息失败: %v", err)
+			report.Indexes.Total++
+			report.Indexes.Failed++
+			report.Indexes.Items = append(report.Indexes.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(indexes))
 			for _, idx := range indexes {
@@ -652,6 +699,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
 			m.log.Errorf("获取外键信息失败: %v", err)
+			report.Constraints.Total++
+			report.Constraints.Failed++
+			report.Constraints.Items = append(report.Constraints.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			filtered := make([]source.FKInfo, 0, len(fks))
 			for _, fk := range fks {
@@ -701,6 +751,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		views, err := m.readViews(ctx)
 		if err != nil {
 			m.log.Errorf("获取视图信息失败: %v", err)
+			report.Views.Total++
+			report.Views.Failed++
+			report.Views.Items = append(report.Views.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			report.Views.Total = len(views)
 			for _, v := range views {
@@ -728,6 +781,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		comments, err := m.reader.GetComments(ctx)
 		if err != nil {
 			m.log.Errorf("获取注释信息失败: %v", err)
+			report.Comments.Total++
+			report.Comments.Failed++
+			report.Comments.Items = append(report.Comments.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			matched := 0
 			for _, cm := range comments {
@@ -827,6 +883,25 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 // MigrateViews 按名称批量创建视图,返回每个视图的结果(复用 createOneView)。
 // viewNames 以源库原始大小写匹配 ViewInfo.ViewName。
 func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []ObjectResult {
+	if len(viewNames) == 0 {
+		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.isOracle() {
+		return m.migrateOracleViews(ctx, viewNames)
+	}
+	if m.isPGMySQL() {
+		m.cfg.ViewNames = viewNames
+		report := m.runPGMySQL(ctx)
+		out := append([]ObjectResult{}, report.Views.Items...)
+		if report.Preflight != nil && !report.Preflight.Ready {
+			for _, i := range report.Preflight.Issues {
+				if i.Severity == "error" {
+					out = append(out, ObjectResult{Name: i.Object.Name, Error: i.Reason})
+				}
+			}
+		}
+		return out
+	}
 	want := make(map[string]bool, len(viewNames))
 	for _, n := range viewNames {
 		want[n] = true
@@ -834,7 +909,7 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	views, err := m.readViews(ctx)
 	if err != nil {
 		m.log.Errorf("获取视图信息失败: %v", err)
-		return nil
+		return []ObjectResult{{Name: "视图元数据", Error: err.Error()}}
 	}
 	results := make([]ObjectResult, 0, len(viewNames))
 	if m.isOscar() {

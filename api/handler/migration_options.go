@@ -3,6 +3,9 @@ package handler
 // resolveChangeOwner preserves explicit choices, including false. Only PostgreSQL
 // compatible targets default to changing the owner to the schema's namesake role.
 func resolveChangeOwner(targetType string, requested *bool) bool {
+	if targetType == "oracle" {
+		return false
+	}
 	if requested != nil {
 		return *requested
 	}

@@ -38,6 +38,7 @@ type PageResult[T any] struct {
 }
 
 type DataMigrationJob struct {
+	ExcludedObjects    string     `gorm:"type:text" json:"excluded_objects,omitempty"`
 	ID                 uint       `gorm:"primaryKey" json:"id"`
 	OwnerID            uint       `gorm:"index;not null;default:0" json:"owner_id"`
 	JobID              string     `gorm:"uniqueIndex;not null" json:"job_id"`

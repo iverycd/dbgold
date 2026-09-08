@@ -39,6 +39,7 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 
 // MySQLReader 实现 Reader 接口，连接到 MySQL 数据库
 type MySQLReader struct {
+	oracleTarget    bool
 	db              *sql.DB
 	dbName          string
 	snapshotTx      *sql.Tx
@@ -251,6 +252,9 @@ func (r *MySQLReader) ListTables(ctx context.Context) ([]string, error) {
 }
 
 func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*TableDDLInfo, error) {
+	if r.oracleTarget {
+		return r.oracleTableInfo(ctx, table)
+	}
 	rows, err := r.queryContext(ctx,
 		`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
 		        NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA
@@ -346,6 +350,9 @@ func (r *MySQLReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) {
 }
 
 func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
+	if r.oracleTarget {
+		return r.readOraclePage(ctx, table, pkCols, offset, limit)
+	}
 	if r.snapshotTx != nil && len(pkCols) == 0 {
 		return r.readSnapshotCursorPage(ctx, table, offset, limit)
 	}
@@ -487,6 +494,9 @@ func (r *MySQLReader) closeSnapshotCursors() {
 }
 
 func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {
+	if r.oracleTarget {
+		return r.oracleSequences(ctx)
+	}
 	// 大库（数千表/数万列）场景下，TABLES JOIN COLUMNS 的单条查询会极慢（最慢达 1 小时），
 	// 拆成两条单视图查询、在内存合并，实测可降到毫秒级。
 
@@ -542,6 +552,9 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
+	if r.oracleTarget {
+		return r.oracleIndexes(ctx)
+	}
 	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
 		 FROM information_schema.STATISTICS
@@ -578,6 +591,9 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 }
 
 func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
+	if r.oracleTarget {
+		return r.oracleForeignKeys(ctx)
+	}
 	// 大库场景下 KEY_COLUMN_USAGE JOIN REFERENTIAL_CONSTRAINTS 的单条查询很慢，
 	// 拆成两条单视图查询、在内存合并：查询 1 取约束级元数据（引用表 + 级联规则），
 	// 查询 2 取列级明细，按 表名.约束名 关联。
@@ -936,6 +952,11 @@ func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
 
 // CountRows 返回指定表的行数
 func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error) {
+	if r.oracleTarget {
+		var count int64
+		err := r.queryRowContext(ctx, "SELECT COUNT(*) FROM "+mysqlOracleIdent(r.dbName)+"."+mysqlOracleIdent(table)).Scan(&count)
+		return count, err
+	}
 	var count int64
 	err := r.queryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
 	return count, err

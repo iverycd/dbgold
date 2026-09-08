@@ -3,6 +3,7 @@ package target
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -15,7 +16,18 @@ func (w *MySQLWriter) CopyData(ctx context.Context, table string, cols []string,
 	if len(rows) == 0 {
 		return nil
 	}
-	tx, err := w.db.BeginTx(ctx, nil)
+	var tx *sql.Tx
+	var err error
+	if source.IsPGFamily(w.srcType) {
+		conn, restore, e := w.pgSession(ctx)
+		if e != nil {
+			return e
+		}
+		defer restore()
+		tx, err = conn.BeginTx(ctx, nil)
+	} else {
+		tx, err = w.db.BeginTx(ctx, nil)
+	}
 	if err != nil {
 		return err
 	}
@@ -61,13 +73,10 @@ func (w *MySQLWriter) convertRow(row []interface{}, colTypes []string) []interfa
 }
 
 // CreateSequence 修正自增列种子(MySQL 自增已在建表声明 AUTO_INCREMENT)。
-// 若该列实际非自增,ALTER 会失败,降级忽略(种子未修正只影响后续应用插入)。
+// 修正失败必须返回调用方并计入报告，不能忽略后续插入语义。
 func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
 	stmts := w.dia.SequenceStatements(w.schema, seq, owner)
-	for _, s := range stmts {
-		_, _ = w.db.ExecContext(ctx, s.SQL) // 降级:忽略错误
-	}
-	return nil
+	return w.execStatements(ctx, stmts)
 }
 
 func (w *MySQLWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {

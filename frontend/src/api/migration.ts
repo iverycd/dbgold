@@ -8,6 +8,7 @@ export interface SupportedPair {
 }
 
 export interface StartDataMigrationRequest {
+  excluded_objects?: MigrationObjectRef[]
   src_conn_id: number
   dst_conn_id: number
   migrate_mode: 'all' | 'include' | 'exclude'
@@ -131,6 +132,8 @@ export interface TableRowCount {
 }
 
 export interface MigrationReport {
+	 warnings?: { table: string; column: string; reason: string; count: number }[]
+  preflight?: PGMySQLPreflight
   tables: CategoryReport
   data: CategoryReport
   primaryKeys: CategoryReport
@@ -389,6 +392,7 @@ export const acknowledgeIncrementalDDL = (jobID: string) => api.post(`/migration
 // ===== 视图迁移 =====
 
 export interface MigrateViewsRequest {
+  excluded_objects?: MigrationObjectRef[]
   src_conn_id: number
   dst_conn_id: number
   view_names: string[]
@@ -415,6 +419,7 @@ export const listConnectionTables = (connId: number, database?: string) =>
   })
 
 export interface StartObjectMigrationRequest {
+  excluded_objects?: MigrationObjectRef[]
   src_conn_id: number
   dst_conn_id: number
   migrate_objects: MigrateObjectType[]
@@ -480,6 +485,7 @@ export const validateBatch = (file: File) => {
 
 // 批量迁移整批共用的迁移选项（对齐单任务默认值）
 export interface BatchOptions {
+  excluded_objects_by_row?: Record<number, MigrationObjectRef[]>
   migrate_content: 'both' | 'schema_only' | 'data_only'
   page_size: number
   max_parallel: number
@@ -498,6 +504,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   const fd = new FormData()
   fd.append('file', file)
   if (excludeRows.length) fd.append('exclude_rows', excludeRows.join(','))
+  if (opts.excluded_objects_by_row) fd.append('excluded_objects_by_row', JSON.stringify(opts.excluded_objects_by_row))
   fd.append('migrate_content', opts.migrate_content)
   fd.append('page_size', String(opts.page_size))
   fd.append('max_parallel', String(opts.max_parallel))
@@ -537,3 +544,29 @@ export const downloadBatchTemplate = async () => {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+export interface MigrationObjectRef { kind: string; table?: string; name: string }
+export interface CompatibilityIssue {
+  object: MigrationObjectRef
+  severity: 'error' | 'warning'
+  reason: string
+  suggestion: string
+  excludable: boolean
+  definition?: string
+}
+export interface PGMySQLPreflight {
+  ready: boolean
+  source: { product: string; version: string; mode: string; schema: string; verification: string }
+  target: { version: string; database: string; target_collation: string; verification: string }
+  issues: CompatibilityIssue[]
+  excluded: MigrationObjectRef[]
+  objects: { object: MigrationObjectRef; target: string; stage: string; statements: { SQL: string }[] }[]
+  rows_checked: number
+}
+export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
+  migrate_objects?: MigrateObjectType[]
+  table_names?: string[]
+  view_names?: string[]
+}
+export const preflightDataMigration = (data: PGMySQLPreflightRequest, signal?: AbortSignal) =>
+  api.post<PGMySQLPreflight>('/migration/data/preflight', data, { timeout: 0, signal })

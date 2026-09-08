@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/valueconv"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -31,6 +32,7 @@ func NewMySQL(dsn, schema string, pool ConnPoolConfig) (*MySQLWriter, error) {
 	}
 	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return &MySQLWriter{
@@ -70,6 +72,19 @@ func (w *MySQLWriter) CreateTable(ctx context.Context, stmts []dialect.Statement
 }
 
 func (w *MySQLWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
+	if source.IsPGFamily(w.srcType) {
+		conn, restore, err := w.pgSession(ctx)
+		if err != nil {
+			return err
+		}
+		defer restore()
+		for _, s := range stmts {
+			if _, err = conn.ExecContext(ctx, s.SQL); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, s := range stmts {
 		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
 			return err

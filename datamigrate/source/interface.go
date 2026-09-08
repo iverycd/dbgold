@@ -4,20 +4,29 @@ import "context"
 
 // ColumnInfo 表示一列的元数据，用于 DDL 生成
 type ColumnInfo struct {
-	Name       string
-	DataType   string // 原始数据库类型（如 "varchar"、"int"）
-	Length     int64
-	Precision  int64
-	Scale      int64
-	IsNullable bool
-	Default    *string
-	Extra      string // 如 "auto_increment"
+	Name              string
+	DataType          string // 原始数据库类型（如 "varchar"、"int"）
+	Length            int64
+	Precision         int64
+	Scale             int64
+	IsNullable        bool
+	Default           *string
+	Extra             string // 如 "auto_increment"
+	Ordinal           int
+	TypeKind          string
+	TypeSchema        string
+	FormattedType     string
+	DateTimePrecision int64
+	Identity          string
+	Generated         string
+	Comment           string
 }
 
 // TableDDLInfo 包含建表所需的完整元数据
 type TableDDLInfo struct {
 	TableName string
 	Columns   []ColumnInfo
+	Comment   string
 }
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
@@ -25,15 +34,22 @@ type SequenceInfo struct {
 	TableName  string
 	ColumnName string
 	StartValue int64
+	// StartValueText preserves MySQL unsigned AUTO_INCREMENT values beyond int64.
+	// Existing targets continue using StartValue; Oracle uses the exact text.
+	StartValueText string
 }
 
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
-	TableName string
-	IndexName string
-	Columns   []string
-	IsUnique  bool
-	IsPrimary bool
+	TableName   string
+	IndexName   string
+	Columns     []string
+	IsUnique    bool
+	IsPrimary   bool
+	Attnums     []int
+	Method      string
+	Definition  string
+	Unsupported string
 }
 
 // FKInfo 表示一个外键约束
@@ -45,10 +61,13 @@ type FKInfo struct {
 	RefColumns     []string
 	OnDelete       string
 	OnUpdate       string
+	RefSchema      string
+	Unsupported    string
 }
 
 // ViewInfo 表示一个视图
 type ViewInfo struct {
+	Columns    []ColumnInfo
 	ViewName   string
 	Definition string // 已转换为目标库语法的 SQL
 }

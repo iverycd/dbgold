@@ -1,0 +1,44 @@
+name: dbgold-pgmysql-it
+services:
+  postgres:
+    image: postgres:16.6
+    environment:
+      POSTGRES_PASSWORD: dbgold_fixture
+      POSTGRES_DB: fixture
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fixture"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  mysql57:
+    image: mysql:5.7.44
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: dbgold_fixture
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: fixture
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin", "--sql-mode=STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION", "--lower-case-table-names=0"]
+    ports:
+      - "127.0.0.1:55357:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdbgold_fixture"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+  mysql80:
+    image: mysql:8.0.36
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: dbgold_fixture
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: fixture
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin", "--sql-mode=STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION", "--lower-case-table-names=0"]
+    ports:
+      - "127.0.0.1:55380:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdbgold_fixture"]
+      interval: 3s
+      timeout: 3s
+      retries: 60

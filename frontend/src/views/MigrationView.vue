@@ -98,7 +98,8 @@
                 <a-select
                   v-if="dataMigrate.dstConnId"
                   v-model="dataMigrate.dstSchema"
-                  placeholder="请选择目标 Schema"
+                  :placeholder="selectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                  :allow-clear="selectedDst?.db_type === 'oracle'"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
@@ -106,7 +107,8 @@
                 </a-select>
                 <div v-if="dataMigrate.dstConnId" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
-                  请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。
+                  <span v-if="selectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
+                  <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
             </a-col>
@@ -177,23 +179,23 @@
 
                   <div class="adv-section-title">选项</div>
                   <a-row :gutter="16">
-                    <a-col v-if="selectedDst?.db_type !== 'dameng' && selectedDst?.db_type !== 'oscar'" :span="12">
+                    <a-col v-if="selectedDst?.db_type !== 'dameng' && selectedDst?.db_type !== 'oscar' && selectedDst?.db_type !== 'oracle'" :span="12">
                       <a-checkbox v-model="dataMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                     </a-col>
-                    <a-col v-if="selectedDst?.db_type === 'oscar'" :span="12">
-                      <span class="adv-check">Oscar 对象名统一转大写</span>
+                    <a-col v-if="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle'" :span="12">
+                      <span class="adv-check">{{ selectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.changeOwner" :disabled="selectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.charInLength" class="adv-check">char 长度单位（CHAR）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
                     </a-col>
                     <a-col :span="12">
                       <a-checkbox v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
                     </a-col>
                   </a-row>
 
@@ -249,6 +251,9 @@
               </a-row>
             </a-collapse-item>
           </a-collapse>
+
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')" :result="pgChecks.data" :excluded="pgExclusions.data" :busy="pgBusy.data"
+            @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
 
           <!-- 目标表删除重建警告 -->
           <a-alert type="warning" style="margin-bottom: 16px">
@@ -419,7 +424,8 @@
                 <a-select
                   v-if="viewMigrate.dstConnId"
                   v-model="viewMigrate.dstSchema"
-                  placeholder="请选择目标 Schema"
+                  :placeholder="vmSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                  :allow-clear="vmSelectedDst?.db_type === 'oracle'"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
@@ -427,7 +433,8 @@
                 </a-select>
                 <div v-if="viewMigrate.dstConnId" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
-                  请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。
+                  <span v-if="vmSelectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
+                  <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
             </a-col>
@@ -482,14 +489,14 @@
             <a-collapse-item key="advanced" header="高级设置">
               <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
-                <a-col v-if="vmSelectedDst?.db_type !== 'dameng' && vmSelectedDst?.db_type !== 'oscar'" :span="12">
+                <a-col v-if="vmSelectedDst?.db_type !== 'dameng' && vmSelectedDst?.db_type !== 'oscar' && vmSelectedDst?.db_type !== 'oracle'" :span="12">
                   <a-checkbox v-model="viewMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
-                <a-col v-if="vmSelectedDst?.db_type === 'oscar'" :span="12">
-                  <span class="adv-check">Oscar 对象名统一转大写</span>
+                <a-col v-if="vmSelectedDst?.db_type === 'oscar' || vmSelectedDst?.db_type === 'oracle'" :span="12">
+                  <span class="adv-check">{{ vmSelectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="viewMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  <a-checkbox v-model="viewMigrate.changeOwner" :disabled="vmSelectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
               </a-row>
               <div class="adv-section-title">视图剥离模式名</div>
@@ -501,6 +508,9 @@
               <div class="adv-hint">从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。</div>
             </a-collapse-item>
           </a-collapse>
+
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views"
+            @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
           <!-- 操作按钮 -->
           <a-space style="margin-bottom: 16px">
@@ -633,7 +643,8 @@
                 <a-select
                   v-if="objMigrate.dstConnId"
                   v-model="objMigrate.dstSchema"
-                  placeholder="请选择目标 Schema"
+                  :placeholder="omSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                  :allow-clear="omSelectedDst?.db_type === 'oracle'"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
@@ -715,21 +726,24 @@
             <a-collapse-item key="advanced" header="高级设置">
               <div class="adv-section-title">选项</div>
               <a-row :gutter="16">
-                <a-col v-if="omSelectedDst?.db_type !== 'dameng' && omSelectedDst?.db_type !== 'oscar'" :span="12">
+                <a-col v-if="omSelectedDst?.db_type !== 'dameng' && omSelectedDst?.db_type !== 'oscar' && omSelectedDst?.db_type !== 'oracle'" :span="12">
                   <a-checkbox v-model="objMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
                 </a-col>
-                <a-col v-if="omSelectedDst?.db_type === 'oscar'" :span="12">
-                  <span class="adv-check">Oscar 对象名统一转大写</span>
+                <a-col v-if="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle'" :span="12">
+                  <span class="adv-check">{{ omSelectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.changeOwner" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  <a-checkbox v-model="objMigrate.changeOwner" :disabled="omSelectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
+                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
                 </a-col>
               </a-row>
             </a-collapse-item>
           </a-collapse>
+
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')" :result="pgChecks.objects" :excluded="pgExclusions.objects" :busy="pgBusy.objects"
+            @check="runPGCheck('objects')" @exclude="excludePGObject('objects', $event)" @restore="restorePGObject('objects', $event)" />
 
           <!-- 操作按钮 -->
           <a-space style="margin-bottom: 16px">
@@ -786,11 +800,16 @@ import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import { applyTargetMigrationDefaults } from '@/utils/migrationOptions'
 import { copyText } from '@/utils/clipboard'
 import MigrationReportPanel from './MigrationReportPanel.vue'
+import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
 import { downloadRoutines } from '@/api/schema'
 import {
   getSupportedPairs,
+  preflightDataMigration,
+  type PGMySQLPreflight,
+  type PGMySQLPreflightRequest,
+  type MigrationObjectRef,
   startDataMigration as apiStartMigration,
   cancelDataMigration as apiCancelMigration,
   createDataMigrateEventSource,
@@ -882,7 +901,7 @@ const srcConnections = computed(() =>
 const pgConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql' || c.db_type === 'oscar') &&
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql' || c.db_type === 'oscar' || c.db_type === 'oracle') &&
       (!dstEnvFilter.value || c.env === dstEnvFilter.value)
   )
 )
@@ -890,7 +909,7 @@ const selectedSrc = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.srcConnId)
 )
 // 支持导出函数/存储过程/触发器的源库类型（与后端可选导出接口实现保持一致）
-const ROUTINE_EXPORT_TYPES = ['mysql', 'oracle', 'sqlserver', 'dameng']
+const ROUTINE_EXPORT_TYPES = ['mysql', 'oracle', 'sqlserver', 'dameng', 'postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase']
 const canExportRoutines = computed(() =>
   !!selectedSrc.value && ROUTINE_EXPORT_TYPES.includes(selectedSrc.value.db_type)
 )
@@ -914,7 +933,7 @@ const selectedDst = computed(() =>
 watch(() => dataMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
   applyTargetMigrationDefaults(dataMigrate, dst?.db_type)
-  dataMigrate.charInLength = dst?.db_type === 'dameng'
+  dataMigrate.charInLength = dst?.db_type === 'dameng' || dst?.db_type === 'oracle'
 })
 
 const canStartMigration = computed(() =>
@@ -959,7 +978,7 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
@@ -977,7 +996,7 @@ function getLogClass(line: string): string {
 
 async function startDataMigration() {
   if (!validateTableFilter()) return
-  if (dataMigrate.dstConnId && !dataMigrate.dstSchema) {
+  if (dataMigrate.dstConnId && !dataMigrate.dstSchema && selectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
   }
@@ -985,30 +1004,8 @@ async function startDataMigration() {
   dataMigrate.finished = false
   dataMigrate.logs = []
   try {
-    const res = await apiStartMigration({
-      src_conn_id: dataMigrate.srcConnId!,
-      dst_conn_id: dataMigrate.dstConnId!,
-      migrate_mode: dataMigrate.mode,
-      table_filter: dataMigrate.filter,
-      migrate_content: dataMigrate.content,
-      page_size: dataMigrate.pageSize,
-      max_parallel: dataMigrate.maxParallel,
-      intra_table_parallel: dataMigrate.intraTableParallel,
-      lower_case_names: dataMigrate.lowerCaseNames,
-      char_in_length: dataMigrate.charInLength,
-      use_nvarchar2: dataMigrate.useNvarchar2,
-      distributed: dataMigrate.distributed,
-      change_owner: dataMigrate.changeOwner,
-      src_database: dataMigrate.srcDatabase,
-      target_schema: dataMigrate.dstSchema || undefined,
-      strip_view_schemas: dataMigrate.stripViewSchemas || undefined,
-      src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
-      src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
-      src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,
-      dst_max_open_conns: dataMigrate.dstMaxOpenConns || undefined,
-      dst_max_idle_conns: dataMigrate.dstMaxIdleConns || undefined,
-      dst_conn_max_lifetime: dataMigrate.dstConnMaxLifetime || undefined,
-    })
+    if (isPGMySQLSelection('data') && !(await runPGCheck('data'))?.ready) { dataMigrate.running = false; return }
+    const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)
   } catch (e: any) {
@@ -1210,7 +1207,7 @@ async function vmLoadDstSchemas(connId: number) {
   viewMigrate.dstSchema = ''
   viewMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
@@ -1246,14 +1243,16 @@ function vmClearSelection() {
 }
 
 async function handleMigrateViews() {
-  if (viewMigrate.dstConnId && !viewMigrate.dstSchema) {
+  if (viewMigrate.dstConnId && !viewMigrate.dstSchema && vmSelectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
   }
   viewMigrate.running = true
   viewMigrate.results = []
   try {
+    if (isPGMySQLSelection('views') && !(await runPGCheck('views'))?.ready) return
     const res = await apiMigrateViews({
+      excluded_objects: pgExclusions.views,
       src_conn_id: viewMigrate.srcConnId!,
       dst_conn_id: viewMigrate.dstConnId!,
       view_names: viewMigrate.selected,
@@ -1375,7 +1374,7 @@ async function omLoadDstSchemas(connId: number) {
   objMigrate.dstSchema = ''
   objMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []
@@ -1410,7 +1409,7 @@ function omClearSelection() {
 }
 
 async function startObjectMigration() {
-  if (objMigrate.dstConnId && !objMigrate.dstSchema) {
+  if (objMigrate.dstConnId && !objMigrate.dstSchema && omSelectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
   }
@@ -1426,7 +1425,9 @@ async function startObjectMigration() {
   objMigrate.finished = false
   objMigrate.logs = []
   try {
+    if (isPGMySQLSelection('objects') && !(await runPGCheck('objects'))?.ready) { objMigrate.running = false; return }
     const res = await apiStartObjectMigration({
+      excluded_objects: pgExclusions.objects,
       src_conn_id: objMigrate.srcConnId!,
       dst_conn_id: objMigrate.dstConnId!,
       migrate_objects: objMigrate.objects,
@@ -1491,6 +1492,84 @@ function resetObjectMigration() {
 function copyObjLogs() {
   copyText(objMigrate.logs.join('\n')).catch(() => Message.error('复制失败'))
 }
+
+
+// Preview state is scoped to the three existing migration workflows.
+type PGCheckKind = 'data' | 'views' | 'objects'
+const pgChecks = reactive<Record<PGCheckKind, PGMySQLPreflight | null>>({ data: null, views: null, objects: null })
+const pgExclusions = reactive<Record<PGCheckKind, MigrationObjectRef[]>>({ data: [], views: [], objects: [] })
+const pgBusy = reactive<Record<PGCheckKind, boolean>>({ data: false, views: false, objects: false })
+const pgAbort = new Map<PGCheckKind, AbortController>()
+function isPGMySQLSelection(kind: PGCheckKind) {
+  const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
+  const src = connections.value.find(c => c.id === state.srcConnId)
+  const dst = connections.value.find(c => c.id === state.dstConnId)
+  return !!src && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && dst?.db_type === 'mysql'
+}
+function dataMigrationRequest(): PGMySQLPreflightRequest {
+return {
+      src_conn_id: dataMigrate.srcConnId!,
+      dst_conn_id: dataMigrate.dstConnId!,
+      migrate_mode: dataMigrate.mode,
+      table_filter: dataMigrate.filter,
+      migrate_content: dataMigrate.content,
+      page_size: dataMigrate.pageSize,
+      max_parallel: dataMigrate.maxParallel,
+      intra_table_parallel: dataMigrate.intraTableParallel,
+      lower_case_names: dataMigrate.lowerCaseNames,
+      char_in_length: dataMigrate.charInLength,
+      use_nvarchar2: dataMigrate.useNvarchar2,
+      distributed: dataMigrate.distributed,
+      change_owner: dataMigrate.changeOwner,
+      src_database: dataMigrate.srcDatabase,
+      target_schema: dataMigrate.dstSchema || undefined,
+      strip_view_schemas: dataMigrate.stripViewSchemas || undefined,
+      src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
+      src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
+      src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,
+      dst_max_open_conns: dataMigrate.dstMaxOpenConns || undefined,
+      dst_max_idle_conns: dataMigrate.dstMaxIdleConns || undefined,
+      dst_conn_max_lifetime: dataMigrate.dstConnMaxLifetime || undefined,
+      excluded_objects: pgExclusions.data,
+  }
+}
+function pgRequest(kind: PGCheckKind): PGMySQLPreflightRequest {
+  if (kind === 'data') return dataMigrationRequest()
+  const state = kind === 'views' ? viewMigrate : objMigrate
+  return {
+    src_conn_id: state.srcConnId!, dst_conn_id: state.dstConnId!, migrate_mode: 'all',
+    src_database: state.srcDatabase || undefined, target_schema: state.dstSchema || undefined,
+    lower_case_names: state.lowerCaseNames, change_owner: state.changeOwner,
+    excluded_objects: pgExclusions[kind],
+    ...(kind === 'views' ? { view_names: viewMigrate.selected } : { migrate_objects: objMigrate.objects, table_names: omFinalTables.value, distributed: objMigrate.distributed }),
+  }
+}
+async function runPGCheck(kind: PGCheckKind) {
+  pgAbort.get(kind)?.abort()
+  const controller = new AbortController(); pgAbort.set(kind, controller); pgBusy[kind] = true
+  try {
+    const result = await preflightDataMigration(pgRequest(kind), controller.signal)
+    if (!controller.signal.aborted) pgChecks[kind] = result.data
+    return controller.signal.aborted ? undefined : result.data
+  } catch (e: any) {
+    if (!controller.signal.aborted) Message.error(`预检失败：${e?.response?.data?.error ?? e.message}`)
+  } finally {
+    if (pgAbort.get(kind) === controller) { pgBusy[kind] = false; pgAbort.delete(kind) }
+  }
+}
+function objectKey(o: MigrationObjectRef) { return JSON.stringify([o.kind, o.table ?? '', o.name]) }
+function excludePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
+  if (!pgExclusions[kind].some(o => objectKey(o) === objectKey(object))) pgExclusions[kind].push(object)
+  pgChecks[kind] = null
+}
+function restorePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
+  pgExclusions[kind] = pgExclusions[kind].filter(o => objectKey(o) !== objectKey(object)); pgChecks[kind] = null
+}
+for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
+  watch(() => JSON.stringify(pgRequest(kind)), () => { pgAbort.get(kind)?.abort(); pgChecks[kind] = null })
+  watch(() => { const req = pgRequest(kind); return [req.src_conn_id, req.dst_conn_id, req.src_database, req.target_schema].join('|') }, () => { pgExclusions[kind] = [] })
+}
+onUnmounted(() => { for (const controller of pgAbort.values()) controller.abort() })
 
 </script>
 

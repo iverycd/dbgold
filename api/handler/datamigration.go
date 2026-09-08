@@ -28,6 +28,15 @@ type SupportedPair struct {
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
+	{Source: "mysql", Target: "oracle"},
+	{Source: "postgres", Target: "mysql"},
+	{Source: "gaussdb", Target: "mysql"},
+	{Source: "highgo", Target: "mysql"},
+	{Source: "vastbase", Target: "mysql"},
+	{Source: "gbase", Target: "mysql"},
+	{Source: "seabox", Target: "mysql"},
+	{Source: "kingbase", Target: "mysql"},
+
 	{Source: "mysql", Target: "postgres"},
 	{Source: "mysql", Target: "gaussdb"},
 	{Source: "mysql", Target: "seabox"},
@@ -80,22 +89,23 @@ func GetSupportedPairs(c *gin.Context) {
 }
 
 type startDataMigrationRequest struct {
-	SrcConnID          uint   `json:"src_conn_id" binding:"required"`
-	DstConnID          uint   `json:"dst_conn_id" binding:"required"`
-	MigrateMode        string `json:"migrate_mode" binding:"required,oneof=all include exclude"`
-	TableFilter        string `json:"table_filter"`
-	MigrateContent     string `json:"migrate_content"` // "both" | "schema_only" | "data_only"，空值默认 "both"
-	PageSize           int    `json:"page_size"`
-	MaxParallel        int    `json:"max_parallel"`
-	IntraTableParallel int    `json:"intra_table_parallel"`
-	LowerCaseNames     bool   `json:"lower_case_names"`
-	CharInLength       bool   `json:"char_in_length"`
-	UseNvarchar2       bool   `json:"use_nvarchar2"`
-	Distributed        bool   `json:"distributed"`
-	ChangeOwner        *bool  `json:"change_owner"`       // nil: PG 兼容目标 true，其他目标 false
-	SrcDatabase        string `json:"src_database"`       // 可选，覆盖连接中的默认数据库
-	TargetSchema       string `json:"target_schema"`      // 可选，目标库 schema，为空时使用连接默认 search_path
-	StripViewSchemas   string `json:"strip_view_schemas"` // 逗号分隔的模式名，迁移视图时从定义中剥离前缀(忽略大小写)
+	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
+	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
+	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
+	MigrateMode        string                  `json:"migrate_mode" binding:"required,oneof=all include exclude"`
+	TableFilter        string                  `json:"table_filter"`
+	MigrateContent     string                  `json:"migrate_content"` // "both" | "schema_only" | "data_only"，空值默认 "both"
+	PageSize           int                     `json:"page_size"`
+	MaxParallel        int                     `json:"max_parallel"`
+	IntraTableParallel int                     `json:"intra_table_parallel"`
+	LowerCaseNames     bool                    `json:"lower_case_names"`
+	CharInLength       bool                    `json:"char_in_length"`
+	UseNvarchar2       bool                    `json:"use_nvarchar2"`
+	Distributed        bool                    `json:"distributed"`
+	ChangeOwner        *bool                   `json:"change_owner"`       // nil: PG 兼容目标 true，其他目标 false
+	SrcDatabase        string                  `json:"src_database"`       // 可选，覆盖连接中的默认数据库
+	TargetSchema       string                  `json:"target_schema"`      // 可选，目标库 schema，为空时使用连接默认 search_path
+	StripViewSchemas   string                  `json:"strip_view_schemas"` // 逗号分隔的模式名，迁移视图时从定义中剥离前缀(忽略大小写)
 	// 连接池配置，0 表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=3600s）
 	SrcMaxOpenConns    int `json:"src_max_open_conns"`
 	SrcMaxIdleConns    int `json:"src_max_idle_conns"`
@@ -135,6 +145,11 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
+	if dstConn.DBType == "oracle" {
+		req.LowerCaseNames = false
+		req.CharInLength = true
+		req.Distributed = false
+	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 
 	// 校验迁移组合是否支持
@@ -155,6 +170,7 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		ExcludedObjects:    encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:            middleware.GetCurrentUserID(c),
 		JobID:              jobID,
 		SrcConnID:          req.SrcConnID,
@@ -190,6 +206,7 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	p := migrationParams{
+		ExcludedObjects:    req.ExcludedObjects,
 		MigrateMode:        req.MigrateMode,
 		TableFilter:        req.TableFilter,
 		MigrateContent:     req.MigrateContent,
@@ -225,6 +242,7 @@ func StartDataMigration(c *gin.Context) {
 
 // migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
 type migrationParams struct {
+	ExcludedObjects  []datamigrate.ObjectRef
 	MigrateMode      string
 	TableFilter      string
 	MigrateContent   string
@@ -261,7 +279,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		MaxIdleConns:    p.SrcMaxIdleConns,
 		ConnMaxLifetime: time.Duration(p.SrcConnMaxLifetime) * time.Second,
 	}
-	reader, readerErr := buildSrcReader(srcConn, p.SrcDatabase, srcPool)
+	reader, readerErr := buildSrcReader(srcConn, p.SrcDatabase, srcPool, dstConn.DBType)
 	if readerErr != nil {
 		slog.Warn("连接源库失败", "job_id", dbJob.JobID, "db_type", srcConn.DBType, "err", readerErr)
 		job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
@@ -306,6 +324,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
+		ExcludedObjects:    p.ExcludedObjects,
 		PageSize:           p.PageSize,
 		MaxParallel:        p.MaxParallel,
 		Mode:               p.MigrateMode,
@@ -334,9 +353,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 	status := "done"
 	if ctx.Err() != nil {
 		status = "cancelled"
-	} else if report.Tables.Failed+report.Data.Failed+report.PrimaryKeys.Failed+
-		report.Views.Failed+report.Indexes.Failed+report.Constraints.Failed+
-		report.Sequences.Failed > 0 {
+	} else if report.HasFailures() {
 		status = "failed"
 	}
 	updateJobStatus(dbJob, status, "")
@@ -351,21 +368,22 @@ func updateJobStatus(job *store.DataMigrationJob, status, summary string) {
 }
 
 type startObjectMigrationRequest struct {
-	SrcConnID          uint     `json:"src_conn_id" binding:"required"`
-	DstConnID          uint     `json:"dst_conn_id" binding:"required"`
-	MigrateObjects     []string `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments"`
-	TableNames         []string `json:"table_names" binding:"required,min=1"`
-	SrcDatabase        string   `json:"src_database"`
-	TargetSchema       string   `json:"target_schema"`
-	LowerCaseNames     bool     `json:"lower_case_names"`
-	ChangeOwner        *bool    `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
-	Distributed        bool     `json:"distributed"`
-	SrcMaxOpenConns    int      `json:"src_max_open_conns"`
-	SrcMaxIdleConns    int      `json:"src_max_idle_conns"`
-	SrcConnMaxLifetime int      `json:"src_conn_max_lifetime"`
-	DstMaxOpenConns    int      `json:"dst_max_open_conns"`
-	DstMaxIdleConns    int      `json:"dst_max_idle_conns"`
-	DstConnMaxLifetime int      `json:"dst_conn_max_lifetime"`
+	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
+	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
+	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
+	MigrateObjects     []string                `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments"`
+	TableNames         []string                `json:"table_names" binding:"required,min=1"`
+	SrcDatabase        string                  `json:"src_database"`
+	TargetSchema       string                  `json:"target_schema"`
+	LowerCaseNames     bool                    `json:"lower_case_names"`
+	ChangeOwner        *bool                   `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
+	Distributed        bool                    `json:"distributed"`
+	SrcMaxOpenConns    int                     `json:"src_max_open_conns"`
+	SrcMaxIdleConns    int                     `json:"src_max_idle_conns"`
+	SrcConnMaxLifetime int                     `json:"src_conn_max_lifetime"`
+	DstMaxOpenConns    int                     `json:"dst_max_open_conns"`
+	DstMaxIdleConns    int                     `json:"dst_max_idle_conns"`
+	DstConnMaxLifetime int                     `json:"dst_conn_max_lifetime"`
 }
 
 // StartObjectMigration 创建并启动"仅对象迁移"后台任务:只为指定表补建所选对象类型
@@ -386,6 +404,10 @@ func StartObjectMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
+	if dstConn.DBType == "oracle" {
+		req.LowerCaseNames = false
+		req.Distributed = false
+	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -403,6 +425,7 @@ func StartObjectMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		ExcludedObjects: encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:         middleware.GetCurrentUserID(c),
 		JobID:           jobID,
 		SrcConnID:       req.SrcConnID,
@@ -443,7 +466,7 @@ func StartObjectMigration(c *gin.Context) {
 			MaxIdleConns:    req.SrcMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
 		}
-		reader, readerErr := buildSrcReader(srcConn, req.SrcDatabase, srcPool)
+		reader, readerErr := buildSrcReader(srcConn, req.SrcDatabase, srcPool, dstConn.DBType)
 		if readerErr != nil {
 			slog.Warn("连接源库失败", "job_id", jobID, "db_type", srcConn.DBType, "err", readerErr)
 			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
@@ -482,14 +505,15 @@ func StartObjectMigration(c *gin.Context) {
 		}
 
 		cfg := datamigrate.Config{
-			Mode:           "all",
-			Objects:        req.MigrateObjects,
-			TableNames:     req.TableNames,
-			LowerCaseNames: req.LowerCaseNames,
-			Distributed:    req.Distributed,
-			TargetSchema:   req.TargetSchema,
-			ChangeOwner:    changeOwner,
-			TargetDBType:   dstConn.DBType,
+			ExcludedObjects: req.ExcludedObjects,
+			Mode:            "all",
+			Objects:         req.MigrateObjects,
+			TableNames:      req.TableNames,
+			LowerCaseNames:  req.LowerCaseNames,
+			Distributed:     req.Distributed,
+			TargetSchema:    req.TargetSchema,
+			ChangeOwner:     changeOwner,
+			TargetDBType:    dstConn.DBType,
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)
@@ -504,8 +528,7 @@ func StartObjectMigration(c *gin.Context) {
 		status := "done"
 		if ctx.Err() != nil {
 			status = "cancelled"
-		} else if report.Tables.Failed+report.PrimaryKeys.Failed+report.Indexes.Failed+
-			report.Sequences.Failed+report.Constraints.Failed+report.Comments.Failed > 0 {
+		} else if report.HasFailures() {
 			status = "failed"
 		}
 		updateJobStatus(dbJob, status, "")
@@ -585,7 +608,7 @@ func StreamDataMigration(c *gin.Context) {
 
 // buildSrcReader 根据连接与可选的 srcDatabase 构造源库 Reader。
 // srcDatabase 非空时覆盖连接默认库(mysql/sqlserver 需重建 DSN,oracle/dameng 的库即 schema 不重建)。
-func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.ConnPoolConfig) (source.Reader, error) {
+func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.ConnPoolConfig, targetTypes ...string) (source.Reader, error) {
 	db := conn.Database
 	if srcDatabase != "" {
 		db = srcDatabase
@@ -601,6 +624,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 				conn.Host, conn.Port, srcDatabase, conn.Username, conn.Password)
 		}
 	}
+	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "oracle" {
+		return source.NewMySQLForOracle(dsn, db, pool)
+	}
 	switch conn.DBType {
 	case "sqlserver":
 		return source.NewSQLServer(dsn, db, pool)
@@ -611,10 +637,10 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，
 		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
-		return source.NewPostgresCompatible(pgCompatibleDriverName(conn.DBType), dsn, db, pool)
+		return source.NewPostgresProduct(conn.DBType, pgCompatibleDriverName(conn.DBType), dsn, srcDatabase, pool)
 	case "gaussdb":
 		// GaussDB 需 opengauss 驱动，其余逻辑与 PG 一致
-		return source.NewPostgresCompatible("opengauss", dsn, db, pool)
+		return source.NewPostgresProduct(conn.DBType, "opengauss", dsn, srcDatabase, pool)
 	default: // mysql
 		return source.NewMySQL(dsn, db, pool)
 	}
@@ -624,6 +650,8 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.ConnPoolConfig) (target.Writer, error) {
 	dstDSN := buildDSN(dstConn)
 	switch dstConn.DBType {
+	case "oracle":
+		return target.NewOracle(dstDSN, targetSchema, pool)
 	case "gaussdb":
 		return target.NewGaussDB(dstDSN, targetSchema, pool)
 	case "dameng":
@@ -718,14 +746,15 @@ func ListConnectionTables(c *gin.Context) {
 }
 
 type migrateViewsRequest struct {
-	SrcConnID        uint     `json:"src_conn_id" binding:"required"`
-	DstConnID        uint     `json:"dst_conn_id" binding:"required"`
-	ViewNames        []string `json:"view_names" binding:"required,min=1"`
-	SrcDatabase      string   `json:"src_database"`
-	TargetSchema     string   `json:"target_schema"`
-	LowerCaseNames   bool     `json:"lower_case_names"`
-	ChangeOwner      *bool    `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
-	StripViewSchemas string   `json:"strip_view_schemas"`
+	ExcludedObjects  []datamigrate.ObjectRef `json:"excluded_objects"`
+	SrcConnID        uint                    `json:"src_conn_id" binding:"required"`
+	DstConnID        uint                    `json:"dst_conn_id" binding:"required"`
+	ViewNames        []string                `json:"view_names" binding:"required,min=1"`
+	SrcDatabase      string                  `json:"src_database"`
+	TargetSchema     string                  `json:"target_schema"`
+	LowerCaseNames   bool                    `json:"lower_case_names"`
+	ChangeOwner      *bool                   `json:"change_owner"` // nil: PG 兼容目标 true，其他目标 false
+	StripViewSchemas string                  `json:"strip_view_schemas"`
 }
 
 // MigrateViews 按所选视图名同步批量在目标库创建视图,返回每个视图的结果
@@ -753,8 +782,11 @@ func MigrateViews(c *gin.Context) {
 		return
 	}
 
+	if dstConn.DBType == "oracle" {
+		req.LowerCaseNames = false
+	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
-	reader, err := buildSrcReader(srcConn, req.SrcDatabase, source.ConnPoolConfig{})
+	reader, err := buildSrcReader(srcConn, req.SrcDatabase, source.ConnPoolConfig{}, dstConn.DBType)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接源库失败: %v", err)})
 		return
@@ -800,6 +832,7 @@ func MigrateViews(c *gin.Context) {
 	}()
 
 	cfg := datamigrate.Config{
+		ExcludedObjects:  req.ExcludedObjects,
 		Mode:             "all",
 		LowerCaseNames:   req.LowerCaseNames,
 		TargetSchema:     req.TargetSchema,

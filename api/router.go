@@ -89,6 +89,7 @@ func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 
 		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
 		authed.POST("/migration/data-migrate", handler.StartDataMigration)
+		authed.POST("/migration/data/preflight", handler.PreflightDataMigration)
 		authed.POST("/migration/data-migrate/:jobID/cancel", handler.CancelDataMigration)
 		authed.GET("/migration/data-migrate/jobs", handler.ListDataMigrationJobs)
 		authed.GET("/migration/data-migrate/jobs/:jobID", handler.GetDataMigrationJobDetail)

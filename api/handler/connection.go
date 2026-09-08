@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
+	goora "github.com/sijms/go-ora/v2"
 )
 
 type connectionRequest struct {
@@ -54,8 +55,7 @@ func buildDSN(c *store.Connection) string {
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 			c.Host, c.Port, c.Username, c.Password, c.Database)
 	case "oracle":
-		return fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
-			c.Username, c.Password, c.Host, c.Port, c.Database)
+		return goora.BuildUrl(c.Host, c.Port, c.Database, c.Username, c.Password, nil)
 	case "sqlserver":
 		// 使用 key=value 格式，避免密码含 @ 或 host 含 \ 破坏 URL 解析
 		return fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
@@ -257,9 +257,9 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
-		reader, err = source.NewPostgresCompatible(pgCompatibleDriverName(conn.DBType), buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+		reader, err = source.NewPostgresProduct(conn.DBType, pgCompatibleDriverName(conn.DBType), buildDSN(conn), "*", source.ConnPoolConfig{})
 	case "gaussdb":
-		reader, err = source.NewPostgresCompatible("opengauss", buildDSN(conn), conn.Database, source.ConnPoolConfig{})
+		reader, err = source.NewPostgresProduct(conn.DBType, "opengauss", buildDSN(conn), "*", source.ConnPoolConfig{})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持列出 %s 类型的数据库", conn.DBType)})
 		return
@@ -290,6 +290,10 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
+	if conn.DBType == "oracle" {
+		listOracleSchemas(c, conn)
+		return
+	}
 	// 达梦的 schema 即数据库用户,单独走 ALL_USERS 查询
 	if conn.DBType == "dameng" {
 		listDaMengSchemas(c, conn)

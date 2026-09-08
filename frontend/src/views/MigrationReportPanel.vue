@@ -13,7 +13,19 @@
           导出报告
         </a-button>
       </div>
+      <PGMySQLPreflightPanel v-if="report.preflight" :result="report.preflight" :excluded="report.preflight.excluded" readonly />
       <a-tabs default-active-key="overview">
+        <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
+          <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
+          <a-table :data="report.warnings" :pagination="{ pageSize: 20 }" size="small">
+            <template #columns>
+              <a-table-column title="表" data-index="table" />
+              <a-table-column title="列" data-index="column" />
+              <a-table-column title="原因" data-index="reason" />
+              <a-table-column title="数量" data-index="count" :width="100" />
+            </template>
+          </a-table>
+        </a-tab-pane>
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
           <a-table
@@ -129,6 +141,7 @@
 </template>
 
 <script setup lang="ts">
+import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import { ref, computed, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
@@ -214,6 +227,12 @@ function exportReport() {
   lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
   lines.push('')
 
+  if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
+  if (r.warnings?.length) {
+    lines.push('=== 迁移告警 ===')
+    for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
+    lines.push('')
+  }
   lines.push('=== 迁移概览 ===')
   const categories = [
     { label: '表', cat: r.tables, isTrigger: false },

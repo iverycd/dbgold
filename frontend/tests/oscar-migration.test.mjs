@@ -34,8 +34,8 @@ test('only PG-compatible targets default owner on without changing other options
     const state = reactive({ lowerCaseNames: true, changeOwner: !expected, distributed: true })
     applyTargetMigrationDefaults(state, type)
     assert.equal(state.changeOwner, expected, String(type))
-    assert.equal(state.lowerCaseNames, type !== 'dameng' && type !== 'oscar')
-    assert.equal(state.distributed, type !== 'oscar')
+    assert.equal(state.lowerCaseNames, type !== 'dameng' && type !== 'oscar' && type !== 'oracle')
+    assert.equal(state.distributed, type !== 'oscar' && type !== 'oracle')
   }
 })
 

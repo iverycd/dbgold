@@ -23,7 +23,7 @@ func TestResolveChangeOwner(t *testing.T) {
 		t.Run(tt.target, func(t *testing.T) {
 			require.Equal(t, tt.want, resolveChangeOwner(tt.target, nil))
 			for _, value := range []bool{false, true} {
-				require.Equal(t, value, resolveChangeOwner(tt.target, &value))
+				require.Equal(t, value && tt.target != "oracle", resolveChangeOwner(tt.target, &value))
 			}
 		})
 	}
@@ -54,7 +54,7 @@ func TestBatchOwnerDefaultsAndOverrides(t *testing.T) {
 				require.Equal(t, tt.postgres, opts.changeOwnerFor(target), target)
 			}
 			for _, target := range []string{"dameng", "mysql", "sqlserver", "oracle", "", "unknown"} {
-				require.Equal(t, tt.nonPG, opts.changeOwnerFor(target), target)
+				require.Equal(t, tt.nonPG && target != "oracle", opts.changeOwnerFor(target), target)
 			}
 		})
 	}

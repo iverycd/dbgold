@@ -61,7 +61,11 @@ func (d *MySQLDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOp
 //   - CREATE TABLE,自增列追加 AUTO_INCREMENT(种子由 Phase3 修正)
 //   - 表选项 ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 func (d *MySQLDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
+	if source.IsPGFamily(srcType) {
+		return nil, fmt.Errorf("PG → MySQL 必须使用经过版本探测和预检的 PGTableStatements")
+	}
 	var cols []string
+	auto := ""
 	for _, col := range info.Columns {
 		myType := d.MapType(col, srcType, opt)
 		colDef := fmt.Sprintf("%s %s", d.QuoteIdent(name(col.Name)), myType)
@@ -69,6 +73,10 @@ func (d *MySQLDialect) CreateTableStatements(schema string, info *source.TableDD
 			colDef += " NOT NULL"
 		}
 		if col.Extra == "auto_increment" {
+			if auto != "" {
+				return nil, fmt.Errorf("MySQL 每表只支持一个自增列")
+			}
+			auto = name(col.Name)
 			colDef += " AUTO_INCREMENT"
 		} else if col.Default != nil {
 			if clause := d.columnDefaultClause(coldefault.Strip(srcType, *col.Default), myType); clause != "" {
@@ -76,6 +84,9 @@ func (d *MySQLDialect) CreateTableStatements(schema string, info *source.TableDD
 			}
 		}
 		cols = append(cols, "  "+colDef)
+	}
+	if auto != "" {
+		cols = append(cols, "  KEY "+d.QuoteIdent("__migration_auto")+" ("+d.QuoteIdent(auto)+")")
 	}
 	qn := d.QualifyTable(schema, name(info.TableName))
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", qn)

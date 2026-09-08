@@ -1,5 +1,7 @@
 package datamigrate
 
+import "dbgold/datamigrate/valueconv"
+
 // ObjectResult 单个失败对象的详情
 type ObjectResult struct {
 	Name  string `json:"name"`
@@ -17,16 +19,18 @@ type CategoryReport struct {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
-	Tables      CategoryReport  `json:"tables"`
-	Data        CategoryReport  `json:"data"`
-	PrimaryKeys CategoryReport  `json:"primaryKeys"`
-	Views       CategoryReport  `json:"views"`
-	Indexes     CategoryReport  `json:"indexes"`
-	Constraints CategoryReport  `json:"constraints"`
-	Sequences   CategoryReport  `json:"sequences"`
-	Comments    CategoryReport  `json:"comments"`
-	Triggers    CategoryReport  `json:"triggers"`
-	RowCounts   []TableRowCount `json:"rowCounts"`
+	Warnings    []valueconv.MigrationWarning `json:"warnings,omitempty"`
+	Preflight   *PGMySQLPreflight            `json:"preflight,omitempty"`
+	Tables      CategoryReport               `json:"tables"`
+	Data        CategoryReport               `json:"data"`
+	PrimaryKeys CategoryReport               `json:"primaryKeys"`
+	Views       CategoryReport               `json:"views"`
+	Indexes     CategoryReport               `json:"indexes"`
+	Constraints CategoryReport               `json:"constraints"`
+	Sequences   CategoryReport               `json:"sequences"`
+	Comments    CategoryReport               `json:"comments"`
+	Triggers    CategoryReport               `json:"triggers"`
+	RowCounts   []TableRowCount              `json:"rowCounts"`
 }
 
 // TableRowCount 记录单张表的源/目标行数对比
@@ -54,4 +58,22 @@ func newMigrationReport() MigrationReport {
 		Triggers:    newCategoryReport(),
 		RowCounts:   []TableRowCount{},
 	}
+}
+
+// HasFailures is shared by all job entrypoints; read/validation failures count.
+func (r MigrationReport) HasFailures() bool {
+	if r.Preflight != nil && !r.Preflight.Ready {
+		return true
+	}
+	for _, c := range []CategoryReport{r.Tables, r.Data, r.PrimaryKeys, r.Views, r.Indexes, r.Constraints, r.Sequences, r.Comments, r.Triggers} {
+		if c.Failed > 0 {
+			return true
+		}
+	}
+	for _, row := range r.RowCounts {
+		if !row.Match {
+			return true
+		}
+	}
+	return false
 }

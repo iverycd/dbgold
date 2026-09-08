@@ -110,8 +110,8 @@
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item label="数据库名" field="database" :rules="[{ required: form.db_type !== 'mysql' && form.db_type !== 'dameng', message: '请输入数据库名' }]">
-          <a-input v-model="form.database" placeholder="数据库名" />
+        <a-form-item :label="form.db_type === 'oracle' ? 'Service Name' : '数据库名'" field="database" :rules="[{ required: form.db_type !== 'mysql' && form.db_type !== 'dameng', message: '请输入数据库名' }]">
+          <a-input v-model="form.database" :placeholder="form.db_type === 'oracle' ? 'Oracle Service Name（不是 Schema）' : '数据库名'" />
         </a-form-item>
         <a-form-item label="用户名" field="username" :rules="[{ required: true }]">
           <a-input v-model="form.username" placeholder="用户名" />

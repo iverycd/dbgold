@@ -8,9 +8,9 @@ export function applyTargetMigrationDefaults(
   state: { lowerCaseNames: boolean; changeOwner: boolean; distributed?: boolean },
   targetType?: string,
 ) {
-  state.lowerCaseNames = targetType !== 'dameng' && targetType !== 'oscar'
+  state.lowerCaseNames = targetType !== 'dameng' && targetType !== 'oscar' && targetType !== 'oracle'
   state.changeOwner = PG_OWNER_DEFAULT_TYPES.has(targetType ?? '')
-  if (targetType === 'oscar' && 'distributed' in state) state.distributed = false
+  if ((targetType === 'oscar' || targetType === 'oracle') && 'distributed' in state) state.distributed = false
 }
 
 export function defaultBatchOwnerOptions() {

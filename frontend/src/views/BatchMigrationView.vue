@@ -134,16 +134,30 @@
                   </a-col>
                 </a-row>
                 <a-space wrap>
-                  <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar 始终转大写）</a-checkbox>
-                  <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar）</a-checkbox>
+                  <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
+                  <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
                   <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
-                  <a-checkbox v-model="options.char_in_length">char 长度单位（CHAR）</a-checkbox>
+                  <a-checkbox v-model="options.char_in_length">char 长度单位（CHAR，Oracle 固定启用）</a-checkbox>
                   <a-checkbox v-model="options.use_nvarchar2">使用 nvarchar2</a-checkbox>
-                  <a-checkbox v-model="options.distributed">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                  <a-checkbox v-model="options.distributed">分布式模式（Oracle 不适用）</a-checkbox>
                 </a-space>
               </a-form>
             </a-collapse-item>
           </a-collapse>
+
+          <a-card v-if="pgMySQLRows.length" title="PG → MySQL 对象排除（按 Excel 行生效）" size="small">
+            <a-alert type="info">上面的校验只检查迁移组合。每行启动时都会执行完整兼容预检，阻止项会保存在任务报告中。可根据报告明确排除独立对象或整表后重新提交；排除后仍会重新检查依赖。源 schema 可使用 Excel 可选列 source_schema 指定，未填时为 public。</a-alert>
+            <a-space wrap style="margin: 12px 0">
+              <a-select v-model="batchObjectDraft.row" placeholder="Excel 行" style="width:120px"><a-option v-for="row in pgMySQLRows" :key="row.row_num" :value="row.row_num">第 {{ row.row_num }} 行</a-option></a-select>
+              <a-select v-model="batchObjectDraft.kind" style="width:140px"><a-option v-for="kind in exclusionKinds" :key="kind.value" :value="kind.value">{{ kind.label }}</a-option></a-select>
+              <a-input v-if="['index', 'primary_key', 'foreign_key', 'check', 'constraint', 'trigger'].includes(batchObjectDraft.kind)" v-model="batchObjectDraft.table" placeholder="源表名（原始大小写）" style="width:210px" />
+              <a-input v-model="batchObjectDraft.name" placeholder="源对象名（原始大小写）" style="width:210px" />
+              <a-button @click="addBatchObjectExclusion">明确排除</a-button>
+            </a-space>
+            <div v-for="(objects, row) in options.excluded_objects_by_row" :key="row">
+              第 {{ row }} 行：<a-tag v-for="(object, index) in objects" :key="index" closable color="orange" @close="objects.splice(index, 1)">{{ object.kind }}: {{ object.table ? object.table + '.' : '' }}{{ object.name }}</a-tag>
+            </div>
+          </a-card>
 
           <a-button
             type="primary"
@@ -246,7 +260,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onUnmounted } from 'vue'
+import { ref, reactive, computed, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { FileItem } from '@arco-design/web-vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
@@ -259,6 +273,7 @@ import {
   downloadBatchTemplate,
   type BatchValidateResult,
   type BatchOptions,
+  type MigrationObjectRef,
   type DataMigrationJob,
 } from '@/api/migration'
 import MigrationReportPanel from './MigrationReportPanel.vue'
@@ -283,6 +298,27 @@ const options = reactive<BatchOptions>({
   ...defaultBatchOwnerOptions(),
   strip_view_schemas: '',
 })
+
+
+const exclusionKinds = [
+  { value: 'table', label: '整表' }, { value: 'index', label: '索引' }, { value: 'primary_key', label: '主键' },
+  { value: 'foreign_key', label: '外键' }, { value: 'check', label: 'CHECK' }, { value: 'constraint', label: '排除约束' },
+  { value: 'view', label: '视图' }, { value: 'routine', label: '函数/过程' }, { value: 'trigger', label: '触发器' }, { value: 'sequence', label: '独立序列' },
+]
+const pgMySQLRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.dst_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(row.src_db_type)))
+const batchObjectDraft = reactive({ row: undefined as number | undefined, kind: 'table', table: '', name: '' })
+watch(selectedFile, () => { options.excluded_objects_by_row = {}; batchObjectDraft.row = undefined })
+function addBatchObjectExclusion() {
+  const draft = batchObjectDraft
+  const needsTable = ['index', 'primary_key', 'foreign_key', 'check', 'constraint', 'trigger'].includes(draft.kind)
+  if (!draft.row || !pgMySQLRows.value.some(row => row.row_num === draft.row) || !draft.name || (needsTable && !draft.table)) {
+    Message.warning('请选择 Excel 行并填写完整的源对象身份'); return
+  }
+  const object: MigrationObjectRef = { kind: draft.kind, name: draft.name, ...(needsTable ? { table: draft.table } : {}) }
+  options.excluded_objects_by_row ??= {}
+  const objects = options.excluded_objects_by_row[draft.row] ??= []
+  if (!objects.some(item => item.kind === object.kind && item.table === object.table && item.name === object.name)) objects.push(object)
+}
 
 const batchId = ref('')
 const batchStatus = ref<'running' | 'done' | 'cancelled'>('running')

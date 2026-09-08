@@ -3,6 +3,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/source"
 	"dbgold/middleware"
 	"dbgold/store"
 
@@ -63,6 +65,7 @@ type batchRow struct {
 	SrcDatabase string `json:"src_database"`
 	SrcUsername string `json:"src_username"`
 	SrcPassword string `json:"-"`
+	SrcSchema   string `json:"src_schema,omitempty"`
 
 	DstDBType    string `json:"dst_db_type"`
 	DstHost      string `json:"dst_host"`
@@ -128,8 +131,8 @@ func parseBatchExcel(f *excelize.File) ([]batchRow, error) {
 	}
 
 	cell := func(row []string, name string) string {
-		i := colIdx[name]
-		if i < len(row) {
+		i, ok := colIdx[name]
+		if ok && i < len(row) {
 			return strings.TrimSpace(row[i])
 		}
 		return ""
@@ -147,6 +150,7 @@ func parseBatchExcel(f *excelize.File) ([]batchRow, error) {
 			SrcDBType:    normalizeDBType(cell(row, "source_db_type")),
 			SrcHost:      cell(row, "source_host"),
 			SrcDatabase:  cell(row, "source_database"),
+			SrcSchema:    cell(row, "source_schema"),
 			SrcUsername:  cell(row, "source_username"),
 			SrcPassword:  cell(row, "source_password"),
 			DstDBType:    normalizeDBType(cell(row, "target_db_type")),
@@ -204,7 +208,7 @@ func validateBatchRow(br *batchRow, srcPortStr, dstPortStr string) {
 	if br.DstUsername == "" {
 		missing = append(missing, "target_username")
 	}
-	if br.TargetSchema == "" {
+	if br.TargetSchema == "" && br.DstDBType != "oracle" {
 		missing = append(missing, "target_schema")
 	}
 
@@ -268,6 +272,7 @@ func ValidateBatch(c *gin.Context) {
 // batchOptions 是整批共用的迁移选项，对齐单任务前端默认值（MigrationView.vue）。
 // 这些选项应用到批次内所有迁移对。
 type batchOptions struct {
+	ExcludedObjects    map[int][]datamigrate.ObjectRef
 	MigrateContent     string // both / schema_only / data_only
 	PageSize           int
 	MaxParallel        int
@@ -367,6 +372,13 @@ func StartBatch(c *gin.Context) {
 		return
 	}
 
+	var excludedObjects map[int][]datamigrate.ObjectRef
+	if raw := c.PostForm("excluded_objects_by_row"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &excludedObjects); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "excluded_objects_by_row 必须是行号到对象排除列表的 JSON"})
+			return
+		}
+	}
 	ownerID := middleware.GetCurrentUserID(c)
 	batchID := uuid.New().String()
 	batch := &store.BatchMigration{
@@ -382,6 +394,7 @@ func StartBatch(c *gin.Context) {
 	}
 
 	opts := parseBatchOptions(c)
+	opts.ExcludedObjects = excludedObjects
 	go runBatch(batchID, ownerID, valid, opts)
 
 	c.JSON(http.StatusOK, gin.H{"batch_id": batchID, "total": len(valid)})
@@ -410,6 +423,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		job := datamigrate.Registry.Register(jobID, cancel)
 
 		dbJob := &store.DataMigrationJob{
+			ExcludedObjects:    encodeExcludedObjects(opts.ExcludedObjects[r.RowNum]),
 			OwnerID:            ownerID,
 			JobID:              jobID,
 			BatchID:            batchID,
@@ -419,8 +433,8 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			PageSize:           opts.PageSize,
 			MaxParallel:        opts.MaxParallel,
 			IntraTableParallel: opts.IntraTableParallel,
-			LowerCaseNames:     opts.LowerCaseNames,
-			CharInLength:       opts.CharInLength,
+			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
+			CharInLength:       opts.CharInLength || r.DstDBType == "oracle",
 			UseNvarchar2:       opts.UseNvarchar2,
 			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 			DstSchema:          r.TargetSchema,
@@ -442,7 +456,13 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			continue
 		}
 
+		sourceSchema := ""
+		if source.IsPGFamily(r.SrcDBType) {
+			sourceSchema = r.SrcSchema
+		}
 		p := migrationParams{
+			ExcludedObjects:    opts.ExcludedObjects[r.RowNum],
+			SrcDatabase:        sourceSchema,
 			MigrateMode:        "all",
 			MigrateContent:     opts.MigrateContent,
 			TargetSchema:       r.TargetSchema,
@@ -450,10 +470,10 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			PageSize:           opts.PageSize,
 			MaxParallel:        opts.MaxParallel,
 			IntraTableParallel: opts.IntraTableParallel,
-			LowerCaseNames:     opts.LowerCaseNames,
-			CharInLength:       opts.CharInLength,
+			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
+			CharInLength:       opts.CharInLength || r.DstDBType == "oracle",
 			UseNvarchar2:       opts.UseNvarchar2,
-			Distributed:        opts.Distributed,
+			Distributed:        opts.Distributed && r.DstDBType != "oracle",
 			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 		}
 
