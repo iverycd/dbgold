@@ -3,7 +3,15 @@ package source
 import "context"
 
 // ColumnInfo 表示一列的元数据，用于 DDL 生成
+// IdentityInfo preserves SQL Server identity state independently of target names.
+type IdentityInfo struct {
+	Seed      int64
+	Increment int64
+	Last      *int64
+}
+
 type ColumnInfo struct {
+	IdentityInfo      *IdentityInfo
 	Name              string
 	DataType          string // 原始数据库类型（如 "varchar"、"int"）
 	Length            int64
@@ -31,9 +39,11 @@ type TableDDLInfo struct {
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
 type SequenceInfo struct {
-	TableName  string
-	ColumnName string
-	StartValue int64
+	Unsupported  string // Metadata that cannot be represented by the selected target.
+	IdentityInfo *IdentityInfo
+	TableName    string
+	ColumnName   string
+	StartValue   int64
 	// StartValueText preserves MySQL unsigned AUTO_INCREMENT values beyond int64.
 	// Existing targets continue using StartValue; Oracle uses the exact text.
 	StartValueText string
@@ -41,6 +51,7 @@ type SequenceInfo struct {
 
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
+	Descending  []bool // Optional direction per key column; omitted means ascending.
 	TableName   string
 	IndexName   string
 	Columns     []string

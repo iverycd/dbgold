@@ -4,13 +4,13 @@ package target
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"errors"
 	"strings"
 	"sync"
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/valueconv"
-	_ "gitee.com/chunanyong/dm"
+	"gitee.com/chunanyong/dm"
 )
 
 // DaMengWriter 实现 Writer 接口,写入到达梦(Oracle 兼容模式)数据库。
@@ -35,7 +35,14 @@ func NewDaMeng(dsn, schema string, pool ConnPoolConfig) (*DaMengWriter, error) {
 	}
 	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, err
+	}
+	if schema == "" {
+		if err := db.QueryRow("SELECT CURRENT_SCHEMA").Scan(&schema); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &DaMengWriter{
 		db:         db,
@@ -45,6 +52,8 @@ func NewDaMeng(dsn, schema string, pool ConnPoolConfig) (*DaMengWriter, error) {
 		identCache: map[string]bool{},
 	}, nil
 }
+
+func (w *DaMengWriter) EffectiveSchema() string { return w.schema }
 
 // SetSourceType 由 Migrator 注入源库类型(reader.DBType())。
 func (w *DaMengWriter) SetSourceType(srcType string) { w.srcType = srcType }
@@ -56,20 +65,26 @@ func (w *DaMengWriter) Close() error   { return w.db.Close() }
 func (w *DaMengWriter) DBType() string { return "dameng" }
 
 func (w *DaMengWriter) qualifiedTable(table string) string {
-	table = strings.ToUpper(table)
-	if w.schema == "" {
-		return fmt.Sprintf(`"%s"`, table)
-	}
-	return fmt.Sprintf(`"%s"."%s"`, w.schema, table)
+	return w.dia.QualifyTable(w.schema, table)
 }
 
 // CreateTable 执行建表 DDL。达梦不支持 DROP TABLE IF EXISTS,
 // 故 DDL 拆成 DROP + CREATE 两句,DROP 失败(表不存在)忽略。
 func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	w.identMu.Lock()
+	w.identCache = map[string]bool{}
+	w.identMu.Unlock()
 	for _, stmt := range stmts {
 		if _, err := w.db.ExecContext(ctx, stmt.SQL); err != nil {
 			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt.SQL)), "DROP") {
-				continue // 表不存在等,忽略
+				if w.srcType != "sqlserver" {
+					continue
+				}
+				var dmErr *dm.DmError
+				if errors.As(err, &dmErr) && dmErr.ErrCode == -2106 {
+					continue
+				} // invalid table/view name
+				return err
 			}
 			return err
 		}

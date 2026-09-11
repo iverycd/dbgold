@@ -5,12 +5,16 @@ const PG_OWNER_DEFAULT_TYPES = new Set([
 // Apply only when the target connection changes, not when its schema changes:
 // a user's explicit owner choice must survive schema selection and submission.
 export function applyTargetMigrationDefaults(
-  state: { lowerCaseNames: boolean; changeOwner: boolean; distributed?: boolean },
+  state: { lowerCaseNames: boolean; changeOwner: boolean; distributed?: boolean; charInLength?: boolean; useNvarchar2?: boolean },
   targetType?: string,
 ) {
   state.lowerCaseNames = targetType !== 'dameng' && targetType !== 'oscar' && targetType !== 'oracle'
   state.changeOwner = PG_OWNER_DEFAULT_TYPES.has(targetType ?? '')
-  if ((targetType === 'oscar' || targetType === 'oracle') && 'distributed' in state) state.distributed = false
+  if (targetType === 'sqlserver') {
+    if ('charInLength' in state) state.charInLength = false
+    if ('useNvarchar2' in state) state.useNvarchar2 = false
+  }
+  if ((targetType === 'oscar' || targetType === 'oracle' || targetType === 'sqlserver') && 'distributed' in state) state.distributed = false
 }
 
 export function defaultBatchOwnerOptions() {

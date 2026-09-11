@@ -3,27 +3,52 @@ package target
 
 import (
 	"context"
+	"database/sql/driver"
+	"dbgold/datamigrate/valueconv"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"dbgold/datamigrate/source"
 )
 
 // CopyData 用参数化批量 INSERT 写入(达梦占位符为 ?)。
 // 含自增列的表写入前后开关 IDENTITY_INSERT,以便导入源库原始 id。
-func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {
+func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) (retErr error) {
 	if len(rows) == 0 {
 		return nil
 	}
-	tx, err := w.db.BeginTx(ctx, nil)
+	hasIdentity, err := w.tableHasIdentity(ctx, table)
+	if err != nil {
+		return err
+	}
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	hasIdentity := w.tableHasIdentity(ctx, table)
+	identityEnabled := hasIdentity
 	if hasIdentity {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET IDENTITY_INSERT %s ON`, w.qualifiedTable(table))); err != nil {
+		// Always clean the same physical session, including failed INSERT/cancellation.
+		defer func() {
+			if !identityEnabled {
+				return
+			}
+			_ = tx.Rollback()
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, e := conn.ExecContext(cleanup, "SET IDENTITY_INSERT "+w.qualifiedTable(table)+" OFF"); e != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				retErr = errors.Join(retErr, fmt.Errorf("清理 IDENTITY_INSERT: %w", e))
+			}
+		}()
+		if _, err = tx.ExecContext(ctx, "SET IDENTITY_INSERT "+w.qualifiedTable(table)+" ON"); err != nil {
 			return err
 		}
 	}
@@ -31,8 +56,11 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 	quotedCols := make([]string, len(cols))
 	placeholders := make([]string, len(cols))
 	for i, c := range cols {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, strings.ToUpper(c))
+		quotedCols[i] = w.dia.QuoteIdent(c)
 		placeholders[i] = "?"
+		if w.srcType == "sqlserver" && i < len(colTypes) {
+			placeholders[i] = valueconv.SQLServerDamengPlaceholder(colTypes[i])
+		}
 	}
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
 		w.qualifiedTable(table), strings.Join(quotedCols, ", "), strings.Join(placeholders, ", "))
@@ -43,7 +71,23 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 	defer stmt.Close()
 
 	for _, row := range rows {
+		if len(row) != len(cols) {
+			return fmt.Errorf("表 %s 行列数不匹配", table)
+		}
 		conv := w.convertRow(row, colTypes)
+		if w.srcType == "sqlserver" {
+			if len(colTypes) != len(cols) {
+				return fmt.Errorf("表 %s 缺少源列类型", table)
+			}
+			conv = make([]interface{}, len(row))
+			for i, v := range row {
+				var e error
+				conv[i], e = valueconv.SQLServerDameng(v, colTypes[i])
+				if e != nil {
+					return fmt.Errorf("%s.%s: %w", table, cols[i], e)
+				}
+			}
+		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
@@ -53,6 +97,7 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET IDENTITY_INSERT %s OFF`, w.qualifiedTable(table))); err != nil {
 			return err
 		}
+		identityEnabled = false
 	}
 	return tx.Commit()
 }
@@ -75,11 +120,12 @@ func (w *DaMengWriter) convertRow(row []interface{}, colTypes []string) []interf
 
 // tableHasIdentity 判断目标表是否含自增(IDENTITY)列,结果缓存。
 // 复用达梦 SYS.SYSCOLUMNS.INFO2 & 0x01 的自增位判定(与源端 Reader 一致)。
-func (w *DaMengWriter) tableHasIdentity(ctx context.Context, table string) bool {
+func (w *DaMengWriter) tableHasIdentity(ctx context.Context, table string) (bool, error) {
+	table = strings.ToUpper(table)
 	w.identMu.Lock()
 	if v, ok := w.identCache[table]; ok {
 		w.identMu.Unlock()
-		return v
+		return v, nil
 	}
 	w.identMu.Unlock()
 
@@ -90,22 +136,20 @@ func (w *DaMengWriter) tableHasIdentity(ctx context.Context, table string) bool 
 		 JOIN ALL_OBJECTS o ON o.object_id = sc.id
 		 WHERE o.owner = ? AND o.object_name = ? AND sc.INFO2 & 0x01 = 0x01`,
 		w.schema, table).Scan(&cnt)
-	has := err == nil && cnt > 0
+	if err != nil {
+		return false, fmt.Errorf("检测 %s 自增列: %w", table, err)
+	}
+	has := cnt > 0
 
 	w.identMu.Lock()
 	w.identCache[table] = has
 	w.identMu.Unlock()
-	return has
+	return has, nil
 }
 
-// CreateSequence 重置 IDENTITY 种子(达梦自增在建表已声明)。
-// 失败降级为不报错,避免使整个迁移失败(种子未修正只影响后续应用插入)。
+// CreateSequence reports every identity continuation failure to the job.
 func (w *DaMengWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
-	stmts := w.dia.SequenceStatements(w.schema, seq, owner)
-	for _, s := range stmts {
-		_, _ = w.db.ExecContext(ctx, s.SQL) // 降级:忽略错误
-	}
-	return nil
+	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
 }
 
 func (w *DaMengWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {

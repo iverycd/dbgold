@@ -108,6 +108,7 @@
                 <div v-if="dataMigrate.dstConnId" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
                   <span v-if="selectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
+                  <span v-else-if="selectedDst?.db_type === 'sqlserver'">目标数据库取自连接配置，Schema 默认 dbo。</span>
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
@@ -115,7 +116,10 @@
           </a-row>
 
           <!-- 不支持提示 -->
-          <a-alert
+          <a-alert v-if="selectedSrc?.db_type === 'sqlserver' && selectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
+              仅迁移 dbo 对象，达梦对象名统一大写。不兼容类型、精度和对象会在写入前报错；不自动降级。迁移期间请暂停源表写入。
+            </a-alert>
+            <a-alert
             v-if="dataMigrate.unsupportedMsg"
             type="error"
             style="margin-bottom: 16px"
@@ -186,16 +190,16 @@
                       <span class="adv-check">{{ selectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.changeOwner" :disabled="selectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.changeOwner" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
+                      <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
                     </a-col>
                   </a-row>
 
@@ -258,7 +262,7 @@
           <!-- 目标表删除重建警告 -->
           <a-alert type="warning" style="margin-bottom: 16px">
             <template #title>注意：迁移前目标表将被删除重建</template>
-            迁移开始时会对目标库中同名表执行 <strong>DROP TABLE IF EXISTS ... CASCADE</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
+            迁移开始时会对目标库中同名表执行 <strong>删除并重新创建表</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
           </a-alert>
 
           <!-- 操作按钮 -->
@@ -434,6 +438,7 @@
                 <div v-if="viewMigrate.dstConnId" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
                   <span v-if="vmSelectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
+                  <span v-else-if="vmSelectedDst?.db_type === 'sqlserver'">目标数据库取自连接配置，Schema 默认 dbo。</span>
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
@@ -441,7 +446,10 @@
           </a-row>
 
           <!-- 不支持提示 -->
-          <a-alert
+          <a-alert v-if="vmSelectedSrc?.db_type === 'sqlserver' && vmSelectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
+              仅迁移 dbo 对象，达梦对象名统一大写。不兼容类型、精度和对象会在写入前报错；不自动降级。迁移期间请暂停源表写入。
+            </a-alert>
+            <a-alert
             v-if="viewMigrate.unsupportedMsg"
             type="error"
             style="margin-bottom: 16px"
@@ -496,7 +504,7 @@
                   <span class="adv-check">{{ vmSelectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="viewMigrate.changeOwner" :disabled="vmSelectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  <a-checkbox v-model="viewMigrate.changeOwner" :disabled="vmSelectedDst?.db_type === 'oracle' || vmSelectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
               </a-row>
               <div class="adv-section-title">视图剥离模式名</div>
@@ -659,7 +667,10 @@
           </a-row>
 
           <!-- 不支持提示 -->
-          <a-alert
+          <a-alert v-if="omSelectedSrc?.db_type === 'sqlserver' && omSelectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
+              仅迁移 dbo 对象，达梦对象名统一大写。不兼容类型、精度和对象会在写入前报错；不自动降级。迁移期间请暂停源表写入。
+            </a-alert>
+            <a-alert
             v-if="objMigrate.unsupportedMsg"
             type="error"
             style="margin-bottom: 16px"
@@ -733,10 +744,10 @@
                   <span class="adv-check">{{ omSelectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.changeOwner" :disabled="omSelectedDst?.db_type === 'oracle'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
+                  <a-checkbox v-model="objMigrate.changeOwner" :disabled="omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
+                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
                 </a-col>
               </a-row>
             </a-collapse-item>
@@ -901,7 +912,7 @@ const srcConnections = computed(() =>
 const pgConnections = computed(() =>
   connections.value.filter(
     (c) =>
-      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql' || c.db_type === 'oscar' || c.db_type === 'oracle') &&
+      (c.db_type === 'postgres' || c.db_type === 'gaussdb' || c.db_type === 'seabox' || c.db_type === 'dameng' || c.db_type === 'highgo' || c.db_type === 'vastbase' || c.db_type === 'gbase' || c.db_type === 'kingbase' || c.db_type === 'mysql' || c.db_type === 'oscar' || c.db_type === 'oracle' || c.db_type === 'sqlserver') &&
       (!dstEnvFilter.value || c.env === dstEnvFilter.value)
   )
 )
@@ -978,10 +989,11 @@ async function loadDstSchemas(connId: number) {
   dataMigrate.dstSchema = ''
   dataMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
   try {
     const res = await listConnectionSchemas(connId)
     dataMigrate.dstSchemas = res.data ?? []
+    if (dst.db_type === 'sqlserver' && dataMigrate.dstSchemas.includes('dbo')) dataMigrate.dstSchema = 'dbo'
   } catch (e: any) {
     Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
@@ -1171,6 +1183,7 @@ const vmCanMigrate = computed(() =>
 watch(() => viewMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
   applyTargetMigrationDefaults(viewMigrate, dst?.db_type)
+  if (vmSelectedSrc.value?.db_type === 'sqlserver') void vmLoadViews()
 })
 
 function vmCheckPairSupport() {
@@ -1207,28 +1220,33 @@ async function vmLoadDstSchemas(connId: number) {
   viewMigrate.dstSchema = ''
   viewMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
   try {
     const res = await listConnectionSchemas(connId)
     viewMigrate.dstSchemas = res.data ?? []
+    if (dst.db_type === 'sqlserver' && viewMigrate.dstSchemas.includes('dbo')) viewMigrate.dstSchema = 'dbo'
   } catch (e: any) {
     Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
 }
 
+let vmLoadViewsRequest = 0
 async function vmLoadViews() {
+  const request = ++vmLoadViewsRequest
   if (!viewMigrate.srcConnId) return
   viewMigrate.loadingViews = true
   viewMigrate.views = []
   viewMigrate.selected = []
   viewMigrate.results = []
   try {
-    const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined)
+    const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined, vmSelectedDst.value?.db_type)
+    if (request !== vmLoadViewsRequest) return
     viewMigrate.views = res.data ?? []
   } catch (e: any) {
+    if (request !== vmLoadViewsRequest) return
     Message.error(`加载视图失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
   } finally {
-    viewMigrate.loadingViews = false
+    if (request === vmLoadViewsRequest) viewMigrate.loadingViews = false
   }
 }
 
@@ -1339,6 +1357,7 @@ const omCanMigrate = computed(() =>
 watch(() => objMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
   applyTargetMigrationDefaults(objMigrate, dst?.db_type)
+  if (omSelectedSrc.value?.db_type === 'sqlserver') void omLoadTables()
 })
 
 function omCheckPairSupport() {
@@ -1374,27 +1393,32 @@ async function omLoadDstSchemas(connId: number) {
   objMigrate.dstSchema = ''
   objMigrate.dstSchemas = []
   const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle')) return
+  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
   try {
     const res = await listConnectionSchemas(connId)
     objMigrate.dstSchemas = res.data ?? []
+    if (dst.db_type === 'sqlserver' && objMigrate.dstSchemas.includes('dbo')) objMigrate.dstSchema = 'dbo'
   } catch (e: any) {
     Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
   }
 }
 
+let omLoadTablesRequest = 0
 async function omLoadTables() {
+  const request = ++omLoadTablesRequest
   if (!objMigrate.srcConnId) return
   objMigrate.loadingTables = true
   objMigrate.tables = []
   objMigrate.selected = []
   try {
-    const res = await listConnectionTables(objMigrate.srcConnId, objMigrate.srcDatabase || undefined)
+    const res = await listConnectionTables(objMigrate.srcConnId, objMigrate.srcDatabase || undefined, omSelectedDst.value?.db_type)
+    if (request !== omLoadTablesRequest) return
     objMigrate.tables = res.data ?? []
   } catch (e: any) {
+    if (request !== omLoadTablesRequest) return
     Message.error(`加载表失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
   } finally {
-    objMigrate.loadingTables = false
+    if (request === omLoadTablesRequest) objMigrate.loadingTables = false
   }
 }
 

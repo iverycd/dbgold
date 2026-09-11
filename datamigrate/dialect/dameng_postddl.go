@@ -7,13 +7,18 @@ import (
 	"dbgold/datamigrate/source"
 )
 
-// SequenceStatements 达梦自增列以 IDENTITY 在建表时声明,这里生成「重置种子」语句,
-// 把 IDENTITY 当前值推到源库当前 AUTO_INCREMENT 值,避免后续插入撞已导入的 id。
-// 确切语法依达梦版本而定;失败由 Writer 降级处理(记日志,不使 job 失败)。
+// SequenceStatements reattaches IDENTITY using DM8's documented ADD COLUMN
+// identity clause. ALTER COLUMN ... RESTART WITH is not DM8 syntax.
 func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
-	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s RESTART WITH %d`,
-		d.QualifyTable(schema, seq.TableName), d.QuoteIdent(seq.ColumnName), seq.StartValue)
-	return []Statement{{SQL: sql}}
+	step := int64(1)
+	if seq.IdentityInfo != nil {
+		step = seq.IdentityInfo.Increment
+	}
+	table := d.QualifyTable(schema, seq.TableName)
+	return []Statement{
+		{SQL: "ALTER TABLE " + table + " DROP IDENTITY"},
+		{SQL: fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s IDENTITY(%d, %d)", table, d.QuoteIdent(seq.ColumnName), seq.StartValue, step)},
+	}
 }
 
 // IndexStatements 达梦索引/主键 DDL,不带 IF NOT EXISTS。
@@ -23,6 +28,9 @@ func (d *DaMengDialect) IndexStatements(schema string, idx source.IndexInfo) []S
 	quotedCols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
 		quotedCols[i] = d.QuoteIdent(c)
+		if !idx.IsPrimary && i < len(idx.Descending) && idx.Descending[i] {
+			quotedCols[i] += " DESC"
+		}
 	}
 	cols := strings.Join(quotedCols, ", ")
 	qn := d.QualifyTable(schema, idx.TableName)

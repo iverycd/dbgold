@@ -28,6 +28,8 @@ type SupportedPair struct {
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
+	{Source: "sqlserver", Target: "dameng"},
+	{Source: "mysql", Target: "sqlserver"},
 	{Source: "mysql", Target: "oracle"},
 	{Source: "postgres", Target: "mysql"},
 	{Source: "gaussdb", Target: "mysql"},
@@ -624,11 +626,17 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 				conn.Host, conn.Port, srcDatabase, conn.Username, conn.Password)
 		}
 	}
+	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "sqlserver" {
+		return source.NewMySQLForSQLServer(dsn, db, pool)
+	}
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "oracle" {
 		return source.NewMySQLForOracle(dsn, db, pool)
 	}
 	switch conn.DBType {
 	case "sqlserver":
+		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
+			return source.NewSQLServerForDameng(dsn, db, pool)
+		}
 		return source.NewSQLServer(dsn, db, pool)
 	case "dameng":
 		return source.NewDaMeng(dsn, db, pool)
@@ -650,6 +658,8 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.ConnPoolConfig) (target.Writer, error) {
 	dstDSN := buildDSN(dstConn)
 	switch dstConn.DBType {
+	case "sqlserver":
+		return target.NewSQLServer(dstDSN, targetSchema, pool)
 	case "oracle":
 		return target.NewOracle(dstDSN, targetSchema, pool)
 	case "gaussdb":
@@ -697,7 +707,7 @@ func ListConnectionViews(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
-	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{})
+	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -729,7 +739,7 @@ func ListConnectionTables(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
-	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{})
+	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})

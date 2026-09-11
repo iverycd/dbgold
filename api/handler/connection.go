@@ -290,6 +290,10 @@ func ListConnectionSchemas(c *gin.Context) {
 		return
 	}
 
+	if conn.DBType == "sqlserver" {
+		listSQLServerSchemas(c, conn)
+		return
+	}
 	if conn.DBType == "oracle" {
 		listOracleSchemas(c, conn)
 		return
@@ -453,6 +457,36 @@ func listMySQLSchemas(c *gin.Context, conn *store.Connection) {
 			continue
 		}
 		schemas = append(schemas, s)
+	}
+	c.JSON(http.StatusOK, schemas)
+}
+
+// SQL Server database is fixed by the connection; schemas live inside it.
+func listSQLServerSchemas(c *gin.Context, conn *store.Connection) {
+	db, err := sql.Open("sqlserver", buildDSN(conn))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(c.Request.Context(), `SELECT name FROM sys.schemas WHERE name NOT IN ('sys','INFORMATION_SCHEMA') AND schema_id < 16384 ORDER BY CASE WHEN name='dbo' THEN 0 ELSE 1 END,name`)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	schemas := []string{}
+	for rows.Next() {
+		var s string
+		if err = rows.Scan(&s); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		schemas = append(schemas, s)
+	}
+	if err = rows.Err(); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
 	}
 	c.JSON(http.StatusOK, schemas)
 }

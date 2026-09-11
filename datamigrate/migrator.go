@@ -63,6 +63,39 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if reader.DBType() == "sqlserver" && writer.DBType() == "dameng" {
+		cfg.TargetDBType = "dameng"
+		cfg.LowerCaseNames = false
+		cfg.ChangeOwner = false
+		cfg.Distributed = false
+		if r, ok := reader.(*source.SQLServerReader); ok {
+			reader = &source.SQLServerDamengReader{SQLServerReader: r}
+		}
+		if cfg.Mode == "" {
+			cfg.Mode = "all"
+		}
+		if cfg.PageSize <= 0 {
+			cfg.PageSize = 20000
+		}
+		if cfg.MaxParallel <= 0 {
+			cfg.MaxParallel = 10
+		}
+		if s, ok := writer.(interface{ EffectiveSchema() string }); ok {
+			cfg.TargetSchema = s.EffectiveSchema()
+		}
+	}
+
+	if cfg.TargetDBType == "sqlserver" {
+		if cfg.TargetSchema == "" {
+			cfg.TargetSchema = "dbo"
+		}
+		if cfg.PageSize <= 0 {
+			cfg.PageSize = 20000
+		}
+		if cfg.MaxParallel <= 0 {
+			cfg.MaxParallel = 10
+		}
+	}
 	if cfg.TargetDBType == "oracle" {
 		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed, cfg.CharInLength = "oracle", false, false, false, true
 		if s, ok := writer.(interface{ EffectiveSchema() string }); ok {
@@ -91,7 +124,7 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 // objName only normalizes target object names; source lookups and schema/owner
 // names must never pass through it. Oscar always uses uppercase identifiers.
 func (m *Migrator) objName(s string) string {
-	if m.isOscar() || m.isOracle() {
+	if m.isOscar() || m.isOracle() || m.isSQLServerDameng() {
 		return strings.ToUpper(s)
 	}
 	if m.cfg.LowerCaseNames {
@@ -118,6 +151,9 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	if m.isSQLServer() {
+		return m.runSQLServer(ctx)
+	}
 	if m.isOracle() {
 		return m.runOracle(ctx)
 	}
@@ -169,6 +205,10 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 			recordOscarPreflightError(&report, err)
 			return report
 		}
+	}
+
+	if m.isSQLServerDameng() && !m.preflightSQLServerDameng(ctx, tables, &report) {
+		return report
 	}
 
 	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
@@ -263,9 +303,20 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		wg.Wait()
 	}
 
+	if m.isSQLServerDameng() && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
+		m.log.Errorf("表结构或数据迁移失败，停止附属对象创建")
+		return report
+	}
+
 	// Phase 3: Post-DDL（串行）
 	if skipSchema {
 		m.log.Info("=== Phase 3: 跳过创建序列、索引、外键、视图（仅迁移数据行模式）===")
+		if m.isSQLServerDameng() {
+			originalObjects := m.cfg.Objects
+			m.cfg.Objects = []string{"sequences"}
+			m.createPostDDL(ctx, &report, tables, allTables)
+			m.cfg.Objects = originalObjects
+		}
 	} else {
 		m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
 		m.createPostDDL(ctx, &report, tables, allTables)
@@ -366,7 +417,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
-			if m.isOracle() {
+			if m.isOracle() || m.isSQLServer() {
 				return false, fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
 			}
 			return false, err.Error()
@@ -384,7 +435,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		}
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
-			if m.isOracle() {
+			if m.isOracle() || m.isSQLServer() {
 				return false, fmt.Sprintf("表 %s 第 %d 页写入失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
 			}
 			if !hasError {
@@ -694,7 +745,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// 外键:
 	// - 非对象模式:沿用原逻辑,include 模式跳过(引用表可能不在迁移范围内)
 	// - 对象模式:用户明确要求迁外键(want),引用表视为已存在,不受 include 限制
-	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include")
+	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng())
 	if migrateFK {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
@@ -834,6 +885,12 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 // createOneView 处理单个视图:对象名规范化、定义调整、特殊视图修正、剥离跨库模式名,
 // 然后在目标库创建视图并按需修改 owner。返回实际执行的 DDL 与执行错误(nil 表示成功)。
 func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string, error) {
+	if m.isSQLServerDameng() {
+		v.ViewName = m.objName(v.ViewName)
+		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
+		return ddl, m.writer.CreateView(ctx, v)
+	}
+
 	vCopy := v
 	vCopy.ViewName = m.objName(v.ViewName)
 	vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
@@ -885,6 +942,29 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []ObjectResult {
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.isSQLServer() {
+		report := newCategoryReport()
+		m.sqlServerViews(ctx, viewNames, &report, nil, nil)
+		out := append([]ObjectResult{}, report.Items...)
+		failed := map[string]bool{}
+		for _, item := range out {
+			failed[item.Name] = true
+		}
+		if report.Total == len(viewNames) && report.Success > 0 {
+			for _, n := range viewNames {
+				if !failed[m.objName(n)] {
+					out = append(out, ObjectResult{Name: m.objName(n)})
+				}
+			}
+		}
+		return out
+	}
+	if len(viewNames) == 0 {
+		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.isSQLServerDameng() {
+		return m.migrateSQLServerDamengViews(ctx, viewNames)
 	}
 	if m.isOracle() {
 		return m.migrateOracleViews(ctx, viewNames)

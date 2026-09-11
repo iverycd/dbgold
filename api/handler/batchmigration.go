@@ -171,6 +171,9 @@ func parseBatchExcel(f *excelize.File) ([]batchRow, error) {
 
 // validateBatchRow 完成单行的端口解析、必填校验与迁移对支持性校验，写入 Supported/Reason。
 func validateBatchRow(br *batchRow, srcPortStr, dstPortStr string) {
+	if br.DstDBType == "sqlserver" && br.TargetSchema == "" {
+		br.TargetSchema = "dbo"
+	}
 	var missing []string
 
 	if br.SrcDBType == "" {
@@ -287,6 +290,9 @@ type batchOptions struct {
 }
 
 func (o batchOptions) changeOwnerFor(targetType string) bool {
+	if targetType == "sqlserver" {
+		return false
+	} // 批量共用 owner 选项仅适用于支持的目标
 	if targetType == "oscar" && o.OscarChangeOwner != nil {
 		return *o.OscarChangeOwner
 	}
@@ -434,8 +440,8 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			MaxParallel:        opts.MaxParallel,
 			IntraTableParallel: opts.IntraTableParallel,
 			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
-			CharInLength:       opts.CharInLength || r.DstDBType == "oracle",
-			UseNvarchar2:       opts.UseNvarchar2,
+			CharInLength:       (opts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
+			UseNvarchar2:       opts.UseNvarchar2 && r.DstDBType != "sqlserver",
 			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 			DstSchema:          r.TargetSchema,
 			Status:             "running",
@@ -471,9 +477,9 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			MaxParallel:        opts.MaxParallel,
 			IntraTableParallel: opts.IntraTableParallel,
 			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
-			CharInLength:       opts.CharInLength || r.DstDBType == "oracle",
-			UseNvarchar2:       opts.UseNvarchar2,
-			Distributed:        opts.Distributed && r.DstDBType != "oracle",
+			CharInLength:       (opts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
+			UseNvarchar2:       opts.UseNvarchar2 && r.DstDBType != "sqlserver",
+			Distributed:        opts.Distributed && r.DstDBType != "oracle" && r.DstDBType != "sqlserver",
 			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
 		}
 

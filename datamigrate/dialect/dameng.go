@@ -6,6 +6,7 @@ import (
 
 	"dbgold/datamigrate/coldefault"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/tsqldameng"
 	"dbgold/datamigrate/typemap"
 )
 
@@ -34,14 +35,14 @@ func (d *DaMengDialect) Caps() Capabilities {
 }
 
 func (d *DaMengDialect) QuoteIdent(name string) string {
-	return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
 }
 
 func (d *DaMengDialect) QualifyTable(schema, table string) string {
 	if schema == "" {
-		return fmt.Sprintf(`"%s"`, strings.ToUpper(table))
+		return d.QuoteIdent(table)
 	}
-	return fmt.Sprintf(`"%s"."%s"`, strings.ToUpper(schema), strings.ToUpper(table))
+	return d.QuoteIdent(schema) + "." + d.QuoteIdent(table)
 }
 
 func (d *DaMengDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOpt) string {
@@ -57,17 +58,32 @@ func (d *DaMengDialect) MapType(col source.ColumnInfo, srcType string, opt TypeO
 func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
 	var cols []string
 	for _, col := range info.Columns {
+		if srcType == "sqlserver" {
+			if err := typemap.ValidateSQLServerDamengColumn(col); err != nil {
+				return nil, err
+			}
+		}
 		dmType := d.MapType(col, srcType, opt)
 		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(name(col.Name)), dmType)
 		if col.Extra == "auto_increment" {
 			// 达梦 Oracle 兼容模式自增列:允许显式插入(导入原 id),种子先填 1
-			colDef += " IDENTITY(1, 1)"
+			if srcType == "sqlserver" && col.IdentityInfo != nil {
+				colDef += fmt.Sprintf(" IDENTITY(%d, %d)", col.IdentityInfo.Seed, col.IdentityInfo.Increment)
+			} else {
+				colDef += " IDENTITY(1, 1)"
+			}
 		}
 		if !col.IsNullable {
 			colDef += " NOT NULL"
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
-			if clause := d.columnDefaultClause(coldefault.Strip(srcType, *col.Default)); clause != "" {
+			if srcType == "sqlserver" {
+				clause, err := tsqldameng.Default(*col.Default)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+				}
+				colDef += clause
+			} else if clause := d.columnDefaultClause(coldefault.Strip(srcType, *col.Default)); clause != "" {
 				colDef += clause
 			}
 		}

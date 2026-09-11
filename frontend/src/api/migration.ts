@@ -413,9 +413,9 @@ export const migrateViews = (data: MigrateViewsRequest) =>
 export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'comments'
 
 // listConnectionTables 列出源连接指定库下的全部表名
-export const listConnectionTables = (connId: number, database?: string) =>
+export const listConnectionTables = (connId: number, database?: string, targetType?: string) =>
   api.get<string[]>(`/connections/${connId}/tables`, {
-    params: database ? { database } : undefined,
+    params: { database, target_type: targetType },
   })
 
 export interface StartObjectMigrationRequest {

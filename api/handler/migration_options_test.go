@@ -54,7 +54,7 @@ func TestBatchOwnerDefaultsAndOverrides(t *testing.T) {
 				require.Equal(t, tt.postgres, opts.changeOwnerFor(target), target)
 			}
 			for _, target := range []string{"dameng", "mysql", "sqlserver", "oracle", "", "unknown"} {
-				require.Equal(t, tt.nonPG && target != "oracle", opts.changeOwnerFor(target), target)
+				require.Equal(t, tt.nonPG && target != "oracle" && target != "sqlserver", opts.changeOwnerFor(target), target)
 			}
 		})
 	}
