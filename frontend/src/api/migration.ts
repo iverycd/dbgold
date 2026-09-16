@@ -557,7 +557,7 @@ export interface CompatibilityIssue {
 export interface PGMySQLPreflight {
   ready: boolean
   source: { product: string; version: string; mode: string; schema: string; verification: string }
-  target: { version: string; database: string; target_collation: string; verification: string }
+  target: { version: string; database: string; target_charset?: string; target_collation: string; verification: string }
   issues: CompatibilityIssue[]
   excluded: MigrationObjectRef[]
   objects: { object: MigrationObjectRef; target: string; stage: string; statements: { SQL: string }[] }[]

@@ -92,3 +92,21 @@ func TestPGAutoIncrementRequiresExactNextvalDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestPGOperatorClassCheckIgnoresCollationsAndPreservesOtherReasons(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	r := &PostgresReader{db: db, schema: "Mixed", profile: PGProfile{Catalog: "pg_catalog"}}
+	// End anchoring ensures no collation OR predicate can creep back in.
+	mock.ExpectQuery(`SELECT t.relname,i.relname.*WHERE n.nspname=\$1 AND EXISTS \(SELECT 1 FROM "pg_catalog"\."pg_opclass" op WHERE op.oid=ANY\(ix.indclass\) AND NOT op.opcdefault\)$`).WithArgs("Mixed").WillReturnRows(sqlmock.NewRows([]string{"table", "index"}).AddRow("T", "Custom").AddRow("T", "Partial"))
+	table := &PGTable{Indexes: []IndexInfo{{IndexName: "Normal"}, {IndexName: "Custom"}, {IndexName: "Partial", Unsupported: "部分索引"}}}
+	if err := r.markPGOperatorClasses(context.Background(), map[string]*PGTable{"T": table}); err != nil {
+		t.Fatal(err)
+	}
+	if table.Indexes[0].Unsupported != "" || table.Indexes[1].Unsupported != "非默认操作符类" || table.Indexes[2].Unsupported != "部分索引、非默认操作符类" {
+		t.Fatal(table.Indexes)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

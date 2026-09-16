@@ -40,7 +40,7 @@ func TestPGDefaultsPreserveLiteralCategory(t *testing.T) {
 func TestPGAutoIncrementIndexedAtCreation(t *testing.T) {
 	v, _ := ParseMySQLVersion("5.7.44")
 	table := source.PGTable{Info: source.TableDDLInfo{TableName: "Mixed", Columns: []source.ColumnInfo{{Name: "Id", DataType: "int4", Extra: "auto_increment"}}}, Indexes: []source.IndexInfo{{TableName: "Mixed", IndexName: "Mixed_pkey", Columns: []string{"Id"}, IsPrimary: true, IsUnique: true}}}
-	stmts, inline, e := NewMySQL().PGTableStatements("dest", table, v, "utf8mb4_bin", func(s string) string { return s })
+	stmts, inline, e := NewMySQL().PGTableStatements("dest", table, v, func(s string) string { return s })
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -60,6 +60,27 @@ func TestPGTimezoneDefaultRemainsUTCInApplicationSessions(t *testing.T) {
 		}
 		if v.Expressions() && (e != nil || got != " DEFAULT (UTC_TIMESTAMP(6))") {
 			t.Fatal(version, got, e)
+		}
+	}
+}
+
+func TestPGTableInheritsDatabaseCharacterDefaults(t *testing.T) {
+	v, _ := ParseMySQLVersion("8.0.36")
+	def := "'Example'::varchar"
+	table := source.PGTable{Info: source.TableDDLInfo{TableName: "Mixed", Comment: "table comment", Columns: []source.ColumnInfo{{Name: "Name", DataType: "varchar", Length: 50, Default: &def, Comment: "column comment"}}}}
+	stmts, _, err := NewMySQL().PGTableStatements("dest", table, v, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := stmts[1].SQL
+	for _, s := range []string{"CHARSET", "CHARACTER SET", "COLLATE"} {
+		if strings.Contains(ddl, s) {
+			t.Fatalf("unexpected %s in %s", s, ddl)
+		}
+	}
+	for _, s := range []string{"`Name` VARCHAR(50) NOT NULL DEFAULT 'Example'", "column comment", "table comment", "ENGINE=InnoDB ROW_FORMAT=DYNAMIC"} {
+		if !strings.Contains(ddl, s) {
+			t.Fatalf("missing %s in %s", s, ddl)
 		}
 	}
 }

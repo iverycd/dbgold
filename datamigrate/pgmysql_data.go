@@ -13,6 +13,7 @@ import (
 
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/sqlsyntax"
+	"dbgold/datamigrate/target"
 	"dbgold/datamigrate/typemap"
 	"dbgold/datamigrate/valueconv"
 )
@@ -37,12 +38,6 @@ func pgKey(row []any, cols []source.ColumnInfo, names []string) ([32]byte, bool,
 				s = string(v)
 			default:
 				s = fmt.Sprint(v)
-			}
-			// utf8mb4_bin uses PAD SPACE for CHAR/VARCHAR comparisons. Trailing ASCII
-			// spaces must compare equal when testing primary/unique/foreign keys.
-			switch c.DataType {
-			case "varchar", "bpchar", "char", "text":
-				s = strings.TrimRight(s, " ")
 			}
 			writePGKeyPart(h, s)
 		}
@@ -172,7 +167,7 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 		if readTarget {
 			inputDB = db
 		}
-		checkQuery, checkErr := m.pgRowCheckQuery(t, p.Target.Parsed.Checks())
+		checkQuery, checkErr := m.pgRowCheckQuery(t, p.Target.Parsed.Checks(), p.textRules[t.Info.TableName])
 		if checkErr != nil {
 			return checkErr
 		}
@@ -183,8 +178,20 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 				return checkErr
 			}
 		}
+		keyCols := map[string]bool{}
+		for _, idx := range t.Indexes {
+			if sets[idxRef(idx)] != nil {
+				for _, c := range idx.Columns {
+					keyCols[c] = true
+				}
+			}
+		}
 		e := m.eachPGPage(ctx, t, inputDB, func(_ []string, rows [][]any) error {
-			for _, row := range rows {
+			weighted, sizes, err := inspectPGTextPage(ctx, db, t, p.textRules[t.Info.TableName], rows, keyCols, p.Target.MaxAllowedPacket)
+			if err != nil {
+				return err
+			}
+			for rowIndex, row := range rows {
 				packetBytes := 1024 + len(row)*16
 				for _, v := range row {
 					if b, ok := v.([]byte); ok {
@@ -196,7 +203,7 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 				if p.Target.MaxAllowedPacket > 0 && packetBytes > p.Target.MaxAllowedPacket {
 					return fmt.Errorf("%s 行数据超过 max_allowed_packet", t.Info.TableName)
 				}
-				if e := checkPGRowStorage(t, row, p.Target.PageSize); e != nil {
+				if e := checkPGRowStorage(t, row, sizes[rowIndex], p.Target.PageSize); e != nil {
 					return e
 				}
 				if checkStmt != nil {
@@ -232,7 +239,7 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 					if set == nil {
 						continue
 					}
-					key, valid, e := pgKey(row, t.Info.Columns, idx.Columns)
+					key, valid, e := pgKey(weighted[rowIndex], t.Info.Columns, idx.Columns)
 					if e != nil {
 						return e
 					}
@@ -284,8 +291,24 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 		if readTarget {
 			inputDB = db
 		}
+		keyCols := map[string]bool{}
+		fkRules := map[string]target.MySQLTextRules{}
+		for i, c := range fk.Columns {
+			keyCols[c] = true
+			fkRules[c] = p.textRules[fk.RefTable][fk.RefColumns[i]]
+		}
+		// Include non-key character rules for round-trip checks on this page.
+		for c, r := range p.textRules[t.Info.TableName] {
+			if !keyCols[c] {
+				fkRules[c] = r
+			}
+		}
 		if e := m.eachPGPage(ctx, t, inputDB, func(_ []string, rows [][]any) error {
-			for _, row := range rows {
+			weighted, _, err := inspectPGTextPage(ctx, db, t, fkRules, rows, keyCols, p.Target.MaxAllowedPacket)
+			if err != nil {
+				return err
+			}
+			for _, row := range weighted {
 				key, valid, e := pgKey(row, t.Info.Columns, fk.Columns)
 				if e != nil {
 					return e
@@ -304,7 +327,7 @@ func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight,
 	return nil
 }
 
-func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool) (string, error) {
+func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool, rules map[string]target.MySQLTextRules) (string, error) {
 	if len(t.Checks) == 0 || !checksSupported {
 		return "", nil
 	}
@@ -320,37 +343,56 @@ func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool) (stri
 		}
 		conditions = append(conditions, "("+safe+") IS NOT FALSE")
 	}
-	for _, c := range t.Info.Columns {
+	var parameters, textValues, textColumns []string
+	for i, c := range t.Info.Columns {
 		typ, e := typemap.PGToMySQLChecked(c)
 		if e != nil {
 			return "", e
 		}
-		cast := "?"
+		parameter := fmt.Sprintf("input_row.p%d", i)
+		parameters = append(parameters, fmt.Sprintf("? AS p%d", i))
+		cast := parameter
 		switch {
 		case strings.HasPrefix(typ, "DECIMAL"):
-			cast = "CAST(? AS " + typ + ")"
+			cast = "CAST(" + parameter + " AS " + typ + ")"
 		case typ == "INT" || typ == "SMALLINT" || typ == "BIGINT" || strings.HasPrefix(typ, "TINYINT"):
-			cast = "CAST(? AS SIGNED)"
+			cast = "CAST(" + parameter + " AS SIGNED)"
 		case typ == "DATE" || strings.HasPrefix(typ, "TIME(") || strings.HasPrefix(typ, "DATETIME("):
-			cast = "CAST(? AS " + typ + ")"
+			cast = "CAST(" + parameter + " AS " + typ + ")"
 		case typ == "FLOAT" || typ == "DOUBLE":
-			cast = "(? + 0e0)"
+			cast = "(" + parameter + " + 0e0)"
 		case typ == "JSON":
-			cast = "CAST(? AS JSON)"
+			cast = "CAST(" + parameter + " AS JSON)"
 		case typ == "LONGBLOB":
-			cast = "CAST(? AS BINARY)"
+			cast = "CAST(" + parameter + " AS BINARY)"
 		default:
-			cast = "CAST(? AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_bin"
+			r := rules[c.Name]
+			if e := r.Validate(); e != nil {
+				return "", e
+			}
+			// JSON_TABLE creates typed columns with implicit collation coercibility
+			// (2). An expression with COLLATE has coercibility 0, and incorrectly
+			// rejects comparisons between, for example, general_ci and bin columns.
+			// CHECK is only evaluated on 8.0.16+, where JSON_TABLE is available.
+			textColumns = append(textColumns, fmt.Sprintf("v%d %s CHARACTER SET %s COLLATE %s PATH '$[%d]' ERROR ON ERROR", i, typ, r.Charset, r.Collation, len(textValues)))
+			textValues = append(textValues, "COALESCE(CONVERT("+parameter+" USING utf8mb4), '')")
+			// Before 8.0.21 JSON_TABLE errors on JSON null; restore SQL NULL after
+			// materializing an empty placeholder instead.
+			cast = fmt.Sprintf("IF(%s IS NULL, NULL, text_row.v%d)", parameter, i)
 		}
 		cols = append(cols, cast+" AS "+sqlsyntax.QuoteIdent(m.objName(c.Name)))
 	}
-	return "SELECT (" + strings.Join(conditions, " AND ") + ") FROM (SELECT " + strings.Join(cols, ",") + ") AS checked_row", nil
+	from := "(SELECT " + strings.Join(parameters, ",") + ") AS input_row"
+	if len(textColumns) > 0 {
+		from += " JOIN JSON_TABLE(JSON_ARRAY(" + strings.Join(textValues, ",") + "), '$' COLUMNS (" + strings.Join(textColumns, ",") + ")) AS text_row ON TRUE"
+	}
+	return "SELECT (" + strings.Join(conditions, " AND ") + ") FROM (SELECT " + strings.Join(cols, ",") + " FROM " + from + ") AS checked_row", nil
 }
 
 // Bound the local InnoDB record after DYNAMIC external storage. Short variable
 // values stay inline; long values need a 20-byte external pointer. No truncation
 // or row-format guessing is used to bypass this check.
-func checkPGRowStorage(t source.PGTable, row []any, pageSize int) error {
+func checkPGRowStorage(t source.PGTable, row []any, textSizes []int, pageSize int) error {
 	local := 32 + (len(t.Info.Columns)+7)/8
 	for i, c := range t.Info.Columns {
 		if row[i] == nil {
@@ -367,6 +409,9 @@ func checkPGRowStorage(t source.PGTable, row []any, pageSize int) error {
 				n = len(b)
 			} else {
 				n = len(fmt.Sprint(row[i]))
+			}
+			if pgTextColumn(c) {
+				n = textSizes[i]
 			}
 			if n > 40 {
 				n = 20
@@ -393,7 +438,7 @@ func mysqlReadExpression(expr string) (string, error) {
 	parts := make([]string, len(ts))
 	for i, t := range ts {
 		if t.Kind == 's' {
-			parts[i] = "CONVERT(X'" + hex.EncodeToString([]byte(t.Value)) + "' USING utf8mb4) COLLATE utf8mb4_bin"
+			parts[i] = "_utf8mb4 X'" + hex.EncodeToString([]byte(t.Value)) + "'"
 		} else {
 			parts[i] = t.Text
 		}

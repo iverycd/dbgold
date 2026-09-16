@@ -43,7 +43,7 @@ func (w *pgPlanWriter) DBType() string        { return "mysql" }
 func (w *pgPlanWriter) InspectionDB() *sql.DB { return w.db }
 func (w *pgPlanWriter) InspectMySQL(context.Context) (target.MySQLProfile, error) {
 	v, _ := dialect.ParseMySQLVersion("8.0.36")
-	return target.MySQLProfile{Version: "8.0.36", Parsed: v, Database: "target", TargetCollation: "utf8mb4_bin", PageSize: 16384, LargePrefix: true}, nil
+	return target.MySQLProfile{Version: "8.0.36", Parsed: v, Database: "target", TargetCharset: "utf8mb4", CharsetMaxBytes: 4, CollationPadSpace: true, TargetCollation: "utf8mb4_bin", PageSize: 16384, LargePrefix: true}, nil
 }
 func (w *pgPlanWriter) CreateTable(context.Context, []dialect.Statement) error {
 	w.mutations++
@@ -101,12 +101,12 @@ func TestMySQLCommentPreservesColumnAttributes(t *testing.T) {
 		t.Fatal(def, e)
 	}
 }
-func TestPGKeyDetectsTrailingSpaceUniqueness(t *testing.T) {
+func TestPGKeyPreservesServerWeightBytes(t *testing.T) {
 	cols := []source.ColumnInfo{{Name: "c", DataType: "varchar"}}
-	a, _, _ := pgKey([]any{"x"}, cols, []string{"c"})
-	b, _, _ := pgKey([]any{"x "}, cols, []string{"c"})
-	if a != b {
-		t.Fatal("PAD SPACE collision missed")
+	a, _, _ := pgKey([]any{[]byte("x")}, cols, []string{"c"})
+	b, _, _ := pgKey([]any{[]byte("x ")}, cols, []string{"c"})
+	if a == b {
+		t.Fatal("server weights must not be trimmed as text")
 	}
 	_, valid, _ := pgKey([]any{nil}, cols, []string{"c"})
 	if valid {

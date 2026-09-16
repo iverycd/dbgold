@@ -17,6 +17,9 @@ type MySQLProfile struct {
 	Parsed              dialect.MySQLVersion `json:"parsed"`
 	SQLMode             string               `json:"sql_mode"`
 	Collation           string               `json:"server_collation"`
+	TargetCharset       string               `json:"target_charset"`
+	CharsetMaxBytes     int                  `json:"charset_max_bytes"`
+	CollationPadSpace   bool                 `json:"collation_pad_space"`
 	TargetCollation     string               `json:"target_collation"`
 	LowerCaseTableNames int                  `json:"lower_case_table_names"`
 	PageSize            int                  `json:"innodb_page_size"`
@@ -28,7 +31,7 @@ type MySQLProfile struct {
 // InspectionDB is for read-only catalog/data validation queries in preflight.
 func (w *MySQLWriter) InspectionDB() *sql.DB { return w.db }
 func (w *MySQLWriter) InspectMySQL(ctx context.Context) (MySQLProfile, error) {
-	p := MySQLProfile{TargetCollation: "utf8mb4_bin", LargePrefix: true, Verification: "待验证（能力探测不等于实库认证）"}
+	p := MySQLProfile{LargePrefix: true, Verification: "待验证（能力探测不等于实库认证）"}
 	var db sql.NullString
 	err := w.db.QueryRowContext(ctx, `SELECT VERSION(),@@SESSION.sql_mode,@@collation_server,@@lower_case_table_names,@@innodb_page_size,DATABASE(),@@max_allowed_packet`).Scan(&p.Version, &p.SQLMode, &p.Collation, &p.LowerCaseTableNames, &p.PageSize, &db, &p.MaxAllowedPacket)
 	if err != nil {
@@ -74,13 +77,12 @@ func (w *MySQLWriter) InspectMySQL(ctx context.Context) (MySQLProfile, error) {
 			return p, e
 		}
 	}
-	var count int
-	if err = w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLLATIONS WHERE COLLATION_NAME=?`, p.TargetCollation).Scan(&count); err != nil {
+	rules, err := ReadMySQLDatabaseTextRules(ctx, w.db, p.Database)
+	if err != nil {
 		return p, err
 	}
-	if count != 1 {
-		return p, fmt.Errorf("目标缺少排序规则 %s", p.TargetCollation)
-	}
+	p.TargetCharset, p.TargetCollation = rules.Charset, rules.Collation
+	p.CharsetMaxBytes, p.CollationPadSpace = rules.MaxBytes, rules.PadSpace
 	w.schema = p.Database
 	return p, nil
 }

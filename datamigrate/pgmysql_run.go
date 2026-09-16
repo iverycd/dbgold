@@ -43,6 +43,12 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 		}
 		return report
 	}
+	if err := m.recheckPGMySQLText(ctx, plan, m.writer.(mysqlInspector).InspectionDB()); err != nil {
+		plan.add(ObjectRef{Kind: "target", Name: plan.Target.Database}, err.Error(), false)
+		plan.finish()
+		m.log.Errorf("执行前复核失败: %v", err)
+		return report
+	}
 	for _, issue := range plan.Issues {
 		if issue.Severity == "warning" {
 			m.log.Warnf("%s", issue.Reason)

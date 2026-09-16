@@ -19,7 +19,7 @@
         {{ result.ready ? '预检通过' : '预检未通过：请处理阻止项' }} · 已检查 {{ result.rows_checked }} 行
       </a-alert>
       <p>源库：{{ result.source.product }} · {{ result.source.version }} · {{ result.source.mode || '默认兼容模式' }}</p>
-      <p>目标：MySQL {{ result.target.version }} / {{ result.target.database }} · {{ result.target.target_collation }}</p>
+      <p>目标：MySQL {{ result.target.version }} / {{ result.target.database }} · 数据库默认：{{ result.target.target_charset || '' }} / {{ result.target.target_collation }}</p>
       <p>{{ result.source.verification }}；{{ result.target.verification }}</p>
       <a-table :data="result.issues" :pagination="{ pageSize: 10 }" size="small">
         <template #columns>

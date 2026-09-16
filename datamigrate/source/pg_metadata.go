@@ -560,50 +560,7 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 	if err != nil {
 		return nil, err
 	}
-	// A non-default column collation cannot be substituted without approval.
-	if r.profile.Fields["pg_attribute.attcollation"] {
-		cr, e := r.db.QueryContext(ctx, `SELECT t.relname,a.attname,co.collname FROM `+r.qcat("pg_attribute")+` a JOIN `+r.qcat("pg_class")+` t ON t.oid=a.attrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace JOIN `+r.qcat("pg_collation")+` co ON co.oid=a.attcollation WHERE n.nspname=$1 AND a.attnum>0 AND NOT a.attisdropped AND co.collname<>'default'`, r.schema)
-		if e != nil {
-			return nil, e
-		}
-		for cr.Next() {
-			var tn, cn, coll string
-			if e = cr.Scan(&tn, &cn, &coll); e != nil {
-				cr.Close()
-				return nil, e
-			}
-			if table := byName[tn]; table != nil {
-				table.Unsupported = append(table.Unsupported, PGObject{Kind: "table", Name: tn, Reason: "列 " + cn + " 使用非默认排序规则 " + coll})
-			}
-		}
-		e = cr.Err()
-		cr.Close()
-		if e != nil {
-			return nil, e
-		}
-	}
-	// Custom opclasses / explicit collations need semantic adaptation.
-	rows, err = r.db.QueryContext(ctx, `SELECT t.relname,i.relname FROM `+r.qcat("pg_index")+` ix JOIN `+r.qcat("pg_class")+` t ON t.oid=ix.indrelid JOIN `+r.qcat("pg_class")+` i ON i.oid=ix.indexrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND (EXISTS (SELECT 1 FROM `+r.qcat("pg_opclass")+` op WHERE op.oid=ANY(ix.indclass) AND NOT op.opcdefault) OR EXISTS (SELECT 1 FROM `+r.qcat("pg_collation")+` co WHERE co.oid=ANY(ix.indcollation) AND co.collname<>'default'))`, r.schema)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var t, n string
-		if err = rows.Scan(&t, &n); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if table := byName[t]; table != nil {
-			for j := range table.Indexes {
-				if table.Indexes[j].IndexName == n {
-					table.Indexes[j].Unsupported = "自定义操作符类或排序规则"
-				}
-			}
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
+	if err := r.markPGOperatorClasses(ctx, byName); err != nil {
 		return nil, err
 	}
 	rows, err = r.db.QueryContext(ctx, `SELECT t.relname,g.tgname,pg_get_triggerdef(g.oid) FROM `+r.qcat("pg_trigger")+` g JOIN `+r.qcat("pg_class")+` t ON t.oid=g.tgrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND NOT g.tgisinternal ORDER BY t.relname,g.tgname`, r.schema)
@@ -798,4 +755,33 @@ func pgSimpleNextval(raw string) bool {
 		ts = ts[2:]
 	}
 	return len(ts) == 6 && ts[0].Is("nextval") && ts[1].Is("(") && ts[2].Kind == 's' && ts[3].Is("::") && ts[4].Is("regclass") && ts[5].Is(")")
+}
+
+func (r *PostgresReader) markPGOperatorClasses(ctx context.Context, byName map[string]*PGTable) error {
+	// Source collations are intentionally ignored; MySQL inherits its own defaults.
+	// Non-default operator classes still require semantic adaptation.
+	rows, err := r.db.QueryContext(ctx, `SELECT t.relname,i.relname FROM `+r.qcat("pg_index")+` ix JOIN `+r.qcat("pg_class")+` t ON t.oid=ix.indrelid JOIN `+r.qcat("pg_class")+` i ON i.oid=ix.indexrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND EXISTS (SELECT 1 FROM `+r.qcat("pg_opclass")+` op WHERE op.oid=ANY(ix.indclass) AND NOT op.opcdefault)`, r.schema)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var t, n string
+		if err = rows.Scan(&t, &n); err != nil {
+			rows.Close()
+			return err
+		}
+		if table := byName[t]; table != nil {
+			for j := range table.Indexes {
+				if table.Indexes[j].IndexName == n {
+					table.Indexes[j].Unsupported = strings.TrimPrefix(table.Indexes[j].Unsupported+"、非默认操作符类", "、")
+				}
+			}
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return nil
 }

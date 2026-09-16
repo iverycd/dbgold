@@ -22,13 +22,13 @@
 
 表和列注释随建表生成。对象模式修改列注释时读取 `SHOW CREATE TABLE` 完整列定义，保留默认值、自增及其他属性。每表最多一个非空整数自增列，建表时创建所需索引；保留导入的零值，完成后设置源序列下一值与导入最大值共同决定的种子。共享、独立、循环、非单位正步长、耗尽及无法保持上界语义的序列阻止自动转换。
 
-常规 BTREE 索引和主键保留列顺序；表达式、部分、INCLUDE、非默认排序/操作符类、特殊访问方法、延迟唯一性及 NULLS NOT DISTINCT 均阻止，可明确排除独立索引。外键按目录数组位置配对，保留引用 schema，检查复合列、引用键、类型、动作和依赖；跨 schema、SET DEFAULT 和延迟外键不自动改写。
+常规 BTREE 索引和主键保留列顺序；表达式、部分、INCLUDE、非默认索引方向/NULL 顺序、非默认操作符类、特殊访问方法、延迟唯一性及 NULLS NOT DISTINCT 均阻止，可明确排除独立索引。外键按目录数组位置配对，保留引用 schema，检查复合列、引用键、类型、动作和依赖；跨 schema、SET DEFAULT 和延迟外键不自动改写。
 
 分区（包括可探测的 Gauss pg_partition/parttype）、继承、外部表、物化视图、生成列、排除约束和行级安全策略会显式阻止，避免重复或不完整复制。函数、过程、触发器不跨库转换；全量迁移中列出并要求明确排除，原始定义仍可单独导出。
 
 ## 目标版本与表达式
 
-仅接受 MySQL 5.7 和 8.0，解析实际补丁版本，不按连接标签推断能力。使用 InnoDB、DYNAMIC、utf8mb4、utf8mb4_bin，读取严格模式、大小写策略、页大小、大索引能力和 max_allowed_packet。执行连接设置 UTC、NO_AUTO_VALUE_ON_ZERO、NO_BACKSLASH_ESCAPES 和严格模式，结束后恢复，不修改全局配置。
+仅接受 MySQL 5.7 和 8.0，解析实际补丁版本，不按连接标签推断能力。使用 InnoDB、DYNAMIC，建表不指定字符集或排序规则，继承目标 database 默认配置（不是服务器默认配置）；读取严格模式、大小写策略、页大小、大索引能力和 max_allowed_packet。执行连接设置 UTC、NO_AUTO_VALUE_ON_ZERO、NO_BACKSLASH_ESCAPES 和严格模式，结束后恢复，不修改全局配置。
 
 | 版本 | 默认值 | CHECK |
 | --- | --- | --- |
@@ -45,8 +45,10 @@
 - `data_only` 要求空的目标表，逐列检查名称、顺序、映射类型、NULL、自增、生成属性及排序规则，检查已有主键/唯一性、CHECK、外键和触发器；保留约束并先加载父表。非空追加、循环或自引用外键的数据导入暂不支持。
 - 已有表的对象迁移要求 InnoDB DYNAMIC 和匹配列结构。外键引用表必须纳入完整验证，不能依赖未核验目标。
 - 权限检查目前接受可确认的全局或直接 database 级授权；只通过角色继承、表级或不能确定作用范围的通配授权获得权限时失败关闭，需提供明确权限。
-- 数据预检扫描全部数据，唯一键验证使用长度编码的 SHA-256 键集合，内存随唯一键数量增加；外键会再次扫描子表。复制当前使用顺序表/分页，页大小最多 20000；并发参数不用于这条严格执行路径。
-- utf8mb4_bin 的 PAD SPACE 与 PG 字符比较存在差异，实际唯一性和外键按目标规则检查；应用层排序/比较仍须按报告中的映射调整。
+- 数据预检扫描全部数据，字符键通过目标 MySQL 的只读批量查询获取比较权重，唯一键验证使用长度编码的 SHA-256 键集合，内存随唯一键数量增加；外键会再次扫描子表。复制当前使用顺序表/分页，页大小最多 20000；并发参数不用于这条严格执行路径。
+- 忽略源端列及索引的排序规则（包括显式指定的规则），不因排序规则阻止迁移；非默认操作符类和其他不支持的索引特性仍然阻止。已有表使用各列实际字符集和排序规则，不强制与数据库默认值一致。
+- 按目标规则检查大小写、重音、CHAR 存储和 PAD SPACE／NO PAD 差异下的唯一性、外键及 CHECK；字符转换必须可无损回转，行宽和索引长度使用实际字符集字节数。迁移后应用比较/排序遵循目标配置。
+- 执行前复核数据库默认配置和已有列排序规则；变化时停止并要求重新预检。预检不修改任何目标表，也不创建临时表。
 - MySQL 5.7 重启后计数器可能从表内最大值重建，不能承诺 PG 序列空洞持久性。GENERATED ALWAYS 映射为 AUTO_INCREMENT 后允许显式赋值，报告会提示。
 - 预检不证明厂商版本兼容认证，也不预测执行时发生的权限、磁盘或连接变化。没有实库测试的产品组合始终显示“待验证”。
 
@@ -75,16 +77,17 @@
 
 ## 验证矩阵和复现
 
-2026-09-07 验证状态：
+2026-09-16 验证状态：
 
 | 源 | 目标 | 状态 |
 | --- | --- | --- |
-| PostgreSQL 16.6（Homebrew） | MySQL 8.0.41（Homebrew） | 本机独立临时实例，集成夹具通过 |
+| PostgreSQL 16.6（Homebrew） | MySQL 8.0.41（Homebrew） | 独立临时实例，全量迁移及字符规则集成测试通过 |
+| PostgreSQL 16.6（Homebrew） | MySQL 5.7.20（Docker） | 独立临时容器，全量迁移及字符规则集成测试通过 |
 | PostgreSQL | MySQL 5.7.44 | 待实库验证；提供固定镜像夹具 |
 | PostgreSQL | MySQL 8.0.36 | 待实库验证；提供固定镜像夹具 |
 | GaussDB、HighGo、Vastbase、GBase、SeaBox、KingBase | MySQL 5.7.44 / 8.0.36 | 待提供各产品具体版本、兼容模式及独立测试 DSN |
 
-单元测试覆盖 8.0.12/13、8.0.15/16 门槛，不将模拟测试记为这些版本的实库通过。本机 Docker daemon 未启动，因此未运行 Compose 矩阵。
+单元测试覆盖 8.0.12/13、8.0.15/16 门槛，不将模拟测试记为这些版本的实库通过。本次使用本机已有 MySQL 5.7.20 镜像验证，未运行 Compose 中的 5.7.44 / 8.0.36 矩阵。
 
 在专用测试环境启动固定版本：
 
@@ -97,10 +100,10 @@ docker compose -f datamigrate/testdata/pgmysql/compose.yml up -d --wait
 ```sh
 DBGOLD_PGMYSQL_SOURCE_DSN='host=127.0.0.1 port=55432 user=postgres password=dbgold_fixture dbname=fixture sslmode=disable' \
 DBGOLD_PGMYSQL_TARGET_DSN='root:dbgold_fixture@tcp(127.0.0.1:55357)/fixture?parseTime=true&charset=utf8mb4' \
-/Users/kay/sdk/go1.25.5/bin/go test ./datamigrate -run TestPGMySQLIntegration -v -count=1
+/Users/kay/sdk/go1.25.5/bin/go test ./datamigrate -run '^TestPGMySQL(Integration|TextComparisonIntegration)$' -v -count=1
 ```
 
-国产源使用相同夹具，替换两个 DSN，并设置 `DBGOLD_PGMYSQL_PRODUCT` 和 `DBGOLD_PGMYSQL_DRIVER`（gaussdb/opengauss、highgo/highgo，其他产品/postgres）。夹具需要创建并删除独立 schema/database 的权限，只操作本次生成的 `dbgold_it_*` 对象，结束时清理；未设置 DSN 时跳过实库测试。
+国产源使用相同夹具，替换两个 DSN，并设置 `DBGOLD_PGMYSQL_PRODUCT` 和 `DBGOLD_PGMYSQL_DRIVER`（gaussdb/opengauss、highgo/highgo，其他产品/postgres）。夹具需要创建并删除独立 schema/database 的权限，只操作本次生成的 `dbgold_it_*` / `dbgold_text_*` 对象，结束时清理；未设置 DSN 时跳过实库测试。
 
 夹具覆盖复合外键顺序、自增零值/序列空洞、identity、DECIMAL、二进制、中文与特殊名称、布尔、UUID、UTC 微秒、JSON、默认值、注释、视图、重复重建及结构/数据分阶段；检查阻止项不会删除已有目标数据。
 
@@ -113,3 +116,5 @@ docker compose -f datamigrate/testdata/pgmysql/compose.yml down --volumes
 ```
 
 实现依据：[PG 索引目录](https://www.postgresql.org/docs/current/catalog-pg-index.html)、[MySQL 默认值](https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html)、[MySQL CHECK](https://dev.mysql.com/doc/refman/8.0/en/create-table-check-constraints.html)。
+
+字符规则回归覆盖 `utf8mb4_general_ci`、`utf8mb4_bin`、`utf8mb4_unicode_ci`、`latin1_swedish_ci`，并在 8.0 覆盖 `utf8mb4_0900_ai_ci`。包括大小写、重音、Unicode 展开字符、尾空格、CHAR/VARCHAR、复合键、NULL、外键、CHECK（含不同列排序规则）、不可表示字符和已有列配置保留。源库测试使用显式列/索引排序规则，确保不再产生排序规则阻止项。空表及仅迁移结构时也检查字符默认值是否可无损转换。

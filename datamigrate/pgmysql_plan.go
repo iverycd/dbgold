@@ -52,6 +52,7 @@ type PGMySQLPreflight struct {
 	Objects       []PlannedObject      `json:"objects"`
 	RowsChecked   int64                `json:"rows_checked"`
 	rowCounts     map[string]int64
+	textRules     map[string]map[string]target.MySQLTextRules
 	tables        []source.PGTable
 	snapshot      *source.PGSnapshot
 	validationFKs []source.FKInfo
@@ -265,7 +266,6 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			t.Indexes = append(t.Indexes, idx)
 		}
 		var auto []source.ColumnInfo
-		rowBytes := int64(0)
 		for _, c := range t.Info.Columns {
 			registerName("column:"+t.Info.TableName, m.objName(c.Name), t.Info.TableName+"."+c.Name)
 			typ, e := typemap.PGToMySQLChecked(c)
@@ -282,17 +282,6 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			if c.DataType == "json" || c.DataType == "jsonb" {
 				p.warn(ref, "列 "+c.Name+" 转为 MySQL JSON，空白、键顺序和重复键可能规范化")
 			}
-			if strings.Contains(typ, "CHAR(") {
-				if c.DataType == "uuid" {
-					rowBytes += 144
-				} else {
-					rowBytes += c.Length*4 + 2
-				}
-			} else if typ == "LONGTEXT" || typ == "LONGBLOB" || typ == "JSON" {
-				rowBytes += 20
-			} else {
-				rowBytes += 32
-			}
 			if !isExisting && c.Default != nil && c.Extra != "auto_increment" {
 				if _, e = dialect.PGColumnDefault(c, typ, p.Target.Parsed); e != nil {
 					p.add(ref, "列 "+c.Name+" 默认值: "+e.Error(), true)
@@ -301,29 +290,6 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			if utf8.RuneCountInString(c.Comment) > 1024 {
 				p.add(ref, "列 "+c.Name+" 注释超过 MySQL 长度限制", true)
 			}
-		}
-		minRecord := 32 + (len(t.Info.Columns)+7)/8
-		for _, c := range t.Info.Columns {
-			typ, e := typemap.PGToMySQLChecked(c)
-			if e != nil {
-				continue
-			}
-			switch {
-			case strings.HasPrefix(typ, "VARCHAR") || typ == "LONGTEXT" || typ == "LONGBLOB" || typ == "JSON":
-				minRecord += 22
-			case typ == "CHAR(36)" && c.DataType == "uuid":
-				minRecord += 144
-			case strings.HasPrefix(typ, "CHAR"):
-				minRecord += int(max(c.Length, 1) * 4)
-			default:
-				minRecord += 32
-			}
-		}
-		if minRecord > min(p.Target.PageSize/2-200, 16000) {
-			p.add(ref, "预计 InnoDB 最小行内记录超过目标页大小限制", true)
-		}
-		if len(t.Info.Columns) > 1017 || rowBytes > 65535 {
-			p.add(ref, "列数或预计行宽超过 MySQL 限制", true)
 		}
 		if utf8.RuneCountInString(t.Info.Comment) > 2048 {
 			p.add(ref, "表注释超过 MySQL 长度限制", true)
@@ -419,9 +385,6 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 				continue
 			}
 			registerName("index:"+t.Info.TableName, m.objName(idx.IndexName), t.Info.TableName+"."+idx.IndexName)
-			if e := checkPGIndex(t, idx, p.Target); e != nil {
-				p.add(idxRef(idx), e.Error(), true)
-			}
 		}
 		// Preserve selected objects for cached-plan execution; exclusions do not
 		// change the immutable source snapshot used for diagnostics.
@@ -448,7 +411,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 		}
 
 		if !isExisting {
-			stmts, inline, e := dia.PGTableStatements(p.Target.Database, t, p.Target.Parsed, p.Target.TargetCollation, m.objName)
+			stmts, inline, e := dia.PGTableStatements(p.Target.Database, t, p.Target.Parsed, m.objName)
 			if e != nil {
 				p.add(ref, e.Error(), true)
 			} else {
@@ -545,6 +508,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	if err = m.inspectPGMySQLTarget(ctx, p, w.InspectionDB(), isExisting); err != nil {
 		p.add(ObjectRef{Kind: "target", Name: p.Target.Database}, err.Error(), false)
 	}
+	m.checkPGMySQLTextStructure(p)
 	if m.cfg.Content == "data_only" {
 		orderPGDataTables(p)
 	}
@@ -552,6 +516,17 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	if p.Ready {
 		if e := m.checkPGMySQLPrivileges(ctx, p, w.InspectionDB()); e != nil {
 			p.add(ObjectRef{Kind: "permission", Name: p.Target.Database}, e.Error(), false)
+			p.finish()
+		}
+	}
+	if p.Ready && !isExisting {
+		if err := validatePGTextDefaults(ctx, p, w.InspectionDB()); err != nil {
+			var objectErr *pgObjectError
+			if errors.As(err, &objectErr) {
+				p.add(objectErr.Object, err.Error(), true)
+			} else {
+				p.add(ObjectRef{Kind: "target", Name: p.Target.Database}, err.Error(), false)
+			}
 			p.finish()
 		}
 	}
@@ -568,7 +543,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	// Stable execution order; dependency order among views is already topological.
 	order := map[string]int{"drop_dependency": 0, "table": 1, "index": 2, "sequence": 3, "check": 4, "foreign_key": 5, "comment": 6, "view": 7}
 	sort.SliceStable(p.Objects, func(i, j int) bool { return order[p.Objects[i].Stage] < order[p.Objects[j].Stage] })
-	p.warn(ObjectRef{Kind: "migration", Name: "迁移前提"}, "停写及停止结构变更期间执行；字符列使用 utf8mb4_bin，比较/排序及 CHAR 尾空格语义需应用确认")
+	p.warn(ObjectRef{Kind: "migration", Name: "迁移前提"}, fmt.Sprintf("停写及停止结构变更期间执行；忽略源排序规则，采用目标配置。新表继承目标数据库 %s / %s，已有表使用各列实际配置", p.Target.TargetCharset, p.Target.TargetCollation))
 	p.finish()
 	return p
 }
@@ -586,7 +561,7 @@ func mappedPGIndex(i source.IndexInfo, name func(string) string) source.IndexInf
 	i.Columns = mapNames(i.Columns, name)
 	return i
 }
-func checkPGIndex(t source.PGTable, idx source.IndexInfo, p target.MySQLProfile) error {
+func checkPGIndex(t source.PGTable, idx source.IndexInfo, p target.MySQLProfile, rules map[string]target.MySQLTextRules) error {
 	if len(idx.Columns) == 0 || len(idx.Columns) > 16 {
 		return fmt.Errorf("索引列数量超出 MySQL 范围")
 	}
@@ -614,9 +589,9 @@ func checkPGIndex(t source.PGTable, idx source.IndexInfo, p target.MySQLProfile)
 				return fmt.Errorf("%s 索引不能无损自动加前缀", typ)
 			case strings.Contains(typ, "CHAR"):
 				if c.DataType == "uuid" {
-					bytes += 144
+					bytes += 36 * int64(rules[c.Name].MaxBytes)
 				} else {
-					bytes += max(c.Length, 1) * 4
+					bytes += max(c.Length, 1) * int64(rules[c.Name].MaxBytes)
 				}
 			default:
 				bytes += 32

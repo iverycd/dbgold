@@ -103,7 +103,7 @@ func PGDefault(raw, typ string, nullable bool, v MySQLVersion) (string, error) {
 
 // PGTableStatements consumes validated metadata. Indexes needed by AUTO_INCREMENT
 // are created atomically with the column; no temporary duplicate primary key.
-func (d *MySQLDialect) PGTableStatements(schema string, t source.PGTable, v MySQLVersion, collation string, name NameFunc) ([]Statement, []string, error) {
+func (d *MySQLDialect) PGTableStatements(schema string, t source.PGTable, v MySQLVersion, name NameFunc) ([]Statement, []string, error) {
 	defs := []string{}
 	var auto string
 	inline := []string{}
@@ -163,7 +163,7 @@ func (d *MySQLDialect) PGTableStatements(schema string, t source.PGTable, v MySQ
 		}
 	}
 	qn := d.QualifyTable(schema, name(t.Info.TableName))
-	create := "CREATE TABLE " + qn + " (\n  " + strings.Join(defs, ",\n  ") + "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=" + collation + " ROW_FORMAT=DYNAMIC"
+	create := "CREATE TABLE " + qn + " (\n  " + strings.Join(defs, ",\n  ") + "\n) ENGINE=InnoDB ROW_FORMAT=DYNAMIC"
 	if t.Info.Comment != "" {
 		create += " COMMENT=" + sqlsyntax.QuoteString(t.Info.Comment)
 	}

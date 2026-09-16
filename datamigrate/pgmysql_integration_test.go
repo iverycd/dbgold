@@ -52,11 +52,11 @@ func TestPGMySQLIntegration(t *testing.T) {
 	}
 	exec(pg, "CREATE SCHEMA "+qn)
 	defer pg.ExecContext(context.Background(), "DROP SCHEMA "+qn+" CASCADE")
-	exec(my, "CREATE DATABASE `"+ns+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin")
+	exec(my, "CREATE DATABASE `"+ns+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci")
 	defer my.ExecContext(context.Background(), "DROP DATABASE `"+ns+"`")
 	// serial works on older PG-derived catalogs too; modern identity has its own
 	// optional fixture below for sources that advertise attidentity.
-	exec(pg, `CREATE TABLE `+qn+`."Parent" ("Id" serial PRIMARY KEY, "Name" varchar(100) NOT NULL DEFAULT '', "Amount" numeric(10,2) DEFAULT 0, "Active" boolean DEFAULT true, "Raw" bytea, "At" timestamptz, "Doc" jsonb, "UUID" uuid, CONSTRAINT positive_amount CHECK ("Amount">=0))`)
+	exec(pg, `CREATE TABLE `+qn+`."Parent" ("Id" serial PRIMARY KEY, "Name" varchar(100) COLLATE "C" NOT NULL DEFAULT '' UNIQUE, "Amount" numeric(10,2) DEFAULT 0, "Active" boolean DEFAULT true, "Raw" bytea, "At" timestamptz, "Doc" jsonb, "UUID" uuid, CONSTRAINT positive_amount CHECK ("Amount">=0))`)
 	exec(pg, `COMMENT ON COLUMN `+qn+`."Parent"."Name" IS 'Name''s comment'`)
 	exec(pg, `COMMENT ON TABLE `+qn+`."Parent" IS 'Parent comment'`)
 	exec(pg, `CREATE TABLE `+qn+`."Child" ("Id" integer PRIMARY KEY, "ParentId" integer NOT NULL, CONSTRAINT child_parent FOREIGN KEY ("ParentId") REFERENCES `+qn+`."Parent"("Id"))`)
@@ -131,11 +131,16 @@ func TestPGMySQLIntegration(t *testing.T) {
 	if schemaReport.HasFailures() {
 		t.Fatalf("schema-only: %+v %+v", schemaReport.Preflight, schemaReport.Tables)
 	}
+	// Existing columns retain general_ci even after database defaults change.
+	exec(my, "ALTER DATABASE `"+ns+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin")
 	dataCfg := cfg
 	dataCfg.Content = "data_only"
 	dataReport := NewMigrator(r, w, job, dataCfg).Run(ctx)
 	if dataReport.HasFailures() {
 		t.Fatalf("data-only: preflight=%+v data=%+v", dataReport.Preflight, dataReport.Data)
+	}
+	if got := dataReport.Preflight.textRules["Parent"]["Name"].Collation; got != "utf8mb4_general_ci" {
+		t.Fatalf("existing column override ignored: %s", got)
 	}
 	var nextAuto int64
 	if e = my.QueryRowContext(ctx, `SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME='parent'`, ns).Scan(&nextAuto); e != nil || nextAuto != 101 {

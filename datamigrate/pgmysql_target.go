@@ -11,6 +11,7 @@ import (
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/sqlsyntax"
+	"dbgold/datamigrate/target"
 	"dbgold/datamigrate/typemap"
 )
 
@@ -33,6 +34,16 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 	}
 	if exists == 0 {
 		return fmt.Errorf("目标 database 不存在")
+	}
+	p.textRules = map[string]map[string]target.MySQLTextRules{}
+	ruleCache := map[string]target.MySQLTextRules{p.Target.TargetCollation: p.Target.TextRules()}
+	for _, t := range p.tables {
+		p.textRules[t.Info.TableName] = map[string]target.MySQLTextRules{}
+		for _, c := range t.Info.Columns {
+			if pgTextColumn(c) {
+				p.textRules[t.Info.TableName][c.Name] = p.Target.TextRules()
+			}
+		}
 	}
 	targets := map[string]string{}
 	for _, t := range p.tables {
@@ -117,8 +128,19 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 			if actual.generated.Valid && actual.generated.String != "" {
 				p.add(ref, "目标生成列不允许显式复制", false)
 			}
-			if actual.collation.Valid && actual.collation.String != p.Target.TargetCollation {
-				p.add(ref, "目标列 "+actual.name+" 排序规则必须与预检映射一致："+p.Target.TargetCollation, false)
+			if pgTextColumn(c) {
+				if !actual.collation.Valid {
+					return fmt.Errorf("目标字符列 %s.%s 缺少排序规则", name, actual.name)
+				}
+				rules, ok := ruleCache[actual.collation.String]
+				if !ok {
+					rules, e = target.ReadMySQLTextRules(ctx, db, actual.collation.String)
+					if e != nil {
+						return e
+					}
+					ruleCache[actual.collation.String] = rules
+				}
+				p.textRules[t.Info.TableName][c.Name] = rules
 			}
 			if strings.Contains(actual.extra, "auto_increment") != (c.Extra == "auto_increment") {
 				p.add(ref, "目标自增属性不匹配", false)

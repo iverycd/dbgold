@@ -53,8 +53,8 @@ func PGToMySQLChecked(c source.ColumnInfo) (string, error) {
 		if c.Length <= 0 {
 			return "LONGTEXT", nil
 		}
-		if c.Length > 16383 {
-			return "", fmt.Errorf("VARCHAR(%d) 超出 utf8mb4 容量，不能自动丢失长度约束", c.Length)
+		if c.Length > 65535 {
+			return "", fmt.Errorf("VARCHAR(%d) 超出 MySQL 最大字符容量，不能自动丢失长度约束", c.Length)
 		}
 		return fmt.Sprintf("VARCHAR(%d)", c.Length), nil
 	case "bpchar", "char", "character":
