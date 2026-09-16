@@ -311,10 +311,22 @@ func (r *PostgresReader) pgIndexes(ctx context.Context) ([]IndexInfo, error) {
 			rows.Close()
 			return nil, e
 		}
-		for _, v := range opts {
-			if v != 0 {
-				why = append(why, "非默认排序/NULL 顺序")
-				break
+		if len(opts) != nkeys {
+			rows.Close()
+			return nil, fmt.Errorf("索引 %s 的 indoption 数量 %d 与键列数量 %d 不一致", idx.IndexName, len(opts), nkeys)
+		}
+		if idx.Method == "btree" {
+			// BTREE indoption is a bitmask, not an enum: DESC=1, NULLS_FIRST=2.
+			// An ascending NULLS FIRST index (2) matches MySQL's native ordering;
+			// it must not be rejected just because PostgreSQL's default is 0.
+			// Existing ASC NULLS LAST (0) mappings continue to use target defaults.
+			// Keep DESC and unknown vendor bits blocked instead of dropping them.
+			for i, v := range opts {
+				if v < 0 || v & ^3 != 0 {
+					why = append(why, fmt.Sprintf("索引第 %d 个键列含未知选项（indoption=%d）", i+1, v))
+				} else if v&1 != 0 {
+					why = append(why, fmt.Sprintf("索引第 %d 个键列为降序 DESC，暂不自动转换（indoption=%d）", i+1, v))
+				}
 			}
 		}
 		idx.Unsupported = strings.Join(why, "、")

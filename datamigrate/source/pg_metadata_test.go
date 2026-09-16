@@ -110,3 +110,53 @@ func TestPGOperatorClassCheckIgnoresCollationsAndPreservesOtherReasons(t *testin
 		t.Fatal(err)
 	}
 }
+
+func TestPGBtreeIndexOptionsDistinguishNullPlacementFromDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name, options, reason       string
+		primary, partial, badLength bool
+	}{
+		{name: "default", options: "0 0"},
+		{name: "vastbase_primary_nulls_first", options: "2 2", primary: true},
+		{name: "unique_nulls_first", options: "2 0"},
+		{name: "mixed_null_placement", options: "0 2"},
+		{name: "descending_nulls_last", options: "1 0", reason: "降序 DESC"},
+		{name: "descending_nulls_first", options: "0 3", reason: "降序 DESC"},
+		{name: "unknown_vendor_bit", options: "4 0", reason: "未知选项（indoption=4）"},
+		{name: "unknown_bit_with_nulls_first", options: "6 0", reason: "未知选项（indoption=6）"},
+		{name: "negative_option", options: "-1 0", reason: "未知选项（indoption=-1）"},
+		{name: "partial_stays_blocked", options: "2 0", partial: true, reason: "部分索引"},
+		{name: "missing_option", options: "2", badLength: true},
+		{name: "extra_option", options: "0 0 2", badLength: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, _ := sqlmock.New()
+			defer db.Close()
+			r := &PostgresReader{db: db, schema: "Mixed", profile: PGProfile{Product: "vastbase", Catalog: "pg_catalog", Fields: map[string]bool{}}}
+			mock.ExpectQuery(`SELECT t.relname,i.relname`).WithArgs("Mixed").WillReturnRows(sqlmock.NewRows([]string{"table", "index", "keys", "unique", "primary", "method", "expr", "pred", "nkeys", "natts", "nulls", "valid", "immediate", "options", "def"}).AddRow("T", "Ix", "2 1", true, tc.primary, "btree", false, tc.partial, 2, 2, false, true, true, tc.options, "CREATE UNIQUE INDEX"))
+			if !tc.badLength {
+				mock.ExpectQuery(`SELECT c.relname,a.attnum,a.attname`).WithArgs("Mixed").WillReturnRows(sqlmock.NewRows([]string{"t", "n", "a"}).AddRow("T", 1, "First").AddRow("T", 2, "Second"))
+			}
+			indexes, err := r.pgIndexes(context.Background())
+			if tc.badLength {
+				if err == nil || !strings.Contains(err.Error(), "indoption 数量") {
+					t.Fatal(indexes, err)
+				}
+			} else {
+				if err != nil || len(indexes) != 1 {
+					t.Fatal(indexes, err)
+				}
+				idx := indexes[0]
+				if tc.reason == "" && idx.Unsupported != "" || tc.reason != "" && !strings.Contains(idx.Unsupported, tc.reason) {
+					t.Fatal(idx.Unsupported)
+				}
+				if idx.IsPrimary != tc.primary || !idx.IsUnique || !reflect.DeepEqual(idx.Columns, []string{"Second", "First"}) {
+					t.Fatalf("key metadata changed: %+v", idx)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
