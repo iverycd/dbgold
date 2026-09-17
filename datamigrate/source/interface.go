@@ -11,6 +11,9 @@ type IdentityInfo struct {
 }
 
 type ColumnInfo struct {
+	// PGMySQLLongText is a private migration-plan override. Readers leave it false;
+	// the original VARCHAR length remains authoritative for conversion and CHECK.
+	PGMySQLLongText   bool `json:"-"`
 	IdentityInfo      *IdentityInfo
 	Name              string
 	DataType          string // 原始数据库类型（如 "varchar"、"int"）

@@ -80,10 +80,11 @@ test('report export includes Oracle warnings and still accepts historical report
   const blobs = []
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
   const panel = execute(`${descriptor.scriptSetup.content}\nexport { report, exportReport };`, name => {
-    if (name === 'vue') return { ...Vue, onMounted() {} }
+    if (name === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
     return {}
   }, {
     defineProps: () => ({ jobID: 'oracle-report' }),
+    defineEmits: () => () => {},
     URL: { createObjectURL: blob => { blobs.push(blob); return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) },
   })

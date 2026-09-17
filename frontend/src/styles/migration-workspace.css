@@ -1,0 +1,84 @@
+/* Shared migration workspace surfaces. Keep overrides scoped to this workspace. */
+.migration-workspace {
+  max-width: 1600px;
+  min-width: 0;
+  margin: 0 auto;
+  padding-bottom: 24px;
+  container-type: inline-size;
+  --primary-1: 240, 253, 244;
+  --primary-2: 220, 252, 231;
+  --primary-3: 187, 247, 208;
+  --primary-4: 134, 239, 172;
+  --primary-5: 34, 197, 94;
+  --primary-6: 22, 163, 74;
+  --primary-7: 21, 128, 61;
+}
+.migration-workspace .migration-page-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin: 8px 0 24px; }
+.migration-workspace .migration-page-heading h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.5px; }
+.migration-workspace .migration-page-heading p { margin: 8px 0 0; color: var(--color-text-3); font-size: 13px; }
+.migration-workspace .migration-page-label { display: flex; gap: 8px; align-items: center; color: var(--color-text-3); font-size: 12px; padding: 8px 12px; background: var(--color-bg-1); border: 1px solid var(--color-border-2); border-radius: 20px; }
+.migration-workspace .migration-form, .migration-workspace .incremental-panel { margin-top: 8px; }
+.migration-workspace .migration-surface { min-width: 0; margin-bottom: 20px; padding: 24px; background: var(--color-bg-1); border: 1px solid var(--color-border-2); border-radius: 10px; }
+.migration-workspace .migration-section-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.migration-workspace .migration-section-heading h3 { font-size: 16px; font-weight: 600; margin: 0; }
+.migration-workspace .migration-section-heading span { font-size: 12px; color: var(--color-text-3); }
+.migration-workspace .migration-connections { display: grid; grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr); align-items: stretch; margin-bottom: 20px; gap: 12px; }
+.migration-workspace .migration-connection-side { min-width: 0; }
+.migration-workspace .migration-connection-arrow { display: flex; align-items: center; justify-content: center; }
+.migration-workspace .migration-connection-arrow .arco-icon { font-size: 22px !important; color: #16a34a !important; }
+.migration-workspace .conn-card { height: 100%; border-radius: 10px !important; box-shadow: none !important; }
+.migration-workspace .conn-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.migration-workspace .conn-card-title { font-size: 15px; font-weight: 600; }
+.migration-workspace .conn-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 0 2px; margin: 0; }
+.migration-workspace .conn-meta-item { font-size: 12px; color: var(--color-text-3); overflow-wrap: anywhere; }
+.migration-workspace .conn-meta-label { color: var(--color-text-4); margin-right: 5px; }
+.migration-workspace .migration-select-label { font-size: 12px; color: var(--color-text-3); padding-right: 10px; margin-right: 2px; border-right: 1px solid var(--color-border-2); white-space: nowrap; }
+.migration-workspace .arco-select-view, .migration-workspace .arco-input-wrapper, .migration-workspace .arco-input-number { box-shadow: none !important; }
+.migration-workspace .arco-select-view { min-height: 36px; }
+.migration-workspace .migration-settings > .arco-form-item { margin-bottom: 22px !important; }
+.migration-workspace .migration-settings > .arco-form-item > .arco-form-item-wrapper > .arco-form-item-content { flex-wrap: wrap; gap: 8px; }
+.migration-workspace .migration-settings .arco-radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
+.migration-workspace .migration-settings .arco-radio { border: 1px solid var(--color-border-2); border-radius: 6px; padding: 8px 14px; margin: 0; background: var(--color-bg-1); height: auto; }
+.migration-workspace .migration-settings .arco-radio-checked { border-color: #86efac; background: #f0fdf4; }
+.migration-workspace .migration-object-options .arco-checkbox { border: 1px solid var(--color-border-2); border-radius: 6px; padding: 8px 12px; margin: 0 8px 8px 0; }
+.migration-workspace .migration-object-options .arco-checkbox-checked { border-color: #86efac; background: #f0fdf4; }
+.migration-workspace .migration-advanced { border: 1px solid var(--color-border-2); border-radius: 8px; overflow: hidden; }
+.migration-workspace .migration-advanced .arco-collapse-item-header { background: var(--color-bg-2); padding-top: 14px; padding-bottom: 14px; font-weight: 500; }
+.migration-workspace .migration-advanced .arco-collapse-item-content { background: var(--color-bg-1); }
+.migration-workspace .adv-section-title { margin-bottom: 14px; font-size: 13px; font-weight: 600; }
+.migration-workspace .adv-check { display: inline-flex; align-items: flex-start; line-height: 1.7; margin-bottom: 12px; }
+.migration-workspace .adv-check .arco-checkbox { margin-top: 4px; }
+.migration-workspace .migration-log-container { height: 360px; max-height: 50vh; padding: 16px 20px; border-radius: 8px; overflow: auto; background: #17212b; color: #d5dee7; font: 12px/1.8 var(--font-mono, monospace); }
+.migration-workspace .migration-results { margin-top: 20px; }
+.migration-workspace .migration-results .arco-tabs-content { padding-top: 12px; }
+.migration-workspace .report-conn-bar { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+.migration-workspace .report-conn-detail { white-space: normal; overflow-wrap: anywhere; }
+.migration-workspace .view-result-ddl { max-height: 320px; overflow: auto; }
+.migration-workspace .arco-tabs-tab-active, .migration-workspace .arco-tabs-tab:hover { color: #15803d; }
+.migration-workspace .arco-tabs-nav-ink { background: #16a34a; }
+.migration-workspace .arco-tabs-content, .migration-workspace .arco-tabs-pane, .migration-workspace .arco-form-item-wrapper { min-width: 0; }
+.migration-workspace .arco-table-cell { overflow-wrap: anywhere; }
+.migration-workspace .migration-settings .arco-space { max-width: 100%; }
+@container (max-width: 1099px) {
+  .migration-workspace .migration-advanced-grid > .arco-col { flex: 0 0 100%; max-width: 100%; }
+  .migration-workspace .migration-advanced-grid > .arco-col + .arco-col { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--color-border-2); }
+}
+@container (max-width: 767px) {
+  .migration-workspace .migration-connections { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .migration-workspace .migration-connection-arrow { height: 24px; transform: rotate(90deg); }
+  .migration-workspace .migration-surface { padding: 16px; }
+  .migration-workspace .conn-card .arco-card-body { padding: 16px !important; }
+  .migration-workspace .migration-settings .arco-col { flex: 0 0 100%; max-width: 100%; }
+  .migration-workspace .migration-settings .arco-radio { padding: 6px 10px; }
+  .migration-workspace .migration-settings .arco-input-wrapper { max-width: 100%; }
+  .migration-workspace .migration-page-label { display: none; }
+}
+
+.migration-workspace .migration-row-no-details .arco-table-expand-btn { display: none; }
+.migration-workspace .report-conn-arrow { color: #16a34a; }
+.migration-workspace .arco-btn-primary.arco-btn-disabled {
+  background: #e2e8f0 !important;
+  border-color: #e2e8f0 !important;
+  color: #64748b !important;
+  box-shadow: none !important;
+}

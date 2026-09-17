@@ -1,11 +1,10 @@
 <template>
   <a-form :model="form" layout="vertical" class="incremental-panel">
-    <a-alert type="warning" style="margin-bottom: 16px">
-      “全量快照后持续同步”只在任务首次初始化时删除并重建所选目标表；全量完成后会立即把 checkpoint 写入目标库，恢复任务只会从 checkpoint 继续，不会再次删表。全量未完成的中断任务禁止直接恢复。
-    </a-alert>
 
-    <a-row :gutter="20">
-      <a-col :span="12">
+
+    <div class="migration-connections">
+      <div class="migration-connection-side"><a-card class="conn-card" :body-style="{ padding: '24px' }">
+        <div class="conn-card-header"><a-tag color="orange" size="small">源库</a-tag><span class="conn-card-title">从哪里迁移</span></div>
         <a-form-item label="源连接">
           <div style="width: 100%">
             <a-select
@@ -38,8 +37,10 @@
             <a-option v-for="d in databases" :key="d" :value="d">{{ d }}</a-option>
           </a-select>
         </a-form-item>
-      </a-col>
-      <a-col :span="12">
+      </a-card></div>
+      <div class="migration-connection-arrow"><icon-arrow-right /></div>
+      <div class="migration-connection-side"><a-card class="conn-card" :body-style="{ padding: '24px' }">
+        <div class="conn-card-header"><a-tag color="blue" size="small">目标库</a-tag><span class="conn-card-title">迁移到哪里</span></div>
         <a-form-item label="目标连接">
           <div style="width: 100%">
             <a-select
@@ -73,9 +74,10 @@
             <a-option v-for="s in schemas" :key="s" :value="s">{{ s }}</a-option>
           </a-select>
         </a-form-item>
-      </a-col>
-    </a-row>
+      </a-card></div>
+    </div>
 
+    <section class="migration-surface migration-settings"><div class="migration-section-heading"><h3>迁移设置</h3><span>配置启动方式与同步范围</span></div>
     <a-form-item label="启动方式">
       <a-radio-group v-model="form.start_mode">
         <a-radio value="full_then_cdc">全量快照后持续同步</a-radio>
@@ -126,20 +128,18 @@
       <a-col :span="4"><a-form-item label="名称"><a-checkbox v-model="form.lower_case_names">转小写</a-checkbox></a-form-item></a-col>
     </a-row>
 
-    <a-space style="margin-bottom: 16px">
-      <a-button :loading="checking" :disabled="!ready" @click="preflight">运行预检</a-button>
-      <a-button type="primary" :loading="starting" :disabled="!preflightResult?.ok" @click="start">启动增量任务</a-button>
-    </a-space>
+    </section>
 
-    <a-card v-if="preflightResult" title="预检结果" style="margin-bottom: 16px">
-      <a-descriptions :column="5" size="small">
+
+    <section v-if="preflightResult" class="migration-surface incremental-preflight"><div class="migration-section-heading"><h3>兼容预检</h3><a-tag :color="preflightResult.ok ? 'green' : 'red'">{{ preflightResult.ok ? '预检通过' : '存在阻止项' }}</a-tag></div>
+      <a-descriptions :column="{ xs: 1, sm: 2, lg: 3, xl: 5 }" size="small">
         <a-descriptions-item label="log_bin">{{ preflightResult.log_bin ? 'ON' : 'OFF' }}</a-descriptions-item>
         <a-descriptions-item label="format">{{ preflightResult.binlog_format }}</a-descriptions-item>
         <a-descriptions-item label="row image">{{ preflightResult.binlog_row_image }}</a-descriptions-item>
         <a-descriptions-item label="匹配表">{{ preflightResult.tables?.length || 0 }}</a-descriptions-item>
         <a-descriptions-item label="binlog 保留">{{ retentionText }}</a-descriptions-item>
       </a-descriptions>
-      <a-descriptions :column="3" size="small" style="margin-top: 10px">
+      <a-descriptions :column="{ xs: 1, sm: 2, lg: 3 }" size="small" style="margin-top: 10px">
         <a-descriptions-item label="主键定位">{{ preflightLocatorCounts.primary }}</a-descriptions-item>
         <a-descriptions-item label="唯一索引定位">{{ preflightLocatorCounts.unique }}</a-descriptions-item>
         <a-descriptions-item label="更新前整行匹配">{{ preflightLocatorCounts.fullRow }}</a-descriptions-item>
@@ -149,7 +149,15 @@
       <a-alert v-if="preflightFullRowTables.length" type="warning" style="margin-top: 8px">
         以下表将按更新前完整行同步 UPDATE/DELETE，目标端可能全表扫描：{{ preflightFullRowTables.join(', ') }}
       </a-alert>
-    </a-card>
+    </section>
+
+    <a-alert type="warning" style="margin-bottom: 16px">
+      “全量快照后持续同步”只在任务首次初始化时删除并重建所选目标表；全量完成后会立即把 checkpoint 写入目标库，恢复任务只会从 checkpoint 继续，不会再次删表。全量未完成的中断任务禁止直接恢复。
+    </a-alert>
+    <MigrationActionBar :status="checking ? '正在检查同步条件' : starting ? '正在创建增量任务' : preflightResult ? (preflightResult.ok ? '预检通过，可以启动增量任务' : '预检未通过，请处理问题') : '请先完成配置并运行预检'" :busy="checking || starting">
+      <a-button :loading="checking" :disabled="!ready" @click="preflight">运行预检</a-button>
+      <a-button type="primary" :loading="starting" :disabled="!preflightResult?.ok" @click="start">启动增量任务</a-button>
+    </MigrationActionBar>
 
     <a-modal v-model:visible="missingTableModalVisible" title="目标表不存在" :mask-closable="false" :footer="false">
       <a-alert type="error">
@@ -173,6 +181,7 @@
 </template>
 
 <script setup lang="ts">
+import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
@@ -348,7 +357,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.incremental-panel { margin-top: 12px; max-width: 1180px; }
+.incremental-panel { min-width: 0; }
 .conn-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
 .conn-meta-item { font-size: 12px; color: var(--color-text-3); }
 .conn-meta-label { color: var(--color-text-4); margin-right: 3px; }

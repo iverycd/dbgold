@@ -122,6 +122,14 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 				p.add(ref, e.Error(), false)
 				continue
 			}
+			// Recognize a previous schema-only wide-table plan from the actual
+			// column, not the database default charset (which may have changed).
+			if strings.HasPrefix(typ, "VARCHAR(") && normalizedMySQLType(actual.typ) == "longtext" && p.Target.Parsed.Checks() {
+				c.PGMySQLLongText = true
+				t.Info.Columns[i] = c
+				typ = "LONGTEXT"
+				p.warn(ref, fmt.Sprintf("列 %s 使用已有 LONGTEXT；必须保留 %d 字符长度约束", c.Name, c.Length))
+			}
 			if actual.name != m.objName(c.Name) || normalizedMySQLType(actual.typ) != normalizedMySQLType(typ) || strings.EqualFold(actual.nullable, "YES") != c.IsNullable {
 				p.add(ref, "目标列 "+actual.name+" 的名称、类型、顺序或可空性不匹配", false)
 			}
@@ -149,12 +157,12 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 		// Data-only writes into an empty schema created in a separate schema-only
 		// run. Appending to populated tables needs a separate conflict policy.
 		if m.cfg.Content == "data_only" {
-			var count int64
-			e = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+sqlsyntax.QuoteIdent(p.Target.Database)+`.`+sqlsyntax.QuoteIdent(name)).Scan(&count)
-			if e != nil {
+			var one int
+			e = db.QueryRowContext(ctx, `SELECT 1 FROM `+sqlsyntax.QuoteIdent(p.Target.Database)+`.`+sqlsyntax.QuoteIdent(name)+` LIMIT 1`).Scan(&one)
+			if e != nil && e != sql.ErrNoRows {
 				return e
 			}
-			if count != 0 {
+			if e == nil {
 				p.add(ref, "data_only 首版要求空目标表，不能隐式追加或覆盖已有行", false)
 			}
 		}
@@ -309,7 +317,12 @@ func (m *Migrator) checkExistingPGObjects(ctx context.Context, p *PGMySQLPreflig
 		}
 	}
 	if m.cfg.Content == "data_only" {
-		return m.compareExistingPGConstraints(ctx, p, db, t)
+		return m.compareExistingPGConstraints(ctx, p, db, t, false)
+	}
+	for _, c := range t.Info.Columns {
+		if c.PGMySQLLongText {
+			return m.compareExistingPGConstraints(ctx, p, db, t, true)
+		}
 	}
 
 	return nil
@@ -475,8 +488,9 @@ func replaceMySQLColumnComment(def, comment string) (string, error) {
 	return def + " COMMENT " + sqlsyntax.QuoteString(comment), nil
 }
 
-func (m *Migrator) compareExistingPGConstraints(ctx context.Context, p *PGMySQLPreflight, db *sql.DB, t source.PGTable) error {
+func (m *Migrator) compareExistingPGConstraints(ctx context.Context, p *PGMySQLPreflight, db *sql.DB, t source.PGTable, lengthOnly bool) error {
 	seenChecks := map[string]bool{}
+	seenLengths := map[string]bool{}
 	if p.Target.Parsed.Checks() {
 		rows, e := db.QueryContext(ctx, `SELECT tc.CONSTRAINT_NAME,cc.CHECK_CLAUSE,tc.ENFORCED FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=? AND tc.TABLE_NAME=? AND tc.CONSTRAINT_TYPE='CHECK'`, p.Target.Database, m.objName(t.Info.TableName))
 		if e != nil {
@@ -489,6 +503,16 @@ func (m *Migrator) compareExistingPGConstraints(ctx context.Context, p *PGMySQLP
 				return e
 			}
 			seenChecks[n] = true
+			lengthCheck := false
+			for _, c := range t.Info.Columns {
+				if c.PGMySQLLongText && matchesPGTextLengthCheck(expr, c, m.objName) && enforced == "YES" {
+					seenLengths[c.Name] = true
+					lengthCheck = true
+				}
+			}
+			if lengthCheck || lengthOnly {
+				continue
+			}
 			actual, e := canonicalMySQLCheck(expr)
 			if e != nil {
 				rows.Close()
@@ -510,6 +534,14 @@ func (m *Migrator) compareExistingPGConstraints(ctx context.Context, p *PGMySQLP
 		if e != nil {
 			return e
 		}
+	}
+	for _, c := range t.Info.Columns {
+		if c.PGMySQLLongText && !seenLengths[c.Name] {
+			p.add(tableRef(t.Info.TableName), fmt.Sprintf("目标 LONGTEXT 列 %s 缺少已启用的 %d 字符长度 CHECK", c.Name, c.Length), false)
+		}
+	}
+	if lengthOnly {
+		return nil
 	}
 	for _, c := range t.Checks {
 		if !seenChecks[m.objName(c.Name)] {

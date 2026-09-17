@@ -737,18 +737,8 @@ func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) 
 				copy := seq
 				copy.TableName = ref.t
 				copy.ColumnName = ref.c
-				// MAX reads are observational; never call nextval/setval in preflight.
-				var max sql.NullInt64
-				if e = r.db.QueryRowContext(ctx, `SELECT MAX(`+QuotePGIdent(ref.c)+`) FROM `+QuotePGIdent(ref.s)+`.`+QuotePGIdent(ref.t)).Scan(&max); e != nil {
-					return e
-				}
-				if max.Valid && max.Int64 >= copy.StartValue {
-					if max.Int64 == int64(^uint64(0)>>1) {
-						copy.Cycle = true
-					} else {
-						copy.StartValue = max.Int64 + 1
-					}
-				}
+				// Read only sequence catalog state here. Data maxima are collected
+				// during copying, not by scanning business tables in preflight.
 				t.Sequences = append(t.Sequences, copy)
 			}
 		}

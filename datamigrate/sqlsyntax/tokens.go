@@ -165,11 +165,17 @@ func QuoteString(s string) string { return "'" + strings.ReplaceAll(s, "'", "''"
 func QuoteIdent(s string) string  { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
 
 // Expr supports comparisons, boolean logic, constants, and column references.
-// Casts are accepted only for literals; they are checked, never stripped blind.
+// Casts are checked, never stripped blind. Additional syntax requires explicit
+// callbacks that validate metadata in the caller.
 type Expr struct {
 	Tokens  []Token
 	Pos     int
 	Resolve func([]string) (string, error)
+	// CastReference is opt-in: callers must validate source metadata before
+	// translating a column cast. Defaults and CHECK expressions leave it nil.
+	CastReference func(reference, target string) (string, error)
+	BitLiteral    func(bits string) (string, error)
+	Compare       func(left, operator, right string) error
 	// TypedLiteral is only enabled when the caller subsequently validates and
 	// converts the literal using its result type (defaults/view projections).
 	TypedLiteral bool
@@ -227,11 +233,19 @@ func (p *Expr) binary(min int) (string, error) {
 		if e != nil {
 			return "", e
 		}
+		if prec == 3 && p.Compare != nil {
+			if e := p.Compare(left, strings.ToUpper(t.Text), right); e != nil {
+				return "", e
+			}
+		}
 		left = "(" + left + " " + strings.ToUpper(t.Text) + " " + right + ")"
 	}
 	return left, nil
 }
 func (p *Expr) atom() (string, error) {
+	if p.Pos+1 < len(p.Tokens) && p.Tokens[p.Pos].Is("B") && p.Tokens[p.Pos+1].Kind == 's' {
+		return p.bitLiteral()
+	}
 	if p.take("NOT") {
 		s, e := p.binary(3)
 		return "(NOT " + s + ")", e
@@ -319,9 +333,42 @@ func (p *Expr) atom() (string, error) {
 	}
 	return p.cast(text, t, literal, sign)
 }
+
+func (p *Expr) bitLiteral() (string, error) {
+	if p.BitLiteral == nil {
+		return "", fmt.Errorf("此表达式暂不支持位串常量")
+	}
+	bits := p.Tokens[p.Pos+1].Value
+	p.Pos += 2
+	if len(bits) < 1 || len(bits) > 64 || strings.Trim(bits, "01") != "" {
+		return "", fmt.Errorf("位串常量须为 1..64 位的 0/1")
+	}
+	for p.take("::") {
+		if p.Pos >= len(p.Tokens) || p.Tokens[p.Pos].Value != "bit" || (p.Tokens[p.Pos].Kind != 'i' && p.Tokens[p.Pos].Kind != 'q') {
+			return "", fmt.Errorf("位串常量仅支持 bit 类型转换")
+		}
+		p.Pos++
+		width := int64(1)
+		if p.take("(") {
+			if p.Pos >= len(p.Tokens) || p.Tokens[p.Pos].Kind != 'n' {
+				return "", fmt.Errorf("缺少位串转换长度")
+			}
+			var err error
+			width, err = strconv.ParseInt(p.Tokens[p.Pos].Value, 10, 64)
+			p.Pos++
+			if err != nil || !p.take(")") {
+				return "", fmt.Errorf("无效位串转换长度")
+			}
+		}
+		if width != int64(len(bits)) {
+			return "", fmt.Errorf("位串类型转换会改变长度，需人工适配")
+		}
+	}
+	return p.BitLiteral(bits)
+}
 func (p *Expr) cast(text string, t Token, literal bool, sign string) (string, error) {
 	for p.take("::") {
-		if !literal {
+		if !literal && p.CastReference == nil {
 			return "", fmt.Errorf("只支持常量类型转换")
 		}
 		if p.Pos >= len(p.Tokens) {
@@ -350,6 +397,17 @@ func (p *Expr) cast(text string, t Token, literal bool, sign string) (string, er
 					cast = "timetz"
 				}
 			}
+		}
+		if !literal {
+			if p.Pos < len(p.Tokens) && p.Tokens[p.Pos].Is("(") {
+				return "", fmt.Errorf("带长度/精度的类型转换需人工确认")
+			}
+			var err error
+			text, err = p.CastReference(text, cast)
+			if err != nil {
+				return "", err
+			}
+			continue
 		}
 		if t.Is("NULL") {
 			switch cast {

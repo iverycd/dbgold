@@ -146,28 +146,25 @@ func TestPGMySQLTextComparisonIntegration(t *testing.T) {
 					t.Fatal("lossy character conversion accepted")
 				}
 			}
-			// Foreign-key key generation must use the same server semantics as uniqueness.
-			parent := source.PGTable{Info: source.TableDDLInfo{TableName: "parent", Columns: []source.ColumnInfo{{Name: "k", DataType: "varchar", Length: 20}}}, Indexes: []source.IndexInfo{{TableName: "parent", IndexName: "pk", Columns: []string{"k"}, IsUnique: true, IsPrimary: true}}}
-			child := source.PGTable{Info: source.TableDDLInfo{TableName: "child", Columns: parent.Info.Columns}}
-			p := &PGMySQLPreflight{Target: profile, tables: []source.PGTable{parent, child}, textRules: map[string]map[string]target.MySQLTextRules{"parent": {"k": rules}, "child": {"k": rules}}, validationFKs: []source.FKInfo{{TableName: "child", ConstraintName: "fk", Columns: []string{"k"}, RefTable: "parent", RefColumns: []string{"k"}}}}
-			r := &pgTextFixtureReader{data: map[string][][]any{"parent": {{"A"}}, "child": {{"a"}}}}
-			m := &Migrator{reader: r, cfg: Config{PageSize: 100}}
-			err = m.validatePGMySQLData(ctx, p, db, false)
+			// Without deep preflight, target constraints enforce collation semantics.
+			exec("CREATE TABLE " + qn + ".parent (k VARCHAR(20) PRIMARY KEY) ENGINE=InnoDB")
+			exec("CREATE TABLE " + qn + ".child (k VARCHAR(20), FOREIGN KEY(k) REFERENCES " + qn + ".parent(k)) ENGINE=InnoDB")
+			exec("INSERT INTO " + qn + ".parent VALUES ('A')")
 			var equal bool
 			if e := db.QueryRowContext(ctx, "SELECT CONVERT('A' USING "+rules.Charset+") COLLATE "+rules.Collation+" = CONVERT('a' USING "+rules.Charset+") COLLATE "+rules.Collation).Scan(&equal); e != nil {
 				t.Fatal(e)
 			}
+			w.SetSourceType("vastbase")
+			err = w.CopyData(ctx, "child", []string{"k"}, []string{"varchar"}, [][]any{{"a"}})
 			if (err == nil) != equal {
 				t.Fatalf("FK equal=%v error=%v", equal, err)
 			}
-			// Unique key rejection uses the same weights, including composite key delimiting.
-			r.data["parent"] = [][]any{{"A"}, {"a"}}
-			p.tables = []source.PGTable{parent}
-			p.validationFKs = nil
-			err = m.validatePGMySQLData(ctx, p, db, false)
+			err = w.CopyData(ctx, "parent", []string{"k"}, []string{"varchar"}, [][]any{{"a"}})
 			if (err != nil) != equal {
 				t.Fatalf("unique equal=%v error=%v", equal, err)
 			}
+			exec("DROP TABLE " + qn + ".child")
+			exec("DROP TABLE " + qn + ".parent")
 		})
 	}
 	if profile.Parsed.Checks() {

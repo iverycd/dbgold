@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -18,6 +19,7 @@ type pgViewParser struct {
 	schema, database string
 	relations        map[string][]source.ColumnInfo
 	aliases          map[string]string
+	resolved         map[string]source.ColumnInfo
 	dependencies     []string
 	name             func(string) string
 }
@@ -62,8 +64,226 @@ func (p *pgViewParser) resolve(parts []string) (string, error) {
 	if len(matches) != 1 {
 		return "", fmt.Errorf("列 %s 不存在或存在歧义", strings.Join(parts, "."))
 	}
-	return sqlsyntax.QuoteIdent(p.name(matches[0])) + "." + sqlsyntax.QuoteIdent(p.name(col)), nil
+	rendered := sqlsyntax.QuoteIdent(p.name(matches[0])) + "." + sqlsyntax.QuoteIdent(p.name(col))
+	if p.resolved == nil {
+		p.resolved = map[string]source.ColumnInfo{}
+	}
+	for _, c := range p.relations[p.aliases[matches[0]]] {
+		if c.Name == col {
+			p.resolved[rendered] = c
+			break
+		}
+	}
+	return rendered, nil
 }
+
+func (p *pgViewParser) castReference(reference, target string) (string, error) {
+	c, ok := p.resolved[reference]
+	if !ok || target != "text" {
+		return "", fmt.Errorf("仅支持字符列到 text 的安全转换，当前目标类型 %s", target)
+	}
+	switch strings.ToLower(c.DataType) {
+	case "text", "varchar", "character varying", "uuid":
+		c.DataType = "text"
+		p.resolved[reference] = c
+		return reference, nil
+	case "bpchar", "char", "character":
+		// PG strips padding when converting CHAR to text.
+		rendered := "RTRIM(" + reference + ")"
+		c.DataType = "text"
+		p.resolved[rendered] = c
+		return rendered, nil
+	default:
+		return "", fmt.Errorf("列 %s 的 %s → text 转换需人工适配，不能直接移除类型转换", c.Name, c.DataType)
+	}
+}
+
+func (p *pgViewParser) bitLiteral(bits string) (string, error) {
+	if p.resolved == nil {
+		p.resolved = map[string]source.ColumnInfo{}
+	}
+	rendered := "b'" + bits + "'"
+	p.resolved[rendered] = source.ColumnInfo{DataType: "bit", Length: int64(len(bits))}
+	return rendered, nil
+}
+
+func (p *pgViewParser) compare(left, operator, right string) error {
+	a, b := p.resolved[left], p.resolved[right]
+	if a.DataType == "bit" || b.DataType == "bit" {
+		if a.DataType != "bit" || b.DataType != "bit" || a.Length != b.Length {
+			return fmt.Errorf("位串 %s 比较只支持等长的 BIT 列或位串常量，避免数值比较改变源语义", operator)
+		}
+	}
+	return nil
+}
+
+// Text COALESCE preserves argument order and NULL handling. Avoid MySQL's
+// implicit mixing of strings, numbers and dates by checking each argument.
+func (p *pgViewParser) coalesceProjection(ts []sqlsyntax.Token, result source.ColumnInfo) (string, bool, error) {
+	if len(ts) < 2 || !ts[0].Is("COALESCE") || !ts[1].Is("(") {
+		return "", false, nil
+	}
+	if !pgTextExpression(result) {
+		return "", true, fmt.Errorf("COALESCE 目前仅支持文本结果，当前为 %s", result.DataType)
+	}
+	var args [][]sqlsyntax.Token
+	start, depth := 2, 1
+	for i := 2; i < len(ts); i++ {
+		if ts[i].Is("(") {
+			depth++
+		}
+		if ts[i].Is(")") {
+			depth--
+		}
+		if depth == 0 {
+			if i != len(ts)-1 {
+				return "", true, fmt.Errorf("COALESCE 后存在尚不支持的表达式")
+			}
+			args = append(args, ts[start:i])
+			break
+		}
+		if depth == 1 && ts[i].Is(",") {
+			args = append(args, ts[start:i])
+			start = i + 1
+		}
+	}
+	if depth != 0 || len(args) == 0 {
+		return "", true, fmt.Errorf("COALESCE 参数或括号不完整")
+	}
+	var rendered []string
+	for _, arg := range args {
+		if nested, found, err := p.coalesceProjection(arg, result); found {
+			if err != nil {
+				return "", true, err
+			}
+			rendered = append(rendered, nested)
+			continue
+		}
+		refs := 0
+		ex := sqlsyntax.Expr{Tokens: arg, TypedLiteral: true, CastReference: p.castReference, Resolve: func(parts []string) (string, error) { refs++; return p.resolve(parts) }}
+		s, err := ex.Parse()
+		if err != nil {
+			return "", true, err
+		}
+		if refs > 0 {
+			c, ok := p.resolved[s]
+			if !ok || refs != 1 || !pgTextExpression(c) {
+				return "", true, fmt.Errorf("COALESCE 参数必须是文本列、文本常量或 NULL")
+			}
+		} else {
+			lit, err := sqlsyntax.Lex(s)
+			if err != nil || len(lit) != 1 || !(lit[0].Kind == 's' || lit[0].Is("NULL")) {
+				return "", true, fmt.Errorf("COALESCE 不允许隐式混合文本与其他类型")
+			}
+		}
+		rendered = append(rendered, s)
+	}
+	// A one-argument COALESCE is exactly its argument, including NULL.
+	if len(rendered) == 1 {
+		return rendered[0], true, nil
+	}
+	return "COALESCE(" + strings.Join(rendered, ", ") + ")", true, nil
+}
+
+func pgTextExpression(c source.ColumnInfo) bool {
+	switch strings.ToLower(c.DataType) {
+	case "text", "varchar", "character varying":
+		return true
+	default:
+		return false
+	}
+}
+
+// integerOffset handles the integer-column + integer-literal projection used
+// by UNION views. It deliberately excludes floating point and string coercion.
+func (p *pgViewParser) integerOffset(tokens []sqlsyntax.Token, result source.ColumnInfo) (string, bool, error) {
+	for len(tokens) > 1 && tokens[0].Is("(") && tokens[len(tokens)-1].Is(")") {
+		depth, wraps := 0, true
+		for i, t := range tokens {
+			if t.Is("(") {
+				depth++
+			}
+			if t.Is(")") {
+				depth--
+			}
+			if depth == 0 && i != len(tokens)-1 {
+				wraps = false
+				break
+			}
+		}
+		if !wraps {
+			break
+		}
+		tokens = tokens[1 : len(tokens)-1]
+	}
+	plus, depth := -1, 0
+	for i, t := range tokens {
+		if t.Is("(") {
+			depth++
+		}
+		if t.Is(")") {
+			depth--
+		}
+		if t.Is("+") && depth == 0 && i > 0 {
+			if plus >= 0 {
+				return "", true, fmt.Errorf("仅支持整数列与单个整数常量相加")
+			}
+			plus = i
+		}
+	}
+	if plus < 0 {
+		return "", false, nil
+	}
+	fail := func() (string, bool, error) {
+		return "", true, fmt.Errorf("仅支持整数列与整数常量相加，且视图结果须为整数类型")
+	}
+	if !pgIntegerColumn(result) {
+		return fail()
+	}
+	integer := func(ts []sqlsyntax.Token) (string, bool) {
+		sign := ""
+		if len(ts) == 2 && (ts[0].Is("-") || ts[0].Is("+")) {
+			sign = ts[0].Text
+			ts = ts[1:]
+		}
+		if len(ts) != 1 || ts[0].Kind != 'n' {
+			return "", false
+		}
+		n, err := strconv.ParseInt(sign+ts[0].Text, 10, 64)
+		return strconv.FormatInt(n, 10), err == nil
+	}
+	left, right := tokens[:plus], tokens[plus+1:]
+	literal, ok := integer(left)
+	column := right
+	if !ok {
+		literal, ok = integer(right)
+		column = left
+	}
+	if !ok {
+		return fail()
+	}
+	refs := 0
+	ex := sqlsyntax.Expr{Tokens: column, Resolve: func(parts []string) (string, error) { refs++; return p.resolve(parts) }}
+	s, err := ex.Parse()
+	if err != nil {
+		return "", true, err
+	}
+	c, ok := p.resolved[s]
+	if !ok || refs != 1 || !pgIntegerColumn(c) {
+		return fail()
+	}
+	return "CAST((" + s + " + " + literal + ") AS SIGNED)", true, nil
+}
+
+func pgIntegerColumn(c source.ColumnInfo) bool {
+	switch strings.ToLower(c.DataType) {
+	case "int2", "int4", "int8", "smallint", "integer", "int", "bigint":
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *pgViewParser) relation() (string, error) {
 	if p.take("(") {
 		s, e := p.from()
@@ -100,7 +320,7 @@ func (p *pgViewParser) relation() (string, error) {
 		}
 	} else if p.pos < len(p.tokens) {
 		t := p.tokens[p.pos]
-		if (t.Kind == 'i' || t.Kind == 'q') && !t.Is("INNER") && !t.Is("LEFT") && !t.Is("JOIN") && !t.Is("ON") && !t.Is("WHERE") {
+		if (t.Kind == 'i' || t.Kind == 'q') && !t.Is("INNER") && !t.Is("LEFT") && !t.Is("JOIN") && !t.Is("ON") && !t.Is("WHERE") && !t.Is("CROSS") && !t.Is("RIGHT") && !t.Is("FULL") && !t.Is("NATURAL") && !t.Is("USING") {
 			alias, e = p.ident()
 			if e != nil {
 				return "", e
@@ -136,12 +356,23 @@ func (p *pgViewParser) from() (string, error) {
 			}
 		} else if p.take("JOIN") {
 			join = "INNER"
+		} else if p.take("CROSS") {
+			join = "CROSS"
+			if !p.take("JOIN") {
+				return "", fmt.Errorf("缺少 JOIN")
+			}
 		} else {
 			break
 		}
 		right, e := p.relation()
 		if e != nil {
 			return "", e
+		}
+		if join == "CROSS" {
+			// Parenthesize left-to-right joins explicitly. A later ON may
+			// reference either side of the preceding CROSS JOIN.
+			left = "(" + left + " CROSS JOIN " + right + ")"
+			continue
 		}
 		if !p.take("ON") {
 			return "", fmt.Errorf("仅支持显式 JOIN ON")
@@ -150,7 +381,7 @@ func (p *pgViewParser) from() (string, error) {
 		depth := 0
 		for p.pos < len(p.tokens) {
 			t := p.tokens[p.pos]
-			if depth == 0 && (t.Is(")") || t.Is("JOIN") || t.Is("INNER") || t.Is("LEFT")) {
+			if depth == 0 && (t.Is(")") || t.Is("JOIN") || t.Is("INNER") || t.Is("LEFT") || t.Is("CROSS")) {
 				break
 			}
 			if t.Is("(") {
@@ -161,12 +392,12 @@ func (p *pgViewParser) from() (string, error) {
 			}
 			p.pos++
 		}
-		ex := sqlsyntax.Expr{Tokens: p.tokens[start:p.pos], Resolve: p.resolve}
+		ex := sqlsyntax.Expr{Tokens: p.tokens[start:p.pos], Resolve: p.resolve, CastReference: p.castReference, BitLiteral: p.bitLiteral, Compare: p.compare}
 		on, e := ex.Parse()
 		if e != nil {
 			return "", e
 		}
-		left += " " + join + " JOIN " + right + " ON " + on
+		left = "(" + left + " " + join + " JOIN " + right + " ON " + on + ")"
 	}
 	return left, nil
 }
@@ -175,8 +406,69 @@ func translatePGView(v source.ViewInfo, schema, database string, relations map[s
 	if e != nil {
 		return "", nil, e
 	}
+	if len(ts) > 0 && ts[len(ts)-1].Is(";") {
+		ts = ts[:len(ts)-1]
+	}
+	var branches [][]sqlsyntax.Token
+	var operators []string
+	start, depth := 0, 0
+	for i := 0; i < len(ts); i++ {
+		t := ts[i]
+		if t.Is(";") {
+			return "", nil, fmt.Errorf("视图定义不能包含多条语句")
+		}
+		if t.Is("(") {
+			depth++
+		}
+		if t.Is(")") {
+			depth--
+			if depth < 0 {
+				return "", nil, fmt.Errorf("括号不匹配")
+			}
+		}
+		if depth == 0 && t.Is("UNION") {
+			branches = append(branches, ts[start:i])
+			op := "UNION"
+			if i+1 < len(ts) && (ts[i+1].Is("ALL") || ts[i+1].Is("DISTINCT")) {
+				i++
+				op += " " + strings.ToUpper(ts[i].Text)
+			}
+			operators = append(operators, op)
+			start = i + 1
+		}
+	}
+	if depth != 0 {
+		return "", nil, fmt.Errorf("括号不匹配")
+	}
+	branches = append(branches, ts[start:])
+	var result string
+	var deps []string
+	for i, branch := range branches {
+		sql, refs, err := translatePGSelect(v, branch, schema, database, relations, name)
+		if err != nil {
+			return "", nil, err
+		}
+		if i > 0 {
+			result += " " + operators[i-1] + " "
+		}
+		result += sql
+		deps = append(deps, refs...)
+	}
+	return result, deps, nil
+}
+
+func translatePGSelect(v source.ViewInfo, ts []sqlsyntax.Token, schema, database string, relations map[string][]source.ColumnInfo, name func(string) string) (string, []string, error) {
 	if len(ts) < 4 || !ts[0].Is("SELECT") {
 		return "", nil, fmt.Errorf("仅支持简单 SELECT 视图")
+	}
+	projectionStart, modifier := 1, ""
+	if ts[1].Is("DISTINCT") {
+		projectionStart, modifier = 2, "DISTINCT "
+		if ts[2].Is("ON") {
+			return "", nil, fmt.Errorf("DISTINCT ON 需按分组取行规则人工适配，不能替换为普通 DISTINCT")
+		}
+	} else if ts[1].Is("ALL") {
+		projectionStart, modifier = 2, "ALL "
 	}
 	from, where := -1, -1
 	depth := 0
@@ -213,9 +505,9 @@ func translatePGView(v source.ViewInfo, schema, database string, relations map[s
 		return "", nil, fmt.Errorf("FROM 包含不支持语法")
 	}
 	segments := [][]sqlsyntax.Token{}
-	start := 1
+	start := projectionStart
 	depth = 0
-	for i := 1; i < from; i++ {
+	for i := projectionStart; i < from; i++ {
 		t := ts[i]
 		if t.Is("(") {
 			depth++
@@ -249,13 +541,28 @@ func translatePGView(v source.ViewInfo, schema, database string, relations map[s
 		if len(segment) >= 2 && segment[len(segment)-2].Is("AS") {
 			segment = segment[:len(segment)-2]
 		}
+		if s, found, err := p.coalesceProjection(segment, v.Columns[i]); found {
+			if err != nil {
+				return "", nil, err
+			}
+			projections = append(projections, s+" AS "+sqlsyntax.QuoteIdent(columnName))
+			continue
+		}
+		if s, found, e := p.integerOffset(segment, v.Columns[i]); found {
+			if e != nil {
+				return "", nil, e
+			}
+			projections = append(projections, s+" AS "+sqlsyntax.QuoteIdent(columnName))
+			continue
+		}
 		refs := 0
-		ex := sqlsyntax.Expr{Tokens: segment, TypedLiteral: true, Resolve: func(parts []string) (string, error) { refs++; return p.resolve(parts) }}
+		ex := sqlsyntax.Expr{Tokens: segment, TypedLiteral: true, CastReference: p.castReference, Resolve: func(parts []string) (string, error) { refs++; return p.resolve(parts) }}
 		s, e := ex.Parse()
 		if e != nil {
 			return "", nil, e
 		}
-		if refs > 0 && (refs != 1 || !(len(segment) == 1 || len(segment) == 3 && segment[1].Is("."))) {
+		_, columnProjection := p.resolved[s]
+		if refs > 0 && (refs != 1 || !columnProjection) {
 			return "", nil, fmt.Errorf("仅支持列投影或安全常量投影")
 		}
 		if refs == 0 {
@@ -266,9 +573,9 @@ func translatePGView(v source.ViewInfo, schema, database string, relations map[s
 		}
 		projections = append(projections, s+" AS "+sqlsyntax.QuoteIdent(name(v.Columns[i].Name)))
 	}
-	result := "SELECT " + strings.Join(projections, ", ") + " FROM " + fromSQL
+	result := "SELECT " + modifier + strings.Join(projections, ", ") + " FROM " + fromSQL
 	if where >= 0 {
-		ex := sqlsyntax.Expr{Tokens: ts[where+1:], Resolve: p.resolve}
+		ex := sqlsyntax.Expr{Tokens: ts[where+1:], Resolve: p.resolve, CastReference: p.castReference, BitLiteral: p.bitLiteral, Compare: p.compare}
 		s, e := ex.Parse()
 		if e != nil {
 			return "", nil, e
@@ -414,6 +721,8 @@ func pgViewConstant(rendered string, c source.ColumnInfo) (string, error) {
 		return "", fmt.Errorf("浮点常量投影首版不自动转换")
 	case typ == "JSON" || typ == "LONGBLOB":
 		return "", fmt.Errorf("大对象常量投影首版不自动转换")
+	case strings.HasPrefix(typ, "BIT("):
+		return "", fmt.Errorf("位串常量投影尚不支持自动转换")
 	}
 	return "CAST(" + literal + " AS " + cast + ")", nil
 }

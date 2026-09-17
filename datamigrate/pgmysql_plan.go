@@ -51,7 +51,7 @@ type PGMySQLPreflight struct {
 	Excluded      []ObjectRef          `json:"excluded"`
 	Objects       []PlannedObject      `json:"objects"`
 	RowsChecked   int64                `json:"rows_checked"`
-	rowCounts     map[string]int64
+	CheckScope    string               `json:"check_scope,omitempty"`
 	textRules     map[string]map[string]target.MySQLTextRules
 	tables        []source.PGTable
 	snapshot      *source.PGSnapshot
@@ -108,10 +108,10 @@ func (m *Migrator) wantPGObject(kind string) bool {
 	return false
 }
 
-// PreflightPGMySQL performs catalog reads, full-data validation and SQL planning.
+// PreflightPGMySQL performs structure checks and SQL planning without scanning business rows.
 // It never calls Writer mutation methods. Run always builds a fresh plan.
 func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
-	p := &PGMySQLPreflight{Issues: []CompatibilityIssue{}, Objects: []PlannedObject{}, Excluded: append([]ObjectRef{}, m.cfg.ExcludedObjects...)}
+	p := &PGMySQLPreflight{CheckScope: "structure", Issues: []CompatibilityIssue{}, Objects: []PlannedObject{}, Excluded: append([]ObjectRef{}, m.cfg.ExcludedObjects...)}
 	fail := func(err error) *PGMySQLPreflight {
 		p.add(ObjectRef{Kind: "metadata", Name: "兼容预检"}, err.Error(), false)
 		return p
@@ -244,6 +244,12 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			continue
 		}
 		t := original
+		// Keep source metadata intact. DDL, defaults, preflight and copy must all
+		// consume the same target precision in this plan's private column slice.
+		t.Info.Columns = append([]source.ColumnInfo(nil), original.Info.Columns...)
+		if !isExisting {
+			m.fitPGMySQLRow(p, &t)
+		}
 		ref := tableRef(t.Info.TableName)
 		registerName("relation", m.objName(t.Info.TableName), t.Info.TableName)
 		for _, u := range t.Unsupported {
@@ -266,11 +272,26 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			t.Indexes = append(t.Indexes, idx)
 		}
 		var auto []source.ColumnInfo
-		for _, c := range t.Info.Columns {
+		validColumns := true
+		for i, c := range t.Info.Columns {
 			registerName("column:"+t.Info.TableName, m.objName(c.Name), t.Info.TableName+"."+c.Name)
+			if (strings.EqualFold(c.DataType, "numeric") || strings.EqualFold(c.DataType, "decimal")) && c.Precision > 65 {
+				mapped := c
+				mapped.Precision = 65
+				if _, err := typemap.PGToMySQLChecked(mapped); err == nil {
+					p.Issues = append(p.Issues, CompatibilityIssue{
+						Object: ref, Severity: "warning",
+						Reason:     fmt.Sprintf("列 %s: numeric(%d,%d) 将映射为 DECIMAL(65,%d)，保留小数位；实际数据在复制时逐值校验", c.Name, c.Precision, c.Scale, c.Scale),
+						Suggestion: fmt.Sprintf("目标最多容纳 %d 位整数、%d 位小数；默认值超限将阻止预检；实际数据超限会在复制时停止，已提交批次可能保留，后续业务写入也须遵守此范围", 65-c.Scale, c.Scale),
+					})
+					c = mapped
+					t.Info.Columns[i] = mapped
+				}
+			}
 			typ, e := typemap.PGToMySQLChecked(c)
 			if e != nil {
 				p.add(ref, "列 "+c.Name+": "+e.Error(), true)
+				validColumns = false
 				continue
 			}
 			if c.Extra == "auto_increment" {
@@ -284,7 +305,8 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			}
 			if !isExisting && c.Default != nil && c.Extra != "auto_increment" {
 				if _, e = dialect.PGColumnDefault(c, typ, p.Target.Parsed); e != nil {
-					p.add(ref, "列 "+c.Name+" 默认值: "+e.Error(), true)
+					p.add(ref, "列 "+c.Name+" 默认值: "+e.Error()+"；原始默认表达式: "+*c.Default, true)
+					validColumns = false
 				}
 			}
 			if utf8.RuneCountInString(c.Comment) > 1024 {
@@ -410,7 +432,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			t.Checks = append(t.Checks, c)
 		}
 
-		if !isExisting {
+		if !isExisting && validColumns {
 			stmts, inline, e := dia.PGTableStatements(p.Target.Database, t, p.Target.Parsed, m.objName)
 			if e != nil {
 				p.add(ref, e.Error(), true)
@@ -528,16 +550,6 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 				p.add(ObjectRef{Kind: "target", Name: p.Target.Database}, err.Error(), false)
 			}
 			p.finish()
-		}
-	}
-	if p.Ready && m.cfg.Content != "schema_only" && !viewOnly {
-		if err = m.validatePGMySQLData(ctx, p, w.InspectionDB(), m.cfg.objectMode()); err != nil {
-			var objectErr *pgObjectError
-			if errors.As(err, &objectErr) {
-				p.add(objectErr.Object, err.Error(), true)
-			} else {
-				p.add(ObjectRef{Kind: "data", Name: "全量数据预检"}, err.Error(), false)
-			}
 		}
 	}
 	// Stable execution order; dependency order among views is already topological.

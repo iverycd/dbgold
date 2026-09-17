@@ -17,7 +17,7 @@ import (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// PGMySQLValue is used by both full-data preflight and the actual copy. Errors
+// PGMySQLValue validates values during copying and constant-default planning. Errors
 // carry column identity at the caller, never the potentially sensitive value.
 func PGMySQLValue(v any, c source.ColumnInfo) (any, error) {
 	if v == nil {
@@ -34,6 +34,21 @@ func PGMySQLValue(v any, c source.ColumnInfo) (any, error) {
 		return fmt.Sprint(v)
 	}
 	switch dt {
+	case "bit":
+		if c.Length < 1 || c.Length > 64 {
+			return nil, fmt.Errorf("BIT 长度须为 1..64")
+		}
+		// PG returns textual bits. Target reads explicitly use the same format;
+		// never guess whether a []byte is ASCII bits or MySQL's packed bytes.
+		s := str()
+		if int64(len(s)) != c.Length || strings.Trim(s, "01") != "" {
+			return nil, fmt.Errorf("BIT(%d) 数据必须为等长的 0/1 位串", c.Length)
+		}
+		n, err := strconv.ParseUint(s, 2, 64)
+		if err != nil {
+			return nil, fmt.Errorf("非法 BIT 数据")
+		}
+		return n, nil
 	case "bytea":
 		if b, ok := v.([]byte); ok {
 			return b, nil
@@ -79,7 +94,7 @@ func PGMySQLValue(v any, c source.ColumnInfo) (any, error) {
 		}
 		limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(c.Precision), nil)
 		if new(big.Int).Abs(scaled.Num()).Cmp(limit) >= 0 {
-			return nil, fmt.Errorf("DECIMAL 越界")
+			return nil, fmt.Errorf("数值超出目标 DECIMAL(%d,%d) 范围（最多 %d 位整数、%d 位小数）", c.Precision, c.Scale, c.Precision-c.Scale, c.Scale)
 		}
 		return rat.FloatString(int(c.Scale)), nil
 	case "float4", "float8", "real", "double precision":

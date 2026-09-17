@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -102,5 +103,44 @@ func TestPGTextDefaultsAreCheckedWithoutData(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPGRowWidthDiagnostics(t *testing.T) {
+	var cols []source.ColumnInfo
+	rules := map[string]target.MySQLTextRules{}
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("long_column_%d", i)
+		cols = append(cols, source.ColumnInfo{Name: name, DataType: "varchar", Length: 2000})
+		rules[name] = target.MySQLTextRules{Charset: "utf8mb4", Collation: "utf8mb4_bin", MaxBytes: 4}
+	}
+	p := &PGMySQLPreflight{Target: target.MySQLProfile{PageSize: 16384}, tables: []source.PGTable{{Info: source.TableDDLInfo{TableName: "wide", Columns: cols}}}, textRules: map[string]map[string]target.MySQLTextRules{"wide": rules}}
+	(&Migrator{}).checkPGMySQLTextStructure(p)
+	p.finish()
+	if p.Ready || len(p.Issues) != 1 {
+		t.Fatalf("wide table was not blocked: %+v", p.Issues)
+	}
+	for _, part := range []string{"80022 字节", "65535", "10 列", "long_column_0 ≈ 8002 字节"} {
+		if !strings.Contains(p.Issues[0].Reason, part) {
+			t.Fatalf("missing %s: %+v", part, p.Issues)
+		}
+	}
+	if !strings.Contains(p.Issues[0].Suggestion, "非索引") {
+		t.Fatal("missing index caveat")
+	}
+	cols = make([]source.ColumnInfo, 1018)
+	for i := range cols {
+		cols[i] = source.ColumnInfo{Name: fmt.Sprint(i), DataType: "int4"}
+	}
+	p = &PGMySQLPreflight{Target: target.MySQLProfile{PageSize: 16384}, tables: []source.PGTable{{Info: source.TableDDLInfo{TableName: "many", Columns: cols}}}}
+	(&Migrator{}).checkPGMySQLTextStructure(p)
+	found := false
+	for _, issue := range p.Issues {
+		if strings.Contains(issue.Reason, "列数 1018") && strings.Contains(issue.Reason, "1017 列") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing column-count diagnostic: %+v", p.Issues)
 	}
 }

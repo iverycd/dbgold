@@ -555,6 +555,7 @@ export interface CompatibilityIssue {
   definition?: string
 }
 export interface PGMySQLPreflight {
+  check_scope?: 'structure'
   ready: boolean
   source: { product: string; version: string; mode: string; schema: string; verification: string }
   target: { version: string; database: string; target_charset?: string; target_collation: string; verification: string }

@@ -43,6 +43,11 @@ func PGToMySQLChecked(c source.ColumnInfo) (string, error) {
 		return fmt.Sprintf("DECIMAL(%d,%d)", c.Precision, c.Scale), nil
 	case "bool", "boolean":
 		return "TINYINT(1)", nil
+	case "bit":
+		if c.Length < 1 || c.Length > 64 {
+			return "", fmt.Errorf("bit(%d) 超出 MySQL BIT 支持的 1..64 位范围", c.Length)
+		}
+		return fmt.Sprintf("BIT(%d)", c.Length), nil
 	case "uuid":
 		return "CHAR(36)", nil
 	case "bytea":
@@ -55,6 +60,9 @@ func PGToMySQLChecked(c source.ColumnInfo) (string, error) {
 		}
 		if c.Length > 65535 {
 			return "", fmt.Errorf("VARCHAR(%d) 超出 MySQL 最大字符容量，不能自动丢失长度约束", c.Length)
+		}
+		if c.PGMySQLLongText {
+			return "LONGTEXT", nil
 		}
 		return fmt.Sprintf("VARCHAR(%d)", c.Length), nil
 	case "bpchar", "char", "character":

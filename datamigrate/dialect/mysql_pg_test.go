@@ -84,3 +84,72 @@ func TestPGTableInheritsDatabaseCharacterDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestPGLocalTimestampDefault(t *testing.T) {
+	for _, version := range []string{"5.7.44", "8.0.32"} {
+		v, _ := ParseMySQLVersion(version)
+		for _, tc := range []struct {
+			raw, typ, want string
+			precision      int64
+		}{
+			{"localtimestamp", "DATETIME(6)", " DEFAULT CURRENT_TIMESTAMP(6)", 6},
+			{"LOCALTIMESTAMP()", "DATETIME(0)", " DEFAULT CURRENT_TIMESTAMP(0)", 0},
+			{"localtimestamp(3)", "DATETIME(3)", " DEFAULT CURRENT_TIMESTAMP(3)", 3},
+			{`"localtimestamp"()`, "DATETIME(6)", " DEFAULT CURRENT_TIMESTAMP(6)", 6},
+			{`"localtimestamp"(6)`, "DATETIME(6)", " DEFAULT CURRENT_TIMESTAMP(6)", 6},
+			{`"localtimestamp" ( 0 )`, "DATETIME(0)", " DEFAULT CURRENT_TIMESTAMP(0)", 0},
+			{"CURRENT_TIMESTAMP ( 6 )", "DATETIME(6)", " DEFAULT CURRENT_TIMESTAMP(6)", 6},
+			{"now( /* comment */ )", "DATETIME(6)", " DEFAULT CURRENT_TIMESTAMP(6)", 6},
+		} {
+			c := source.ColumnInfo{Name: "createtime", DataType: "timestamp", DateTimePrecision: tc.precision, Default: &tc.raw}
+			got, err := PGColumnDefault(c, tc.typ, v)
+			if err != nil || got != tc.want {
+				t.Fatalf("%s %s: %s %v", version, tc.raw, got, err)
+			}
+			table := source.PGTable{Info: source.TableDDLInfo{TableName: "clog_exchangeconfig", Columns: []source.ColumnInfo{c}}}
+			stmts, _, err := NewMySQL().PGTableStatements("dst", table, v, func(s string) string { return s })
+			if err != nil || !strings.Contains(stmts[1].SQL, "`createtime` "+tc.typ+" NOT NULL"+tc.want) {
+				t.Fatalf("DDL: %v %v", stmts, err)
+			}
+		}
+		for _, raw := range []string{"localtimestamp(7)", "localtimestamp(1.5)", "localtimestamp + 1", "localtimestamp; DROP TABLE t", `"localtimestamp"`, `"LOCALTIMESTAMP"()`, `public."localtimestamp"()`, `'localtimestamp'()`, `"localtimestamp"(7)`, `"localtimestamp"('6')`, `"localtimestamp"(6, 0)`, `"localtimestamp"() + 1`, `"localtimestamp"(); SELECT 1`} {
+			if _, err := PGDefault(raw, "DATETIME(6)", true, v); err == nil {
+				t.Fatalf("accepted %s", raw)
+			}
+		}
+		if _, err := PGDefault("localtimestamp", "VARCHAR(40)", true, v); err == nil {
+			t.Fatal("current time allowed on non-temporal column")
+		}
+	}
+}
+
+func TestPGCurrentTimeDefaultHasIndependentPrecision(t *testing.T) {
+	for _, version := range []string{"5.7.44", "8.0.12", "8.0.13", "8.0.32"} {
+		v, _ := ParseMySQLVersion(version)
+		for _, tc := range []struct{ raw, dataType, want string }{
+			{`"localtimestamp"(0)`, "timestamp", " DEFAULT (CAST(CURRENT_TIMESTAMP(0) AS DATETIME(6)))"},
+			{"localtimestamp(3)", "timestamp", " DEFAULT (CAST(CURRENT_TIMESTAMP(3) AS DATETIME(6)))"},
+			{"CURRENT_TIMESTAMP(0)", "timestamptz", " DEFAULT (CAST(UTC_TIMESTAMP(0) AS DATETIME(6)))"},
+		} {
+			c := source.ColumnInfo{Name: "createtime", DataType: tc.dataType, DateTimePrecision: 6, Default: &tc.raw}
+			got, err := PGColumnDefault(c, "DATETIME(6)", v)
+			if !v.Expressions() {
+				if err == nil || !strings.Contains(err.Error(), "8.0.13+") {
+					t.Fatalf("%s: %s %v", version, got, err)
+				}
+				continue
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("%s %s: %s %v", version, tc.raw, got, err)
+			}
+			table := source.PGTable{Info: source.TableDDLInfo{TableName: "clog_exchangeconfig", Columns: []source.ColumnInfo{c}}}
+			stmts, _, err := NewMySQL().PGTableStatements("dst", table, v, func(s string) string { return s })
+			if err != nil || !strings.Contains(stmts[1].SQL, "`createtime` DATETIME(6) NOT NULL"+tc.want) {
+				t.Fatalf("DDL: %v %v", stmts, err)
+			}
+		}
+		if _, err := PGDefault("localtimestamp(6)", "DATETIME(3)", true, v); err == nil {
+			t.Fatal("accepted implicit precision loss")
+		}
+	}
+}

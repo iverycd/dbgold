@@ -1,16 +1,22 @@
 <template>
-  <div>
-    <h2>迁移 SQL 生成</h2>
-    <a-tabs v-model:active-key="activeTab">
+  <div class="migration-workspace">
+    <header class="migration-page-heading">
+      <div>
+        <h2>数据库迁移</h2>
+        <p>配置迁移范围，检查兼容性，追踪执行结果。</p>
+      </div>
+      <span class="migration-page-label"><icon-swap /> 数据迁移工作台</span>
+    </header>
+    <a-tabs v-model:active-key="activeTab" class="migration-mode-tabs" :destroy-on-hide="false" :lazy-load="false">
       <a-tab-pane key="data-migrate" title="单次迁移">
-        <a-form :model="dataMigrate" layout="vertical" style="margin-top: 12px">
+        <a-form :model="dataMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+          <div class="migration-connections">
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">源库</span>
+                  <span class="conn-card-title">从哪里迁移</span>
                 </div>
                 <a-select
                   v-model="srcEnvFilter"
@@ -18,6 +24,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -27,12 +34,14 @@
                   allow-search
                   @change="(val) => { checkPairSupport(); loadSrcDatabases(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="selectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
+                  <span v-if="selectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedSrc.username }}</span>
                 </div>
                 <a-select
@@ -42,6 +51,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
+                  <template #prefix><span class="migration-select-label">源数据库</span></template>
                   <a-option v-for="db in dataMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
                 <a-tooltip
@@ -61,15 +71,15 @@
                   </a-button>
                 </a-tooltip>
               </a-card>
-            </a-col>
-            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+            </div>
+            <div class="migration-connection-arrow">
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
-            </a-col>
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+            </div>
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">目标库</span>
+                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <a-select
                   v-model="dstEnvFilter"
@@ -77,6 +87,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -86,13 +97,14 @@
                   allow-search
                   @change="(val) => { checkPairSupport(); loadDstSchemas(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="selectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
                 <a-select
@@ -103,6 +115,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
+                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
                 <div v-if="dataMigrate.dstConnId" class="schema-permission-tip">
@@ -112,8 +125,8 @@
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
-            </a-col>
-          </a-row>
+            </div>
+          </div>
 
           <!-- 不支持提示 -->
           <a-alert v-if="selectedSrc?.db_type === 'sqlserver' && selectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
@@ -127,6 +140,7 @@
             {{ dataMigrate.unsupportedMsg }}
           </a-alert>
 
+          <section class="migration-surface migration-settings"><div class="migration-section-heading"><h3>迁移设置</h3><span>选择范围与执行选项</span></div>
           <!-- 迁移范围 -->
           <a-form-item label="迁移范围" style="margin-bottom: 16px">
             <a-radio-group v-model="dataMigrate.mode">
@@ -157,20 +171,20 @@
           </a-form-item>
 
           <!-- 高级设置 -->
-          <a-collapse :default-active-key="['advanced']" style="margin-bottom: 16px; max-width: 1120px">
+          <a-collapse class="migration-advanced">
             <a-collapse-item key="advanced" header="高级设置">
-              <a-row :gutter="40">
+              <a-row :gutter="24" class="migration-advanced-grid">
                 <!-- 左列：迁移参数与选项 -->
                 <a-col :xs="24" :lg="12">
-                  <div class="adv-section-title">迁移参数</div>
+                  <div class="adv-section-title">迁移性能</div>
                   <a-row :gutter="16">
                     <a-col :span="8">
-                      <a-form-item label="每页行数 (pageSize)">
+                      <a-form-item label="每页行数">
                         <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 100%" />
                       </a-form-item>
                     </a-col>
                     <a-col :span="8">
-                      <a-form-item label="最大并发数 (maxParallel)">
+                      <a-form-item label="最大并发数">
                         <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" style="width: 100%" />
                       </a-form-item>
                     </a-col>
@@ -181,7 +195,7 @@
                     </a-col>
                   </a-row>
 
-                  <div class="adv-section-title">选项</div>
+                  <div class="adv-section-title">对象选项</div>
                   <a-row :gutter="16">
                     <a-col v-if="selectedDst?.db_type !== 'dameng' && selectedDst?.db_type !== 'oscar' && selectedDst?.db_type !== 'oracle'" :span="12">
                       <a-checkbox v-model="dataMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
@@ -256,6 +270,8 @@
             </a-collapse-item>
           </a-collapse>
 
+          </section>
+
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')" :result="pgChecks.data" :excluded="pgExclusions.data" :busy="pgBusy.data"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
 
@@ -265,8 +281,68 @@
             迁移开始时会对目标库中同名表执行 <strong>删除并重新创建表</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
           </a-alert>
 
+          <section v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
+            <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
+            <a-tabs v-model:active-key="dataMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
+              <a-tab-pane key="logs" title="执行日志">
+                <a-empty v-if="!dataMigrate.logs.length" description="等待迁移日志…" />
+                <!-- 日志区 -->
+                <div v-show="dataMigrate.logs.length">
+                  <a-space style="margin-bottom: 8px">
+                    <span style="font-weight:500">迁移日志</span>
+                    <a-button size="mini" @click="copyLogs">复制日志</a-button>
+                  </a-space>
+                  <div ref="logContainer" class="migration-log-container">
+                    <div
+                      v-for="(line, i) in dataMigrate.logs"
+                      :key="i"
+                      :class="getLogClass(line)"
+                      class="log-line"
+                    >{{ line }}</div>
+                  </div>
+                </div>
+              </a-tab-pane>
+              <a-tab-pane v-if="dataMigrate.finished && dataMigrate.currentJobId" key="report" title="迁移报告">
+                <!-- 迁移报告 -->
+                <div v-if="dataMigrate.finished && dataMigrate.currentJobId" style="margin-top: 16px">
+                  <!-- 连接信息摘要条 -->
+                  <div v-if="selectedSrc && selectedDst" class="report-conn-bar">
+                    <div class="report-conn-side">
+                      <a-tag :color="getDbTypeColor(selectedSrc.db_type)" size="small" class="report-conn-type-tag">
+                        {{ getDbTypeLabel(selectedSrc.db_type) }}
+                      </a-tag>
+                      <span class="report-conn-name">{{ selectedSrc.name }}</span>
+                      <span class="report-conn-detail">
+                        <span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}
+                      </span>
+                      <span v-if="dataMigrate.srcDatabase" class="report-conn-detail">
+                        <span class="conn-meta-label">库</span>{{ dataMigrate.srcDatabase }}
+                      </span>
+                    </div>
+                    <icon-arrow-right class="report-conn-arrow" />
+                    <div class="report-conn-side">
+                      <a-tag :color="getDbTypeColor(selectedDst.db_type)" size="small" class="report-conn-type-tag">
+                        {{ getDbTypeLabel(selectedDst.db_type) }}
+                      </a-tag>
+                      <span class="report-conn-name">{{ selectedDst.name }}</span>
+                      <span class="report-conn-detail">
+                        <span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}
+                      </span>
+                      <span class="report-conn-detail">
+                        <span class="conn-meta-label">库</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}
+                      </span>
+                      <span v-if="dataMigrate.dstSchema" class="report-conn-detail">
+                        <span class="conn-meta-label">Schema</span>{{ dataMigrate.dstSchema }}
+                      </span>
+                    </div>
+                  </div>
+                  <MigrationReportPanel :key="dataMigrate.currentJobId" :jobID="dataMigrate.currentJobId" @loaded="dataMigrateResultTab = 'report'" />
+                </div>
+              </a-tab-pane>
+            </a-tabs>
+          </section>
           <!-- 操作按钮 -->
-          <a-space style="margin-bottom: 16px">
+          <MigrationActionBar :status="dataMigrate.running ? '正在迁移，请关注执行日志' : dataMigrate.finished ? '执行已结束，请查看日志与报告' : '配置完成后可开始迁移'" :busy="dataMigrate.running">
             <a-button
               type="primary"
               :disabled="!canStartMigration"
@@ -282,64 +358,8 @@
               v-if="dataMigrate.finished"
               @click="resetDataMigration"
             >重新迁移</a-button>
-          </a-space>
+          </MigrationActionBar>
 
-          <!-- 日志区 -->
-          <div v-if="dataMigrate.logs.length > 0">
-            <a-space style="margin-bottom: 8px">
-              <span style="font-weight:500">迁移日志</span>
-              <a-button size="mini" @click="copyLogs">复制日志</a-button>
-            </a-space>
-            <div ref="logContainer" class="migration-log-container">
-              <div
-                v-for="(line, i) in dataMigrate.logs"
-                :key="i"
-                :class="getLogClass(line)"
-                class="log-line"
-              >{{ line }}</div>
-            </div>
-          </div>
-
-          <!-- 迁移报告 -->
-          <div v-if="dataMigrate.finished && dataMigrate.currentJobId" style="margin-top: 16px">
-            <a-divider>迁移报告</a-divider>
-
-            <!-- 连接信息摘要条 -->
-            <div v-if="selectedSrc && selectedDst" class="report-conn-bar">
-              <div class="report-conn-side">
-                <a-tag :color="getDbTypeColor(selectedSrc.db_type)" size="small" class="report-conn-type-tag">
-                  {{ getDbTypeLabel(selectedSrc.db_type) }}
-                </a-tag>
-                <span class="report-conn-name">{{ selectedSrc.name }}</span>
-                <span class="report-conn-detail">
-                  <span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}
-                </span>
-                <span v-if="dataMigrate.srcDatabase" class="report-conn-detail">
-                  <span class="conn-meta-label">库</span>{{ dataMigrate.srcDatabase }}
-                </span>
-              </div>
-
-              <icon-arrow-right class="report-conn-arrow" />
-
-              <div class="report-conn-side">
-                <a-tag :color="getDbTypeColor(selectedDst.db_type)" size="small" class="report-conn-type-tag">
-                  {{ getDbTypeLabel(selectedDst.db_type) }}
-                </a-tag>
-                <span class="report-conn-name">{{ selectedDst.name }}</span>
-                <span class="report-conn-detail">
-                  <span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}
-                </span>
-                <span class="report-conn-detail">
-                  <span class="conn-meta-label">库</span>{{ selectedDst.database }}
-                </span>
-                <span v-if="dataMigrate.dstSchema" class="report-conn-detail">
-                  <span class="conn-meta-label">Schema</span>{{ dataMigrate.dstSchema }}
-                </span>
-              </div>
-            </div>
-
-            <MigrationReportPanel :jobID="dataMigrate.currentJobId" />
-          </div>
         </a-form>
       </a-tab-pane>
 
@@ -348,14 +368,14 @@
       </a-tab-pane>
 
       <a-tab-pane key="view-migrate" title="视图迁移">
-        <a-form :model="viewMigrate" layout="vertical" style="margin-top: 12px">
+        <a-form :model="viewMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+          <div class="migration-connections">
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">源库</span>
+                  <span class="conn-card-title">从哪里迁移</span>
                 </div>
                 <a-select
                   v-model="srcEnvFilter"
@@ -363,6 +383,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -372,12 +393,14 @@
                   allow-search
                   @change="(val) => { vmCheckPairSupport(); vmLoadSrcDatabases(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="vmSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedSrc.host }}:{{ vmSelectedSrc.port }}</span>
+                  <span v-if="vmSelectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ vmSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedSrc.username }}</span>
                 </div>
                 <a-select
@@ -388,18 +411,19 @@
                   allow-search
                   @change="vmLoadViews"
                 >
+                  <template #prefix><span class="migration-select-label">源数据库</span></template>
                   <a-option v-for="db in viewMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
               </a-card>
-            </a-col>
-            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+            </div>
+            <div class="migration-connection-arrow">
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
-            </a-col>
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+            </div>
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">目标库</span>
+                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <a-select
                   v-model="dstEnvFilter"
@@ -407,6 +431,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -416,13 +441,14 @@
                   allow-search
                   @change="(val) => { vmCheckPairSupport(); vmLoadDstSchemas(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="vmSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedDst.host }}:{{ vmSelectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ vmSelectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(vmSelectedDst, viewMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedDst.username }}</span>
                 </div>
                 <a-select
@@ -433,6 +459,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
+                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in viewMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
                 <div v-if="viewMigrate.dstConnId" class="schema-permission-tip">
@@ -442,8 +469,8 @@
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
-            </a-col>
-          </a-row>
+            </div>
+          </div>
 
           <!-- 不支持提示 -->
           <a-alert v-if="vmSelectedSrc?.db_type === 'sqlserver' && vmSelectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
@@ -457,6 +484,7 @@
             {{ viewMigrate.unsupportedMsg }}
           </a-alert>
 
+          <section class="migration-surface migration-settings"><div class="migration-section-heading"><h3>迁移设置</h3><span>选择范围与执行选项</span></div>
           <!-- 视图选择 -->
           <a-spin :loading="viewMigrate.loadingViews" style="display:block">
             <div v-if="viewMigrate.views.length > 0" style="margin-bottom: 16px">
@@ -493,9 +521,9 @@
           </a-spin>
 
           <!-- 高级设置 -->
-          <a-collapse style="margin-bottom: 16px; max-width: 760px">
+          <a-collapse class="migration-advanced">
             <a-collapse-item key="advanced" header="高级设置">
-              <div class="adv-section-title">选项</div>
+              <div class="adv-section-title">对象选项</div>
               <a-row :gutter="16">
                 <a-col v-if="vmSelectedDst?.db_type !== 'dameng' && vmSelectedDst?.db_type !== 'oscar' && vmSelectedDst?.db_type !== 'oracle'" :span="12">
                   <a-checkbox v-model="viewMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
@@ -517,22 +545,14 @@
             </a-collapse-item>
           </a-collapse>
 
+          </section>
+
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views"
             @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
-          <!-- 操作按钮 -->
-          <a-space style="margin-bottom: 16px">
-            <a-button
-              type="primary"
-              :disabled="!vmCanMigrate"
-              :loading="viewMigrate.running"
-              @click="handleMigrateViews"
-            >开始迁移视图</a-button>
-          </a-space>
-
           <!-- 结果 -->
-          <div v-if="viewMigrate.results.length > 0">
-            <a-divider>迁移结果</a-divider>
+          <div v-if="viewMigrate.results.length > 0" class="migration-surface migration-results">
+            <div class="migration-section-heading"><h3>迁移结果</h3></div>
             <a-space style="margin-bottom: 8px">
               <a-tag color="green">成功 {{ vmSuccessCount }}</a-tag>
               <a-tag :color="vmFailCount > 0 ? 'red' : 'gray'">失败 {{ vmFailCount }}</a-tag>
@@ -540,8 +560,9 @@
             <a-table
               :data="viewMigrate.results"
               row-key="name"
-              :pagination="false"
+              :pagination="{ pageSize: 15, showTotal: true }" :scroll="{ x: 700 }"
               size="small"
+              :row-class="record => record.error ? '' : 'migration-row-no-details'"
               :expandable="{ icon: (_: unknown, record: any) => record.error ? undefined : null }"
             >
               <template #columns>
@@ -567,18 +588,28 @@
               </template>
             </a-table>
           </div>
+        <!-- 操作按钮 -->
+          <MigrationActionBar :status="viewMigrate.running ? '正在迁移视图' : viewMigrate.results.length ? '执行已结束，请查看结果' : '配置完成后可开始迁移'" :busy="viewMigrate.running">
+            <a-button
+              type="primary"
+              :disabled="!vmCanMigrate"
+              :loading="viewMigrate.running"
+              @click="handleMigrateViews"
+            >开始迁移视图</a-button>
+          </MigrationActionBar>
+
         </a-form>
       </a-tab-pane>
 
       <a-tab-pane key="object-migrate" title="对象迁移">
-        <a-form :model="objMigrate" layout="vertical" style="margin-top: 12px">
+        <a-form :model="objMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <a-row :gutter="20" align="stretch" style="margin-bottom: 16px">
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+          <div class="migration-connections">
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">源库</span>
+                  <span class="conn-card-title">从哪里迁移</span>
                 </div>
                 <a-select
                   v-model="srcEnvFilter"
@@ -586,6 +617,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -595,12 +627,14 @@
                   allow-search
                   @change="(val) => { omCheckPairSupport(); omLoadSrcDatabases(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="omSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedSrc.host }}:{{ omSelectedSrc.port }}</span>
+                  <span v-if="omSelectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ omSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedSrc.username }}</span>
                 </div>
                 <a-select
@@ -611,18 +645,19 @@
                   allow-search
                   @change="omLoadTables"
                 >
+                  <template #prefix><span class="migration-select-label">源数据库</span></template>
                   <a-option v-for="db in objMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
               </a-card>
-            </a-col>
-            <a-col :span="2" style="display:flex;align-items:center;justify-content:center">
+            </div>
+            <div class="migration-connection-arrow">
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
-            </a-col>
-            <a-col :span="11">
-              <a-card class="conn-card" :body-style="{ padding: '16px' }">
+            </div>
+            <div class="migration-connection-side">
+              <a-card class="conn-card" :body-style="{ padding: '24px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">目标库</span>
+                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <a-select
                   v-model="dstEnvFilter"
@@ -630,6 +665,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-clear
                 >
+                  <template #prefix><span class="migration-select-label">环境</span></template>
                   <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
                 </a-select>
                 <a-select
@@ -639,13 +675,14 @@
                   allow-search
                   @change="(val) => { omCheckPairSupport(); omLoadDstSchemas(val as number) }"
                 >
+                  <template #prefix><span class="migration-select-label">连接</span></template>
                   <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
                     <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
                   </a-option>
                 </a-select>
                 <div v-if="omSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedDst.host }}:{{ omSelectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ omSelectedDst.database }}</span>
+                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(omSelectedDst, objMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedDst.username }}</span>
                 </div>
                 <a-select
@@ -656,6 +693,7 @@
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
+                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in objMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
                 <div v-if="objMigrate.dstConnId" class="schema-permission-tip">
@@ -663,8 +701,8 @@
                   对象迁移仅向目标库已存在的表补建对象，请确保目标表与引用表已迁移完成。
                 </div>
               </a-card>
-            </a-col>
-          </a-row>
+            </div>
+          </div>
 
           <!-- 不支持提示 -->
           <a-alert v-if="omSelectedSrc?.db_type === 'sqlserver' && omSelectedDst?.db_type === 'dameng'" type="info" style="margin-bottom: 12px">
@@ -678,9 +716,10 @@
             {{ objMigrate.unsupportedMsg }}
           </a-alert>
 
+          <section class="migration-surface migration-settings"><div class="migration-section-heading"><h3>迁移设置</h3><span>选择范围与执行选项</span></div>
           <!-- 对象类型选择 -->
           <a-form-item label="迁移对象类型" style="margin-bottom: 16px">
-            <a-checkbox-group v-model="objMigrate.objects">
+            <a-checkbox-group v-model="objMigrate.objects" class="migration-object-options">
               <a-checkbox v-for="opt in OBJECT_TYPE_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</a-checkbox>
             </a-checkbox-group>
           </a-form-item>
@@ -733,9 +772,9 @@
           </a-form-item>
 
           <!-- 高级设置 -->
-          <a-collapse style="margin-bottom: 16px; max-width: 760px">
+          <a-collapse class="migration-advanced">
             <a-collapse-item key="advanced" header="高级设置">
-              <div class="adv-section-title">选项</div>
+              <div class="adv-section-title">对象选项</div>
               <a-row :gutter="16">
                 <a-col v-if="omSelectedDst?.db_type !== 'dameng' && omSelectedDst?.db_type !== 'oscar' && omSelectedDst?.db_type !== 'oracle'" :span="12">
                   <a-checkbox v-model="objMigrate.lowerCaseNames" class="adv-check">对象名转小写</a-checkbox>
@@ -753,11 +792,42 @@
             </a-collapse-item>
           </a-collapse>
 
+          </section>
+
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')" :result="pgChecks.objects" :excluded="pgExclusions.objects" :busy="pgBusy.objects"
             @check="runPGCheck('objects')" @exclude="excludePGObject('objects', $event)" @restore="restorePGObject('objects', $event)" />
 
+          <section v-if="objMigrate.running || objMigrate.logs.length || objMigrate.currentJobId" class="migration-surface migration-results">
+            <div class="migration-section-heading"><h3>执行结果</h3><span>{{ objMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
+            <a-tabs v-model:active-key="objMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
+              <a-tab-pane key="logs" title="执行日志">
+                <a-empty v-if="!objMigrate.logs.length" description="等待迁移日志…" />
+                <!-- 日志区 -->
+                <div v-show="objMigrate.logs.length">
+                  <a-space style="margin-bottom: 8px">
+                    <span style="font-weight:500">迁移日志</span>
+                    <a-button size="mini" @click="copyObjLogs">复制日志</a-button>
+                  </a-space>
+                  <div ref="objLogContainer" class="migration-log-container">
+                    <div
+                      v-for="(line, i) in objMigrate.logs"
+                      :key="i"
+                      :class="getLogClass(line)"
+                      class="log-line"
+                    >{{ line }}</div>
+                  </div>
+                </div>
+              </a-tab-pane>
+              <a-tab-pane v-if="objMigrate.finished && objMigrate.currentJobId" key="report" title="迁移报告">
+                <!-- 迁移报告 -->
+                <div v-if="objMigrate.finished && objMigrate.currentJobId" style="margin-top: 16px">
+                  <MigrationReportPanel :key="objMigrate.currentJobId" :jobID="objMigrate.currentJobId" @loaded="objMigrateResultTab = 'report'" />
+                </div>
+              </a-tab-pane>
+            </a-tabs>
+          </section>
           <!-- 操作按钮 -->
-          <a-space style="margin-bottom: 16px">
+          <MigrationActionBar :status="objMigrate.running ? '正在迁移，请关注执行日志' : objMigrate.finished ? '执行已结束，请查看日志与报告' : '配置完成后可开始迁移'" :busy="objMigrate.running">
             <a-button
               type="primary"
               :disabled="!omCanMigrate"
@@ -773,29 +843,8 @@
               v-if="objMigrate.finished"
               @click="resetObjectMigration"
             >重新迁移</a-button>
-          </a-space>
+          </MigrationActionBar>
 
-          <!-- 日志区 -->
-          <div v-if="objMigrate.logs.length > 0">
-            <a-space style="margin-bottom: 8px">
-              <span style="font-weight:500">迁移日志</span>
-              <a-button size="mini" @click="copyObjLogs">复制日志</a-button>
-            </a-space>
-            <div ref="objLogContainer" class="migration-log-container">
-              <div
-                v-for="(line, i) in objMigrate.logs"
-                :key="i"
-                :class="getLogClass(line)"
-                class="log-line"
-              >{{ line }}</div>
-            </div>
-          </div>
-
-          <!-- 迁移报告 -->
-          <div v-if="objMigrate.finished && objMigrate.currentJobId" style="margin-top: 16px">
-            <a-divider>迁移报告</a-divider>
-            <MigrationReportPanel :jobID="objMigrate.currentJobId" />
-          </div>
         </a-form>
       </a-tab-pane>
 
@@ -810,6 +859,7 @@ import { Message, Modal } from '@arco-design/web-vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
 import { applyTargetMigrationDefaults } from '@/utils/migrationOptions'
 import { copyText } from '@/utils/clipboard'
+import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
@@ -937,6 +987,14 @@ const handleExportRoutines = async () => {
     exportingRoutines.value = false
   }
 }
+// MySQL 的目标 Schema 就是实际写入的数据库，可能与连接默认库不同。
+function targetDatabaseName(connection: Connection, targetSchema: string): string {
+  if (connection.db_type === 'mysql') {
+    return targetSchema || connection.database || '未选择'
+  }
+  return connection.database || '未配置'
+}
+
 const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )
@@ -1015,8 +1073,9 @@ async function startDataMigration() {
   dataMigrate.running = true
   dataMigrate.finished = false
   dataMigrate.logs = []
+  dataMigrate.currentJobId = ''
   try {
-    if (isPGMySQLSelection('data') && !(await runPGCheck('data'))?.ready) { dataMigrate.running = false; return }
+    if (isPGMySQLSelection('data') && !(await ensurePGCheck('data'))?.ready) { dataMigrate.running = false; return }
     const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
     connectSSE(res.data.job_id)
@@ -1268,7 +1327,7 @@ async function handleMigrateViews() {
   viewMigrate.running = true
   viewMigrate.results = []
   try {
-    if (isPGMySQLSelection('views') && !(await runPGCheck('views'))?.ready) return
+    if (isPGMySQLSelection('views') && !(await ensurePGCheck('views'))?.ready) return
     const res = await apiMigrateViews({
       excluded_objects: pgExclusions.views,
       src_conn_id: viewMigrate.srcConnId!,
@@ -1447,9 +1506,10 @@ async function startObjectMigration() {
   }
   objMigrate.running = true
   objMigrate.finished = false
+  objMigrate.currentJobId = ''
   objMigrate.logs = []
   try {
-    if (isPGMySQLSelection('objects') && !(await runPGCheck('objects'))?.ready) { objMigrate.running = false; return }
+    if (isPGMySQLSelection('objects') && !(await ensurePGCheck('objects'))?.ready) { objMigrate.running = false; return }
     const res = await apiStartObjectMigration({
       excluded_objects: pgExclusions.objects,
       src_conn_id: objMigrate.srcConnId!,
@@ -1524,6 +1584,7 @@ const pgChecks = reactive<Record<PGCheckKind, PGMySQLPreflight | null>>({ data: 
 const pgExclusions = reactive<Record<PGCheckKind, MigrationObjectRef[]>>({ data: [], views: [], objects: [] })
 const pgBusy = reactive<Record<PGCheckKind, boolean>>({ data: false, views: false, objects: false })
 const pgAbort = new Map<PGCheckKind, AbortController>()
+const pgCheckRequests = new Map<PGCheckKind, string>()
 function isPGMySQLSelection(kind: PGCheckKind) {
   const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
   const src = connections.value.find(c => c.id === state.srcConnId)
@@ -1565,16 +1626,29 @@ function pgRequest(kind: PGCheckKind): PGMySQLPreflightRequest {
     src_database: state.srcDatabase || undefined, target_schema: state.dstSchema || undefined,
     lower_case_names: state.lowerCaseNames, change_owner: state.changeOwner,
     excluded_objects: pgExclusions[kind],
-    ...(kind === 'views' ? { view_names: viewMigrate.selected } : { migrate_objects: objMigrate.objects, table_names: omFinalTables.value, distributed: objMigrate.distributed }),
+    ...(kind === 'views' ? { view_names: viewMigrate.selected, strip_view_schemas: viewMigrate.stripViewSchemas || undefined } : { migrate_objects: objMigrate.objects, table_names: omFinalTables.value, distributed: objMigrate.distributed }),
   }
+}
+async function ensurePGCheck(kind: PGCheckKind) {
+  // Flush configuration watchers before considering a previous successful check.
+  // The backend still builds and validates a fresh plan before executing migration.
+  await nextTick()
+  if (pgChecks[kind]?.ready && pgCheckRequests.get(kind) === JSON.stringify(pgRequest(kind))) return pgChecks[kind]
+  return runPGCheck(kind)
 }
 async function runPGCheck(kind: PGCheckKind) {
   pgAbort.get(kind)?.abort()
+  pgChecks[kind] = null
+  pgCheckRequests.delete(kind)
+  const request = pgRequest(kind)
+  const requestKey = JSON.stringify(request)
   const controller = new AbortController(); pgAbort.set(kind, controller); pgBusy[kind] = true
   try {
-    const result = await preflightDataMigration(pgRequest(kind), controller.signal)
-    if (!controller.signal.aborted) pgChecks[kind] = result.data
-    return controller.signal.aborted ? undefined : result.data
+    const result = await preflightDataMigration(request, controller.signal)
+    if (controller.signal.aborted || requestKey !== JSON.stringify(pgRequest(kind))) return
+    pgChecks[kind] = result.data
+    pgCheckRequests.set(kind, requestKey)
+    return result.data
   } catch (e: any) {
     if (!controller.signal.aborted) Message.error(`预检失败：${e?.response?.data?.error ?? e.message}`)
   } finally {
@@ -1590,10 +1664,15 @@ function restorePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
   pgExclusions[kind] = pgExclusions[kind].filter(o => objectKey(o) !== objectKey(object)); pgChecks[kind] = null
 }
 for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
-  watch(() => JSON.stringify(pgRequest(kind)), () => { pgAbort.get(kind)?.abort(); pgChecks[kind] = null })
+  watch(() => JSON.stringify(pgRequest(kind)), () => { pgAbort.get(kind)?.abort(); pgChecks[kind] = null; pgCheckRequests.delete(kind) })
   watch(() => { const req = pgRequest(kind); return [req.src_conn_id, req.dst_conn_id, req.src_database, req.target_schema].join('|') }, () => { pgExclusions[kind] = [] })
 }
 onUnmounted(() => { for (const controller of pgAbort.values()) controller.abort() })
+
+const dataMigrateResultTab = ref('logs')
+const objMigrateResultTab = ref('logs')
+watch(() => dataMigrate.currentJobId, () => { dataMigrateResultTab.value = 'logs' })
+watch(() => objMigrate.currentJobId, () => { objMigrateResultTab.value = 'logs' })
 
 </script>
 
@@ -1749,3 +1828,5 @@ onUnmounted(() => { for (const controller of pgAbort.values()) controller.abort(
   margin: 0;
 }
 </style>
+
+<style src="@/styles/migration-workspace.css"></style>

@@ -1,20 +1,27 @@
 <template>
-  <div v-if="!noReport" class="migration-report-panel">
+  <div class="migration-report-panel">
     <div v-if="loading" style="text-align: center; padding: 24px">
       <a-spin />
     </div>
 
-    <a-alert v-else-if="fetchError" type="error">{{ fetchError }}</a-alert>
+    <a-alert v-else-if="fetchError" type="error">{{ fetchError }} <a-button type="text" size="small" @click="loadReport">重试</a-button></a-alert>
+    <a-empty v-else-if="noReport" description="暂无报告数据，请查看执行日志" />
 
     <template v-else-if="report">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+      <div class="report-heading">
+        <div><h3>迁移报告</h3><span>任务 {{ jobID }}</span></div>
         <a-button size="small" @click="exportReport">
           <template #icon><icon-download /></template>
           导出报告
         </a-button>
       </div>
-      <PGMySQLPreflightPanel v-if="report.preflight" :result="report.preflight" :excluded="report.preflight.excluded" readonly />
-      <a-tabs default-active-key="overview">
+      <div class="report-stats">
+        <div><span>迁移表数</span><strong>{{ report.tables.total }}</strong></div>
+        <div><span>失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
+        <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
+        <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
+      </div>
+      <a-tabs default-active-key="overview" :destroy-on-hide="false">
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
           <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
           <a-table :data="report.warnings" :pagination="{ pageSize: 20 }" size="small">
@@ -32,7 +39,9 @@
             :data="tableRows"
             row-key="key"
             :pagination="false"
+            :scroll="{ x: 600 }"
             size="small"
+            :row-class="record => record.failed > 0 && record.items?.length > 0 ? '' : 'report-row-no-details'"
             :expandable="{ icon: (_, record) => record.failed > 0 && record.items?.length > 0 ? undefined : null }"
           >
             <template #columns>
@@ -101,6 +110,7 @@
           <a-table
             :data="allRowCounts"
             :pagination="{ pageSize: 50 }"
+            :scroll="{ x: 600 }"
             size="small"
             row-key="table"
           >
@@ -136,13 +146,22 @@
           </template>
         </a-tab-pane>
       </a-tabs>
+      <a-collapse
+        v-if="report.preflight"
+        :default-active-key="report.preflight.ready ? [] : ['preflight']"
+        style="margin-top: 16px"
+      >
+        <a-collapse-item key="preflight" :header="`迁移前预检记录（${report.preflight.ready ? '已通过' : '未通过'}）`">
+          <PGMySQLPreflightPanel :result="report.preflight" :excluded="report.preflight.excluded" readonly />
+        </a-collapse-item>
+      </a-collapse>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   getDataMigrationReport,
@@ -153,6 +172,7 @@ import {
 import { copyText } from '@/utils/clipboard'
 
 const props = defineProps<{ jobID: string }>()
+const emit = defineEmits<{ loaded: [jobID: string] }>()
 
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
@@ -198,22 +218,30 @@ const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? 
 const mismatchedRows = computed<TableRowCount[]>(() =>
   report.value?.rowCounts?.filter((r) => !r.match) ?? []
 )
+const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isTrigger ? 0 : row.failed), 0))
+let reportRequest = 0
 
 async function loadReport() {
+  const request = ++reportRequest
+  const jobID = props.jobID
   loading.value = true
   fetchError.value = ''
   noReport.value = false
+  report.value = null
   try {
-    const res = await getDataMigrationReport(props.jobID)
+    const res = await getDataMigrationReport(jobID)
+    if (request !== reportRequest) return
     report.value = res.data
+    emit('loaded', jobID)
   } catch (e: any) {
+    if (request !== reportRequest) return
     if (e?.response?.status === 404) {
       noReport.value = true
     } else {
       fetchError.value = '暂无报告数据'
     }
   } finally {
-    loading.value = false
+    if (request === reportRequest) loading.value = false
   }
 }
 
@@ -311,11 +339,14 @@ async function copyDDL(ddl: string) {
 }
 
 onMounted(loadReport)
+watch(() => props.jobID, loadReport)
+onUnmounted(() => { reportRequest++ })
 </script>
 
 <style scoped>
 .migration-report-panel {
-  margin-top: 16px;
+  min-width: 0;
+  container-type: inline-size;
 }
 .failure-list {
   padding: 8px 16px;
@@ -351,8 +382,26 @@ onMounted(loadReport)
   border-radius: 4px;
   font-size: 12px;
   font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 320px;
   white-space: pre;
   margin: 0;
 }
+
+.report-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.report-heading h3 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.report-heading span { color: var(--color-text-3); font-size: 12px; overflow-wrap: anywhere; }
+.report-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.report-stats > div { padding: 16px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
+.report-stats span { display: block; color: var(--color-text-3); font-size: 12px; margin-bottom: 8px; }
+.report-stats strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.report-danger { color: #dc2626; }
+.failure-error, .failure-name { overflow-wrap: anywhere; }
+.migration-report-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
+/* Arco 2.58 falls back to its default icon for null. Keep the icon contract,
+   and remove non-actionable buttons from both pointer and keyboard navigation. */
+.migration-report-panel :deep(.report-row-no-details .arco-table-expand-btn) { display: none; }
+.migration-report-panel :deep(.arco-tabs-tab-active), .migration-report-panel :deep(.arco-tabs-tab:hover) { color: #15803d; }
+.migration-report-panel :deep(.arco-tabs-nav-ink) { background: #16a34a; }
+@container (max-width: 767px) { .report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

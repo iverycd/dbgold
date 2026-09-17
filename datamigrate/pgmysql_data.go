@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash"
 	"strings"
@@ -17,8 +16,6 @@ import (
 	"dbgold/datamigrate/typemap"
 	"dbgold/datamigrate/valueconv"
 )
-
-type pgKeySet map[[32]byte]struct{}
 
 func pgKey(row []any, cols []source.ColumnInfo, names []string) ([32]byte, bool, error) {
 	h := sha256.New()
@@ -75,6 +72,11 @@ func convertPGPage(t source.PGTable, cols []string, rows [][]any) ([][]any, erro
 			if e != nil {
 				return nil, fmt.Errorf("%s.%s: %w", t.Info.TableName, c.Name, e)
 			}
+			if c.Extra == "auto_increment" {
+				if n, ok := v.(int64); ok && n < 0 {
+					return nil, fmt.Errorf("%s.%s: 自增值含负数", t.Info.TableName, c.Name)
+				}
+			}
 			out[j][i] = v
 		}
 	}
@@ -112,6 +114,14 @@ func (m *Migrator) eachPGPage(ctx context.Context, t source.PGTable, targetDB *s
 			}
 			queryCols := mapNames(cols, func(s string) string { return sqlsyntax.QuoteIdent(m.objName(s)) })
 			order := queryCols
+			queryCols = append([]string(nil), queryCols...)
+			for i, c := range t.Info.Columns {
+				if strings.EqualFold(c.DataType, "bit") {
+					// MySQL drivers return packed bytes for BIT. Read exact-width
+					// textual bits so validation and checksums match the PG reader.
+					queryCols[i] = fmt.Sprintf("LPAD(BIN(CAST(%s AS UNSIGNED)), %d, '0')", queryCols[i], c.Length)
+				}
+			}
 			rs, e := targetDB.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY %s LIMIT %d OFFSET %d", strings.Join(queryCols, ","), sqlsyntax.QuoteIdent(m.cfg.TargetSchema), sqlsyntax.QuoteIdent(m.objName(t.Info.TableName)), strings.Join(order, ","), limit, offset))
 			if e != nil {
 				return e
@@ -150,183 +160,6 @@ func (m *Migrator) eachPGPage(ctx context.Context, t source.PGTable, targetDB *s
 		}
 	}
 }
-func (m *Migrator) validatePGMySQLData(ctx context.Context, p *PGMySQLPreflight, db *sql.DB, readTarget bool) error {
-	sets := map[ObjectRef]pgKeySet{}
-	tableMap := map[string]source.PGTable{}
-	p.rowCounts = map[string]int64{}
-	// Full scan, not a sample. Key hashes are length-delimited; NULL-containing
-	// unique keys are exempt in both PG's normal semantics and MySQL.
-	for _, t := range p.tables {
-		tableMap[t.Info.TableName] = t
-		for _, idx := range t.Indexes {
-			if idx.IsUnique && idx.Unsupported == "" {
-				sets[idxRef(idx)] = pgKeySet{}
-			}
-		}
-		var inputDB *sql.DB
-		if readTarget {
-			inputDB = db
-		}
-		checkQuery, checkErr := m.pgRowCheckQuery(t, p.Target.Parsed.Checks(), p.textRules[t.Info.TableName])
-		if checkErr != nil {
-			return checkErr
-		}
-		var checkStmt *sql.Stmt
-		if checkQuery != "" {
-			checkStmt, checkErr = db.PrepareContext(ctx, checkQuery)
-			if checkErr != nil {
-				return checkErr
-			}
-		}
-		keyCols := map[string]bool{}
-		for _, idx := range t.Indexes {
-			if sets[idxRef(idx)] != nil {
-				for _, c := range idx.Columns {
-					keyCols[c] = true
-				}
-			}
-		}
-		e := m.eachPGPage(ctx, t, inputDB, func(_ []string, rows [][]any) error {
-			weighted, sizes, err := inspectPGTextPage(ctx, db, t, p.textRules[t.Info.TableName], rows, keyCols, p.Target.MaxAllowedPacket)
-			if err != nil {
-				return err
-			}
-			for rowIndex, row := range rows {
-				packetBytes := 1024 + len(row)*16
-				for _, v := range row {
-					if b, ok := v.([]byte); ok {
-						packetBytes += len(b)
-					} else if v != nil {
-						packetBytes += len(fmt.Sprint(v))
-					}
-				}
-				if p.Target.MaxAllowedPacket > 0 && packetBytes > p.Target.MaxAllowedPacket {
-					return fmt.Errorf("%s 行数据超过 max_allowed_packet", t.Info.TableName)
-				}
-				if e := checkPGRowStorage(t, row, sizes[rowIndex], p.Target.PageSize); e != nil {
-					return e
-				}
-				if checkStmt != nil {
-					var valid int
-					if e := checkStmt.QueryRowContext(ctx, row...).Scan(&valid); e != nil {
-						return fmt.Errorf("%s CHECK 验证失败: %w", t.Info.TableName, e)
-					}
-					if valid != 1 {
-						return fmt.Errorf("%s 在目标语义下违反 CHECK", t.Info.TableName)
-					}
-				}
-				for i, c := range t.Info.Columns {
-					if row[i] == nil {
-						continue
-					}
-					if c.Extra == "auto_increment" {
-						if n, ok := row[i].(int64); ok && n < 0 {
-							return fmt.Errorf("%s.%s 自增值含负数", t.Info.TableName, c.Name)
-						}
-					}
-					if c.DataType == "json" || c.DataType == "jsonb" {
-						var valid int
-						if e := db.QueryRowContext(ctx, `SELECT JSON_VALID(?)`, row[i]).Scan(&valid); e != nil {
-							return e
-						}
-						if valid != 1 {
-							return fmt.Errorf("%s.%s 包含 MySQL 不接受的 JSON", t.Info.TableName, c.Name)
-						}
-					}
-				}
-				for _, idx := range t.Indexes {
-					set := sets[idxRef(idx)]
-					if set == nil {
-						continue
-					}
-					key, valid, e := pgKey(weighted[rowIndex], t.Info.Columns, idx.Columns)
-					if e != nil {
-						return e
-					}
-					if !valid {
-						if idx.IsPrimary {
-							return fmt.Errorf("主键 %s 含 NULL", idx.IndexName)
-						}
-						continue
-					}
-					if _, duplicate := set[key]; duplicate {
-						return &pgObjectError{idxRef(idx), fmt.Errorf("在目标比较规则下违反唯一性（含尾空格差异）")}
-					}
-					set[key] = struct{}{}
-				}
-			}
-			p.RowsChecked += int64(len(rows))
-			p.rowCounts[t.Info.TableName] += int64(len(rows))
-			return nil
-		})
-		if checkStmt != nil {
-			checkStmt.Close()
-		}
-		if e != nil {
-			var objectErr *pgObjectError
-			if errors.As(e, &objectErr) {
-				return e
-			}
-			return &pgObjectError{tableRef(t.Info.TableName), e}
-		}
-	}
-	// Re-scan foreign-key children after all referenced unique keys are known;
-	// never retain entire data rows or compare raw source collation semantics.
-	for _, fk := range p.validationFKs {
-		t := tableMap[fk.TableName]
-		referenced, ok := tableMap[fk.RefTable]
-		if !ok {
-			return fmt.Errorf("外键 %s 引用目标表未纳入全量预检", fk.ConstraintName)
-		}
-		var parent pgKeySet
-		for _, idx := range referenced.Indexes {
-			if idx.IsUnique && strings.Join(idx.Columns, "\x00") == strings.Join(fk.RefColumns, "\x00") {
-				parent = sets[idxRef(idx)]
-			}
-		}
-		if parent == nil {
-			return fmt.Errorf("外键 %s 缺少已验证的引用键", fk.ConstraintName)
-		}
-		var inputDB *sql.DB
-		if readTarget {
-			inputDB = db
-		}
-		keyCols := map[string]bool{}
-		fkRules := map[string]target.MySQLTextRules{}
-		for i, c := range fk.Columns {
-			keyCols[c] = true
-			fkRules[c] = p.textRules[fk.RefTable][fk.RefColumns[i]]
-		}
-		// Include non-key character rules for round-trip checks on this page.
-		for c, r := range p.textRules[t.Info.TableName] {
-			if !keyCols[c] {
-				fkRules[c] = r
-			}
-		}
-		if e := m.eachPGPage(ctx, t, inputDB, func(_ []string, rows [][]any) error {
-			weighted, _, err := inspectPGTextPage(ctx, db, t, fkRules, rows, keyCols, p.Target.MaxAllowedPacket)
-			if err != nil {
-				return err
-			}
-			for _, row := range weighted {
-				key, valid, e := pgKey(row, t.Info.Columns, fk.Columns)
-				if e != nil {
-					return e
-				}
-				if valid {
-					if _, ok := parent[key]; !ok {
-						return &pgObjectError{ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}, fmt.Errorf("外键存在未匹配引用行")}
-					}
-				}
-			}
-			return nil
-		}); e != nil {
-			return e
-		}
-	}
-	return nil
-}
-
 func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool, rules map[string]target.MySQLTextRules) (string, error) {
 	if len(t.Checks) == 0 || !checksSupported {
 		return "", nil
@@ -355,6 +188,8 @@ func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool, rules
 		switch {
 		case strings.HasPrefix(typ, "DECIMAL"):
 			cast = "CAST(" + parameter + " AS " + typ + ")"
+		case strings.HasPrefix(typ, "BIT("):
+			cast = "CAST(" + parameter + " AS UNSIGNED)"
 		case typ == "INT" || typ == "SMALLINT" || typ == "BIGINT" || strings.HasPrefix(typ, "TINYINT"):
 			cast = "CAST(" + parameter + " AS SIGNED)"
 		case typ == "DATE" || strings.HasPrefix(typ, "TIME(") || strings.HasPrefix(typ, "DATETIME("):
@@ -387,45 +222,6 @@ func (m *Migrator) pgRowCheckQuery(t source.PGTable, checksSupported bool, rules
 		from += " JOIN JSON_TABLE(JSON_ARRAY(" + strings.Join(textValues, ",") + "), '$' COLUMNS (" + strings.Join(textColumns, ",") + ")) AS text_row ON TRUE"
 	}
 	return "SELECT (" + strings.Join(conditions, " AND ") + ") FROM (SELECT " + strings.Join(cols, ",") + " FROM " + from + ") AS checked_row", nil
-}
-
-// Bound the local InnoDB record after DYNAMIC external storage. Short variable
-// values stay inline; long values need a 20-byte external pointer. No truncation
-// or row-format guessing is used to bypass this check.
-func checkPGRowStorage(t source.PGTable, row []any, textSizes []int, pageSize int) error {
-	local := 32 + (len(t.Info.Columns)+7)/8
-	for i, c := range t.Info.Columns {
-		if row[i] == nil {
-			continue
-		}
-		typ, e := typemap.PGToMySQLChecked(c)
-		if e != nil {
-			return e
-		}
-		switch {
-		case strings.Contains(typ, "CHAR") || typ == "LONGTEXT" || typ == "LONGBLOB" || typ == "JSON":
-			n := 0
-			if b, ok := row[i].([]byte); ok {
-				n = len(b)
-			} else {
-				n = len(fmt.Sprint(row[i]))
-			}
-			if pgTextColumn(c) {
-				n = textSizes[i]
-			}
-			if n > 40 {
-				n = 20
-			}
-			local += n + 2
-		default:
-			local += 32
-		}
-	}
-	limit := min(pageSize/2-200, 16000)
-	if local > limit {
-		return fmt.Errorf("%s 行内数据预计 %d 字节，超过 InnoDB %d 字节安全上限", t.Info.TableName, local, limit)
-	}
-	return nil
 }
 
 // Hex-encode SQL string literals for observational expression evaluation so
