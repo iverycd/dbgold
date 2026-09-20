@@ -85,6 +85,7 @@ test('report export includes Oracle warnings and still accepts historical report
   }, {
     defineProps: () => ({ jobID: 'oracle-report' }),
     defineEmits: () => () => {},
+    defineExpose() {},
     URL: { createObjectURL: blob => { blobs.push(blob); return 'blob:test' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) },
   })

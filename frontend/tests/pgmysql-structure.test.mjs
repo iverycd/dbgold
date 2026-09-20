@@ -23,8 +23,8 @@ function load(source, globals = {}) {
 }
 const component = load(compileScript(descriptor, { id: 'preflight-test', inlineTemplate: true }).content).default
 const legacy = { ready: true, rows_checked: 2543, objects: [], issues: [], excluded: [], source: {}, target: {} }
-async function render(result) {
-  const app = Vue.createSSRApp(component, { result, readonly: true })
+async function render(result, props = {}) {
+  const app = Vue.createSSRApp(component, { result, readonly: true, ...props })
   // Render the actual template with lightweight component shells.
   for (const name of ['ASpace', 'AButton', 'AAlert', 'ACollapse', 'ACollapseItem', 'ATabs', 'ATabPane', 'AInput', 'ARadioGroup', 'ARadio', 'ATable', 'ATableColumn', 'AEmpty', 'APagination', 'ATag', 'IconDownload', 'IconSearch', 'IconCopy']) {
     app.component(name, { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) })
@@ -60,4 +60,19 @@ test('export preserves optional structure scope and legacy rows without changing
       assert.deepEqual(JSON.parse(await blob.text()), result)
     } finally { scope.stop() }
   }
+})
+
+test('compact preview and report summaries show attribution and counts without duplicating full details', async () => {
+  const result = { ...legacy, check_scope: 'structure', issues: [{ severity: 'warning', object: { kind: 'table', name: 'T' } }] }
+  const preview = await render(result, { compact: true, summarySource: 'page' })
+  assert.match(preview, /页面结构预检通过/)
+  assert.match(preview, /阻止 0/)
+  assert.match(preview, /提示 1/)
+  assert.match(preview, /查看执行日志/)
+  assert.doesNotMatch(preview, /检查问题|对象映射与 DDL|导出预检与 DDL|重新预检|明确排除|查看预检记录/)
+  const blocked = await render({ ...result, ready: false, issues: [{ severity: 'error', object: { kind: 'table', name: 'T' } }] }, { compact: true, summarySource: 'report' })
+  assert.match(blocked, /执行前预检未通过/)
+  assert.match(blocked, /阻止 1/)
+  assert.match(blocked, /查看预检记录/)
+  assert.doesNotMatch(blocked, /页面结构预检通过|查看执行日志|检查问题/)
 })

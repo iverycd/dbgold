@@ -272,7 +272,11 @@
 
           </section>
 
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')" :result="pgChecks.data" :excluded="pgExclusions.data" :busy="pgBusy.data"
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')"
+            :result="pgTaskSummaries.data ? (pgTaskSummaries.data.preflight ?? pgTaskSummaries.data.preview) : pgChecks.data"
+            :compact="!!pgTaskSummaries.data" :summary-source="pgTaskSummaries.data?.preflight ? 'report' : 'page'"
+            :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running"
+            @view-report="showPGTaskResult('data', 'report')" @view-logs="showPGTaskResult('data', 'logs')"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
 
           <!-- 目标表删除重建警告 -->
@@ -281,7 +285,7 @@
             迁移开始时会对目标库中同名表执行 <strong>删除并重新创建表</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
           </a-alert>
 
-          <section v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
+          <section ref="dataResultsSection" tabindex="-1" v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
             <a-tabs v-model:active-key="dataMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
               <a-tab-pane key="logs" title="执行日志">
@@ -336,7 +340,7 @@
                       </span>
                     </div>
                   </div>
-                  <MigrationReportPanel :key="dataMigrate.currentJobId" :jobID="dataMigrate.currentJobId" @loaded="dataMigrateResultTab = 'report'" />
+                  <MigrationReportPanel ref="dataReportPanel" :key="dataMigrate.currentJobId" :jobID="dataMigrate.currentJobId" @loaded="(jobID, report) => onPGReportLoaded('data', jobID, report)" />
                 </div>
               </a-tab-pane>
             </a-tabs>
@@ -794,10 +798,14 @@
 
           </section>
 
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')" :result="pgChecks.objects" :excluded="pgExclusions.objects" :busy="pgBusy.objects"
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')"
+            :result="pgTaskSummaries.objects ? (pgTaskSummaries.objects.preflight ?? pgTaskSummaries.objects.preview) : pgChecks.objects"
+            :compact="!!pgTaskSummaries.objects" :summary-source="pgTaskSummaries.objects?.preflight ? 'report' : 'page'"
+            :excluded="pgExclusions.objects" :busy="pgBusy.objects" :disabled="objMigrate.running"
+            @view-report="showPGTaskResult('objects', 'report')" @view-logs="showPGTaskResult('objects', 'logs')"
             @check="runPGCheck('objects')" @exclude="excludePGObject('objects', $event)" @restore="restorePGObject('objects', $event)" />
 
-          <section v-if="objMigrate.running || objMigrate.logs.length || objMigrate.currentJobId" class="migration-surface migration-results">
+          <section ref="objectsResultsSection" tabindex="-1" v-if="objMigrate.running || objMigrate.logs.length || objMigrate.currentJobId" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>执行结果</h3><span>{{ objMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
             <a-tabs v-model:active-key="objMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
               <a-tab-pane key="logs" title="执行日志">
@@ -821,7 +829,7 @@
               <a-tab-pane v-if="objMigrate.finished && objMigrate.currentJobId" key="report" title="迁移报告">
                 <!-- 迁移报告 -->
                 <div v-if="objMigrate.finished && objMigrate.currentJobId" style="margin-top: 16px">
-                  <MigrationReportPanel :key="objMigrate.currentJobId" :jobID="objMigrate.currentJobId" @loaded="objMigrateResultTab = 'report'" />
+                  <MigrationReportPanel ref="objectReportPanel" :key="objMigrate.currentJobId" :jobID="objMigrate.currentJobId" @loaded="(jobID, report) => onPGReportLoaded('objects', jobID, report)" />
                 </div>
               </a-tab-pane>
             </a-tabs>
@@ -871,6 +879,7 @@ import {
   type PGMySQLPreflight,
   type PGMySQLPreflightRequest,
   type MigrationObjectRef,
+  type MigrationReport,
   startDataMigration as apiStartMigration,
   cancelDataMigration as apiCancelMigration,
   createDataMigrateEventSource,
@@ -1074,10 +1083,13 @@ async function startDataMigration() {
   dataMigrate.finished = false
   dataMigrate.logs = []
   dataMigrate.currentJobId = ''
+  pgSubmissions.data = null
   try {
     if (isPGMySQLSelection('data') && !(await ensurePGCheck('data'))?.ready) { dataMigrate.running = false; return }
+    const submitted = preparePGSubmission('data')
     const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
+    savePGSubmission('data', res.data.job_id, submitted)
     connectSSE(res.data.job_id)
   } catch (e: any) {
     dataMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
@@ -1126,6 +1138,7 @@ function resetDataMigration() {
   dataMigrate.finished = false
   dataMigrate.logs = []
   dataMigrate.currentJobId = ''
+  clearPGCheck('data', true)
 }
 
 function copyLogs() {
@@ -1507,9 +1520,11 @@ async function startObjectMigration() {
   objMigrate.running = true
   objMigrate.finished = false
   objMigrate.currentJobId = ''
+  pgSubmissions.objects = null
   objMigrate.logs = []
   try {
     if (isPGMySQLSelection('objects') && !(await ensurePGCheck('objects'))?.ready) { objMigrate.running = false; return }
+    const submitted = preparePGSubmission('objects')
     const res = await apiStartObjectMigration({
       excluded_objects: pgExclusions.objects,
       src_conn_id: objMigrate.srcConnId!,
@@ -1523,6 +1538,7 @@ async function startObjectMigration() {
       distributed: objMigrate.distributed,
     })
     objMigrate.currentJobId = res.data.job_id
+    savePGSubmission('objects', res.data.job_id, submitted)
     omConnectSSE(res.data.job_id)
   } catch (e: any) {
     objMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
@@ -1571,6 +1587,7 @@ function resetObjectMigration() {
   objMigrate.finished = false
   objMigrate.logs = []
   objMigrate.currentJobId = ''
+  clearPGCheck('objects', true)
 }
 
 function copyObjLogs() {
@@ -1585,6 +1602,63 @@ const pgExclusions = reactive<Record<PGCheckKind, MigrationObjectRef[]>>({ data:
 const pgBusy = reactive<Record<PGCheckKind, boolean>>({ data: false, views: false, objects: false })
 const pgAbort = new Map<PGCheckKind, AbortController>()
 const pgCheckRequests = new Map<PGCheckKind, string>()
+// Bind compact summaries to the submitted configuration and the actual job.
+// A later configuration edit permanently restores the editable preview.
+type PGTaskKind = 'data' | 'objects'
+interface PGSubmission {
+  jobID: string
+  requestKey: string
+  preview: PGMySQLPreflight
+  preflight: PGMySQLPreflight | null
+}
+const pgSubmissions = reactive<Record<PGTaskKind, PGSubmission | null>>({ data: null, objects: null })
+const dataReportPanel = ref<InstanceType<typeof MigrationReportPanel> | null>(null)
+const objectReportPanel = ref<InstanceType<typeof MigrationReportPanel> | null>(null)
+const dataResultsSection = ref<HTMLElement | null>(null)
+const objectsResultsSection = ref<HTMLElement | null>(null)
+function matchingPGSubmission(kind: PGTaskKind) {
+  const state = kind === 'data' ? dataMigrate : objMigrate
+  const submitted = pgSubmissions[kind]
+  return submitted && submitted.jobID === state.currentJobId && submitted.requestKey === JSON.stringify(pgRequest(kind)) ? submitted : null
+}
+const pgTaskSummaries = computed(() => ({ data: matchingPGSubmission('data'), objects: matchingPGSubmission('objects') }))
+function preparePGSubmission(kind: PGTaskKind): Omit<PGSubmission, 'jobID'> | null {
+  const preview = pgChecks[kind]
+  const requestKey = JSON.stringify(pgRequest(kind))
+  return isPGMySQLSelection(kind) && preview?.ready && pgCheckRequests.get(kind) === requestKey
+    ? { requestKey, preview, preflight: null } : null
+}
+function savePGSubmission(kind: PGTaskKind, jobID: string, submitted: Omit<PGSubmission, 'jobID'> | null) {
+  // A configuration change while the start request was in flight invalidates its preview.
+  if (submitted && submitted.requestKey === JSON.stringify(pgRequest(kind)) && pgCheckRequests.get(kind) === submitted.requestKey) {
+    pgSubmissions[kind] = { ...submitted, jobID }
+  }
+}
+function onPGReportLoaded(kind: PGTaskKind, jobID: string, report: MigrationReport) {
+  const state = kind === 'data' ? dataMigrate : objMigrate
+  if (state.currentJobId !== jobID) return
+  const submitted = matchingPGSubmission(kind)
+  if (submitted) submitted.preflight = report.preflight ?? null
+  const tab = kind === 'data' ? dataMigrateResultTab : objMigrateResultTab
+  tab.value = 'report'
+}
+async function showPGTaskResult(kind: PGTaskKind, destination: 'logs' | 'report') {
+  const state = kind === 'data' ? dataMigrate : objMigrate
+  const jobID = state.currentJobId
+  if (!jobID) return
+  const tab = kind === 'data' ? dataMigrateResultTab : objMigrateResultTab
+  tab.value = destination
+  await nextTick()
+  if (state.currentJobId !== jobID) return
+  if (destination === 'report') {
+    await (kind === 'data' ? dataReportPanel : objectReportPanel).value?.showPreflight()
+  } else {
+    const section = (kind === 'data' ? dataResultsSection : objectsResultsSection).value
+    section?.focus({ preventScroll: true })
+    section?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
 function isPGMySQLSelection(kind: PGCheckKind) {
   const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
   const src = connections.value.find(c => c.id === state.srcConnId)
@@ -1636,10 +1710,17 @@ async function ensurePGCheck(kind: PGCheckKind) {
   if (pgChecks[kind]?.ready && pgCheckRequests.get(kind) === JSON.stringify(pgRequest(kind))) return pgChecks[kind]
   return runPGCheck(kind)
 }
-async function runPGCheck(kind: PGCheckKind) {
+function clearPGCheck(kind: PGCheckKind, clearExclusions = false) {
   pgAbort.get(kind)?.abort()
+  pgAbort.delete(kind)
+  pgBusy[kind] = false
   pgChecks[kind] = null
   pgCheckRequests.delete(kind)
+  if (kind !== 'views') pgSubmissions[kind] = null
+  if (clearExclusions) pgExclusions[kind] = []
+}
+async function runPGCheck(kind: PGCheckKind) {
+  clearPGCheck(kind)
   const request = pgRequest(kind)
   const requestKey = JSON.stringify(request)
   const controller = new AbortController(); pgAbort.set(kind, controller); pgBusy[kind] = true
@@ -1664,7 +1745,9 @@ function restorePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
   pgExclusions[kind] = pgExclusions[kind].filter(o => objectKey(o) !== objectKey(object)); pgChecks[kind] = null
 }
 for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
-  watch(() => JSON.stringify(pgRequest(kind)), () => { pgAbort.get(kind)?.abort(); pgChecks[kind] = null; pgCheckRequests.delete(kind) })
+  watch(() => JSON.stringify(pgRequest(kind)), () => {
+    clearPGCheck(kind)
+  })
   watch(() => { const req = pgRequest(kind); return [req.src_conn_id, req.dst_conn_id, req.src_database, req.target_schema].join('|') }, () => { pgExclusions[kind] = [] })
 }
 onUnmounted(() => { for (const controller of pgAbort.values()) controller.abort() })

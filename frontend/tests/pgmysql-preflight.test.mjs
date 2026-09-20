@@ -12,11 +12,11 @@ function load(source, require) {
   vm.runInNewContext(compiled.outputText, context)
   return context.exports
 }
-function page(preflight, starts, errors) {
+function page(preflight, starts, errors, options = {}) {
   const helpers = load(readFileSync(new URL('../src/utils/migrationOptions.ts', import.meta.url), 'utf8'), () => {})
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
   return load(`${descriptor.scriptSetup.content}
-    export { connections, dataMigrate, viewMigrate, objMigrate, pgChecks, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration };`, id => {
+    export { connections, dataMigrate, viewMigrate, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
     switch (id) {
       case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
@@ -27,8 +27,8 @@ function page(preflight, starts, errors) {
       case '@/api/connections': return {}
       case '@/api/migration': return {
         preflightDataMigration: preflight,
-        startDataMigration: async request => { starts.push(request); return { data: { job_id: 'job' } } },
-        startObjectMigration: async request => { starts.push(request); return { data: { job_id: 'job' } } },
+        startDataMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
+        startObjectMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
         migrateViews: async request => { starts.push(request); return { data: { results: [] } } },
         createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
       }
@@ -193,3 +193,182 @@ for (const [kind, stateKey, launchKey] of [
     } finally { scope.stop() }
   })
 }
+
+for (const [kind, stateKey, launchKey, resetKey, tabKey, panelKey] of [
+  ['data', 'dataMigrate', 'startDataMigration', 'resetDataMigration', 'dataMigrateResultTab', 'dataReportPanel'],
+  ['objects', 'objMigrate', 'startObjectMigration', 'resetObjectMigration', 'objMigrateResultTab', 'objectReportPanel'],
+]) {
+  test(`${kind}: summary waits for the job, uses its saved preflight, and resets with configuration`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      let resolveStart
+      const preview = { ready: true, issues: [{ severity: 'warning' }], check_scope: 'structure' }
+      const p = scope.run(() => page(async () => ({ data: preview }), [], [], {
+        start: () => new Promise(resolve => { resolveStart = resolve }),
+      }))
+      await select(p)
+      const state = p[stateKey]
+      Object.assign(state, { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'target' })
+      if (kind === 'objects') Object.assign(state, { selected: ['Orders'], objects: ['indexes'] })
+      await Vue.nextTick()
+      const start = p[launchKey]()
+      while (!resolveStart) await Vue.nextTick()
+      assert.equal(p.pgTaskSummaries.value[kind], null, 'pending start keeps the full preview')
+      resolveStart({ data: { job_id: 'first-job' } })
+      await start
+      assert.equal(p.pgTaskSummaries.value[kind].preview.ready, true)
+      assert.equal(p.pgTaskSummaries.value[kind].preflight, null, 'running or missing report uses the page result')
+      // Completion/cancellation alone must not invent a backend preflight result.
+      Object.assign(state, { running: false, finished: true })
+      assert.equal(p.pgTaskSummaries.value[kind].preflight, null)
+      const failure = { ready: false, issues: [{ severity: 'error' }, { severity: 'error' }] }
+      p.onPGReportLoaded(kind, 'old-job', { preflight: failure })
+      assert.equal(p.pgTaskSummaries.value[kind].preflight, null)
+      p.onPGReportLoaded(kind, 'first-job', { preflight: failure })
+      assert.equal(p.pgTaskSummaries.value[kind].preflight.ready, false)
+      assert.equal(p.pgTaskSummaries.value[kind].preflight.issues.length, 2)
+      let opened = 0
+      p[panelKey].value = { showPreflight: async () => { opened++ } }
+      p[tabKey].value = 'logs'
+      await p.showPGTaskResult(kind, 'report')
+      assert.equal(p[tabKey].value, 'report')
+      assert.equal(opened, 1)
+      p.onPGReportLoaded(kind, 'first-job', { preflight: preview })
+      assert.equal(p.pgTaskSummaries.value[kind].preflight.ready, true)
+      state.lowerCaseNames = !state.lowerCaseNames
+      assert.equal(p.pgTaskSummaries.value[kind], null, 'even before watchers flush, edited config hides the old summary')
+      await Vue.nextTick()
+      p.onPGReportLoaded(kind, 'first-job', { preflight: failure })
+      assert.equal(p.pgTaskSummaries.value[kind], null)
+      state.lowerCaseNames = !state.lowerCaseNames
+      await Vue.nextTick()
+      assert.equal(p.pgTaskSummaries.value[kind], null, 'restoring options does not revive the old summary')
+      resolveStart = null
+      const second = p[launchKey]()
+      while (!resolveStart) await Vue.nextTick()
+      resolveStart({ data: { job_id: 'second-job' } })
+      await second
+      p.onPGReportLoaded(kind, 'first-job', { preflight: failure })
+      assert.equal(p.pgTaskSummaries.value[kind].jobID, 'second-job')
+      assert.equal(p.pgTaskSummaries.value[kind].preflight, null)
+      p.onPGReportLoaded(kind, 'second-job', {})
+      assert.equal(p.pgTaskSummaries.value[kind].preflight, null, 'legacy report without preflight retains page attribution')
+      p[resetKey]()
+      assert.equal(p.pgTaskSummaries.value[kind], null)
+      assert.equal(state.currentJobId, '')
+    } finally { scope.stop() }
+  })
+
+  test(`${kind}: editing configuration while launch is pending cannot attach its summary to new options`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      let resolveStart
+      const p = scope.run(() => page(async () => ({ data: { ready: true } }), [], [], {
+        start: () => new Promise(resolve => { resolveStart = resolve }),
+      }))
+      await select(p)
+      const state = p[stateKey]
+      Object.assign(state, { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'target' })
+      if (kind === 'objects') Object.assign(state, { selected: ['Orders'], objects: ['indexes'] })
+      await Vue.nextTick()
+      const start = p[launchKey]()
+      while (!resolveStart) await Vue.nextTick()
+      state.lowerCaseNames = !state.lowerCaseNames
+      await Vue.nextTick()
+      resolveStart({ data: { job_id: 'job' } })
+      await start
+      assert.equal(state.currentJobId, 'job', 'original task remains available')
+      assert.equal(p.pgTaskSummaries.value[kind], null)
+    } finally { scope.stop() }
+  })
+}
+
+for (const [kind, stateKey, launchKey, resetKey] of [
+  ['data', 'dataMigrate', 'startDataMigration', 'resetDataMigration'],
+  ['objects', 'objMigrate', 'startObjectMigration', 'resetObjectMigration'],
+]) {
+  test(kind + ': restart keeps configuration but clears preview, exclusions and cached success', async () => {
+    const scope = Vue.effectScope()
+    try {
+      let checks = 0
+      const p = scope.run(() => page(async () => { checks++; return { data: { ready: true } } }, []))
+      await select(p)
+      const state = p[stateKey]
+      Object.assign(state, { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'target', lowerCaseNames: false })
+      if (kind === 'objects') Object.assign(state, { selected: ['Orders'], objects: ['indexes'] })
+      await Vue.nextTick()
+      state.lowerCaseNames = false
+      p.pgExclusions[kind] = [{ kind: 'index', name: 'old_index' }]
+      await Vue.nextTick()
+      await p[launchKey]()
+      Object.assign(state, { running: false, finished: true })
+      p[resetKey]()
+      assert.equal(p.pgChecks[kind], null)
+      assert.equal(p.pgBusy[kind], false)
+      assert.equal(p.pgExclusions[kind].length, 0)
+      assert.equal(p.pgTaskSummaries.value[kind], null)
+      assert.equal(state.srcConnId, 1)
+      assert.equal(state.dstConnId, 2)
+      assert.equal(state.srcDatabase, 'public')
+      assert.equal(state.dstSchema, 'target')
+      assert.equal(state.lowerCaseNames, false)
+      await p[launchKey]()
+      assert.equal(checks, 2)
+      // Reset again without exclusions: a matching request key must not reuse success.
+      p[resetKey]()
+      await p[launchKey]()
+      assert.equal(checks, 3)
+    } finally { scope.stop() }
+  })
+
+  test(kind + ': reset aborts pending preview and late completion leaves newer request busy', async () => {
+    const scope = Vue.effectScope()
+    try {
+      const pending = []
+      const p = scope.run(() => page((request, signal) => new Promise(resolve => pending.push({ signal, resolve })), []))
+      await select(p)
+      const old = p.runPGCheck(kind)
+      p[resetKey]()
+      assert.equal(pending[0].signal.aborted, true)
+      assert.equal(p.pgBusy[kind], false)
+      await Vue.nextTick()
+      const fresh = p.runPGCheck(kind)
+      pending[0].resolve({ data: { ready: true, marker: 'old' } })
+      await old
+      assert.equal(p.pgChecks[kind], null)
+      assert.equal(p.pgBusy[kind], true)
+      pending[1].resolve({ data: { ready: true, marker: 'new' } })
+      await fresh
+      assert.equal(p.pgChecks[kind].marker, 'new')
+      assert.equal(p.pgBusy[kind], false)
+    } finally { scope.stop() }
+  })
+}
+
+test('clearing panel results resets filters, pages and selected DDL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ result: { ready: true, issues: [], objects: [] }, excluded: [] })
+    const { descriptor } = parse(readFileSync(new URL('../src/views/PGMySQLPreflightPanel.vue', import.meta.url), 'utf8'))
+    const source = descriptor.scriptSetup.content
+      .replace(/const props = withDefaults[^\n]+/, 'const props = require("test-props")')
+      .replace(/defineEmits[^\n]+/, '')
+    const panel = scope.run(() => load(source + '\nexport { activeTab, severity, issueSearch, issuePage, objectSearch, objectPage, selectedObjectKey, selectedSQL };', id => {
+      if (id === 'vue') return Vue
+      if (id === 'test-props') return props
+      return {}
+    }))
+    for (const [key, value] of Object.entries({ activeTab: 'objects', severity: 'error', issueSearch: 'old', issuePage: 3, objectSearch: 'old', objectPage: 4, selectedObjectKey: 'old' })) panel[key].value = value
+    await Vue.nextTick()
+    props.result = null
+    await Vue.nextTick()
+    assert.equal(panel.activeTab.value, 'issues')
+    assert.equal(panel.severity.value, 'all')
+    assert.equal(panel.issueSearch.value, '')
+    assert.equal(panel.objectSearch.value, '')
+    assert.equal(panel.issuePage.value, 1)
+    assert.equal(panel.objectPage.value, 1)
+    assert.equal(panel.selectedObjectKey.value, '')
+    assert.equal(panel.selectedSQL.value, '')
+  } finally { scope.stop() }
+})

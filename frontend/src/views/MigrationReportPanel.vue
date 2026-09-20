@@ -146,22 +146,20 @@
           </template>
         </a-tab-pane>
       </a-tabs>
-      <a-collapse
-        v-if="report.preflight"
-        :default-active-key="report.preflight.ready ? [] : ['preflight']"
-        style="margin-top: 16px"
-      >
-        <a-collapse-item key="preflight" :header="`迁移前预检记录（${report.preflight.ready ? '已通过' : '未通过'}）`">
-          <PGMySQLPreflightPanel :result="report.preflight" :excluded="report.preflight.excluded" readonly />
-        </a-collapse-item>
-      </a-collapse>
+      <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
+        <a-collapse v-model:active-key="preflightActiveKeys">
+          <a-collapse-item key="preflight" :header="`迁移前预检记录（${report.preflight.ready ? '已通过' : '未通过'}）`">
+            <PGMySQLPreflightPanel :result="report.preflight" :excluded="report.preflight.excluded" readonly />
+          </a-collapse-item>
+        </a-collapse>
+      </div>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   getDataMigrationReport,
@@ -172,12 +170,23 @@ import {
 import { copyText } from '@/utils/clipboard'
 
 const props = defineProps<{ jobID: string }>()
-const emit = defineEmits<{ loaded: [jobID: string] }>()
+const emit = defineEmits<{ loaded: [jobID: string, report: MigrationReport] }>()
 
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
 const fetchError = ref('')
 const noReport = ref(false)
+const preflightSection = ref<HTMLElement | null>(null)
+const preflightActiveKeys = ref<string[]>([])
+
+async function showPreflight() {
+  if (!report.value?.preflight) return
+  preflightActiveKeys.value = ['preflight']
+  await nextTick()
+  preflightSection.value?.focus({ preventScroll: true })
+  preflightSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+defineExpose({ showPreflight })
 
 interface ReportRow {
   key: string
@@ -228,11 +237,13 @@ async function loadReport() {
   fetchError.value = ''
   noReport.value = false
   report.value = null
+  preflightActiveKeys.value = []
   try {
     const res = await getDataMigrationReport(jobID)
     if (request !== reportRequest) return
     report.value = res.data
-    emit('loaded', jobID)
+    preflightActiveKeys.value = res.data.preflight && !res.data.preflight.ready ? ['preflight'] : []
+    emit('loaded', jobID, res.data)
   } catch (e: any) {
     if (request !== reportRequest) return
     if (e?.response?.status === 404) {

@@ -1,5 +1,18 @@
 <template>
-  <section class="migration-preflight" aria-label="兼容预检">
+  <section class="migration-preflight" :class="{ 'is-compact': compact }" aria-label="兼容预检">
+    <div v-if="compact" class="preflight-summary">
+      <div class="preflight-summary-content">
+        <div class="preflight-summary-stats" aria-live="polite">
+          <strong :class="result ? (result.ready ? 'text-success' : 'text-danger') : ''">{{ summaryStatus }}</strong>
+          <span>阻止 {{ result ? errorCount : '—' }}</span>
+          <span>提示 {{ result ? warningCount : '—' }}</span>
+        </div>
+        <p>{{ summarySource === 'report' ? '本次任务保存的执行前预检记录，完整问题与 DDL 请在迁移报告中查看。' : '此处为页面预检结果；执行前检查及迁移进度请查看日志，完整记录以迁移报告为准。' }}</p>
+      </div>
+      <a-button v-if="summarySource === 'report'" type="text" @click="$emit('view-report')">查看预检记录</a-button>
+      <a-button v-else type="text" @click="$emit('view-logs')">查看执行日志</a-button>
+    </div>
+    <template v-else>
     <div class="preflight-heading">
       <div>
         <h3>{{ readonly ? 'PG → MySQL 兼容检查结果' : 'PG → MySQL 兼容预检' }}</h3>
@@ -86,6 +99,7 @@
         </a-tab-pane>
       </a-tabs>
     </template>
+    </template>
   </section>
 </template>
 <script setup lang="ts">
@@ -93,9 +107,12 @@ import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { copyText } from '@/utils/clipboard'
 import type { MigrationObjectRef, PGMySQLPreflight } from '@/api/migration'
-const props = withDefaults(defineProps<{ result?: PGMySQLPreflight | null; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean }>(), { excluded: () => [] })
+const props = withDefaults(defineProps<{ result?: PGMySQLPreflight | null; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
 const structureCheck = computed(() => props.result ? props.result.check_scope === 'structure' : !props.readonly)
-defineEmits<{ check: []; exclude: [item: MigrationObjectRef]; restore: [item: MigrationObjectRef] }>()
+const summaryStatus = computed(() => props.summarySource === 'report'
+  ? (props.result?.ready ? '执行前预检通过' : '执行前预检未通过')
+  : (props.result ? (props.result.ready ? '页面结构预检通过' : '页面结构预检未通过') : '暂无页面预检结果'))
+defineEmits<{ check: []; exclude: [item: MigrationObjectRef]; restore: [item: MigrationObjectRef]; 'view-report': []; 'view-logs': [] }>()
 const activeTab = ref('issues')
 const severity = ref('all')
 const issueSearch = ref('')
@@ -116,7 +133,17 @@ watch([objectSearch, () => props.result], () => { objectPage.value = 1 })
 watch(pagedObjects, objects => {
   if (!objects.some(object => objectKey(object.object) === selectedObjectKey.value)) selectedObjectKey.value = objects[0] ? objectKey(objects[0].object) : ''
 }, { immediate: true })
-watch(() => props.result, () => { activeTab.value = 'issues' })
+watch(() => props.result, result => {
+  activeTab.value = 'issues'
+  if (!result) {
+    issueSearch.value = ''
+    severity.value = 'all'
+    issuePage.value = 1
+    objectSearch.value = ''
+    objectPage.value = 1
+    selectedObjectKey.value = ''
+  }
+})
 function objectLabel(item: MigrationObjectRef) { return `${item.kind}: ${item.table ? item.table + '.' : ''}${item.name}` }
 function objectKey(item: MigrationObjectRef) { return JSON.stringify([item.kind, item.table || '', item.name]) }
 async function copySQL() {
@@ -129,6 +156,12 @@ function download() {
 </script>
 <style scoped>
 .migration-preflight { container-type: inline-size; min-width: 0; padding: 24px; margin: 20px 0; background: var(--color-bg-1); border: 1px solid var(--color-border-2); border-radius: 10px; }
+.migration-preflight.is-compact { padding: 16px 20px; }
+.preflight-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.preflight-summary-content { flex: 1 1 260px; min-width: 0; }
+.preflight-summary-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 14px; }
+.preflight-summary-stats span { color: var(--color-text-2); }
+.preflight-summary p { line-height: 1.6; overflow-wrap: anywhere; }
 h3, p { margin: 0; } h3 { font-size: 16px; font-weight: 600; } p { margin-top: 6px; color: var(--color-text-3); font-size: 13px; }
 .preflight-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
 .preflight-notice { margin-bottom: 20px; }

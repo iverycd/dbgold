@@ -16,6 +16,7 @@ function panel(name, props, exports, { api = {}, emit = () => {}, copied = [], l
     defineProps: () => props,
     withDefaults: value => value,
     defineEmits: () => emit,
+    defineExpose() {},
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted: fn => { lifecycle.mount = fn }, onUnmounted: fn => { lifecycle.unmount = fn } }
       if (id === '@/api/migration') return api
@@ -101,7 +102,7 @@ test('changing report jobs discards late responses and never emits loaded for an
     pending[0].resolve({ data: { marker: 'old-report' } })
     await oldRequest
     assert.equal(p.report.value.marker, 'new-report')
-    assert.deepEqual(emitted, [['loaded', 'new-job']])
+    assert.deepEqual(emitted, [['loaded', 'new-job', { marker: 'new-report' }]])
     assert.equal(p.loading.value, false)
     const last = p.loadReport()
     lifecycle.unmount()
@@ -134,6 +135,26 @@ test('report errors and missing reports have distinct states and a successful re
     await p.loadReport()
     assert.equal(p.noReport.value, false)
     assert.equal(p.report.value.marker, 'success')
-    assert.deepEqual(emitted, [['loaded', 'job']])
+    assert.deepEqual(emitted, [['loaded', 'job', { marker: 'success' }]])
+  } finally { scope.stop() }
+})
+
+test('report preflight expands failures by default and can focus a saved successful record', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let ready = false
+    const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'job' }, 'loadReport, preflightActiveKeys, preflightSection, showPreflight', {
+      api: { getDataMigrationReport: async () => ({ data: { preflight: { ready } } }) },
+    }))
+    await p.loadReport()
+    assert.deepEqual(Array.from(p.preflightActiveKeys.value), ['preflight'])
+    ready = true
+    await p.loadReport()
+    assert.equal(p.preflightActiveKeys.value.length, 0)
+    const actions = []
+    p.preflightSection.value = { focus: () => actions.push('focus'), scrollIntoView: () => actions.push('scroll') }
+    await p.showPreflight()
+    assert.deepEqual(Array.from(p.preflightActiveKeys.value), ['preflight'])
+    assert.deepEqual(actions, ['focus', 'scroll'])
   } finally { scope.stop() }
 })
