@@ -115,6 +115,9 @@ export interface ObjectResult {
   name: string
   ddl: string
   error: string
+  suggested_ddl?: string
+  suggestion?: string
+  column_renames?: { source: string; target: string }[]
 }
 
 export interface CategoryReport {

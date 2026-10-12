@@ -57,6 +57,15 @@ func (d *DaMengDialect) MapType(col source.ColumnInfo, srcType string, opt TypeO
 //   - 独立 DROP TABLE 语句(无 IF EXISTS,Writer 容错)
 //   - CREATE TABLE,自增列追加 IDENTITY(1,1)(种子由 Phase3 reseed 修正)
 func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
+	if issue := d.columnNameIssue(schema, info, srcType, opt, name); issue != nil {
+		return nil, issue
+	}
+	return d.createTableStatements(schema, info, srcType, opt, name, name)
+}
+
+// Separate column naming allows manual suggestions to preserve the table name
+// and use already-normalized replacement columns without changing source metadata.
+func (d *DaMengDialect) createTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name, columnName NameFunc) ([]Statement, error) {
 	var cols []string
 	for _, col := range info.Columns {
 		if srcType == "sqlserver" {
@@ -65,7 +74,7 @@ func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableD
 			}
 		}
 		dmType := d.MapType(col, srcType, opt)
-		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(name(col.Name)), dmType)
+		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(columnName(col.Name)), dmType)
 		if col.Extra == "auto_increment" {
 			// 达梦 Oracle 兼容模式自增列:允许显式插入(导入原 id),种子先填 1
 			if srcType == "sqlserver" && col.IdentityInfo != nil {

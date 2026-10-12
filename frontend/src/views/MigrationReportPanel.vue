@@ -90,6 +90,21 @@
                     </template>
                     <span v-else style="color: #86909c">DDL：—</span>
                   </div>
+                  <div v-if="item.suggestion || item.suggested_ddl || item.column_renames?.length" class="failure-suggestion">
+                    <div class="ddl-header"><span>建议 DDL（手动创建）</span></div>
+                    <a-alert v-if="item.suggestion" type="warning">{{ item.suggestion }}</a-alert>
+                    <ul v-if="item.column_renames?.length" class="column-renames">
+                      <li v-for="(rename, index) in item.column_renames" :key="index">
+                        <code>{{ rename.source }}</code> → <code>{{ rename.target }}</code>
+                      </li>
+                    </ul>
+                    <template v-if="item.suggested_ddl">
+                      <div class="ddl-header">
+                        <a-button size="mini" type="text" @click="copyDDL(item.suggested_ddl)">复制建议 DDL</a-button>
+                      </div>
+                      <pre class="ddl-code">{{ item.suggested_ddl }}</pre>
+                    </template>
+                  </div>
                 </div>
               </div>
             </template>
@@ -311,6 +326,16 @@ function exportReport() {
         } else {
           lines.push('    DDL：（无）')
         }
+        if (item.suggestion) lines.push(`    建议：${item.suggestion}`)
+        for (const rename of item.column_renames ?? []) {
+          lines.push(`    建议列名：${rename.source} → ${rename.target}`)
+        }
+        if (item.suggested_ddl) {
+          lines.push('    建议 DDL（手动创建）：')
+          for (const ddlLine of item.suggested_ddl.split('\n')) {
+            lines.push(`      ${ddlLine}`)
+          }
+        }
       }
     }
     lines.push('')
@@ -379,6 +404,8 @@ onUnmounted(() => { reportRequest++ })
   margin-bottom: 4px;
   font-size: 13px;
 }
+.failure-suggestion { margin-top: 12px; }
+.column-renames { padding-left: 20px; overflow-wrap: anywhere; }
 .ddl-header {
   display: flex;
   justify-content: flex-start;

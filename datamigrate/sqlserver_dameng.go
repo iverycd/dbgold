@@ -69,7 +69,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 		ready = false
 		cat.Total++
 		cat.Failed++
-		cat.Items = append(cat.Items, ObjectResult{Name: name, Error: err.Error()})
+		cat.Items = append(cat.Items, objectResultForError(name, "", err))
 		m.log.Errorf("SQL Server → 达梦预检 [%s]: %v", name, err)
 	}
 	names := map[string]string{}

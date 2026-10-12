@@ -249,7 +249,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				report.Tables.Failed++
-				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: "", Error: err.Error()})
+				report.Tables.Items = append(report.Tables.Items, objectResultForError(table, ddl, err))
 				continue
 			}
 			if err := m.writer.CreateTable(ctx, stmts); err != nil {

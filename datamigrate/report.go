@@ -1,12 +1,32 @@
 package datamigrate
 
-import "dbgold/datamigrate/valueconv"
+import (
+	"errors"
+
+	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/valueconv"
+)
 
 // ObjectResult 单个失败对象的详情
 type ObjectResult struct {
-	Name  string `json:"name"`
-	DDL   string `json:"ddl"`
-	Error string `json:"error"`
+	Name          string                       `json:"name"`
+	DDL           string                       `json:"ddl"`
+	Error         string                       `json:"error"`
+	SuggestedDDL  string                       `json:"suggested_ddl,omitempty"`
+	Suggestion    string                       `json:"suggestion,omitempty"`
+	ColumnRenames []dialect.DamengColumnRename `json:"column_renames,omitempty"`
+}
+
+func objectResultForError(name, ddl string, err error) ObjectResult {
+	result := ObjectResult{Name: name, DDL: ddl, Error: err.Error()}
+	var issue *dialect.DamengColumnNameError
+	if errors.As(err, &issue) {
+		result.DDL = issue.OriginalDDL
+		result.SuggestedDDL = issue.SuggestedDDL
+		result.Suggestion = issue.Suggestion
+		result.ColumnRenames = issue.ColumnRenames
+	}
+	return result
 }
 
 // CategoryReport 一类对象的迁移统计
