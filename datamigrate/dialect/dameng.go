@@ -8,6 +8,7 @@ import (
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/tsqldameng"
 	"dbgold/datamigrate/typemap"
+	"dbgold/datamigrate/valueconv"
 )
 
 // DaMengDialect 实现达梦(Oracle 兼容模式)目标库的 SQL 生成。
@@ -83,8 +84,20 @@ func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableD
 					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
 				}
 				colDef += clause
-			} else if clause := d.columnDefaultClause(coldefault.Strip(srcType, *col.Default)); clause != "" {
-				colDef += clause
+			} else {
+				def := coldefault.Strip(srcType, *col.Default)
+				if srcType == "mysql" {
+					switch strings.ToLower(col.DataType) {
+					case "date", "datetime", "timestamp":
+						if valueconv.MySQLDamengZeroDate(def) {
+							def = valueconv.MySQLDamengZeroDateReplacement
+							if !strings.EqualFold(col.DataType, "date") {
+								def += " 00:00:00"
+							}
+						}
+					}
+				}
+				colDef += d.columnDefaultClause(def)
 			}
 		}
 		cols = append(cols, "  "+colDef)

@@ -632,6 +632,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "oracle" {
 		return source.NewMySQLForOracle(dsn, db, pool)
 	}
+	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "dameng" {
+		return source.NewMySQLForDameng(dsn, db, pool)
+	}
 	switch conn.DBType {
 	case "sqlserver":
 		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {

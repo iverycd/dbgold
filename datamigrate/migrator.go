@@ -229,6 +229,9 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 
 	skipSchema := m.cfg.Content == "data_only"
 	skipData := m.cfg.Content == "schema_only"
+	if len(tables) > 0 && m.reader.DBType() == "mysql" && m.writer.DBType() == "dameng" {
+		m.log.Warn("MySQL → 达梦: 日期列的零日期默认值和零日期数据统一替换为 1900-01-01 00:00:00，保留 NOT NULL 约束")
+	}
 
 	// Phase 1: 建表 DDL（串行）
 	tablesFailed := map[string]bool{}

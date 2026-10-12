@@ -1,7 +1,7 @@
 // cmd/e2e_dameng/main.go
 //
 // MySQL → 达梦 端到端迁移验证程序(独立运行,不经 web 服务)。
-// 直接调用 source.NewMySQL + target.NewDaMeng + datamigrate.NewMigrator,
+// 直接调用 source.NewMySQLForDameng + target.NewDaMeng + datamigrate.NewMigrator,
 // 跑完整三阶段迁移并打印 report,重点检查 IDENTITY/行数一致等实测项。
 //
 // 凭据从环境变量读取(密码不进命令行/会话记录):
@@ -59,7 +59,7 @@ func main() {
 	dstPool := target.ConnPoolConfig{}
 
 	fmt.Printf("连接 MySQL %s:%s/%s ...\n", mysqlHost, mysqlPort, mysqlDB)
-	reader, err := source.NewMySQL(mysqlDSN, mysqlDB, srcPool)
+	reader, err := source.NewMySQLForDameng(mysqlDSN, mysqlDB, srcPool)
 	if err != nil {
 		fmt.Printf("[FATAL] 连接源库失败: %v\n", err)
 		os.Exit(1)

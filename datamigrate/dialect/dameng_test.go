@@ -1,10 +1,44 @@
 package dialect
 
 import (
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/source"
 )
+
+func TestDaMengMySQLZeroDateDefaults(t *testing.T) {
+	for _, tc := range []struct{ typ, def, want string }{
+		{"date", "0000-00-00", "1900-01-01"},
+		{"datetime", "0000-00-00 00:00:00", "1900-01-01 00:00:00"},
+		{"timestamp", "('0000-00-00 00:00:00.000000')", "1900-01-01 00:00:00"},
+		{"date", "0000-12-15", "1900-01-01"},
+		{"datetime", "2024-00-15 12:34:56", "1900-01-01 00:00:00"},
+		{"timestamp", "2024-12-00 12:34:56", "1900-01-01 00:00:00"},
+		{"varchar", "0000-00-00 00:00:00", "0000-00-00 00:00:00"},
+		{"datetime", "2024-02-29 12:34:56.123456", "2024-02-29 12:34:56.123456"},
+	} {
+		for _, nullable := range []bool{false, true} {
+			t.Run(tc.typ+"/"+tc.def, func(t *testing.T) {
+				info := &source.TableDDLInfo{TableName: "device_baseinfo", Columns: []source.ColumnInfo{
+					{Name: "equipment_validity", DataType: tc.typ, Length: 100, IsNullable: nullable, Default: strptr(tc.def)},
+					{Name: "next_test_time", DataType: "timestamp", Default: strptr("CURRENT_TIMESTAMP")},
+				}}
+				stmts, err := NewDaMeng().CreateTableStatements("ZNFXPT", info, "mysql", TypeOpt{}, identity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ddl := JoinSQL(stmts)
+				if !strings.Contains(ddl, "DEFAULT '"+tc.want+"'") || !strings.Contains(ddl, "DEFAULT CURRENT_TIMESTAMP") {
+					t.Fatalf("unexpected defaults: %s", ddl)
+				}
+				if strings.Contains(ddl, "NOT NULL DEFAULT '"+tc.want+"'") == nullable {
+					t.Fatalf("nullability changed: %s", ddl)
+				}
+			})
+		}
+	}
+}
 
 // TestDaMengCreateTable_Golden 锁定达梦建表 DDL:IDENTITY 自增列、独立 DROP、无 CASCADE。
 func TestDaMengCreateTable_Golden(t *testing.T) {

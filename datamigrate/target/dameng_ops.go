@@ -61,6 +61,9 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 		if w.srcType == "sqlserver" && i < len(colTypes) {
 			placeholders[i] = valueconv.SQLServerDamengPlaceholder(colTypes[i])
 		}
+		if w.srcType == "mysql" && i < len(colTypes) {
+			placeholders[i] = valueconv.MySQLDamengPlaceholder(colTypes[i])
+		}
 	}
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
 		w.qualifiedTable(table), strings.Join(quotedCols, ", "), strings.Join(placeholders, ", "))
@@ -75,6 +78,21 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 			return fmt.Errorf("表 %s 行列数不匹配", table)
 		}
 		conv := w.convertRow(row, colTypes)
+		if w.srcType == "mysql" {
+			if len(colTypes) != len(cols) {
+				return fmt.Errorf("表 %s 缺少源列类型", table)
+			}
+			for i, v := range row {
+				converted, e := valueconv.MySQLDamengDate(v, colTypes[i])
+				if e != nil {
+					return fmt.Errorf("%s.%s: %w", table, cols[i], e)
+				}
+				switch strings.ToUpper(colTypes[i]) {
+				case "DATE", "DATETIME", "TIMESTAMP":
+					conv[i] = converted
+				}
+			}
+		}
 		if w.srcType == "sqlserver" {
 			if len(colTypes) != len(cols) {
 				return fmt.Errorf("表 %s 缺少源列类型", table)
