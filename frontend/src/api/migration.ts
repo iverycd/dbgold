@@ -135,6 +135,7 @@ export interface TableRowCount {
 }
 
 export interface MigrationReport {
+	 auto_repairs?: AutoRepair[]
 	 warnings?: { table: string; column: string; reason: string; count: number }[]
   preflight?: PGMySQLPreflight
   tables: CategoryReport
@@ -147,6 +148,16 @@ export interface MigrationReport {
   comments: CategoryReport
   triggers: CategoryReport
   rowCounts: TableRowCount[]
+}
+
+export interface AutoRepair {
+  type: 'column_rename'
+  table: string
+  target_table: string
+  source: string
+  target: string
+  reason: string
+  status: 'applied' | 'reused'
 }
 
 export const getDataMigrationReport = (jobID: string) =>

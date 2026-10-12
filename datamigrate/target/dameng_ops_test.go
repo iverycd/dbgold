@@ -20,6 +20,23 @@ func mockDM(t *testing.T) (*DaMengWriter, sqlmock.Sqlmock) {
 	t.Cleanup(func() { require.NoError(t, m.ExpectationsWereMet()); db.Close() })
 	return &DaMengWriter{db: db, schema: "APP", srcType: "sqlserver", dia: dialect.NewDaMeng(), valueConv: valueconv.NewDaMeng(), identCache: map[string]bool{}}, m
 }
+
+func TestDamengColumnMappingValidation(t *testing.T) {
+	for _, cols := range [][]string{{"ROW_ID_2", "ROW_ID"}, {"ROW_ID", "OLD_NAME"}, {"ROW_ID"}, {}} {
+		w, mock := mockDM(t)
+		rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
+		for _, c := range cols {
+			rows.AddRow(c)
+		}
+		mock.ExpectQuery("SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS").WithArgs("APP", "T").WillReturnRows(rows)
+		err := w.ValidateDamengColumns(context.Background(), &source.TableDDLInfo{TableName: "t", Columns: []source.ColumnInfo{{Name: "ROW_ID_2"}, {Name: "ROW_ID"}}})
+		if len(cols) == 2 && cols[0] == "ROW_ID_2" {
+			require.NoError(t, err)
+		} else {
+			require.Error(t, err)
+		}
+	}
+}
 func TestDamengIdentityDetectionFailsClosed(t *testing.T) {
 	w, m := mockDM(t)
 	m.ExpectQuery("SELECT COUNT").WithArgs("APP", "MIXED").WillReturnError(errors.New("permission denied"))

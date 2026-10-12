@@ -39,6 +39,7 @@ type CategoryReport struct {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	AutoRepairs []AutoRepair                 `json:"auto_repairs,omitempty"`
 	Warnings    []valueconv.MigrationWarning `json:"warnings,omitempty"`
 	Preflight   *PGMySQLPreflight            `json:"preflight,omitempty"`
 	Tables      CategoryReport               `json:"tables"`
@@ -51,6 +52,17 @@ type MigrationReport struct {
 	Comments    CategoryReport               `json:"comments"`
 	Triggers    CategoryReport               `json:"triggers"`
 	RowCounts   []TableRowCount              `json:"rowCounts"`
+}
+
+// AutoRepair is emitted only after successful CREATE or existing-column validation.
+type AutoRepair struct {
+	Type        string `json:"type"`
+	Table       string `json:"table"`
+	TargetTable string `json:"target_table"`
+	Source      string `json:"source"`
+	Target      string `json:"target"`
+	Reason      string `json:"reason"`
+	Status      string `json:"status"` // applied | reused
 }
 
 // TableRowCount 记录单张表的源/目标行数对比

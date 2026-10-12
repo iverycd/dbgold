@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"dbgold/datamigrate/damengnames"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/tsqldameng"
 )
@@ -27,12 +28,7 @@ type DamengColumnNameError struct {
 func (e *DamengColumnNameError) Error() string { return e.Reason }
 
 func damengForbiddenColumn(name string) bool {
-	switch name {
-	case "ROWID", "TRXID", "VERSIONS_STARTTIME", "VERSIONS_ENDTIME",
-		"VERSIONS_STARTTRXID", "VERSIONS_ENDTRXID", "VERSIONS_OPERATION":
-		return true
-	}
-	return false
+	return damengnames.Forbidden(name)
 }
 
 func (d *DaMengDialect) columnNameIssue(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) *DamengColumnNameError {

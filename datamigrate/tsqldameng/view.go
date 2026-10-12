@@ -53,7 +53,7 @@ func tokenize(s string) ([]token, error) {
 			i = end + 1
 			continue
 		}
-		if s[i] == '[' || s[i] == '"' {
+		if s[i] == '[' || s[i] == '"' || s[i] == '`' {
 			q := s[i]
 			endq := q
 			if q == '[' {
@@ -91,14 +91,14 @@ func tokenize(s string) ([]token, error) {
 			continue
 		}
 		start := i
-		for i < len(s) && !strings.ContainsRune(" \r\n\t[]\"'()+-*/%,.=<>!;", rune(s[i])) {
+		for i < len(s) && !strings.ContainsRune(" \r\n\t[]`\"'()+-*/%,.=<>!;", rune(s[i])) {
 			i++
 		}
 		if i == start {
 			return nil, fmt.Errorf("不支持的视图字符")
 		}
 		text := s[start:i]
-		if strings.ContainsAny(text, "@:#`\\") {
+		if strings.ContainsAny(text, "@:#\\") {
 			return nil, fmt.Errorf("不支持视图标记 %q", text)
 		}
 		out = append(out, token{text, false})

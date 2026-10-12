@@ -18,7 +18,7 @@ type damengNamedReader struct {
 
 func (r *damengNamedReader) DBType() string { return r.kind }
 
-func TestDamengForbiddenNamesReportedBeforeAnyTableWrites(t *testing.T) {
+func TestDamengForbiddenNamesAutomaticallyRepaired(t *testing.T) {
 	for _, src := range []string{"mysql", "postgres", "sqlserver"} {
 		for _, content := range []string{"both", "schema_only"} {
 			t.Run(src+"/"+content, func(t *testing.T) {
@@ -32,37 +32,34 @@ func TestDamengForbiddenNamesReportedBeforeAnyTableWrites(t *testing.T) {
 				m.cfg.Content = content
 				m.cfg.Mode = "all"
 				report := m.Run(context.Background())
-				require.True(t, report.HasFailures())
-				require.Equal(t, 1, report.Tables.Failed)
-				require.Empty(t, w.created, "must not attempt DROP or CREATE")
-				require.Empty(t, w.copied)
-				require.Zero(t, report.Data.Total)
-				require.Len(t, report.Tables.Items, 1)
-				item := report.Tables.Items[0]
-				require.Contains(t, item.Error, "达梦禁止的列名: ROWID")
-				require.Contains(t, item.DDL, `"ROWID" INT IDENTITY(1, 1) NOT NULL`)
-				require.Contains(t, item.SuggestedDDL, `"SRC_ROWID" INT IDENTITY(1, 1) NOT NULL`)
-				require.Contains(t, item.Suggestion, "不会自动应用此映射")
-				require.Equal(t, "RowId", item.ColumnRenames[0].Source)
+				require.False(t, report.HasFailures())
+				require.Equal(t, 1, report.Tables.Success)
+				require.Len(t, w.created, 1)
+				require.Contains(t, w.created[0], `"ROW_ID" INT IDENTITY(1, 1) NOT NULL`)
+				require.Empty(t, report.Tables.Items)
+				require.Len(t, report.AutoRepairs, 1)
+				require.Equal(t, "RowId", report.AutoRepairs[0].Source)
+				require.Equal(t, "ROW_ID", report.AutoRepairs[0].Target)
+				require.Equal(t, "applied", report.AutoRepairs[0].Status)
+				require.Equal(t, "RowId", r.ddl["gj_data"].Columns[0].Name)
 				payload, err := json.Marshal(report)
 				require.NoError(t, err)
 				var restored MigrationReport
 				require.NoError(t, json.Unmarshal(payload, &restored))
-				require.Equal(t, item, restored.Tables.Items[0])
+				require.Equal(t, report.AutoRepairs, restored.AutoRepairs)
 			})
 		}
 	}
 }
 
-func TestSQLServerDamengForbiddenNameBlocksOtherTables(t *testing.T) {
+func TestSQLServerDamengForbiddenNameAllowsOtherTables(t *testing.T) {
 	r, w := dmFixture()
 	r.tables = append(r.tables, "Bad")
 	r.ddl["Bad"] = &source.TableDDLInfo{TableName: "Bad", Columns: []source.ColumnInfo{{Name: "ROWID", DataType: "int"}}}
 	report := dmMigrator(r, w).Run(context.Background())
-	require.Equal(t, 1, report.Tables.Failed)
-	require.Empty(t, w.created, "valid tables must also wait for a successful SQL Server preflight")
-	require.Empty(t, w.copied)
-	require.NotEmpty(t, report.Tables.Items[0].SuggestedDDL)
+	require.Zero(t, report.Tables.Failed)
+	require.Len(t, w.created, 2)
+	require.Len(t, report.AutoRepairs, 1)
 }
 
 func TestObjectResultOldReportCompatibility(t *testing.T) {

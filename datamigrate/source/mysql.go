@@ -12,6 +12,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+func (r *MySQLReader) MigrationSchema() string { return r.dbName }
+
 // ConnPoolConfig 连接池配置，零值表示使用默认值（MaxOpenConns=50, MaxIdleConns=25, ConnMaxLifetime=1h）
 type ConnPoolConfig struct {
 	MaxOpenConns    int

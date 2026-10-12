@@ -12,6 +12,36 @@ import (
 	"dbgold/datamigrate/typemap"
 )
 
+// ValidateDamengColumns checks the complete target column set before reusing a
+// deterministic rename plan in data/object/view-only work. Never issues DDL.
+func (w *DaMengWriter) ValidateDamengColumns(ctx context.Context, info *source.TableDDLInfo) error {
+	rows, err := w.db.QueryContext(ctx, `SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS WHERE OWNER=? AND TABLE_NAME=? ORDER BY COLUMN_ID`, w.schema, strings.ToUpper(info.TableName))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	actual := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		actual[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(actual) != len(info.Columns) {
+		return fmt.Errorf("目标表 %s 不存在或列数与自动修复映射不一致", info.TableName)
+	}
+	for _, c := range info.Columns {
+		if !actual[c.Name] {
+			return fmt.Errorf("目标表 %s 缺少映射列 %s；未修改已有表，请核对列名修复记录", info.TableName, c.Name)
+		}
+	}
+	return nil
+}
+
 // ValidateSQLServerDamengExisting rejects implicit narrowing on data/object-only
 // runs. Column metadata is observational; no target DDL is executed here.
 func (w *DaMengWriter) ValidateSQLServerDamengExisting(ctx context.Context, info *source.TableDDLInfo, opt dialect.TypeOpt) error {

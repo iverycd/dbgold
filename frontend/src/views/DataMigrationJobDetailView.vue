@@ -97,6 +97,7 @@
       </section>
 
       <section class="detail-tabs-surface">
+        <AutoRepairPanel v-if="report?.auto_repairs?.length" :repairs="report.auto_repairs" />
         <a-alert v-if="reportError" type="warning" class="report-alert">
           {{ reportError }}
         </a-alert>
@@ -231,6 +232,8 @@
 </template>
 
 <script setup lang="ts">
+import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
+import { formatAutoRepairs } from '@/utils/autoRepairs'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
@@ -382,7 +385,9 @@ async function load() {
 
 function exportReport() {
   if (!report.value || !job.value) return
-  const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '', '=== 迁移概览 ===']
+  const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
+  lines.push(...formatAutoRepairs(report.value.auto_repairs))
+  lines.push('=== 迁移概览 ===')
   for (const row of categoryRows.value) {
     lines.push(row.isTrigger
       ? `${row.label.padEnd(6)}总计 ${row.total === -1 ? '获取失败' : row.total}（未迁移）`

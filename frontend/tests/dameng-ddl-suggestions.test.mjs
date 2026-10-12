@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -25,6 +26,7 @@ function harness() {
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === '@/api/migration') return {}
+      if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@/utils/clipboard') return { copyText: async value => copied.push(value) }
       if (id === '@arco-design/web-vue') return { Message: { success() {}, error: msg => assert.fail(msg) } }
       throw new Error(`Unexpected import ${id}`)
@@ -35,7 +37,7 @@ function harness() {
   const render = vm.runInNewContext(`(function() { ${renderCode} })()`, { Vue })
   const app = Vue.createSSRApp({ setup: () => ({ ...p, jobID: 'job-manual-ddl' }), render })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-alert', 'a-tabs', 'a-tab-pane', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel']) app.component(name, passthrough)
+  for (const name of ['a-alert', 'a-tabs', 'a-tab-pane', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel', 'AutoRepairPanel']) app.component(name, passthrough)
   app.component('a-button', {
     setup: (_, { slots, attrs }) => () => {
       const children = slots.default?.() ?? []

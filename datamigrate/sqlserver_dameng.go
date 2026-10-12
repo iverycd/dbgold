@@ -112,7 +112,13 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 		if e := checkName(t, "表 "+t, names); e != nil {
 			issue(&report.Tables, t, e)
 		}
-		info, e := m.reader.GetTableDDLInfo(ctx, t)
+		var info *source.TableDDLInfo
+		var e error
+		if p := m.dmPlans[t]; p != nil {
+			info = p.source
+		} else {
+			info, e = m.reader.GetTableDDLInfo(ctx, t)
+		}
 		if e != nil {
 			issue(&report.Tables, t, e)
 			continue
@@ -126,14 +132,14 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			if validator, ok := m.writer.(interface {
 				ValidateSQLServerDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
 			}); ok {
-				if e := validator.ValidateSQLServerDamengExisting(ctx, info, opt); e != nil {
+				if e := validator.ValidateSQLServerDamengExisting(ctx, m.damengTargetInfo(info), opt); e != nil {
 					issue(&report.Tables, t, e)
 				}
 			}
 		}
 		cols := map[string]string{}
 		for _, c := range info.Columns {
-			if e := checkName(c.Name, t+"."+c.Name, cols); e != nil {
+			if e := checkName(m.targetColumn(t, c.Name), t+"."+c.Name, cols); e != nil {
 				issue(&report.Tables, t, e)
 			}
 			if e := typemap.ValidateSQLServerDamengColumn(c); e != nil {
@@ -146,7 +152,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			}
 		}
 		if !m.cfg.objectMode() && m.cfg.Content != "data_only" {
-			if _, e := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, info, "sqlserver", opt, m.objName); e != nil {
+			if _, e := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, m.damengTargetInfo(info), "sqlserver", opt, m.objName); e != nil {
 				issue(&report.Tables, t, e)
 			}
 		}
@@ -232,7 +238,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 				if b, ok := m.writer.(interface {
 					SQLServerDamengIdentityBounds(context.Context, string, string) (*int64, *int64, error)
 				}); ok {
-					targetLow, targetHigh, err := b.SQLServerDamengIdentityBounds(ctx, seq.TableName, seq.ColumnName)
+					targetLow, targetHigh, err := b.SQLServerDamengIdentityBounds(ctx, m.objName(seq.TableName), m.targetColumn(seq.TableName, seq.ColumnName))
 					if err != nil {
 						issue(&report.Sequences, seq.TableName, err)
 						continue
@@ -350,11 +356,17 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 					issue(&report.Views, v.ViewName, e)
 				}
 			}
-			ordered, errs := m.prepareSQLServerDamengViews(views, selected)
-			for _, e := range errs {
-				issue(&report.Views, e.Name, fmt.Errorf("%s", e.Error))
+			if m.hasDamengRenames() {
+				// Mapping-related view failures are isolated in post-DDL; valid
+				// tables must still be allowed to migrate.
+				snapshot.views = views
+			} else {
+				ordered, errs := m.prepareSQLServerDamengViews(views, selected)
+				for _, e := range errs {
+					issue(&report.Views, e.Name, fmt.Errorf("%s", e.Error))
+				}
+				snapshot.views = ordered
 			}
-			snapshot.views = ordered
 		}
 	}
 	if ready {

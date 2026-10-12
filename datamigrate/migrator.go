@@ -49,11 +49,15 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
-	reader source.Reader
-	writer target.Writer
-	job    *Job
-	cfg    Config
-	log    *Logger
+	dmPlans        map[string]*damengTablePlan
+	dmBlocked      map[string]bool
+	dmUsable       map[string]bool
+	dmSourceSchema string
+	reader         source.Reader
+	writer         target.Writer
+	job            *Job
+	cfg            Config
+	log            *Logger
 }
 
 // sourceTypeSetter 由 Writer 可选实现,用于接收源库类型以驱动 ValueConverter。
@@ -112,12 +116,17 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 	if s, ok := writer.(sourceTypeSetter); ok {
 		s.SetSourceType(reader.DBType())
 	}
+	sourceSchema := ""
+	if r, ok := reader.(interface{ MigrationSchema() string }); ok {
+		sourceSchema = r.MigrationSchema()
+	}
 	return &Migrator{
-		reader: reader,
-		writer: writer,
-		job:    job,
-		cfg:    cfg,
-		log:    newCountingLogger(job.LogCh, job.recordDroppedLog),
+		dmSourceSchema: sourceSchema,
+		reader:         reader,
+		writer:         writer,
+		job:            job,
+		cfg:            cfg,
+		log:            newCountingLogger(job.LogCh, job.recordDroppedLog),
 	}
 }
 
@@ -207,8 +216,17 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		}
 	}
 
-	if m.isSQLServerDameng() && !m.preflightSQLServerDameng(ctx, tables, &report) {
+	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
+	if m.isSQLServerDameng() && (len(tablesFailed) > 0 || !m.preflightSQLServerDameng(ctx, tables, &report)) {
+		report.Tables.Total = len(tables)
 		return report
+	}
+	if m.cfg.Content == "data_only" || m.cfg.objectMode() {
+		for _, table := range tables {
+			if !tablesFailed[table] {
+				m.recordDamengRepairs(&report, table, "reused")
+			}
+		}
 	}
 
 	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
@@ -234,12 +252,14 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	}
 
 	// Phase 1: 建表 DDL（串行）
-	tablesFailed := map[string]bool{}
 	if skipSchema {
 		m.log.Info("=== Phase 1: 跳过创建表结构（仅迁移数据行模式）===")
 	} else {
 		m.log.Info("=== Phase 1: 创建表结构 ===")
 		for _, table := range tables {
+			if tablesFailed[table] {
+				continue
+			}
 			if ctx.Err() != nil {
 				m.log.Warn("任务已取消")
 				return report
@@ -248,6 +268,9 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 			if err != nil {
 				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
+				if m.dmBlocked != nil {
+					m.dmBlocked[table] = true
+				}
 				report.Tables.Failed++
 				report.Tables.Items = append(report.Tables.Items, objectResultForError(table, ddl, err))
 				continue
@@ -255,12 +278,16 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 			if err := m.writer.CreateTable(ctx, stmts); err != nil {
 				m.log.Errorf("创建表失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
+				if m.dmBlocked != nil {
+					m.dmBlocked[table] = true
+				}
 				report.Tables.Failed++
 				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: ddl, Error: err.Error()})
 				continue
 			}
 			m.log.DDLf("创建表 %s ... OK", table)
 			report.Tables.Success++
+			m.recordDamengRepairs(&report, table, "applied")
 			if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
 				if err := m.writer.ChangeOwner(ctx, "TABLE", m.objName(table), m.cfg.TargetSchema); err != nil {
 					m.log.Warnf("修改表 owner 失败 [%s]: %v", table, err)
@@ -379,7 +406,13 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 
 // buildCreateTableDDL 通过目标方言生成建表 DDL。
 func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dialect.Statement, string, error) {
-	info, err := m.reader.GetTableDDLInfo(ctx, table)
+	var info *source.TableDDLInfo
+	var err error
+	if p := m.dmPlans[table]; p != nil {
+		info = p.target
+	} else {
+		info, err = m.reader.GetTableDDLInfo(ctx, table)
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -434,7 +467,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		dstTable := m.objName(table)
 		dstCols := make([]string, len(cols))
 		for i, c := range cols {
-			dstCols[i] = m.objName(c)
+			dstCols[i] = m.targetColumn(table, c)
 		}
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
@@ -488,7 +521,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	}
 	dstCols := make([]string, len(cols))
 	for i, c := range cols {
-		dstCols[i] = m.objName(c)
+		dstCols[i] = m.targetColumn(table, c)
 	}
 
 	var mu sync.Mutex
@@ -574,7 +607,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// tableSet: 本次要迁移的表集合
 	tableSet := make(map[string]bool, len(tables))
 	for _, t := range tables {
-		tableSet[t] = true
+		if !m.dmBlocked[t] {
+			tableSet[t] = true
+		}
 	}
 	// excludedSet: 被排除的表（仅 mode=exclude 时非空，用于过滤外键的 RefTable）
 	var excludedSet map[string]bool
@@ -626,7 +661,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				pkCopy.IndexName = m.objName(pk.IndexName)
 				cols := make([]string, len(pk.Columns))
 				for i, c := range pk.Columns {
-					cols[i] = m.objName(c)
+					cols[i] = m.targetColumn(pk.TableName, c)
 				}
 				pkCopy.Columns = cols
 				pkName := pkCopy.TableName
@@ -672,7 +707,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				seqCopy := seq
 				seqCopy.TableName = m.objName(seq.TableName)
-				seqCopy.ColumnName = m.objName(seq.ColumnName)
+				seqCopy.ColumnName = m.targetColumn(seq.TableName, seq.ColumnName)
 				seqObj := dialect.SequenceName(m.writer.Dialect(), seqCopy)
 				sequenceOwner := ""
 				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
@@ -724,7 +759,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				idxCopy.IndexName = m.objName(idx.IndexName)
 				cols := make([]string, len(idx.Columns))
 				for i, c := range idx.Columns {
-					cols[i] = m.objName(c)
+					cols[i] = m.targetColumn(idx.TableName, c)
 				}
 				idxCopy.Columns = cols
 				indexName := dialect.IndexName(m.writer.Dialect(), idxCopy)
@@ -769,18 +804,35 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
+				if m.writer.DBType() == "dameng" {
+					if !tableSet[fk.TableName] {
+						report.Constraints.Total--
+						continue
+					}
+					var err error
+					if fk.RefSchema != "" && !strings.EqualFold(fk.RefSchema, m.damengSourceSchema()) {
+						err = fmt.Errorf("跨 schema 外键引用 %s.%s 无法可靠应用列名映射", fk.RefSchema, fk.RefTable)
+					} else {
+						err = m.ensureDamengReference(ctx, fk.RefTable)
+					}
+					if err != nil {
+						report.Constraints.Failed++
+						report.Constraints.Items = append(report.Constraints.Items, objectResultForError(fk.ConstraintName, "", err))
+						continue
+					}
+				}
 				fkCopy := fk
 				fkCopy.TableName = m.objName(fk.TableName)
 				fkCopy.ConstraintName = m.objName(fk.ConstraintName)
 				fkCols := make([]string, len(fk.Columns))
 				for i, c := range fk.Columns {
-					fkCols[i] = m.objName(c)
+					fkCols[i] = m.targetColumn(fk.TableName, c)
 				}
 				fkCopy.Columns = fkCols
 				fkCopy.RefTable = m.objName(fk.RefTable)
 				refCols := make([]string, len(fk.RefColumns))
 				for i, c := range fk.RefColumns {
-					refCols[i] = m.objName(c)
+					refCols[i] = m.targetColumn(fk.RefTable, c)
 				}
 				fkCopy.RefColumns = refCols
 				ddl := dialect.JoinSQL(m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, fkCopy))
@@ -810,6 +862,17 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			report.Views.Items = append(report.Views.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
 		} else {
 			report.Views.Total = len(views)
+			if m.hasDamengRenames() {
+				for _, result := range m.migrateDamengMappedViews(ctx, views, nil) {
+					if result.Error != "" {
+						report.Views.Failed++
+						report.Views.Items = append(report.Views.Items, result)
+					} else {
+						report.Views.Success++
+					}
+				}
+				views = nil // already executed in dependency order
+			}
 			for _, v := range views {
 				if ctx.Err() != nil {
 					return
@@ -856,7 +919,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				cmCopy := cm
 				cmCopy.TableName = m.objName(cm.TableName)
 				if cm.ColumnName != "" {
-					cmCopy.ColumnName = m.objName(cm.ColumnName)
+					cmCopy.ColumnName = m.targetColumn(cm.TableName, cm.ColumnName)
 				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().CommentStatements(m.cfg.TargetSchema, cmCopy))
 				if ddl == "" {
@@ -945,6 +1008,27 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []ObjectResult {
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.writer.DBType() == "dameng" {
+		if len(m.cfg.StripViewSchemas) > 0 && m.isSQLServerDameng() {
+			return []ObjectResult{{Name: "视图模式", Error: "此组合不支持删除跨库/schema 前缀"}}
+		}
+		// Read-only discovery lets a fresh migrator reuse the same deterministic
+		// mapping. Actual target verification is restricted to view dependencies.
+		tables, err := m.reader.ListTables(ctx)
+		if err != nil {
+			return []ObjectResult{{Name: "视图依赖表", Error: err.Error()}}
+		}
+		mappingUncertain := false
+		for _, table := range tables {
+			if _, err := m.planDamengTable(ctx, table); err != nil {
+				mappingUncertain = true
+				continue
+			}
+		}
+		if m.hasDamengRenames() || mappingUncertain {
+			return m.migrateDamengViewsOnly(ctx, viewNames)
+		}
 	}
 	if m.isSQLServer() {
 		report := newCategoryReport()

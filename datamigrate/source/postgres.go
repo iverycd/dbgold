@@ -13,6 +13,8 @@ import (
 	_ "github.com/lib/pq"
 )
 
+func (r *PostgresReader) MigrationSchema() string { return r.schema }
+
 // PostgresReader 实现 Reader 接口，连接到 PostgreSQL 及其兼容库
 // （GaussDB / HighGo / Vastbase / GBase / SeaBox / KingBase）。具体目录能力需探测；
 // 使用家族类型映射不代表各产品的对象语义完全相同。

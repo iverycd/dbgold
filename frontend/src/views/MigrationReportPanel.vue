@@ -21,6 +21,7 @@
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
       </div>
+      <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
       <a-tabs default-active-key="overview" :destroy-on-hide="false">
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
           <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
@@ -173,6 +174,8 @@
 </template>
 
 <script setup lang="ts">
+import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
+import { formatAutoRepairs } from '@/utils/autoRepairs'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
@@ -281,6 +284,7 @@ function exportReport() {
   lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
   lines.push('')
 
+  lines.push(...formatAutoRepairs(r.auto_repairs))
   if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
   if (r.warnings?.length) {
     lines.push('=== 迁移告警 ===')

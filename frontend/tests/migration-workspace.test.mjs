@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -20,6 +21,7 @@ function panel(name, props, exports, { api = {}, emit = () => {}, copied = [], l
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted: fn => { lifecycle.mount = fn }, onUnmounted: fn => { lifecycle.unmount = fn } }
       if (id === '@/api/migration') return api
+      if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@/utils/clipboard') return { copyText: async text => copied.push(text) }
       if (id === '@arco-design/web-vue') return { Message: { success() {}, error() {} } }
       throw new Error(`Unexpected import ${id}`)
