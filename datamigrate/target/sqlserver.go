@@ -24,6 +24,8 @@ type SQLServerWriter struct {
 	db     *sql.DB
 	schema string
 	dia    *dialect.SQLServerDialect
+	// Set only on a dedicated recovery Writer, after inspecting the repaired table.
+	recoveryCasts map[string]map[string]string
 }
 
 var _ Writer = (*SQLServerWriter)(nil)
@@ -103,12 +105,7 @@ func (w *SQLServerWriter) execStatements(ctx context.Context, ss []dialect.State
 		return e
 	}
 	defer tx.Rollback()
-	for _, s := range ss {
-		if _, e = tx.ExecContext(ctx, s.SQL); e != nil {
-			return e
-		}
-	}
-	return tx.Commit()
+	return execObservedTransaction(ctx, tx, ss)
 }
 func (w *SQLServerWriter) CreateTable(ctx context.Context, s []dialect.Statement) error {
 	return w.execStatements(ctx, s)
@@ -214,6 +211,9 @@ func (w *SQLServerWriter) CopyData(ctx context.Context, table string, cols, type
 				}
 				args = append(args, cv)
 				t, _ := typemap.SQLServerType(info[ci])
+				if actual := w.recoveryCasts[table][cols[ci]]; actual != "" {
+					t = actual
+				}
 				ps[ci] = fmt.Sprintf("CAST(@p%d AS %s)", len(args), t)
 			}
 			values = append(values, "("+strings.Join(ps, ",")+")")

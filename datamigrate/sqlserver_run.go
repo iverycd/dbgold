@@ -154,7 +154,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			if failed[t] {
 				continue
 			}
-			e = m.writer.CreateTable(ctx, ddl[t])
+			e = m.repairTable(ctx, t, ddl[t])
 			sqlServerResult(&report.Tables, t, dialect.JoinSQL(ddl[t]), e)
 			if e != nil {
 				failed[t] = true
@@ -285,7 +285,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			ss := dia.IndexStatements(m.cfg.TargetSchema, i)
 			err = dependency(original)
 			if err == nil {
-				err = m.writer.CreateIndex(ctx, i)
+				err = m.repairIndex(ctx, i)
 			}
 			sqlServerResult(category, i.TableName+"."+i.IndexName, dialect.JoinSQL(ss), err)
 		}
@@ -306,7 +306,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				ss := dia.SequenceStatements(m.cfg.TargetSchema, s, "")
 				err = dependency(original)
 				if err == nil {
-					err = m.writer.CreateSequence(ctx, s, "")
+					err = m.repairSequence(ctx, s, "")
 				}
 				sqlServerResult(&report.Sequences, s.TableName+"."+s.ColumnName, dialect.JoinSQL(ss), err)
 			}
@@ -339,7 +339,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				}
 				ss := dia.ForeignKeyStatements(m.cfg.TargetSchema, f)
 				if err == nil {
-					err = m.writer.CreateForeignKey(ctx, f)
+					err = m.repairFK(ctx, f)
 				}
 				sqlServerResult(&report.Constraints, f.ConstraintName, dialect.JoinSQL(ss), err)
 			}
@@ -359,7 +359,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				c.ColumnName = m.objName(c.ColumnName)
 				ss := dia.CommentStatements(m.cfg.TargetSchema, c)
 				if err == nil {
-					err = m.writer.CreateComment(ctx, c)
+					err = m.repairComment(ctx, c)
 				}
 				sqlServerResult(&report.Comments, c.TableName+"."+c.ColumnName, dialect.JoinSQL(ss), err)
 			}
@@ -509,7 +509,7 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 			}
 			ss := m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, p.view)
 			if p.err == nil {
-				p.err = m.writer.CreateView(ctx, p.view)
+				p.err = m.repairView(ctx, p.view)
 			}
 			sqlServerResult(category, p.view.ViewName, dialect.JoinSQL(ss), p.err)
 			done[n] = true

@@ -103,7 +103,7 @@ func (w *KingbaseWriter) convertRow(row []interface{}, colTypes []string) []inte
 
 func (w *KingbaseWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
 	for _, s := range stmts {
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}
@@ -139,12 +139,7 @@ func (w *KingbaseWriter) CreateView(ctx context.Context, view source.ViewInfo) e
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
 		return err
 	}
-	for _, s := range stmts {
-		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return execObservedTransaction(ctx, tx, stmts)
 }
 
 func (w *KingbaseWriter) CountRows(ctx context.Context, table string) (int64, error) {
@@ -155,7 +150,7 @@ func (w *KingbaseWriter) CountRows(ctx context.Context, table string) (int64, er
 
 func (w *KingbaseWriter) AlterDistribute(ctx context.Context, table string, cols []string) error {
 	ddl := fmt.Sprintf("ALTER TABLE %s DISTRIBUTE BY hash (%s);", w.qualifiedTable(table), strings.Join(cols, ", "))
-	_, err := w.db.ExecContext(ctx, ddl)
+	_, err := execObserved(ctx, w.db, ddl)
 	return err
 }
 
@@ -169,7 +164,7 @@ func (w *KingbaseWriter) SchemaExists(ctx context.Context, schema string) (bool,
 }
 
 func (w *KingbaseWriter) ChangeOwner(ctx context.Context, objType, name, owner string) error {
-	_, err := w.db.ExecContext(ctx,
+	_, err := execObserved(ctx, w.db,
 		fmt.Sprintf(`ALTER %s %s OWNER TO "%s"`, objType, w.qualifiedTable(name), owner))
 	return err
 }

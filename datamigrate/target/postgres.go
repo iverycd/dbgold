@@ -145,7 +145,7 @@ func (w *PostgresWriter) convertRow(row []interface{}, colTypes []string) []inte
 
 func (w *PostgresWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
 	for _, s := range stmts {
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}
@@ -182,12 +182,7 @@ func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) e
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
 		return err
 	}
-	for _, s := range stmts {
-		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return execObservedTransaction(ctx, tx, stmts)
 }
 
 // CountRows 返回指定表的行数
@@ -211,7 +206,7 @@ func (w *PostgresWriter) SchemaExists(ctx context.Context, schema string) (bool,
 }
 
 func (w *PostgresWriter) ChangeOwner(ctx context.Context, objType, name, owner string) error {
-	_, err := w.db.ExecContext(ctx,
+	_, err := execObserved(ctx, w.db,
 		fmt.Sprintf(`ALTER %s %s OWNER TO "%s"`, objType, w.qualifiedTable(name), owner))
 	return err
 }

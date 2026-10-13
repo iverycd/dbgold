@@ -12,6 +12,7 @@ import { sql, MySQL, PostgreSQL } from '@codemirror/lang-sql'
 const props = defineProps<{
   modelValue: string
   dialect: 'mysql' | 'postgres' | 'gaussdb'
+  executionMode?: 'statement' | 'document'
 }>()
 
 const emit = defineEmits<{
@@ -85,7 +86,7 @@ function selectedOrCurrentSQL(state: EditorState): string {
 }
 
 function getExecutableSQL(): string {
-  return view ? selectedOrCurrentSQL(view.state) : props.modelValue.trim()
+  return view ? (props.executionMode === 'document' ? view.state.doc.toString().trim() : selectedOrCurrentSQL(view.state)) : props.modelValue.trim()
 }
 
 defineExpose({ getExecutableSQL })
@@ -102,7 +103,7 @@ onMounted(() => {
         keymap.of([{
           key: 'Mod-Enter',
           run: (stateView) => {
-            emit('execute', selectedOrCurrentSQL(stateView.state))
+            emit('execute', props.executionMode === 'document' ? stateView.state.doc.toString().trim() : selectedOrCurrentSQL(stateView.state))
             return true
           },
         }]),

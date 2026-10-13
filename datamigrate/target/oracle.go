@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/valueconv"
 	goora "github.com/sijms/go-ora/v2"
@@ -127,7 +128,7 @@ func (w *OracleWriter) execStatements(ctx context.Context, stmts []dialect.State
 		if err := w.validateSQLText(s.SQL); err != nil {
 			return err
 		}
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}
@@ -140,8 +141,10 @@ func (w *OracleWriter) CreateTable(ctx context.Context, stmts []dialect.Statemen
 		}
 	}
 	for _, s := range stmts {
-		_, err := w.db.ExecContext(ctx, s.SQL)
-		if err != nil && !(strings.HasPrefix(s.SQL, "DROP TABLE ") && oracleErrorCode(err, 942)) {
+		_, err := execObservedAllow(ctx, w.db, s.SQL, func(err error) bool {
+			return strings.HasPrefix(s.SQL, "DROP TABLE ") && oracleErrorCode(err, 942)
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -164,10 +167,11 @@ func (w *OracleWriter) CreateSequence(ctx context.Context, s source.SequenceInfo
 	if _, err := dialect.OracleSequenceStart(s); err != nil {
 		return err
 	}
-	if err := w.execStatements(ctx, w.dia.SequenceStatements(w.schema, s, owner)); err != nil {
+	statements := w.dia.SequenceStatements(w.schema, s, owner)
+	if err := w.execStatements(ctx, statements); err != nil {
 		return err
 	}
-	return w.validateObject(ctx, w.dia.TriggerName(s), "TRIGGER")
+	return w.observeValidity(ctx, statements, w.dia.TriggerName(s), "TRIGGER")
 }
 func (w *OracleWriter) CreateIndex(ctx context.Context, i source.IndexInfo) error {
 	if i.Unsupported != "" {
@@ -185,23 +189,50 @@ func (w *OracleWriter) CreateForeignKey(ctx context.Context, f source.FKInfo) er
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, f))
 }
 func (w *OracleWriter) CreateView(ctx context.Context, v source.ViewInfo) error {
-	if err := w.execStatements(ctx, w.dia.ViewStatements(w.schema, v)); err != nil {
+	statements := w.dia.ViewStatements(w.schema, v)
+	if err := w.execStatements(ctx, statements); err != nil {
 		return err
 	}
-	return w.validateObject(ctx, v.ViewName, "VIEW")
+	return w.observeValidity(ctx, statements, v.ViewName, "VIEW")
+}
+
+type oracleInvalidObjectError struct{ message string }
+
+func (e *oracleInvalidObjectError) Error() string { return e.message }
+
+func (w *OracleWriter) observeValidity(ctx context.Context, statements []dialect.Statement, name, kind string) error {
+	err := w.validateObject(ctx, name, kind)
+	if err == nil || len(statements) == 0 {
+		return err
+	}
+	status := "unknown"
+	var invalid *oracleInvalidObjectError
+	if errors.As(err, &invalid) {
+		status = "failed"
+	}
+	return errors.Join(err, repair.Observe(ctx, statements[len(statements)-1].SQL, status, err))
 }
 func (w *OracleWriter) CreateComment(ctx context.Context, c source.CommentInfo) error {
 	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, c))
 }
 func (w *OracleWriter) validateObject(ctx context.Context, name, kind string) error {
+	return w.validateObjectOn(ctx, w.db, name, kind)
+}
+
+type oracleObjectQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func (w *OracleWriter) validateObjectOn(ctx context.Context, q oracleObjectQuerier, name, kind string) error {
 	var status string
-	if err := w.db.QueryRowContext(ctx, `SELECT STATUS FROM ALL_OBJECTS WHERE OWNER=:1 AND OBJECT_NAME=:2 AND OBJECT_TYPE=:3`, w.schema, name, kind).Scan(&status); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT STATUS FROM ALL_OBJECTS WHERE OWNER=:1 AND OBJECT_NAME=:2 AND OBJECT_TYPE=:3`, w.schema, name, kind).Scan(&status); err != nil {
 		return err
 	}
 	if status == "VALID" {
 		return nil
 	}
-	rows, err := w.db.QueryContext(ctx, `SELECT LINE, POSITION, TEXT FROM ALL_ERRORS WHERE OWNER=:1 AND NAME=:2 AND TYPE=:3 ORDER BY SEQUENCE`, w.schema, name, kind)
+	rows, err := q.QueryContext(ctx, `SELECT LINE, POSITION, TEXT FROM ALL_ERRORS WHERE OWNER=:1 AND NAME=:2 AND TYPE=:3 ORDER BY SEQUENCE`, w.schema, name, kind)
 	if err != nil {
 		return err
 	}
@@ -218,7 +249,7 @@ func (w *OracleWriter) validateObject(ctx context.Context, name, kind string) er
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	return fmt.Errorf("%s %s 无效: %s", kind, name, strings.Join(details, "; "))
+	return &oracleInvalidObjectError{message: fmt.Sprintf("%s %s 无效: %s", kind, name, strings.Join(details, "; "))}
 }
 
 func (w *OracleWriter) loadColumns(ctx context.Context, table string) (map[string]valueconv.OracleColumn, error) {

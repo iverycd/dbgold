@@ -129,6 +129,7 @@ func (m *Migrator) migrateDamengMappedViews(ctx context.Context, views []source.
 				continue
 			}
 			converted, err := tsqldameng.MappedView(v.Definition, m.cfg.TargetSchema, m.damengSourceSchema(), m.isSQLServerDameng(), catalog)
+			m.repairViewDependencies(v.ViewName, converted.Dependencies)
 			wait := false
 			for _, dep := range converted.Dependencies {
 				dk := strings.ToUpper(dep)
@@ -176,7 +177,7 @@ func (m *Migrator) migrateDamengMappedViews(ctx context.Context, views []source.
 			v.Definition = converted.SQL
 			ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
 			if wanted(v.ViewName) {
-				err = m.writer.CreateView(ctx, v)
+				err = m.repairView(ctx, v)
 			} else {
 				// An unselected view is an existing dependency, never silently rebuilt.
 				info := &source.TableDDLInfo{TableName: v.ViewName}

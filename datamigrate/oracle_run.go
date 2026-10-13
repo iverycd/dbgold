@@ -372,7 +372,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if ctx.Err() != nil {
 				return report
 			}
-			e := m.writer.CreateTable(ctx, p.ddl[t])
+			e := m.repairTable(ctx, t, p.ddl[t])
 			m.recordOracleResult(&report.Tables, m.objName(t), dialect.JoinSQL(p.ddl[t]), e)
 			failed[m.objName(t)] = e != nil
 			if e == nil {
@@ -435,7 +435,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[i.TableName] {
 				continue
 			}
-			e := m.writer.CreateIndex(ctx, i)
+			e := m.repairIndex(ctx, i)
 			m.recordOracleResult(&report.PrimaryKeys, d.IndexName(i), dialect.JoinSQL(d.IndexStatements(m.cfg.TargetSchema, i)), e)
 		}
 		for _, s := range p.sequences {
@@ -446,7 +446,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				continue
 			}
 			sql := dialect.JoinSQL(d.SequenceStatements(m.cfg.TargetSchema, s, ""))
-			e := m.writer.CreateSequence(ctx, s, "")
+			e := m.repairSequence(ctx, s, "")
 			m.recordOracleResult(&report.Sequences, d.SequenceName(s), sql, e)
 		}
 		for _, i := range p.indexes {
@@ -456,7 +456,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[i.TableName] {
 				continue
 			}
-			e := m.writer.CreateIndex(ctx, i)
+			e := m.repairIndex(ctx, i)
 			m.recordOracleResult(&report.Indexes, d.IndexName(i), dialect.JoinSQL(d.IndexStatements(m.cfg.TargetSchema, i)), e)
 		}
 		for _, f := range p.fks {
@@ -470,7 +470,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[f.RefTable] {
 				e = fmt.Errorf("引用表 %s 建表失败", f.RefTable)
 			} else {
-				e = m.writer.CreateForeignKey(ctx, f)
+				e = m.repairFK(ctx, f)
 			}
 			m.recordOracleResult(&report.Constraints, d.ForeignKeyName(f), dialect.JoinSQL(d.ForeignKeyStatements(m.cfg.TargetSchema, f)), e)
 		}
@@ -481,7 +481,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[c.TableName] {
 				continue
 			}
-			e := m.writer.CreateComment(ctx, c)
+			e := m.repairComment(ctx, c)
 			name := c.TableName
 			if c.ColumnName != "" {
 				name += "." + c.ColumnName
@@ -597,7 +597,7 @@ func (m *Migrator) executeOracleViews(ctx context.Context, plans []oracleViewPla
 			}
 		}
 		if e == nil {
-			e = m.writer.CreateView(ctx, v.view)
+			e = m.repairView(ctx, v.view)
 		}
 		r := ObjectResult{Name: v.view.ViewName, DDL: v.ddl}
 		if e != nil {

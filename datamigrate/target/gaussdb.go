@@ -113,7 +113,7 @@ func (w *GaussDBWriter) convertRow(row []interface{}, colTypes []string) []inter
 
 func (w *GaussDBWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
 	for _, s := range stmts {
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}
@@ -149,12 +149,7 @@ func (w *GaussDBWriter) CreateView(ctx context.Context, view source.ViewInfo) er
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
 		return err
 	}
-	for _, s := range stmts {
-		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return execObservedTransaction(ctx, tx, stmts)
 }
 
 // CountRows 返回指定表的行数
@@ -167,7 +162,7 @@ func (w *GaussDBWriter) CountRows(ctx context.Context, table string) (int64, err
 // AlterDistribute 将表的分布列设置为指定列，适用于 GaussDB 分布式版
 func (w *GaussDBWriter) AlterDistribute(ctx context.Context, table string, cols []string) error {
 	ddl := fmt.Sprintf("ALTER TABLE %s DISTRIBUTE BY hash (%s);", w.qualifiedTable(table), strings.Join(cols, ", "))
-	_, err := w.db.ExecContext(ctx, ddl)
+	_, err := execObserved(ctx, w.db, ddl)
 	return err
 }
 
@@ -181,7 +176,7 @@ func (w *GaussDBWriter) SchemaExists(ctx context.Context, schema string) (bool, 
 }
 
 func (w *GaussDBWriter) ChangeOwner(ctx context.Context, objType, name, owner string) error {
-	_, err := w.db.ExecContext(ctx,
+	_, err := execObserved(ctx, w.db,
 		fmt.Sprintf(`ALTER %s %s OWNER TO "%s"`, objType, w.qualifiedTable(name), owner))
 	return err
 }

@@ -71,10 +71,10 @@ func InitWithError(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := DB.AutoMigrate(&User{}, &Connection{}, &DataMigrationJob{}, &DataMigrationReport{}, &IncrementalMigrationJob{}, &IncrementalMigrationLog{}, &LoginHistory{}, &BatchMigration{}, &MigrationTicket{}, &QueryAudit{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Connection{}, &DataMigrationJob{}, &DataMigrationReport{}, &IncrementalMigrationJob{}, &IncrementalMigrationLog{}, &LoginHistory{}, &BatchMigration{}, &MigrationTicket{}, &QueryAudit{}, &MigrationRepairObject{}, &MigrationRepairBinding{}, &MigrationRepairAttempt{}, &MigrationRecoveryPreview{}, &MigrationRepairLock{}); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
-	return nil
+	return MarkInterruptedRepairsUnknown()
 }
 
 func Close() error {

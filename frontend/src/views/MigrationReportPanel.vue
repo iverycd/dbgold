@@ -21,6 +21,7 @@
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
       </div>
+      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" />
       <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
       <a-tabs default-active-key="overview" :destroy-on-hide="false">
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
@@ -174,6 +175,7 @@
 </template>
 
 <script setup lang="ts">
+import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
@@ -190,6 +192,7 @@ import { copyText } from '@/utils/clipboard'
 const props = defineProps<{ jobID: string }>()
 const emit = defineEmits<{ loaded: [jobID: string, report: MigrationReport] }>()
 
+const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
 const fetchError = ref('')
@@ -274,7 +277,7 @@ async function loadReport() {
   }
 }
 
-function exportReport() {
+async function exportReport() {
   if (!report.value) return
   const r = report.value
   const lines: string[] = []
@@ -360,6 +363,10 @@ function exportReport() {
     }
   }
 
+  if (repairPanel.value) {
+    try { lines.push(...await repairPanel.value.exportHistory()) }
+    catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
+  }
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

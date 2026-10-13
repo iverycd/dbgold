@@ -39,19 +39,20 @@ type CategoryReport struct {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
-	AutoRepairs []AutoRepair                 `json:"auto_repairs,omitempty"`
-	Warnings    []valueconv.MigrationWarning `json:"warnings,omitempty"`
-	Preflight   *PGMySQLPreflight            `json:"preflight,omitempty"`
-	Tables      CategoryReport               `json:"tables"`
-	Data        CategoryReport               `json:"data"`
-	PrimaryKeys CategoryReport               `json:"primaryKeys"`
-	Views       CategoryReport               `json:"views"`
-	Indexes     CategoryReport               `json:"indexes"`
-	Constraints CategoryReport               `json:"constraints"`
-	Sequences   CategoryReport               `json:"sequences"`
-	Comments    CategoryReport               `json:"comments"`
-	Triggers    CategoryReport               `json:"triggers"`
-	RowCounts   []TableRowCount              `json:"rowCounts"`
+	RepairManifest *RepairManifest              `json:"repair_manifest,omitempty"`
+	AutoRepairs    []AutoRepair                 `json:"auto_repairs,omitempty"`
+	Warnings       []valueconv.MigrationWarning `json:"warnings,omitempty"`
+	Preflight      *PGMySQLPreflight            `json:"preflight,omitempty"`
+	Tables         CategoryReport               `json:"tables"`
+	Data           CategoryReport               `json:"data"`
+	PrimaryKeys    CategoryReport               `json:"primaryKeys"`
+	Views          CategoryReport               `json:"views"`
+	Indexes        CategoryReport               `json:"indexes"`
+	Constraints    CategoryReport               `json:"constraints"`
+	Sequences      CategoryReport               `json:"sequences"`
+	Comments       CategoryReport               `json:"comments"`
+	Triggers       CategoryReport               `json:"triggers"`
+	RowCounts      []TableRowCount              `json:"rowCounts"`
 }
 
 // AutoRepair is emitted only after successful CREATE or existing-column validation.

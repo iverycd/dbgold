@@ -79,14 +79,14 @@ func (w *MySQLWriter) execStatements(ctx context.Context, stmts []dialect.Statem
 		}
 		defer restore()
 		for _, s := range stmts {
-			if _, err = conn.ExecContext(ctx, s.SQL); err != nil {
+			if _, err = execObserved(ctx, conn, s.SQL); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	for _, s := range stmts {
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}

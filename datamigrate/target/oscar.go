@@ -73,7 +73,7 @@ func (w *OscarWriter) Close() error {
 
 func (w *OscarWriter) execStatements(ctx context.Context, statements []dialect.Statement) error {
 	for _, statement := range statements {
-		if err := w.bridge.Exec(ctx, w.session, statement.SQL); err != nil {
+		if err := execOscarObserved(ctx, w, statement.SQL); err != nil {
 			return err
 		}
 	}
@@ -195,5 +195,5 @@ func (w *OscarWriter) SchemaExists(ctx context.Context, schema string) (bool, er
 }
 func (w *OscarWriter) ChangeOwner(ctx context.Context, objectType, name, owner string) error {
 	sql := fmt.Sprintf("ALTER %s %s OWNER TO %s", objectType, w.dia.QualifyTable(w.schema, name), w.dia.QuoteIdent(owner))
-	return w.bridge.Exec(ctx, w.session, sql)
+	return execOscarObserved(ctx, w, sql)
 }

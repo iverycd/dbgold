@@ -342,14 +342,23 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		TargetDBType:       dstConn.DBType,
 		StripViewSchemas:   stripSchemas,
 	}
+	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, p.SrcDatabase, &cfg, writer)
+	if repairErr != nil {
+		updateJobStatus(dbJob, "failed", repairErr.Error())
+		return
+	}
+	defer releaseRepair()
 	m := datamigrate.NewMigrator(reader, writer, job, cfg)
 	report := m.Run(ctx)
 
 	if reportJSON, err := json.Marshal(report); err == nil {
-		_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
-			JobID:      dbJob.JobID,
-			ReportJSON: string(reportJSON),
-		})
+		if saveErr := store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: dbJob.JobID, ReportJSON: string(reportJSON)}); saveErr != nil {
+			updateJobStatus(dbJob, "failed", "保存报告失败: "+saveErr.Error())
+			return
+		}
+	} else {
+		updateJobStatus(dbJob, "failed", "序列化报告失败: "+err.Error())
+		return
 	}
 
 	status := "done"
@@ -517,14 +526,23 @@ func StartObjectMigration(c *gin.Context) {
 			ChangeOwner:     changeOwner,
 			TargetDBType:    dstConn.DBType,
 		}
+		releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, req.SrcDatabase, &cfg, writer)
+		if repairErr != nil {
+			updateJobStatus(dbJob, "failed", repairErr.Error())
+			return
+		}
+		defer releaseRepair()
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)
 
 		if reportJSON, err := json.Marshal(report); err == nil {
-			_ = store.CreateDataMigrationReport(&store.DataMigrationReport{
-				JobID:      jobID,
-				ReportJSON: string(reportJSON),
-			})
+			if saveErr := store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: jobID, ReportJSON: string(reportJSON)}); saveErr != nil {
+				updateJobStatus(dbJob, "failed", "保存报告失败: "+saveErr.Error())
+				return
+			}
+		} else {
+			updateJobStatus(dbJob, "failed", "序列化报告失败: "+err.Error())
+			return
 		}
 
 		status := "done"
@@ -853,6 +871,23 @@ func MigrateViews(c *gin.Context) {
 		TargetDBType:     dstConn.DBType,
 		StripViewSchemas: stripSchemas,
 	}
+	schema, scopeErr := target.ResolveRepairSchema(ctx, writer)
+	if scopeErr != nil {
+		close(job.LogCh)
+		<-done
+		repairError(c, scopeErr)
+		return
+	}
+	cfg.TargetSchema = schema
+	scope := migrationScope(dstConn, schema)
+	scopeOwner := uuid.NewString()
+	if scopeErr = store.AcquireMigrationScope(scope, scopeOwner); scopeErr != nil {
+		close(job.LogCh)
+		<-done
+		repairError(c, scopeErr)
+		return
+	}
+	defer store.ReleaseMigrationScope(scope, scopeOwner)
 	m := datamigrate.NewMigrator(reader, writer, job, cfg)
 	results := m.MigrateViews(ctx, req.ViewNames)
 	close(job.LogCh)

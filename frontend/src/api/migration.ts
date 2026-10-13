@@ -48,6 +48,8 @@ export interface DataMigrationJob {
   src_conn_id: number
   dst_conn_id: number
   src_db_type: string
+  source_database?: string
+  source_schema?: string
   dst_db_type: string
   batch_id?: string
   migrate_mode: string

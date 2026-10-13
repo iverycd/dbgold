@@ -96,6 +96,8 @@
         </div>
       </section>
 
+      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" />
+
       <section class="detail-tabs-surface">
         <AutoRepairPanel v-if="report?.auto_repairs?.length" :repairs="report.auto_repairs" />
         <a-alert v-if="reportError" type="warning" class="report-alert">
@@ -232,9 +234,10 @@
 </template>
 
 <script setup lang="ts">
+import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import MigrationConnectionRoute from '@/components/MigrationConnectionRoute.vue'
@@ -255,6 +258,7 @@ interface RiskItem { key: string; level: 'warning' | 'danger'; title: string; de
 
 const route = useRoute()
 const router = useRouter()
+const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
 const job = ref<DataMigrationJob | null>(null)
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
@@ -269,6 +273,7 @@ const rowCountKeyword = ref('')
 let timer: number | undefined
 let requestRunning = false
 let disposed = false
+let loadVersion = 0
 
 const jobID = computed(() => String(route.params.jobId || ''))
 const categoryRows = computed<CategoryRow[]>(() => report.value ? [
@@ -325,7 +330,7 @@ const summaryText = computed(() => job.value?.summary || (job.value?.status === 
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
   if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
-  if (failedObjectCount.value) items.push({ key: 'objects', level: 'danger', title: `${failedObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '展开失败项可查看完整错误和原始 DDL，并复制后进行人工修复。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
+  if (failedObjectCount.value) items.push({ key: 'objects', level: 'danger', title: `${failedObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
   if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items
@@ -346,11 +351,14 @@ async function copy(value: string, label: string) {
   }
 }
 
-async function loadReport(current: DataMigrationJob) {
+async function loadReport(current: DataMigrationJob, version: number) {
   reportError.value = ''
   try {
-    report.value = (await getDataMigrationReport(current.job_id)).data
+    const data = (await getDataMigrationReport(current.job_id)).data
+    if (disposed || version !== loadVersion || current.job_id !== jobID.value) return
+    report.value = data
   } catch (error: any) {
+    if (disposed || version !== loadVersion || current.job_id !== jobID.value) return
     report.value = null
     reportError.value = error?.response?.status === 404
       ? (current.status === 'running' ? '迁移尚未结束，报告将在任务完成后生成。' : '该任务没有可用的迁移报告。')
@@ -361,29 +369,34 @@ async function loadReport(current: DataMigrationJob) {
 async function load() {
   if (requestRunning || disposed) return
   requestRunning = true
+  const version = ++loadVersion
+  const requestedID = jobID.value
   if (job.value) refreshing.value = true
   else loading.value = true
   loadError.value = ''
   try {
-    const current = (await getDataMigrationJob(jobID.value)).data
-    if (disposed) return
+    const current = (await getDataMigrationJob(requestedID)).data
+    if (disposed || version !== loadVersion || requestedID !== jobID.value) return
     job.value = current
-    await loadReport(current)
+    await loadReport(current, version)
+    if (disposed || version !== loadVersion || requestedID !== jobID.value) return
     if (current.status === 'running' && !timer) timer = window.setInterval(load, 5000)
     if (current.status !== 'running' && timer) {
       clearInterval(timer)
       timer = undefined
     }
   } catch (error: any) {
+    if (disposed || version !== loadVersion || requestedID !== jobID.value) return
     loadError.value = error?.response?.data?.error || '单次迁移任务不存在或无权访问'
   } finally {
+    if (version !== loadVersion) return
     requestRunning = false
     loading.value = false
     refreshing.value = false
   }
 }
 
-function exportReport() {
+async function exportReport() {
   if (!report.value || !job.value) return
   const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   lines.push(...formatAutoRepairs(report.value.auto_repairs))
@@ -403,6 +416,10 @@ function exportReport() {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)
   }
+  if (repairPanel.value) {
+    try { lines.push(...await repairPanel.value.exportHistory()) }
+    catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
+  }
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
@@ -415,6 +432,14 @@ function exportReport() {
 function backToHistory() { router.push({ path: '/history', query: { tab: 'data' } }) }
 
 onMounted(load)
+watch(jobID, () => {
+  loadVersion++
+  requestRunning = false
+  if (timer) clearInterval(timer)
+  timer = undefined
+  job.value = null; report.value = null; reportError.value = ''; activeTab.value = 'overview'
+  void load()
+})
 onUnmounted(() => {
   disposed = true
   if (timer) clearInterval(timer)

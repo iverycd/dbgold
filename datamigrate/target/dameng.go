@@ -75,17 +75,17 @@ func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statemen
 	w.identCache = map[string]bool{}
 	w.identMu.Unlock()
 	for _, stmt := range stmts {
-		if _, err := w.db.ExecContext(ctx, stmt.SQL); err != nil {
-			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt.SQL)), "DROP") {
-				if w.srcType != "sqlserver" {
-					continue
-				}
-				var dmErr *dm.DmError
-				if errors.As(err, &dmErr) && dmErr.ErrCode == -2106 {
-					continue
-				} // invalid table/view name
-				return err
+		_, err := execObservedAllow(ctx, w.db, stmt.SQL, func(err error) bool {
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt.SQL)), "DROP") {
+				return false
 			}
+			if w.srcType != "sqlserver" {
+				return true
+			}
+			var dmErr *dm.DmError
+			return errors.As(err, &dmErr) && dmErr.ErrCode == -2106
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -106,7 +106,7 @@ func splitDDL(ddl string) []string {
 
 func (w *DaMengWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
 	for _, s := range stmts {
-		if _, err := w.db.ExecContext(ctx, s.SQL); err != nil {
+		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
 			return err
 		}
 	}

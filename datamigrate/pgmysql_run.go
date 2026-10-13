@@ -70,7 +70,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			cat.Items = append(cat.Items, ObjectResult{Name: obj.Object.Name, Error: e.Error()})
 			return false
 		}
-		err := m.writer.CreateTable(ctx, obj.Statements) // common statement execution; no regeneration
+		err := m.repairPlanned(ctx, obj) // common statement execution; no regeneration
 		if err != nil {
 			cat.Failed++
 			detail := err.Error()

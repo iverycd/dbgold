@@ -16,6 +16,8 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
+	CaptureRepair      bool                       `json:"CaptureRepair,omitempty"`
+	RepairSink         func(RepairManifest) error `json:"-"`
 	ExcludedObjects    []ObjectRef
 	ViewNames          []string
 	PageSize           int
@@ -49,6 +51,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	repairs        *repairRecorder
 	dmPlans        map[string]*damengTablePlan
 	dmBlocked      map[string]bool
 	dmUsable       map[string]bool
@@ -160,6 +163,24 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	if !m.cfg.CaptureRepair {
+		return m.run(ctx)
+	}
+	m.beginRepair(ctx)
+	if m.repairs.sinkErr != nil {
+		report := newMigrationReport()
+		report.Tables.Total = 1
+		report.Tables.Failed = 1
+		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "修复记录持久化", Error: m.repairs.sinkErr.Error()})
+		m.finishRepair(ctx, &report)
+		return report
+	}
+	report := m.run(ctx)
+	m.finishRepair(ctx, &report)
+	return report
+}
+
+func (m *Migrator) run(ctx context.Context) MigrationReport {
 	if m.isSQLServer() {
 		return m.runSQLServer(ctx)
 	}
@@ -275,7 +296,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 				report.Tables.Items = append(report.Tables.Items, objectResultForError(table, ddl, err))
 				continue
 			}
-			if err := m.writer.CreateTable(ctx, stmts); err != nil {
+			if err := m.repairTable(ctx, table, stmts); err != nil {
 				m.log.Errorf("创建表失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				if m.dmBlocked != nil {
@@ -289,7 +310,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 			report.Tables.Success++
 			m.recordDamengRepairs(&report, table, "applied")
 			if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-				if err := m.writer.ChangeOwner(ctx, "TABLE", m.objName(table), m.cfg.TargetSchema); err != nil {
+				if err := m.repairOwner(ctx, "TABLE", m.objName(table), m.cfg.TargetSchema); err != nil {
 					m.log.Warnf("修改表 owner 失败 [%s]: %v", table, err)
 				}
 			}
@@ -670,11 +691,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
 				if m.cfg.Distributed {
-					if err := m.writer.AlterDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
+					if err := m.repairDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
 						m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
 					}
 				}
-				if err := m.writer.CreateIndex(ctx, pkCopy); err != nil {
+				if err := m.repairIndex(ctx, pkCopy); err != nil {
 					m.log.Errorf("创建主键失败 [%s]: %v", pkName, err)
 					report.PrimaryKeys.Failed++
 					report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkName, DDL: ddl, Error: err.Error()})
@@ -714,7 +735,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					sequenceOwner = m.cfg.TargetSchema
 				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy, sequenceOwner))
-				if err := m.writer.CreateSequence(ctx, seqCopy, sequenceOwner); err != nil {
+				if err := m.repairSequence(ctx, seqCopy, sequenceOwner); err != nil {
 					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 					report.Sequences.Failed++
 					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
@@ -726,7 +747,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					m.log.Indexf("创建序列 %s ... OK", seqObj)
 					report.Sequences.Success++
 					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-						if err := m.writer.ChangeOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
+						if err := m.repairOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
 							m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
 						}
 					}
@@ -764,7 +785,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				idxCopy.Columns = cols
 				indexName := dialect.IndexName(m.writer.Dialect(), idxCopy)
 				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
-				if err := m.writer.CreateIndex(ctx, idxCopy); err != nil {
+				if err := m.repairIndex(ctx, idxCopy); err != nil {
 					m.log.Errorf("创建索引失败 [%s]: %v", indexName, err)
 					report.Indexes.Failed++
 					report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
@@ -836,7 +857,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				fkCopy.RefColumns = refCols
 				ddl := dialect.JoinSQL(m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, fkCopy))
-				if err := m.writer.CreateForeignKey(ctx, fkCopy); err != nil {
+				if err := m.repairFK(ctx, fkCopy); err != nil {
 					m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
 					report.Constraints.Failed++
 					report.Constraints.Items = append(report.Constraints.Items, ObjectResult{
@@ -931,7 +952,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					name = fmt.Sprintf("%s.%s", cmCopy.TableName, cmCopy.ColumnName)
 				}
 				report.Comments.Total++
-				if err := m.writer.CreateComment(ctx, cmCopy); err != nil {
+				if err := m.repairComment(ctx, cmCopy); err != nil {
 					m.log.Errorf("创建注释失败 [%s]: %v", name, err)
 					report.Comments.Failed++
 					report.Comments.Items = append(report.Comments.Items, ObjectResult{
@@ -954,7 +975,7 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	if m.isSQLServerDameng() {
 		v.ViewName = m.objName(v.ViewName)
 		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
-		return ddl, m.writer.CreateView(ctx, v)
+		return ddl, m.repairView(ctx, v)
 	}
 
 	vCopy := v
@@ -990,13 +1011,13 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	if m.isOscar() {
 		viewDDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
 	}
-	if err := m.writer.CreateView(ctx, vCopy); err != nil {
+	if err := m.repairView(ctx, vCopy); err != nil {
 		m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
 		return viewDDL, err
 	}
 	m.log.DDLf("创建视图 %s ... OK", vCopy.ViewName)
 	if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
-		if err := m.writer.ChangeOwner(ctx, "VIEW", vCopy.ViewName, m.cfg.TargetSchema); err != nil {
+		if err := m.repairOwner(ctx, "VIEW", vCopy.ViewName, m.cfg.TargetSchema); err != nil {
 			m.log.Warnf("修改视图 owner 失败 [%s]: %v", vCopy.ViewName, err)
 		}
 	}
