@@ -262,7 +262,7 @@ func MarkInterruptedRepairsUnknown() error {
 			if err := json.Unmarshal([]byte(row.ObjectJSON), &obj); err != nil {
 				return err
 			}
-			changed := false
+			changed := obj.NormalizeLegacyExecution()
 			for _, done := range completedData[row.JobID] {
 				if (obj.Kind == "table" || obj.Kind == "data") && (obj.Table != "" && obj.Table == done.Table || obj.SourceTable != "" && obj.SourceTable == done.SourceTable) {
 					obj.DataStatus = "succeeded"
@@ -294,12 +294,12 @@ func MarkInterruptedRepairsUnknown() error {
 				if err = tx.Model(&row).Updates(map[string]any{"object_json": string(payload), "version": row.Version + 1}).Error; err != nil {
 					return err
 				}
-				if err = tx.Model(&DataMigrationJob{}).Where("job_id = ? AND status = ?", row.JobID, "running").Updates(map[string]any{"status": "failed", "summary": "服务重启，部分对象执行结果未知，请核验后修复", "finished_at": &now}).Error; err != nil {
+				if err = tx.Model(&DataMigrationJob{}).Where("job_id = ? AND status = ?", row.JobID, "running").Updates(map[string]any{"status": "failed", "summary": "服务重启，部分对象执行结果未知，禁止自动重放", "finished_at": &now}).Error; err != nil {
 					return err
 				}
 			}
 		}
-		if err := tx.Model(&MigrationRepairAttempt{}).Where("status = ?", "running").Updates(map[string]any{"status": "unknown", "error": "服务重启，数据库执行结果未知；请先核验，禁止自动重放", "finished_at": &now}).Error; err != nil {
+		if err := tx.Model(&MigrationRepairAttempt{}).Where("status = ?", "running").Updates(map[string]any{"status": "unknown", "error": "服务重启，数据库执行结果未知，禁止自动重放", "finished_at": &now}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&DataMigrationJob{}).Where("status = ?", "running").Updates(map[string]any{"status": "failed", "summary": "服务重启，原迁移已中断；请查看保留的对象执行状态", "finished_at": &now}).Error; err != nil {

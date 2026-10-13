@@ -7,6 +7,8 @@ import (
 	"dbgold/datamigrate/source"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
+	"time"
 )
 
 type Unit struct {
@@ -20,38 +22,93 @@ type Unit struct {
 }
 
 type Object struct {
-	OriginalStatus   string               `json:"original_status"`
-	OriginalError    string               `json:"original_error"`
-	ID               string               `json:"id"`
-	Kind             string               `json:"kind"`
-	Name             string               `json:"name"`
-	Table            string               `json:"table,omitempty"`
-	SourceName       string               `json:"source_name,omitempty"`
-	SourceTable      string               `json:"source_table,omitempty"`
-	TargetName       string               `json:"target_name"`
-	Schema           string               `json:"schema"`
-	DDL              string               `json:"ddl"`
-	SuggestedDDL     string               `json:"suggested_ddl,omitempty"`
-	Error            string               `json:"error,omitempty"`
-	Status           string               `json:"status"`
-	Units            []Unit               `json:"units"`
-	Dependencies     []string             `json:"dependencies"`
-	ColumnMapping    map[string]string    `json:"column_mapping,omitempty"`
-	RefColumnMapping map[string]string    `json:"ref_column_mapping,omitempty"`
-	Columns          []source.ColumnInfo  `json:"columns,omitempty"`
-	SourceColumns    []source.ColumnInfo  `json:"source_columns,omitempty"`
-	Index            *source.IndexInfo    `json:"index,omitempty"`
-	ForeignKey       *source.FKInfo       `json:"foreign_key,omitempty"`
-	Sequence         *source.SequenceInfo `json:"sequence,omitempty"`
-	Comment          *source.CommentInfo  `json:"comment,omitempty"`
-	Legacy           bool                 `json:"legacy"`
-	RequiresReview   bool                 `json:"requires_review"`
-	DataStatus       string               `json:"data_status,omitempty"`
+	// Deprecated metadata is retained only to read old records; it does not affect execution status.
+	Verification       *Verification        `json:"verification,omitempty"`
+	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
+	OriginalStatus     string               `json:"original_status"`
+	OriginalError      string               `json:"original_error"`
+	ID                 string               `json:"id"`
+	Kind               string               `json:"kind"`
+	Name               string               `json:"name"`
+	Table              string               `json:"table,omitempty"`
+	SourceName         string               `json:"source_name,omitempty"`
+	SourceTable        string               `json:"source_table,omitempty"`
+	TargetName         string               `json:"target_name"`
+	Schema             string               `json:"schema"`
+	DDL                string               `json:"ddl"`
+	SourceDDL          string               `json:"source_ddl,omitempty"` // Reference only; never an execution candidate.
+	DiagnosticOnly     bool                 `json:"diagnostic_only,omitempty"`
+	SuggestedDDL       string               `json:"suggested_ddl,omitempty"`
+	Error              string               `json:"error,omitempty"`
+	Status             string               `json:"status"`
+	Units              []Unit               `json:"units"`
+	Dependencies       []string             `json:"dependencies"`
+	ColumnMapping      map[string]string    `json:"column_mapping,omitempty"`
+	RefColumnMapping   map[string]string    `json:"ref_column_mapping,omitempty"`
+	Columns            []source.ColumnInfo  `json:"columns,omitempty"`
+	SourceColumns      []source.ColumnInfo  `json:"source_columns,omitempty"`
+	Index              *source.IndexInfo    `json:"index,omitempty"`
+	ForeignKey         *source.FKInfo       `json:"foreign_key,omitempty"`
+	Sequence           *source.SequenceInfo `json:"sequence,omitempty"`
+	Comment            *source.CommentInfo  `json:"comment,omitempty"`
+	Legacy             bool                 `json:"legacy"`
+	RequiresReview     bool                 `json:"requires_review"`
+	DataStatus         string               `json:"data_status,omitempty"`
 }
 
 type Verification struct {
 	Status  string `json:"status"` // succeeded, failed, unknown
 	Message string `json:"message"`
+}
+
+type ManualVerification struct {
+	ConfirmedBy uint      `json:"confirmed_by"`
+	ConfirmedAt time.Time `json:"confirmed_at"`
+	Evidence    string    `json:"evidence"`
+	Fingerprint string    `json:"fingerprint"`
+}
+
+func (o Object) AllUnitsSucceeded() bool {
+	if len(o.Units) == 0 {
+		return false
+	}
+	for _, u := range o.Units {
+		if u.Status != "succeeded" || strings.TrimSpace(u.SQL) == "" || u.Error != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeLegacyExecution upgrades the old verification-gated status using
+// complete saved execution evidence. It never replays SQL or modifies history.
+func (o *Object) NormalizeLegacyExecution() bool {
+	if o.Status != "unverified" {
+		return false
+	}
+	o.Status = "unknown"
+	if !o.DiagnosticOnly && o.AllUnitsSucceeded() {
+		o.Status = "succeeded"
+		for i := range o.Units {
+			o.Units[i].Selected = false
+		}
+	}
+	return true
+}
+
+// CanEditDDL requires an object identity, not just a report category label.
+func (o Object) CanEditDDL() bool {
+	if o.DiagnosticOnly || strings.TrimSpace(o.Schema) == "" || strings.TrimSpace(o.TargetName) == "" {
+		return false
+	}
+	switch o.Kind {
+	case "table", "tables", "view", "views", "sequence", "sequences", "owner", "distribution":
+		return true
+	case "index", "indexes", "primary_key", "primary_keys", "primaryKeys", "unique", "foreign_key", "foreign_keys", "constraints", "comment", "comments":
+		return o.Table != "" || o.DDL != "" || len(o.Units) > 0
+	default:
+		return false
+	}
 }
 
 type RecoveryPreview struct {

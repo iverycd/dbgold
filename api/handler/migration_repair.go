@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"dbgold/datamigrate"
-	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -178,9 +177,11 @@ func ensureRepairLedger(j *store.DataMigrationJob) error {
 		cfg = repairJSON(reportConfig)
 		legacy = false
 	}
+	datamigrate.EnrichRepairReferences(objects, report)
 	b := initialRepairBinding(j, cfg, legacy)
 	rows := make([]store.MigrationRepairObject, 0, len(objects))
 	for _, o := range objects {
+		o.NormalizeLegacyExecution()
 		rows = append(rows, store.MigrationRepairObject{JobID: j.JobID, ObjectID: o.ID, ObjectJSON: repairJSON(o), Version: 1})
 	}
 	return store.SeedMigrationRepairs(b, rows)
@@ -198,7 +199,19 @@ func repairObjects(jobID string) ([]repair.Object, []store.MigrationRepairObject
 		}
 		objects = append(objects, o)
 	}
+	enrichRepairReferences(jobID, objects)
 	return objects, rows, nil
+}
+
+func enrichRepairReferences(jobID string, objects []repair.Object) {
+	r, err := store.GetDataMigrationReport(jobID)
+	if err != nil {
+		return
+	}
+	var report datamigrate.MigrationReport
+	if json.Unmarshal([]byte(r.ReportJSON), &report) == nil {
+		datamigrate.EnrichRepairReferences(objects, report)
+	}
 }
 func loadRepairObject(c *gin.Context, write bool) (*store.DataMigrationJob, *store.MigrationRepairBinding, *store.MigrationRepairObject, repair.Object, bool) {
 	j, ok := ownedRepairJob(c, write)
@@ -224,7 +237,9 @@ func loadRepairObject(c *gin.Context, write bool) (*store.DataMigrationJob, *sto
 		repairError(c, e)
 		return nil, nil, nil, repair.Object{}, false
 	}
-	return j, b, row, o, true
+	objects := []repair.Object{o}
+	enrichRepairReferences(j.JobID, objects)
+	return j, b, row, objects[0], true
 }
 func bindingResponse(b *store.MigrationRepairBinding, j *store.DataMigrationJob) gin.H {
 	return gin.H{"src_conn_id": b.SrcConnID, "dst_conn_id": b.DstConnID, "source_database": b.SourceDatabase, "source_schema": b.SourceSchema, "target_schema": b.TargetSchema, "configured": b.Configured, "legacy": b.Legacy, "src_db_type": j.SrcDBType, "dst_db_type": j.DstDBType}
@@ -516,6 +531,10 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !o.CanEditDDL() {
+		repairError(c, fmt.Errorf("此记录仅供诊断或接续数据，不支持编辑对象 DDL"))
+		return
+	}
 	var req struct {
 		Version       int               `json:"version"`
 		Units         []repair.Unit     `json:"units"`
@@ -531,13 +550,13 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		return
 	}
 	if o.Status == "unknown" {
-		repairError(c, fmt.Errorf("执行结果未知，请先核验"))
+		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
 	existing := map[string]repair.Unit{}
 	for _, u := range o.Units {
 		if u.Status == "unknown" || u.Status == "running" {
-			repairError(c, fmt.Errorf("存在执行结果未知的单元，请先核验对象"))
+			repairError(c, fmt.Errorf("存在执行结果未知的单元，不允许自动重放"))
 			return
 		}
 		existing[u.ID] = u
@@ -555,7 +574,7 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		seen[u.ID] = true
 		if old, exists := existing[u.ID]; exists {
 			if old.Status == "running" || old.Status == "unknown" {
-				repairError(c, fmt.Errorf("执行结果未知，先核验该对象"))
+				repairError(c, fmt.Errorf("执行结果未知，不允许自动重放该对象"))
 				return
 			}
 			if old.Status == "succeeded" && u.SQL != old.SQL {
@@ -621,7 +640,7 @@ func attemptResponse(a *store.MigrationRepairAttempt) gin.H {
 	if a.ResultJSON != "" {
 		_ = json.Unmarshal([]byte(a.ResultJSON), &result)
 	}
-	return gin.H{"id": a.ID, "job_id": a.JobID, "object_id": a.ObjectID, "kind": a.Kind, "status": a.Status, "units": units, "result": result, "verification": verification, "error": a.Error, "created_at": a.CreatedAt, "finished_at": a.FinishedAt, "cancel_requested": a.CancelRequested}
+	return gin.H{"id": a.ID, "job_id": a.JobID, "owner_id": a.OwnerID, "object_id": a.ObjectID, "kind": a.Kind, "status": a.Status, "units": units, "result": result, "verification": verification, "error": a.Error, "created_at": a.CreatedAt, "finished_at": a.FinishedAt, "cancel_requested": a.CancelRequested}
 }
 func ListMigrationRepairAttempts(c *gin.Context) {
 	j, ok := ownedRepairJob(c, false)
@@ -750,10 +769,11 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 	} else if a.Status == "running" {
 		a.Status = "succeeded"
 	}
-	if a.Kind == "ddl" && !(o.Status == "unverified" && a.Status == "succeeded") {
-		o.Status = a.Status
-	}
 	if a.Kind == "ddl" {
+		o.Status = a.Status
+		o.Verification = nil
+		o.ManualVerification = nil
+		a.VerificationJSON = ""
 		o.Units = nil
 		_ = json.Unmarshal([]byte(a.UnitsJSON), &o.Units)
 	}
@@ -766,6 +786,10 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 func ExecuteMigrationRepair(c *gin.Context) {
 	j, b, row, o, ok := loadRepairObject(c, true)
 	if !ok {
+		return
+	}
+	if !o.CanEditDDL() {
+		repairError(c, fmt.Errorf("此记录不是可执行 DDL 的目标对象"))
 		return
 	}
 	var req struct {
@@ -790,7 +814,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		return
 	}
 	if o.Status == "unknown" {
-		repairError(c, fmt.Errorf("执行结果未知，请先核验"))
+		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
 	if o.RequiresReview {
@@ -799,7 +823,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 	}
 	for _, u := range o.Units {
 		if u.Status == "unknown" || u.Status == "running" {
-			repairError(c, fmt.Errorf("存在未知结果，请先核验"))
+			repairError(c, fmt.Errorf("存在未知执行结果，不允许自动重放"))
 			return
 		}
 	}
@@ -816,6 +840,8 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
+	o.Verification = nil
+	o.ManualVerification = nil
 	a := &store.MigrationRepairAttempt{ID: uuid.NewString(), JobID: j.JobID, RequestID: req.RequestID, RequestHash: hash, ObjectID: o.ID, OwnerID: middleware.GetCurrentUserID(c), Kind: "ddl", Status: "running", Scope: migrationScope(dst, b.TargetSchema), SnapshotJSON: repairJSON(gin.H{"object": o, "binding": b}), UnitsJSON: repairJSON(o.Units)}
 	claimed, newAttempt, e := store.ClaimRepairAttempt(a, row.Version, b.Version)
 	if e != nil {
@@ -849,96 +875,9 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			}
 		}
 		a.UnitsJSON = repairJSON(units)
-		if e == nil {
-			v, verifyErr := target.InspectRepair(ctx, w, o)
-			if verifyErr != nil {
-				v = repair.Verification{Status: "unknown", Message: verifyErr.Error()}
-			}
-			a.VerificationJSON = repairJSON(v)
-			if v.Status == "unknown" && conditionalRepairEffect(o.Units) {
-				o.Status = "unverified"
-			}
-			if v.Status == "failed" {
-				a.Status = "failed"
-				e = fmt.Errorf("%s", v.Message)
-			}
-		}
 		finishRepair(a, o, e)
 	})
 	c.JSON(202, response)
-}
-func VerifyMigrationRepair(c *gin.Context) {
-	j, b, row, o, ok := loadRepairObject(c, true)
-	if !ok {
-		return
-	}
-	var req struct {
-		Version int `json:"version"`
-	}
-	if e := c.ShouldBindJSON(&req); e != nil {
-		repairError(c, e)
-		return
-	}
-	if req.Version != row.Version {
-		repairError(c, store.ErrRepairConflict)
-		return
-	}
-	_, dst, e := resolveRepairConnections(c, j, b, false)
-	if e != nil {
-		repairError(c, e)
-		return
-	}
-	scope := migrationScope(dst, b.TargetSchema)
-	owner := uuid.NewString()
-	if e = store.AcquireMigrationScope(scope, owner); e != nil {
-		repairError(c, e)
-		return
-	}
-	defer store.ReleaseMigrationScope(scope, owner)
-	w, e := buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
-	if e != nil {
-		repairError(c, e)
-		return
-	}
-	defer w.Close()
-	v, e := target.InspectRepair(c.Request.Context(), w, o)
-	if e != nil {
-		repairError(c, e)
-		return
-	}
-	if dst.DBType == "mysql" && o.Kind == "comment" && o.Comment != nil && v.Status != "succeeded" {
-		cm := *o.Comment
-		if o.Table != "" {
-			cm.TableName = o.Table
-		}
-		statements, generationErr := target.GenerateRepairComment(c.Request.Context(), w, cm)
-		if generationErr != nil {
-			v.Message += "; 无法生成保留当前列定义的候选: " + generationErr.Error()
-		} else {
-			o.SuggestedDDL = dialect.JoinSQL(statements)
-			o.RequiresReview = true
-		}
-	}
-	if v.Status == "succeeded" {
-		o.Status = "succeeded"
-		for i := range o.Units {
-			o.Units[i].Status = "succeeded"
-			o.Units[i].Selected = false
-		}
-	} else if v.Status == "failed" {
-		o.Status = "failed"
-		for i := range o.Units {
-			if o.Units[i].Status == "unknown" || o.Units[i].Status == "running" {
-				o.Units[i].Status = "failed"
-				o.Units[i].Selected = false
-			}
-		}
-	}
-	if e = store.SaveMigrationRepairObject(row.JobID, row.ObjectID, row.Version, repairJSON(o)); e != nil {
-		repairError(c, e)
-		return
-	}
-	c.JSON(200, gin.H{"verification": v, "object": o, "version": row.Version + 1})
 }
 
 // prepareMigrationRepair runs before the first mutation, fixing effective namespace and a shared target lock.

@@ -5,15 +5,19 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
+import { compile } from '@vue/compiler-dom'
+import { renderToString } from '@vue/server-renderer'
+import Arco from '@arco-design/web-vue'
 
 function transpile(source) { return ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText }
 const utilsContext = { exports: {} }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const utils = utilsContext.exports
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
-const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, attempts, openEditor, closeEditor, useSuggested, verify, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding'
+const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
+const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, objectStatus, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing'
 function panel(props, overrides = {}) {
-  const lifecycle = {}, messages = [], scheduled = []
+  const lifecycle = {}, messages = [], scheduled = [], emitted = []
   let uuid = 0
   const api = {
     listRepairs: async () => ({ data: { objects: [], binding: { configured: true } } }),
@@ -21,12 +25,13 @@ function panel(props, overrides = {}) {
     ...overrides,
   }
   const context = {
-    exports: {}, defineProps: () => props, defineExpose() {},
+    exports: {}, defineProps: () => props, defineExpose() {}, defineEmits: () => (...args) => emitted.push(args),
     crypto: { randomUUID: () => `uuid-${++uuid}` },
     setTimeout: fn => { scheduled.push(fn); return scheduled.length }, clearTimeout() {},
     require: id => {
       if (id === 'vue') return { ...Vue, onUnmounted: fn => { lifecycle.unmount = fn } }
       if (id === '@/utils/migrationRepair') return utils
+      if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } }) }
       if (id === '@/api/connections') return { listConnections: async () => ({ data: [] }) }
@@ -34,12 +39,261 @@ function panel(props, overrides = {}) {
       throw new Error(`Unexpected import ${id}`)
     },
   }
-  vm.runInNewContext(transpile(`${descriptor.scriptSetup.content}\nexport { ${fields} };`), context)
-  return { ...context.exports, lifecycle, messages, scheduled }
+  vm.runInNewContext(transpile(`${descriptor.scriptSetup.content}\nexport { ${fields}, ${renderFields} };`), context)
+  return { ...context.exports, lifecycle, messages, scheduled, emitted }
 }
 const tick = async () => { await Vue.nextTick(); await Promise.resolve(); await Vue.nextTick() }
 const unit = (id, status, extra = {}) => ({ id, status, sql: `CREATE ${id}`, original_sql: `CREATE ${id}`, selected: true, destructive: false, ...extra })
 const record = (extra = {}) => ({ version: 1, object: { id: 'obj', kind: 'table', name: 'Orders', target_name: 'Orders', schema: 'public', ddl: 'CREATE TABLE Orders (id INT)', status: 'failed', units: [unit('table', 'failed')], dependencies: [], legacy: false, requires_review: false, ...extra } })
+
+test('summary counts attention objects once and updates after DDL and data completion', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    const table = record({ id: 'table', data_status: 'failed' })
+    p.records.value = [table, table, record({ id: 'blocked', status: 'blocked' }), record({ id: 'data', status: 'succeeded', original_status: 'failed', data_status: 'pending' }), record({ id: 'ok', status: 'succeeded', original_status: 'succeeded' })]
+    await tick()
+    assert.equal(p.summary.value.attention, 3)
+    assert.equal(new Set(p.visibleRecords.value.map(item => item.object.id)).size, 3)
+    assert.equal(p.summary.value.repaired, 1)
+    assert.equal(p.emitted.at(-1)[0], 'summary-change')
+    assert.equal(p.emitted.at(-1)[1].attention, 3)
+    p.records.value = [record({ status: 'succeeded', original_status: 'failed', data_status: 'pending' })]
+    await tick()
+    assert.equal(p.summary.value.repaired, 1)
+    assert.equal(p.summary.value.attention, 1, 'DDL success still needs data')
+    p.records.value[0].object.data_status = 'succeeded'
+    await tick()
+    assert.equal(p.summary.value.attention, 0)
+    assert.equal(p.emitted.at(-1)[1].attention, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('repair state is unknown on failed loading and becomes ready only after retry', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let failed = true
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => {
+      if (failed) throw new Error('network down')
+      return { data: { objects: [], binding: { configured: true } } }
+    } }))
+    assert.equal(p.emitted[0][1].state, 'loading')
+    await tick()
+    assert.equal(p.summary.value.state, 'unknown')
+    assert.doesNotMatch(await renderPanel(p), /当前无待处理对象/)
+    failed = false; await p.refresh(); await tick()
+    assert.equal(p.summary.value.state, 'ready')
+    assert.match(await renderPanel(p), /当前无待处理对象/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('repair matching preserves case and distinguishes types, tables, schemas and renamed identifiers', () => {
+  const records = [
+    record({ id: 'selected', kind: 'index', name: 'orders_Ix', source_name: 'Ix', target_name: 'orders_Ix', source_table: 'Orders', table: 'orders', schema: 'dst' }),
+    record({ id: 'other-table', kind: 'index', name: 'orders_Ix', source_name: 'Ix', target_name: 'orders_Ix', table: 'Archive', schema: 'dst' }),
+    record({ id: 'other-kind', kind: 'primary_key', name: 'orders_Ix', source_name: 'Ix', target_name: 'orders_Ix', table: 'orders', schema: 'dst' }),
+    record({ id: 'other-schema', kind: 'index', name: 'orders_Ix', source_name: 'Ix', target_name: 'orders_Ix', table: 'orders', schema: 'other' }),
+    record({ id: 'other-case', kind: 'index', name: 'orders_ix', source_name: 'ix', target_name: 'orders_ix', table: 'orders', schema: 'dst' }),
+  ]
+  const target = { kind: 'indexes', name: 'orders_Ix', source_name: 'Ix', target_name: 'orders_Ix', table: 'Orders', target_table: 'orders', target_schema: 'dst' }
+  assert.deepEqual(Array.from(utils.matchingRepairRecords(records, target), item => item.object.id), ['selected'])
+  assert.equal(utils.matchingRepairRecords(records, { ...target, name: 'ORDERS_IX', source_name: 'IX', target_name: 'ORDERS_IX' }).length, 0)
+  assert.equal(utils.matchingRepairRecords(records, { kind: 'indexes', name: 'orders_Ix' }).length, 3, 'ambiguous records are returned for user selection')
+  assert.equal(utils.matchingRepairRecords([record()], { kind: 'data', name: 'Orders' }).length, 1, 'data failures can locate the table recovery record')
+})
+
+test('focus includes repaired objects, selects the matching page and focuses its highlighted anchor', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = Array.from({ length: 23 }, (_, index) => record({ id: `object-${index}`, name: `Index${index}`, kind: 'index', table: 'Orders', target_name: `Index${index}`, status: 'succeeded', original_status: 'failed' }))
+    const actions = []
+    p.repairSection.value = { querySelectorAll: () => [{ dataset: { repairObjectId: 'object-22' }, focus: () => actions.push('focus'), scrollIntoView: () => actions.push('scroll') }] }
+    p.keyword.value = 'unrelated'; await tick()
+    await p.focusObject({ kind: 'indexes', name: 'Index22', table: 'Orders' })
+    assert.equal(p.filter.value, 'all')
+    assert.equal(p.keyword.value, '')
+    assert.equal(p.highlightedObjectID.value, 'object-22')
+    assert.equal(p.page.value, 3)
+    assert.deepEqual(actions, ['focus', 'scroll'])
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('ambiguous and missing legacy matches filter by name without opening an editor', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [record({ id: 'one', kind: 'index', name: 'Ix', target_name: 'Ix', table: 'Orders' }), record({ id: 'two', kind: 'index', name: 'Ix', target_name: 'Ix', table: 'Archive' })]
+    await p.focusObject({ kind: 'indexes', name: 'Ix' })
+    assert.equal(p.keyword.value, 'Ix')
+    assert.equal(p.visibleRecords.value.length, 2)
+    assert.equal(p.highlightedObjectID.value, '')
+    assert.equal(p.editorVisible.value, false)
+    await p.focusObject({ kind: 'indexes', name: 'Missing' })
+    assert.equal(p.keyword.value, 'Missing')
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.match(await renderPanel(p), /没有匹配的对象/)
+    p.showAllObjects(); await tick()
+    assert.equal(p.visibleRecords.value.length, 2)
+    p.filter.value = 'attention'; p.records.value.forEach(item => { item.object.status = 'succeeded' })
+    await tick()
+    const html = await renderPanel(p)
+    assert.match(html, /当前无待处理对象/)
+    assert.match(html, /查看全部对象/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('focus waits for loading and task changes clear pending navigation and old summary data', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ jobID: 'old' }), requests = []
+    const p = scope.run(() => panel(props, { listRepairs: id => new Promise(resolve => requests.push({ id, resolve })) }))
+    await p.focusObject({ kind: 'tables', name: 'Orders' })
+    assert.ok(p.pendingFocus.value)
+    requests[0].resolve({ data: { objects: [record()], binding: { configured: true } } }); await tick(); await tick()
+    assert.equal(p.highlightedObjectID.value, 'obj')
+    assert.equal(p.filter.value, 'all')
+    p.keyword.value = 'Orders'; p.page.value = 4
+    const refresh = p.refresh()
+    await p.focusObject({ kind: 'tables', name: 'Orders' })
+    props.jobID = 'new'; await tick()
+    assert.equal(p.pendingFocus.value, null)
+    assert.equal(p.highlightedObjectID.value, '')
+    assert.equal(p.keyword.value, '')
+    assert.equal(p.filter.value, 'attention')
+    assert.equal(p.page.value, 1)
+    assert.equal(p.summary.value.jobID, 'new')
+    assert.equal(p.summary.value.state, 'loading')
+    requests[2].resolve({ data: { objects: [], binding: { configured: true } } }); await tick()
+    requests[1].resolve({ data: { objects: [record()], binding: { configured: true } } }); await refresh; await tick()
+    assert.equal(p.summary.value.attention, 0)
+    assert.equal(p.summary.value.state, 'ready')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+async function renderPanel(p) {
+  const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
+  const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
+  const app = Vue.createSSRApp({ setup: () => ({ ...p, ...utils, getDbTypeLabel: value => value === 'gaussdb' ? 'GaussDB' : value }), render })
+  const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
+  for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-tag', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  app.component('a-empty', Arco.Empty)
+  for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', slots.default?.()) : null })
+  app.component('a-table-column', { setup: () => () => null })
+  app.component('a-table', {
+    props: ['data'],
+    setup: (props, { slots }) => () => Vue.h('div', props.data?.length ? props.data.flatMap(record => (slots.columns?.() || []).map(column => Vue.h('div', column.children?.cell?.({ record })))) : slots.empty?.()),
+  })
+  app.component('SqlEditor', { props: ['modelValue'], setup: props => () => Vue.h('textarea', props.modelValue) })
+  return renderToString(app)
+}
+
+test('rendered manual repair shows its entry and editor while keeping source definition read-only', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const failed = record({ kind: 'index', table: 'Orders', target_name: 'ix', ddl: '', units: [], source_ddl: 'SOURCE REFERENCE SQL' })
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.job.value.dst_db_type = 'gaussdb'; p.records.value = [failed]
+    assert.ok((await renderPanel(p)).includes('手动编写 DDL'))
+    p.openEditor(failed)
+    const html = await renderPanel(p)
+    for (const label of ['添加执行单元', '保存草稿', '确认执行步骤', 'GaussDB', 'Schema：public', '所属表：Orders', '源端定义（只读', 'SOURCE REFERENCE SQL']) assert.ok(html.includes(label), label)
+    assert.match(html, /<textarea\b[^>]*><\/textarea>/)
+    assert.ok(!html.includes('恢复原文'))
+    p.openEditor(record({ diagnostic_only: true, units: [], ddl: '' }))
+    const diagnostic = await renderPanel(p)
+    for (const label of ['添加执行单元', '保存草稿', '确认执行步骤']) assert.ok(!diagnostic.includes(label), label)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('unsupported index accepts manual target SQL only after saving and explicit confirmation', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const calls = [], source = 'CREATE TABLE source_t(id INT, KEY ix ((source_expression)))'
+    const failed = record({ kind: 'index', table: 'Orders', target_name: 'ix', ddl: '', units: [], source_ddl: source, original_error: 'unsupported expression' })
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      saveRepairDraft: async (...args) => { calls.push(['save', ...args]); return { data: { version: 2, object: { ...failed.object, units: args[2].units } } } },
+      executeRepair: async (...args) => { calls.push(['execute', ...args]); return { data: { id: 'attempt', status: 'running' } } },
+      getRepairAttempt: async () => ({ data: { id: 'attempt', status: 'running', units: [] } }),
+    }))
+    await tick(); p.openEditor(failed)
+    assert.equal(p.draftUnits.value.length, 1)
+    assert.equal(p.draftUnits.value[0].sql, '')
+    assert.equal(p.draftUnits.value[0].original_sql, '')
+    assert.equal(p.canExecute.value, false)
+    assert.equal(p.editing.value.object.source_ddl, source)
+    const sql = 'CREATE INDEX ix ON public.Orders ((lower(name)))'
+    p.draftUnits.value[0].sql = sql
+    await p.prepareExecute()
+    assert.equal(calls.length, 1)
+    assert.equal(p.executionSnapshot.value[0].sql, sql)
+    assert.equal(p.executeConfirmVisible.value, true)
+    await p.confirmExecute()
+    assert.equal(calls[1][0], 'execute')
+    assert.equal(calls[1][3].version, 2)
+    p.openEditor({ version: 2, object: { ...failed.object, units: [{ ...p.executionSnapshot.value[0], status: 'pending' }] } })
+    assert.equal(p.draftUnits.value.length, 1)
+    assert.equal(p.draftUnits.value[0].sql, sql)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('diagnostics, data failures and indexes without table identity cannot submit DDL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let saved = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, { saveRepairDraft: async () => { saved++; throw new Error('unexpected save') } }))
+    await tick()
+    for (const object of [record({ diagnostic_only: true }), record({ kind: 'data' }), record({ kind: 'index', ddl: '', units: [] })]) {
+      assert.equal(utils.canEditRepairDDL(object.object), false)
+      p.openEditor(object); p.addUnit()
+      assert.equal(p.canExecute.value, false)
+      assert.equal(await p.saveDraft(), false)
+      await p.prepareExecute()
+    }
+    assert.equal(saved, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('successful manual repairs are counted and never reselect their SQL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const object = record({ kind: 'index', table: 'Orders', status: 'succeeded', original_status: 'failed', units: [unit('ix', 'succeeded', { original_sql: '', sql: 'CREATE INDEX ix ON Orders ((id+1))' })] })
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => ({ data: { objects: [object], binding: { configured: true } } }) }))
+    await tick(); p.openEditor(object)
+    assert.equal(p.stats.value.repaired, 1)
+    assert.equal(p.stats.value.pending, 0)
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.draftUnits.value[0].selected, false)
+    assert.equal(p.canExecute.value, false)
+    const history = utils.formatRepairHistory([object], [{ id: 'a', object_id: 'obj', kind: 'ddl', created_at: 'now', status: 'succeeded', units: object.object.units, verification: { status: 'unknown', message: 'check expression manually' } }]).join('\n')
+    assert.ok(history.includes('执行成功'))
+    assert.ok(history.includes('历史核验（旧版本'))
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('restoring original SQL preserves successful and manually added steps', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.openEditor(record({ units: [unit('done', 'succeeded', { sql: 'committed edited SQL', original_sql: 'old failing SQL' }), unit('edit', 'failed', { sql: 'edited', original_sql: 'original' })] }))
+    p.addUnit(); p.draftUnits.value[2].sql = 'manual SQL'
+    p.restoreOriginal()
+    assert.equal(p.draftUnits.value[0].sql, 'committed edited SQL')
+    assert.equal(p.draftUnits.value[0].selected, false)
+    assert.equal(p.draftUnits.value[1].sql, 'original')
+    assert.equal(p.draftUnits.value[2].sql, 'manual SQL')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('reopening repair drafts never selects committed or destructive steps and preserves program bodies', () => {
   const body = "BEGIN\n x := 'a;b';\n NULL;\nEND;"
@@ -294,32 +548,11 @@ test('legacy PostgreSQL schema snapshot is not reused as the source database', a
   } finally { scope.stop() }
 })
 
-test('a conditional create awaiting verification is visible as unresolved and cannot be counted repaired', () => {
-  assert.equal(utils.repairStatus('unverified'), '已执行待核验')
+test('unknown execution results are unresolved and cannot be counted as success', () => {
+  assert.equal(utils.repairStatus('unknown'), '执行结果未知')
+  assert.equal(utils.repairStatus('unverified'), '执行结果未知')
+  assert.equal(utils.unitCommitted('unknown'), false)
   assert.equal(utils.unitCommitted('unverified'), false)
-})
-
-test('verification can offer a MySQL column-comment DDL without executing or replacing original diagnostics', async () => {
-  const scope = Vue.effectScope()
-  try {
-    const original = record({ kind: 'comment', ddl: '', units: [], error: 'original metadata failure' })
-    const suggested = "ALTER TABLE Orders MODIFY id INT NOT NULL COMMENT 'identifier'"
-    const p = scope.run(() => panel({ jobID: 'job' }, {
-      verifyRepair: async () => ({ data: { version: 2, object: { ...original.object, suggested_ddl: suggested }, verification: { status: 'failed', message: '已从实际列定义生成修复建议' } } }),
-    }))
-    await tick(); p.records.value = [original]
-    await p.verify(original)
-    p.openEditor(p.records.value[0])
-    assert.equal(p.draftUnits.value.length, 0)
-    p.useSuggested()
-    assert.equal(p.draftUnits.value.length, 1)
-    assert.equal(p.draftUnits.value[0].sql, suggested)
-    assert.equal(p.editing.value.object.ddl, '')
-    assert.equal(p.executeConfirmVisible.value, false)
-    p.openEditor(original); p.useSuggested()
-    assert.equal(p.draftUnits.value.length, 0)
-    p.lifecycle.unmount()
-  } finally { scope.stop() }
 })
 
 test('export distinguishes immutable original error from the latest repair failure', () => {
@@ -330,4 +563,83 @@ test('export distinguishes immutable original error from the latest repair failu
   const pending = utils.formatRepairHistory([record({ original_status: 'pending', original_error: '', error: 'later failure' })], []).join('\n')
   assert.doesNotMatch(pending, /原始错误：later failure/)
   assert.match(pending, /当前错误：later failure/)
+})
+
+
+test('manual expression-index execution immediately completes the repair without verification', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const original = record({ kind: 'index', table: 'Orders', target_name: 'ix_expr', original_status: 'failed', original_error: 'unsupported expression', units: [], ddl: '' })
+    let saved = original
+    const calls = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => ({ data: { objects: [saved], binding: { configured: true } } }),
+      saveRepairDraft: async (_job, _object, body) => { saved = { version: 2, object: { ...original.object, status: 'draft', units: body.units } }; return { data: saved } },
+      executeRepair: async (...args) => {
+        calls.push(args)
+        saved = { version: 3, object: { ...saved.object, status: 'succeeded', units: saved.object.units.map(unit => ({ ...unit, status: 'succeeded', selected: false })) } }
+        return { data: { id: 'ddl-attempt', object_id: 'obj', kind: 'ddl', status: 'succeeded', units: saved.object.units } }
+      },
+      getRepairAttempt: async () => ({ data: { id: 'ddl-attempt', object_id: 'obj', kind: 'ddl', status: 'succeeded', units: saved.object.units } }),
+    }))
+    await tick(); p.openEditor(original)
+    p.draftUnits.value[0].sql = 'CREATE UNIQUE INDEX ix_expr ON public.Orders ((id+1))'
+    await p.prepareExecute(); await p.confirmExecute()
+    assert.equal(calls.length, 1)
+    assert.equal(p.stats.value.repaired, 1)
+    assert.equal(p.stats.value.pending, 0)
+    assert.equal(p.visibleRecords.value.length, 0)
+    await p.refresh()
+    p.filter.value = 'all'
+    const html = await renderPanel(p)
+    assert.ok(html.includes('执行成功'))
+    assert.ok(html.includes('编辑并执行'))
+    assert.ok(html.includes('历史'))
+    for (const text of ['重新核验', '人工确认已核验', '已执行待核验', '当前对象核验']) assert.ok(!html.includes(text), text)
+    p.openEditor(p.records.value[0])
+    assert.equal(p.draftUnits.value[0].selected, false)
+    assert.equal(p.canExecute.value, false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('old verification metadata cannot change current execution success or its repair count', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const object = record({ status: 'succeeded', original_status: undefined, error: '', verification: { status: 'failed', message: 'old definition check failed' }, manual_verification: { confirmed_by: 7, evidence: 'old evidence' }, units: [unit('create', 'succeeded')] })
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [object]; p.filter.value = 'all'
+    p.activeAttempt.value = { id: 'old', object_id: 'obj', kind: 'ddl', status: 'succeeded', verification: { status: 'unknown', message: 'old warning' } }
+    assert.equal(p.stats.value.repaired, 1)
+    const html = await renderPanel(p)
+    assert.ok(html.includes('执行成功'))
+    for (const text of ['old definition check failed', 'old evidence', 'old warning', '已执行待核验']) assert.ok(!html.includes(text), text)
+    p.records.value = [record({ status: 'unknown', units: [unit('create', 'unknown')] })]
+    assert.equal(p.stats.value.repaired, 0)
+    assert.ok((await renderPanel(p)).includes('执行结果未知'))
+    p.openEditor(p.records.value[0])
+    assert.equal(p.canExecute.value, false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('legacy verification history remains explicitly historical in the drawer and export', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const object = record({ status: 'succeeded' })
+    const attempts = [
+      { id: 'ddl', kind: 'ddl', object_id: 'obj', status: 'succeeded', units: [], created_at: 'execution-time', verification: { status: 'unknown', message: 'execution-time limitation' } },
+      { id: 'auto', kind: 'verification', object_id: 'obj', status: 'unknown', units: [], created_at: 'check-time', verification: { status: 'unknown', message: 'old check' } },
+      { id: 'manual', kind: 'manual_verification', object_id: 'obj', owner_id: 7, status: 'succeeded', units: [unit('create', 'succeeded')], created_at: 'manual-time', finished_at: 'confirmed-time', verification: { status: 'succeeded', message: 'old evidence' } },
+    ]
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [object]; p.attempts.value = attempts; p.historyVisible.value = true
+    const html = await renderPanel(p)
+    const exported = utils.formatRepairHistory([object], attempts).join('\n')
+    for (const text of ['历史自动核验（旧版本）', '历史人工核验（旧版本）', '历史核验（旧版本', '用户 #7', 'confirmed-time', 'old evidence', 'execution-time limitation']) {
+      assert.ok(html.includes(text), text)
+      assert.ok(exported.includes(text), text)
+    }
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
 })

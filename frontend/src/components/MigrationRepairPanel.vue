@@ -1,7 +1,7 @@
 <template>
-  <section class="repair-panel" aria-label="对象修复">
+  <section ref="repairSection" class="repair-panel" aria-label="对象修复" tabindex="-1">
     <div class="repair-heading">
-      <div><h3>对象修复</h3><p>修改失败对象的 DDL，核验后按需接续数据与关联对象。原始报告保持不变。</p></div>
+      <div><h3>对象修复</h3><p>修改失败对象的 DDL，执行成功即完成修复，按需接续数据与关联对象。原始报告保持不变。</p></div>
       <a-space wrap>
         <a-button size="small" :disabled="busy" @click="openBinding">连接与配置</a-button>
         <a-button size="small" @click="openHistory()">执行历史</a-button>
@@ -16,60 +16,68 @@
       <span>依赖阻塞 <strong>{{ stats.blocked }}</strong></span><span>待补数据 <strong>{{ stats.data }}</strong></span>
     </div>
     <div v-if="activeAttempt" class="attempt-banner">
-      <a-tag :color="attemptRunning(activeAttempt.status) ? 'blue' : 'orange'">{{ repairStatus(activeAttempt.status) }}</a-tag>
+      <a-tag :color="statusColor(activeAttempt.status)">{{ repairExecutionStatus(activeAttempt.status) }}</a-tag>
       <span>{{ activeAttempt.kind === 'recovery' ? '接续迁移' : 'DDL 修复' }} · {{ activeAttempt.id }}</span>
       <a-button size="mini" @click="openHistory(activeAttempt.object_id)">查看进度</a-button>
       <a-button v-if="attemptRunning(activeAttempt.status)" size="mini" status="danger" :loading="cancelling" @click="cancelAttempt">取消执行</a-button>
     </div>
-    <a-alert v-if="activeAttempt?.verification && activeAttempt.verification.status !== 'succeeded'" type="warning">执行后的对象核验：{{ activeAttempt.verification.message }}</a-alert>
     <div class="repair-filters" v-if="records.length">
       <a-select v-model="filter" style="width: 150px"><a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option></a-select>
       <a-input-search v-model="keyword" placeholder="搜索对象、所属表或错误" allow-clear style="max-width: 300px" />
     </div>
-    <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10 }" :scroll="{ x: 880 }" size="small">
+    <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 880 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+      <template #empty>
+        <div class="repair-empty">
+          <a-empty :description="error ? '修复状态未知，请刷新重试' : loading ? '修复状态加载中' : !keyword.trim() && filter === 'attention' ? '当前无待处理对象' : '没有匹配的对象'" />
+          <a-button v-if="filter === 'attention'" type="text" size="small" @click="showAllObjects">查看全部对象</a-button>
+        </div>
+      </template>
       <template #columns>
-        <a-table-column title="对象" :width="230"><template #cell="{ record }"><strong>{{ qualified(record.object) }}</strong><div class="muted">{{ repairKind(record.object.kind) }}<span v-if="record.object.table"> · 所属表 {{ record.object.table }}</span></div></template></a-table-column>
+        <a-table-column title="对象" :width="230"><template #cell="{ record }"><strong :data-repair-object-id="record.object.id" tabindex="-1">{{ qualified(record.object) }}</strong><div class="muted">{{ repairKind(record.object.kind) }}<span v-if="record.object.table"> · 所属表 {{ record.object.table }}</span></div></template></a-table-column>
         <a-table-column title="原始错误"><template #cell="{ record }"><div class="error-text">{{ (record.object.original_error ?? record.object.error) || '—' }}</div></template></a-table-column>
         <a-table-column title="修复状态" :width="140"><template #cell="{ record }"><a-tag :color="statusColor(record.object.status)">{{ objectStatus(record.object) }}</a-tag><div v-if="record.object.data_status" class="muted">数据：{{ repairStatus(record.object.data_status) }}</div></template></a-table-column>
         <a-table-column title="操作" :width="240"><template #cell="{ record }"><a-space wrap>
-          <a-button v-if="record.object.ddl || record.object.units?.length || record.object.suggested_ddl" type="text" size="mini" :disabled="busy" @click="openEditor(record)">编辑并执行</a-button>
+          <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(record)">{{ hasRepairDDL(record.object) ? '编辑并执行' : '手动编写 DDL' }}</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(record)">查看诊断</a-button>
-          <a-button type="text" size="mini" :disabled="busy || !binding?.configured" @click="verify(record)">重新核验</a-button>
-          <a-button v-if="isTableRepair(record.object)" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(record)">接续此表迁移</a-button>
+          <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(record)">接续此表迁移</a-button>
           <a-button type="text" size="mini" @click="openHistory(record.object.id)">历史</a-button>
         </a-space></template></a-table-column>
       </template>
     </a-table>
-    <a-empty v-else-if="!loading && !error" description="暂无需要修复的对象" />
+    <a-spin v-else-if="loading" />
+    <a-empty v-else-if="!error" :description="keyword.trim() ? '没有匹配的对象' : '当前无待处理对象'" />
 
     <a-modal v-model:visible="editorVisible" :mask-closable="false" :width="960" :footer="false" :title="`对象修复 · ${editing ? qualified(editing.object) : ''}`" @close="closeEditor">
       <template v-if="editing">
-        <a-alert v-if="editing.object.status === 'unknown'" type="warning">上次提交结果不确定，请关闭编辑面板并重新核验对象后再修改执行。</a-alert>
+        <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
+        <a-alert v-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。只重新创建或修复此对象；表数据及关联对象按需单独接续。</a-alert>
+        <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续此表迁移”。</a-alert>
+        <a-alert v-if="editing.object.status === 'unknown'" type="warning">上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
-        <a-alert v-if="editing.object.requires_review" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时应先核验。</a-alert>
+        <a-alert v-if="editing.object.requires_review" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
-        <a-collapse><a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" header="建议 DDL（需显式采用或整理到对应执行单元）"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item><a-collapse-item key="original" header="原始 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || '该错误没有可执行 DDL，请先处理连接、元数据或预检问题。' }}</pre></a-collapse-item></a-collapse>
-        <a-form v-if="isTableRepair(editing.object)" :model="mappingForm" layout="vertical" class="editor-mapping">
+        <a-collapse><a-collapse-item v-if="editing.object.source_ddl" key="source" header="源端定义（只读，仅供手工适配参考）"><pre class="sql-preview">{{ editing.object.source_ddl }}</pre></a-collapse-item><a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" header="建议 DDL（需显式采用或整理到对应执行单元）"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item><a-collapse-item key="original" header="原始目标 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || (canEditRepairDDL(editing.object) ? '未生成目标 DDL，请根据源端定义手动编写。' : '该记录没有可执行的对象 DDL。') }}</pre></a-collapse-item></a-collapse>
+        <a-form v-if="isTableRepair(editing.object) && canEditRepairDDL(editing.object)" :model="mappingForm" layout="vertical" class="editor-mapping">
           <a-form-item label="源列 → 目标列映射（修改建表列名时同时保存）">
             <div class="mapping-list"><div v-for="source in Object.keys(mappingForm.values)" :key="source" class="mapping-row editable-mapping"><code>{{ source }}</code><span>→</span><a-input v-model="mappingForm.values[source]" placeholder="修复 DDL 中的目标列名" /><a-button type="text" size="mini" :disabled="(editing.object.source_columns || editing.object.columns || []).some(column => column.Name === source)" @click="delete mappingForm.values[source]">移除</a-button></div><span v-if="!Object.keys(mappingForm.values).length" class="muted">旧报告没有列元数据时，可按源表与修复 DDL 显式补充映射；接续预检会核对实际列。</span></div>
           </a-form-item>
           <a-form-item label="补充列映射"><div class="mapping-row"><a-input v-model="mappingForm.source" placeholder="源列原始名称" /><span>→</span><a-input v-model="mappingForm.target" placeholder="目标列原始名称" /></div><a-button size="small" style="margin-left: 8px" :disabled="!mappingForm.source.trim() || !mappingForm.target.trim()" @click="addColumnMapping">添加</a-button></a-form-item>
           <a-alert v-if="mappingError(mappingForm.values)" type="error">{{ mappingError(mappingForm.values) }}</a-alert>
         </a-form>
-        <div v-if="editing.object.ddl || draftUnits.length || editing.object.suggested_ddl" class="editor-toolbar">
-          <a-space wrap><a-button size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" @click="addUnit">添加执行单元</a-button></a-space>
+        <div v-if="canEditRepairDDL(editing.object)" class="editor-toolbar">
+          <a-space wrap><a-button v-if="editing.object.units?.some(unit => unit.original_sql)" size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" :disabled="busy || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 打开执行确认</span>
         </div>
-        <div v-for="(unit, index) in draftUnits" :key="unit.id" class="unit-editor">
+        <div v-for="(unit, index) in canEditRepairDDL(editing.object) ? draftUnits : []" :key="unit.id" class="unit-editor">
           <div class="unit-heading"><a-checkbox v-model="unit.selected" :disabled="unitCommitted(unit.status) || unit.destructive">执行步骤 {{ index + 1 }}</a-checkbox><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag><span v-if="unit.destructive" class="error-text">破坏性步骤禁止重放</span><a-button v-if="!unitCommitted(unit.status) && !unit.destructive" type="text" size="mini" @click="draftUnits.splice(index, 1)">移除此单元</a-button></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p>
           <pre v-if="unitCommitted(unit.status) || unit.destructive" class="sql-preview">{{ unit.sql }}</pre>
           <SqlEditor v-else v-model="unit.sql" :dialect="editorDialect" execution-mode="document" @execute="prepareExecute" />
         </div>
-        <a-checkbox v-if="editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
-        <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="draftUnits.length || Object.keys(mappingForm.values).length" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">确认执行步骤</a-button></div>
+        <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
+        <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canEditRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">确认执行步骤</a-button></div>
       </template>
     </a-modal>
 
@@ -108,7 +116,7 @@
         </a-form-item>
         <a-form-item label="此次接续的关联对象"><div class="related-list"><a-checkbox v-for="record in relatedCandidates" :key="record.object.id" v-model="recoveryForm.related[record.object.id]" @change="invalidatePreview">{{ repairKind(record.object.kind) }} · {{ qualified(record.object) }}（{{ repairStatus(record.object.status) }}）</a-checkbox><span v-if="!relatedCandidates.length" class="muted">无待执行关联对象</span></div></a-form-item>
       </a-form>
-      <a-button :loading="previewing" :disabled="!!mappingError(recoveryForm.mapping)" @click="loadPreview">{{ recoveryPlan ? '重新核验预览' : '核验列映射与生成预览' }}</a-button>
+      <a-button :loading="previewing" :disabled="!!mappingError(recoveryForm.mapping)" @click="loadPreview">{{ recoveryPlan ? '重新生成预览' : '检查列映射并生成预览' }}</a-button>
       <p v-if="mappingError(recoveryForm.mapping)" class="error-text">{{ mappingError(recoveryForm.mapping) }}</p>
       <template v-if="recoveryPlan">
         <dl class="preview-facts"><div><dt>源表</dt><dd>{{ recoveryPlan.preview.source_table }}（{{ recoveryPlan.preview.source_rows }} 行）</dd></div><div><dt>目标表</dt><dd>{{ recoveryPlan.preview.qualified_target }}（{{ recoveryPlan.preview.target_rows }} 行）</dd></div><div><dt>数据步骤</dt><dd>{{ recoveryPlan.preview.data_required ? '完整导入此表数据' : '数据无需重导，仅处理确认的关联对象' }}</dd></div></dl>
@@ -129,32 +137,39 @@
       <a-button size="small" :loading="loadingHistory" @click="refreshHistory">刷新历史</a-button>
       <a-empty v-if="!visibleAttempts.length" description="尚无修复执行记录" />
       <article v-for="attempt in visibleAttempts" :key="attempt.id" class="history-attempt">
-        <div class="unit-heading"><strong>{{ attempt.kind === 'recovery' ? '接续迁移' : 'DDL 修复' }}</strong><a-tag :color="statusColor(attempt.status)">{{ repairStatus(attempt.status) }}</a-tag><span>{{ attempt.created_at }}</span></div>
+        <div class="unit-heading"><strong>{{ repairAttemptKind(attempt.kind) }}</strong><a-tag :color="statusColor(attempt.status)">{{ repairAttemptStatus(attempt) }}</a-tag><span>{{ attempt.created_at }}</span></div>
         <p class="muted">{{ objectName(attempt.object_id) }} · {{ attempt.id }}</p>
         <a-alert v-if="attempt.error" type="error">{{ attempt.error }}</a-alert>
-        <a-alert v-if="attempt.verification" :type="attempt.verification.status === 'succeeded' ? 'success' : 'warning'">对象核验：{{ attempt.verification.message }}</a-alert>
+        <a-alert v-if="attempt.verification" type="info">历史核验（旧版本）：{{ repairVerificationStatus(attempt.verification.status) }}：{{ attempt.verification.message }}</a-alert>
+        <p v-if="attempt.kind === 'manual_verification'" class="muted">确认人：用户 #{{ attempt.owner_id }} · 确认时间：{{ attempt.finished_at || attempt.created_at }} · 核验依据：{{ attempt.verification?.message }}</p>
         <p v-if="attempt.result">已提交 {{ attempt.result.committed_rows }} 行 · 源 {{ attempt.result.source_rows }} 行 / 目标 {{ attempt.result.target_rows }} 行<span v-if="attempt.result.error"> · {{ attempt.result.error }}</span></p>
-        <div v-for="(unit, index) in attempt.units" :key="unit.id"><p>步骤 {{ index + 1 }} · {{ repairStatus(unit.status) }}</p><pre class="sql-preview">{{ unit.sql }}</pre><p v-if="unit.error" class="error-text">{{ unit.error }}</p></div>
+        <div v-for="(unit, index) in attempt.units" :key="unit.id"><p>步骤 {{ index + 1 }} · {{ repairExecutionStatus(unit.status) }}</p><pre class="sql-preview">{{ unit.sql }}</pre><p v-if="unit.error" class="error-text">{{ unit.error }}</p></div>
       </article>
     </a-drawer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
-import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, verifyRepair, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, cloneRepairUnits, formatRepairHistory, isTableRepair, mappingError, repairKind, repairStatus, unitCommitted } from '@/utils/migrationRepair'
+import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
+import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { getDbTypeLabel } from '@/utils/dbType'
 
 const SqlEditor = defineAsyncComponent(() => import('@/components/SqlEditor.vue'))
 const props = defineProps<{ jobID: string }>()
+const emit = defineEmits<{ 'summary-change': [summary: RepairSummary] }>()
+const repairSection = ref<HTMLElement | null>(null)
+const page = ref(1)
+const highlightedObjectID = ref('')
+const pendingFocus = ref<RepairFocusTarget | null>(null)
 const records = ref<RepairRecord[]>([])
 const binding = ref<RepairBinding | null>(null)
 const job = ref<DataMigrationJob | null>(null)
 const error = ref('')
-const loading = ref(false)
+const loading = ref(true)
 const saving = ref(false)
 const submitting = ref(false)
 const cancelling = ref(false)
@@ -195,9 +210,10 @@ let disposed = false
 
 const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value)
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
-const canExecute = computed(() => !busy.value && editing.value?.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value?.object.requires_review || reviewed.value))
-const visibleRecords = computed(() => records.value.filter(({ object }) => (filter.value === 'all' || !unitCommitted(object.status) || object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)) && `${object.name} ${object.target_name} ${object.table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
-const stats = computed(() => ({ repaired: records.value.filter(({ object }) => unitCommitted(object.status) && object.original_status !== 'succeeded' && (!!object.original_status || !!object.error || attempts.value.some(attempt => attempt.object_id === object.id && unitCommitted(attempt.status)))).length, pending: records.value.filter(({ object }) => !unitCommitted(object.status) && object.status !== 'blocked').length, blocked: records.value.filter(({ object }) => object.status === 'blocked').length, data: records.value.filter(({ object }) => isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)).length }))
+const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
+const visibleRecords = computed(() => records.value.filter(({ object }) => (filter.value === 'all' || needsRepairAttention(object)) && `${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
+const stats = computed(() => ({ repaired: records.value.filter(({ object }) => unitCommitted(object.status) && object.original_status !== 'succeeded' && (!!object.original_status || !!object.original_error || !!object.error || object.units?.some(unit => unitCommitted(unit.status)) || attempts.value.some(attempt => attempt.object_id === object.id && ['ddl', 'recovery'].includes(attempt.kind) && unitCommitted(attempt.status)))).length, pending: records.value.filter(({ object }) => !unitCommitted(object.status) && object.status !== 'blocked').length, blocked: records.value.filter(({ object }) => object.status === 'blocked').length, data: records.value.filter(({ object }) => !object.diagnostic_only && isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)).length }))
+const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: new Set(records.value.filter(({ object }) => needsRepairAttention(object)).map(({ object }) => object.id)).size }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
 const relatedCandidates = computed(() => {
@@ -214,7 +230,7 @@ const errorText = (e: any) => e?.response?.data?.error || e?.message || '请求�
 function showError(e: unknown) { error.value = errorText(e); Message.error(error.value) }
 function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : 'orange' }
 function qualified(object: RepairObject) { return object.schema ? `${object.schema}.${object.target_name}` : object.target_name }
-function objectStatus(object: RepairObject) { return unitCommitted(object.status) && object.original_status === 'succeeded' ? '成功' : repairStatus(object.status) }
+function objectStatus(object: RepairObject) { return repairStatus(object.status) }
 function objectName(id: string) { const object = records.value.find(record => record.object.id === id)?.object; return object ? qualified(object) : id }
 function dependencyNames(object: RepairObject) { return (object.dependencies || []).map(objectName) }
 function connectionLabel(conn: Connection) { return `${conn.name} · ${conn.host}:${conn.port}/${conn.database} · ${conn.username}` }
@@ -226,6 +242,31 @@ function newKey() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 function replaceRecord(record: RepairRecord) { records.value = records.value.map(item => item.object.id === record.object.id ? record : item) }
+
+function showAllObjects() { filter.value = 'all'; keyword.value = ''; page.value = 1 }
+async function focusObject(target: RepairFocusTarget) {
+  pendingFocus.value = target
+  await applyPendingFocus()
+}
+async function applyPendingFocus() {
+  if (!pendingFocus.value || loading.value || error.value) return
+  const scope = epoch, id = props.jobID, target = pendingFocus.value
+  pendingFocus.value = null
+  showAllObjects()
+  const matches = matchingRepairRecords(records.value, target)
+  const match = matches.length === 1 ? matches[0] : undefined
+  highlightedObjectID.value = match?.object.id || ''
+  if (!match) keyword.value = target.target_name || target.source_name || target.name
+  // Let filter watchers reset pagination before selecting the matching page.
+  await nextTick()
+  if (!current(scope, id)) return
+  if (match) page.value = Math.floor(visibleRecords.value.findIndex(record => record.object.id === match.object.id) / 10) + 1
+  await nextTick()
+  if (!current(scope, id) || highlightedObjectID.value !== (match?.object.id || '')) return
+  const anchor = match ? Array.from(repairSection.value?.querySelectorAll<HTMLElement>('[data-repair-object-id]') || []).find(element => element.dataset.repairObjectId === match.object.id) : repairSection.value
+  anchor?.focus({ preventScroll: true })
+  anchor?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
 
 async function refresh() {
   const scope = epoch, id = props.jobID, serial = ++refreshSerial
@@ -264,6 +305,7 @@ function openEditor(record: RepairRecord) {
   editorSerial++
   editing.value = record
   draftUnits.value = cloneRepairUnits(record.object.units)
+  if (canEditRepairDDL(record.object) && !draftUnits.value.length && !hasRepairDDL(record.object) && !unitCommitted(record.object.status) && record.object.status !== 'unknown') addUnit()
   mappingForm.values = { ...(record.object.column_mapping || {}) }
   for (const column of record.object.source_columns || record.object.columns || []) {
     if (!mappingForm.values[column.Name]) mappingForm.values[column.Name] = job.value?.lower_case_names ? column.Name.toLowerCase() : column.Name
@@ -284,8 +326,12 @@ function addColumnMapping() {
   mappingForm.values = { ...mappingForm.values, [source]: target }
   mappingForm.source = ''; mappingForm.target = ''
 }
-function addUnit() { draftUnits.value.push({ id: newKey(), sql: '', original_sql: '', status: 'pending', selected: true, destructive: false }) }
-function restoreOriginal() { if (editing.value) draftUnits.value = cloneRepairUnits(editing.value.object.units).map(unit => ({ ...unit, sql: unit.original_sql || unit.sql })) }
+function addUnit() { if (editing.value && canEditRepairDDL(editing.value.object)) draftUnits.value.push({ id: newKey(), sql: '', original_sql: '', status: 'pending', selected: true, destructive: false }) }
+function restoreOriginal() {
+  if (!editing.value) return
+  const originals = new Map((editing.value.object.units || []).map(unit => [unit.id, unit.original_sql]))
+  draftUnits.value = draftUnits.value.map(unit => !unitCommitted(unit.status) && !unit.destructive && originals.get(unit.id) ? { ...unit, sql: originals.get(unit.id)! } : unit)
+}
 function useSuggested() {
   if (!editing.value?.object.suggested_ddl) return
   const editable = draftUnits.value.filter(unit => !unitCommitted(unit.status) && !unit.destructive)
@@ -294,7 +340,7 @@ function useSuggested() {
   else draftUnits.value.push({ id: newKey(), sql: editing.value.object.suggested_ddl, original_sql: '', status: 'pending', selected: true, destructive: false })
 }
 async function saveDraft(): Promise<boolean> {
-  if (!editing.value || saving.value || mappingError(mappingForm.values)) return false
+  if (!editing.value || !canEditRepairDDL(editing.value.object) || saving.value || mappingError(mappingForm.values)) return false
   const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
   saving.value = true
   try {
@@ -328,15 +374,6 @@ async function confirmExecute() {
     await pollAttempt(attempt.id, scope, id)
   } catch (e) { if (current(scope, id)) showError(e) }
   finally { if (current(scope, id)) submitting.value = false }
-}
-async function verify(record: RepairRecord) {
-  const scope = epoch, id = props.jobID
-  try {
-    const result = (await verifyRepair(id, record.object.id, record.version)).data
-    if (!current(scope, id)) return
-    replaceRecord(result)
-    Message.info(result.verification.message || repairStatus(result.verification.status))
-  } catch (e) { if (current(scope, id)) showError(e) }
 }
 async function openBinding() {
   const scope = epoch, id = props.jobID
@@ -426,12 +463,16 @@ async function exportHistory() {
   if (!current(scope, id)) throw new Error('任务已切换，请重新导出')
   return formatRepairHistory(objects.data.objects || [], history.data.items || [])
 }
-defineExpose({ exportHistory })
+defineExpose({ exportHistory, focusObject })
+watch(summary, value => emit('summary-change', value), { immediate: true })
+watch(loading, value => { if (!value) void applyPendingFocus() })
+watch([filter, keyword], () => { page.value = 1 })
 watch([draftUnits, () => mappingForm.values], () => { draftRevision++; executeConfirmVisible.value = false }, { deep: true, flush: 'sync' })
 watch(() => props.jobID, () => {
   epoch++; refreshSerial++; previewSerial++; editorSerial++; historySerial++
   if (timer) clearTimeout(timer)
   records.value = []; binding.value = null; job.value = null; activeAttempt.value = null; attempts.value = []
+  filter.value = 'attention'; keyword.value = ''; page.value = 1; highlightedObjectID.value = ''; pendingFocus.value = null
   editorVisible.value = false; executeConfirmVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
   loading.value = false; saving.value = false; submitting.value = false; cancelling.value = false; previewing.value = false; loadingHistory.value = false
   mappingForm.values = {}; mappingForm.source = ''; mappingForm.target = ''
@@ -453,6 +494,9 @@ onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
 .repair-filters, .attempt-banner, .editor-toolbar { margin: 12px 0; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
+.repair-empty { text-align: center; }
+.repair-panel :deep(.repair-row-highlighted .arco-table-td) { background: var(--color-primary-light-1); }
+.repair-panel [data-repair-object-id]:focus { outline: 2px solid rgb(var(--primary-6)); outline-offset: 3px; }
 .unit-editor { border: 1px solid var(--color-border-2); border-radius: 4px; margin: 14px 0; overflow: hidden; }
 .unit-heading { padding: 10px; background: var(--color-fill-1); }
 .unit-editor > p { padding: 0 12px; }

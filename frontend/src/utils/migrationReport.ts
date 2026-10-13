@@ -2,6 +2,44 @@ import type { CategoryReport, MigrationReport, ObjectResult } from '@/api/migrat
 
 const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
 
+// Isolate the original MySQL KEY clause for this failed index. Split only at
+// table-body commas, preserving nested expressions and quoted text verbatim.
+export function sourceIndexDefinition(ddl: string, name: string): string {
+  if (!/^\s*CREATE\s+TABLE\b/i.test(ddl) || !name) return ''
+  const clauses: string[] = []
+  let quote = '', depth = 0, start = -1
+  for (let i = 0; i < ddl.length; i++) {
+    const char = ddl[i]
+    if (quote) {
+      if (char === '\\') { i++; continue }
+      if (char === quote) {
+        if (ddl[i + 1] === quote) i++
+        else quote = ''
+      }
+      continue
+    }
+    if (char === '`' || char === "'" || char === '"') { quote = char; continue }
+    if (char === '(') {
+      if (depth++ === 0) start = i + 1
+    } else if (char === ')') {
+      if (--depth === 0) { clauses.push(ddl.slice(start, i).trim()); break }
+    } else if (char === ',' && depth === 1) {
+      clauses.push(ddl.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  const indexes = clauses.flatMap(clause => {
+    const match = clause.match(/^(?:(?:UNIQUE|FULLTEXT|SPATIAL)\s+)?(?:KEY|INDEX)\s+(?:`((?:``|[^`])+)`|([^\s(]+))\s*(?:USING\s+\w+\s*)?\(/i)
+    return match ? [{ name: match[1]?.replace(/``/g, '`') ?? match[2], clause }] : []
+  })
+  const exact = indexes.find(index => index.name === name)
+  if (exact) return exact.clause
+  // Legacy reports retained only the normalized target name. Avoid guessing
+  // when more than one source index could match it.
+  const matches = indexes.filter(index => index.name.toLowerCase() === name.toLowerCase())
+  return matches.length === 1 ? matches[0].clause : ''
+}
+
 export function failureStage(item: ObjectResult): ObjectResult['stage'] {
   if (item.stage) return item.stage
   // Older reports used a synthetic object for a category-wide read failure.
@@ -48,6 +86,10 @@ export function reportCategories(report: MigrationReport) {
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
         ...item, ...describeFailure(item),
+        nameLabel: key === 'indexes' && failureStage(item) !== 'metadata' ? '索引名称：' : '',
+        targetNameLabel: failureStage(item) === 'unsupported' ? '目标索引名称（计划）：' : '目标索引名称：',
+        targetTableLabel: item.target_table ? [item.target_schema, item.target_table].filter(Boolean).join('.') : '',
+        sourceIndexDDL: key === 'indexes' ? sourceIndexDefinition(item.source_ddl ?? '', item.source_name || item.name) : '',
         key: JSON.stringify([key, item.table ?? '', item.name, item.stage ?? '', index]),
       })),
     }
@@ -71,7 +113,12 @@ export function formatReportCategories(report: MigrationReport): string[] {
   for (const row of failedCategories) {
     lines.push('', `【${row.label}】`)
     for (const item of row.items) {
-      lines.push(`  ● ${item.name}`)
+      lines.push(`  ● ${item.nameLabel}${item.name}`)
+      if (row.key === 'indexes') {
+        if (item.source_name) lines.push(`    源索引名称：${item.source_name}`)
+        if (item.target_name) lines.push(`    ${item.targetNameLabel}${item.target_name}`)
+        if (item.targetTableLabel) lines.push(`    目标表：${item.targetTableLabel}`)
+      }
       if (item.table) lines.push(`    所属表：${item.table}`)
       lines.push(`    失败阶段：${item.stageLabel}`, `    失败原因：${item.error}`)
       if (item.ddl?.trim()) {
@@ -80,6 +127,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
         lines.push(`    目标 DDL：${item.emptyDDLMessage}`)
       }
       if (item.source_ddl?.trim()) {
+        if (item.sourceIndexDDL) lines.push('    源端失败索引定义（仅供参考，需适配目标库）：', ...item.sourceIndexDDL.split('\n').map(line => `      ${line}`))
         lines.push(`    ${item.sourceDDLLabel}：`, ...item.source_ddl.split('\n').map(line => `      ${line}`))
       }
       if (item.suggestion) lines.push(`    建议：${item.suggestion}`)

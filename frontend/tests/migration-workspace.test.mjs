@@ -162,3 +162,26 @@ test('report preflight expands failures by default and can focus a saved success
     assert.deepEqual(actions, ['focus', 'scroll'])
   } finally { scope.stop() }
 })
+
+test('changing report jobs resets repair navigation and rejects late summary events and links', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ jobID: 'old' }), focused = []
+    const p = scope.run(() => panel('MigrationReportPanel', props, 'loadReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel', {
+      api: { getDataMigrationReport: async () => ({ data: {} }) },
+    }))
+    await p.loadReport()
+    p.updateRepairSummary({ jobID: 'old', state: 'ready', repaired: 1, attention: 0 })
+    p.repairPanel.value = { focusObject: target => focused.push(target) }
+    const navigate = p.goToRepair('indexes', { name: 'OldIndex' })
+    props.jobID = 'new'
+    await navigate; await Vue.nextTick()
+    assert.equal(focused.length, 0)
+    assert.equal(p.activeTab.value, 'overview')
+    assert.equal(p.repairSummary.value.jobID, 'new')
+    assert.equal(p.repairSummary.value.state, 'loading')
+    assert.equal(p.repairSummary.value.repaired, 0)
+    p.updateRepairSummary({ jobID: 'old', state: 'ready', repaired: 99, attention: 99 })
+    assert.equal(p.repairSummary.value.repaired, 0)
+  } finally { scope.stop() }
+})

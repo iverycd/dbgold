@@ -19,7 +19,11 @@ export interface RepairColumn {
   Generated?: string
   Identity?: string
 }
+export interface RepairVerification { status: string; message: string }
+export interface ManualVerification { confirmed_by: number; confirmed_at: string; evidence: string; fingerprint: string }
 export interface RepairObject {
+  verification?: RepairVerification
+  manual_verification?: ManualVerification
   id: string
   kind: string
   name: string
@@ -29,6 +33,8 @@ export interface RepairObject {
   target_name: string
   schema: string
   ddl: string
+  source_ddl?: string
+  diagnostic_only?: boolean
   suggested_ddl?: string
   error?: string
   original_error?: string
@@ -60,7 +66,8 @@ export interface RepairAttempt {
   id: string
   job_id: string
   object_id: string
-  kind: 'ddl' | 'recovery'
+  kind: 'ddl' | 'recovery' | 'verification' | 'manual_verification'
+  owner_id?: number
   status: string
   units: RepairUnit[]
   result?: RecoveryResult
@@ -109,7 +116,6 @@ export const listRepairs = (job: string) => api.get<RepairList>(`${base(job)}/re
 export const bindRepairConnections = (job: string, data: BindingRequest) => api.put(`${base(job)}/repairs/binding`, data)
 export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean }) => api.put<RepairRecord>(objectURL(job, object), data)
 export const executeRepair = (job: string, object: string, data: { version: number; request_id: string; confirmed: true }) => api.post<RepairAttempt>(`${objectURL(job, object)}/execute`, data)
-export const verifyRepair = (job: string, object: string, version: number) => api.post<RepairRecord & { verification: { status: string; message: string } }>(`${objectURL(job, object)}/verify`, { version })
 export const listRepairAttempts = (job: string) => api.get<{ items: RepairAttempt[] }>(`${base(job)}/repair-attempts`)
 export const getRepairAttempt = (job: string, attempt: string) => api.get<RepairAttempt>(`${base(job)}/repair-attempts/${encodeURIComponent(attempt)}`)
 export const cancelRepairAttempt = (job: string, attempt: string) => api.post(`${base(job)}/repair-attempts/${encodeURIComponent(attempt)}/cancel`)

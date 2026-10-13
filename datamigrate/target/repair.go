@@ -172,7 +172,6 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		return out, fmt.Errorf("未选择执行步骤")
 	}
 	var tx *sql.Tx
-	var validationConn *sql.Conn
 	var exec func(string) error
 	if oscar, ok := w.(*OscarWriter); ok {
 		exec = func(q string) error { return oscar.bridge.Exec(ctx, oscar.session, q) }
@@ -192,7 +191,6 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		if err != nil {
 			return out, err
 		}
-		validationConn = conn
 		defer close()
 		// Constrain unqualified identifiers on the same physical connection as
 		// every repair unit. Dispose changed sessions rather than leaking state.
@@ -288,6 +286,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 		if err = persist(); err != nil {
 			rollback()
+			if tx == nil {
+				out[i].Status, out[i].Error = "unknown", err.Error()
+			}
 			return out, fmt.Errorf("SQL 已执行，但保存结果失败: %w", err)
 		}
 	}
@@ -300,29 +301,13 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			}
 		}
 		if pe := persist(); err != nil || pe != nil {
-			return out, errors.Join(err, pe)
-		}
-	}
-	if ow, ok := w.(*OracleWriter); ok {
-		name, kind := "", ""
-		switch repairKind(obj.Kind) {
-		case "view":
-			name, kind = obj.TargetName, "VIEW"
-		case "sequence":
-			if obj.Sequence != nil {
-				name, kind = ow.dia.TriggerName(*obj.Sequence), "TRIGGER"
-			}
-		}
-		if name != "" {
-			if err = ow.validateObjectOn(ctx, validationConn, name, kind); err != nil {
-				index := executed[len(executed)-1]
-				out[index].Status, out[index].Error = "unknown", err.Error()
-				var invalid *oracleInvalidObjectError
-				if errors.As(err, &invalid) {
-					out[index].Status = "failed"
+			for _, i := range executed {
+				out[i].Status = "unknown"
+				if pe != nil {
+					out[i].Error = pe.Error()
 				}
-				return out, errors.Join(err, persist())
 			}
+			return out, errors.Join(err, pe)
 		}
 	}
 	invalidateRecoveryCache(w)

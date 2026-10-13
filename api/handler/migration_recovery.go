@@ -121,7 +121,7 @@ func PreviewMigrationRecovery(c *gin.Context) {
 		return
 	}
 	if o.Kind == "table" && o.Status != "succeeded" {
-		repairError(c, fmt.Errorf("请先修复并核验表结构"))
+		repairError(c, fmt.Errorf("请先成功执行表结构修复 DDL"))
 		return
 	}
 	cfg, e := recoveryConfig(b)
@@ -376,7 +376,6 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				item.Status = "blocked"
 				item.Error = "依赖对象尚未成功"
 			} else {
-				conditional := conditionalRepairEffect(item.Units)
 				units, executeErr := target.ExecuteRepair(ctx, w, item, item.Units, func(units []repair.Unit) error {
 					return persistRepairProgress(a, item, units, executedUnits)
 				})
@@ -399,26 +398,12 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 						firstErr = executeErr
 					}
 				} else {
-					v, ve := target.InspectRepair(ctx, w, item)
 					item.Status = "succeeded"
-					if v.Status == "failed" {
-						item.Status = "failed"
-						item.Error = v.Message
-					}
-					if ve != nil {
-						v = repair.Verification{Status: "unknown", Message: ve.Error()}
-					}
-					a.VerificationJSON = repairJSON(v)
-					if v.Status == "unknown" && conditional {
-						item.Status = "unverified"
-						item.Error = v.Message
-					}
+					item.Verification = nil
+					item.ManualVerification = nil
 					completed[item.ID] = item.Status == "succeeded"
 					if completed[item.ID] && item.Kind == "sequence" && item.Sequence != nil {
 						sequenceColumns[item.Sequence.ColumnName] = true
-					}
-					if !completed[item.ID] && firstErr == nil {
-						firstErr = fmt.Errorf("关联对象 %s: %s", item.Name, item.Error)
 					}
 				}
 			}
@@ -446,11 +431,11 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 
 func recoveryRelatedReady(o repair.Object) error {
 	if o.Status == "unknown" || o.Status == "running" || o.Status == "unverified" {
-		return fmt.Errorf("关联对象 %s 尚未核验，先核验或取消选择该对象", o.Name)
+		return fmt.Errorf("关联对象 %s 执行结果未知或仍在执行，请取消选择该对象", o.Name)
 	}
 	for _, u := range o.Units {
 		if u.Status == "unknown" || u.Status == "running" {
-			return fmt.Errorf("关联对象 %s 存在执行结果未知的单元，请先核验", o.Name)
+			return fmt.Errorf("关联对象 %s 存在执行结果未知的单元，禁止自动重放", o.Name)
 		}
 	}
 	return nil

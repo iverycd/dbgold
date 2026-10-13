@@ -10,6 +10,10 @@ import (
 // ObjectResult 单个失败对象的详情
 type ObjectResult struct {
 	Name          string                       `json:"name"`
+	SourceName    string                       `json:"source_name,omitempty"`
+	TargetName    string                       `json:"target_name,omitempty"`
+	TargetTable   string                       `json:"target_table,omitempty"`
+	TargetSchema  string                       `json:"target_schema,omitempty"`
 	Table         string                       `json:"table,omitempty"` // Original source table name.
 	Stage         string                       `json:"stage,omitempty"` // metadata | unsupported | execute
 	DDL           string                       `json:"ddl"`

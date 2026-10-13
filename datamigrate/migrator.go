@@ -802,11 +802,20 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					m.log.Errorf("迁移索引失败 [%s.%s]: %v", idx.TableName, idx.IndexName, err)
 					report.Indexes.Failed++
 					result := ObjectResult{
-						Name:  indexName,
-						Table: idx.TableName,
-						Stage: stage,
-						DDL:   ddl,
-						Error: err.Error(),
+						Name:         indexName,
+						SourceName:   idx.IndexName,
+						TargetName:   indexName,
+						TargetTable:  idxCopy.TableName,
+						TargetSchema: m.cfg.TargetSchema,
+						Table:        idx.TableName,
+						Stage:        stage,
+						DDL:          ddl,
+						Error:        err.Error(),
+					}
+					// These dialects uppercase identifiers when quoting target SQL.
+					if name := m.writer.Dialect().Name(); name == "dameng" || name == "oracle" {
+						result.TargetTable = strings.ToUpper(result.TargetTable)
+						result.TargetSchema = strings.ToUpper(result.TargetSchema)
 					}
 					if stage == "unsupported" {
 						result.Suggestion = "请根据源端定义手工适配目标库后创建索引。"

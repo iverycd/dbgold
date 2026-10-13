@@ -110,6 +110,63 @@ func TestRepairOracleBlockIsOneExecutionUnit(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
+func TestRepairOracleCreationDoesNotQueryCompiledObjectStatus(t *testing.T) {
+	for _, kind := range []string{"view", "sequence"} {
+		t.Run(kind, func(t *testing.T) {
+			w, m := oracleMockWriter(t)
+			q := "CREATE OR REPLACE VIEW APP.V AS SELECT 1 ID FROM DUAL"
+			obj := repair.Object{Kind: kind, Schema: "APP", TargetName: "V"}
+			if kind == "sequence" {
+				q = "CREATE SEQUENCE APP.S START WITH 1"
+				obj.Sequence = &source.SequenceInfo{TableName: "T", ColumnName: "ID"}
+			}
+			m.ExpectExec("ALTER SESSION SET CURRENT_SCHEMA").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectExec(regexp.QuoteMeta(q)).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectClose()
+			units, err := ExecuteRepair(context.Background(), w, obj, []repair.Unit{{ID: "ddl", SQL: q, Selected: true}}, nil)
+			require.NoError(t, err)
+			require.Equal(t, "succeeded", units[0].Status)
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestRepairResultPersistenceFailureAfterSQLIsUnknown(t *testing.T) {
+	for _, transaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "autocommit", true: "transaction committed"}[transaction], func(t *testing.T) {
+			w, m := repairPGMock(t)
+			kind := "index"
+			if transaction {
+				kind = "view"
+				m.ExpectBegin()
+				m.ExpectExec("SET LOCAL search_path").WillReturnResult(sqlmock.NewResult(0, 0))
+			} else {
+				m.ExpectExec("SET search_path").WillReturnResult(sqlmock.NewResult(0, 0))
+			}
+			m.ExpectExec("CREATE").WillReturnResult(sqlmock.NewResult(0, 0))
+			if transaction {
+				m.ExpectCommit()
+			}
+			m.ExpectClose()
+			calls := 0
+			q := "CREATE INDEX ix ON t ((id+1))"
+			if transaction {
+				q = "CREATE VIEW v AS SELECT 1"
+			}
+			units, err := ExecuteRepair(context.Background(), w, repair.Object{Kind: kind, Schema: "app"}, []repair.Unit{{ID: "ddl", SQL: q, Selected: true}}, func([]repair.Unit) error {
+				calls++
+				if !transaction && calls == 2 || transaction && calls == 3 {
+					return errors.New("disk full after execution")
+				}
+				return nil
+			})
+			require.ErrorContains(t, err, "disk full")
+			require.Equal(t, "unknown", units[0].Status)
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestOriginalDDLObserverTracksCommittedAndRolledBackUnits(t *testing.T) {
 	w, m := sqlServerMock(t)
 	m.ExpectExec("SET ANSI_NULLS").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -159,6 +216,19 @@ func TestInspectIndexDoesNotAcceptSameNameWrongDefinition(t *testing.T) {
 	require.NoError(t, e)
 	require.Equal(t, "failed", v.Status)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestInspectHandwrittenIndexAndFKCannotVerifyAgainstOriginalMetadata(t *testing.T) {
+	for _, kind := range []string{"index", "foreign_key"} {
+		t.Run(kind, func(t *testing.T) {
+			w, m := repairPGMock(t)
+			o := repair.Object{Kind: kind, Schema: "app", Table: "t", TargetName: "ix", Index: &source.IndexInfo{Columns: []string{"id"}}, ForeignKey: &source.FKInfo{Columns: []string{"id"}}, Units: []repair.Unit{{SQL: "handwritten target SQL", OriginalSQL: "", Status: "succeeded"}}}
+			v, err := InspectRepair(context.Background(), w, o)
+			require.NoError(t, err)
+			require.Equal(t, "unknown", v.Status)
+			require.NoError(t, m.ExpectationsWereMet()) // No query compares the old definition.
+		})
+	}
 }
 
 func TestInspectTableUsesOriginalCaseColumnMapping(t *testing.T) {

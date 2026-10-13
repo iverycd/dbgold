@@ -31,12 +31,16 @@ func (r *indexReportReader) GetTableSourceDDL(_ context.Context, table string) (
 
 type indexReportWriter struct {
 	mockWriter
-	indexes []source.IndexInfo
-	err     error
+	indexes       []source.IndexInfo
+	err           error
+	targetDialect dialect.Dialect
 }
 
 func (w *indexReportWriter) DBType() string { return "gaussdb" }
 func (w *indexReportWriter) Dialect() dialect.Dialect {
+	if w.targetDialect != nil {
+		return w.targetDialect
+	}
 	return dialect.NewPostgres("gaussdb")
 }
 func (w *indexReportWriter) CreateIndex(_ context.Context, index source.IndexInfo) error {
@@ -83,6 +87,10 @@ func TestIndexReportContinuesAfterUnsupportedIndexes(t *testing.T) {
 	require.True(t, w.indexes[1].IsUnique)
 	require.Equal(t, []string{"Orders"}, r.definitionReads, "read each selected source table definition once")
 	for _, item := range report.Indexes.Items {
+		require.NotEmpty(t, item.SourceName)
+		require.Equal(t, item.Name, item.TargetName)
+		require.Equal(t, "orders", item.TargetTable)
+		require.Equal(t, "dst", item.TargetSchema)
 		require.Equal(t, "Orders", item.Table)
 		require.Equal(t, "unsupported", item.Stage)
 		require.Empty(t, item.DDL, "source SQL must not be presented as target SQL")
@@ -128,9 +136,41 @@ func TestIndexReportExecutionFailureKeepsTargetDDL(t *testing.T) {
 	item := report.Indexes.Items[0]
 	require.Equal(t, "execute", item.Stage)
 	require.Equal(t, "Orders", item.Table)
+	require.Equal(t, "ByID", item.SourceName)
+	require.Equal(t, "byid", item.TargetName)
+	require.Equal(t, "orders", item.TargetTable)
+	require.Equal(t, "dst", item.TargetSchema)
 	require.Equal(t, `CREATE INDEX IF NOT EXISTS "byid" ON "dst"."orders" ("id");`, item.DDL)
 	require.Empty(t, item.SourceDDL)
 	require.Empty(t, r.definitionReads)
+	data, err := json.Marshal(report)
+	require.NoError(t, err)
+	var restored MigrationReport
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.Equal(t, item, restored.Indexes.Items[0], "stored reports must retain source and target identities")
+}
+
+func TestIndexReportTargetNameMatchesDamengDDL(t *testing.T) {
+	for _, unsupported := range []string{"", "expression index requires manual adaptation"} {
+		t.Run(unsupported, func(t *testing.T) {
+			r := &indexReportReader{indexes: []source.IndexInfo{{TableName: "Orders", IndexName: "ByID", Columns: []string{"ID"}, Unsupported: unsupported}}}
+			w := &indexReportWriter{targetDialect: dialect.NewDaMeng(), err: errors.New("permission denied")}
+			report := runIndexReport(r, w)
+			require.Len(t, report.Indexes.Items, 1)
+			item := report.Indexes.Items[0]
+			require.Equal(t, "ByID", item.SourceName)
+			require.Equal(t, "ORDERS_BYID", item.Name)
+			require.Equal(t, item.Name, item.TargetName)
+			require.Equal(t, "ORDERS", item.TargetTable)
+			require.Equal(t, "DST", item.TargetSchema)
+			if unsupported == "" {
+				require.Contains(t, item.DDL, `CREATE INDEX "ORDERS_BYID" ON "DST"."ORDERS"`)
+			} else {
+				require.Empty(t, item.DDL, "planned identity must not generate unsupported SQL")
+				require.Empty(t, w.indexes)
+			}
+		})
+	}
 }
 
 func TestIndexReportSourceDefinitionFailureIsIsolated(t *testing.T) {

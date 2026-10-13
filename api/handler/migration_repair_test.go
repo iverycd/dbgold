@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,7 @@ import (
 	"testing"
 
 	"dbgold/config"
+	"dbgold/datamigrate"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/store"
@@ -48,6 +51,129 @@ func TestRepairDraftOwnershipVersionAndStatusCannotBeForged(t *testing.T) {
 	require.False(t, obj.RequiresReview)
 	require.Contains(t, obj.Units[0].OriginalSQL, "integer")
 	require.Equal(t, 409, repairRequest(t, http.MethodPut, "/jobs/job/repairs/table", body, 1, SaveMigrationRepairDraft).Code)
+}
+
+func TestRepairManualDraftEnrichesOldLedgerWithoutChangingReport(t *testing.T) {
+	seedHandlerRepair(t)
+	sourceDDL := "CREATE TABLE SourceOrders (ID int, KEY IxExpr ((ID+1)))"
+	report := datamigrate.MigrationReport{Indexes: datamigrate.CategoryReport{Items: []datamigrate.ObjectResult{{Name: "IxExpr", Table: "SourceOrders", Stage: "unsupported", SourceDDL: sourceDDL, Error: "unsupported expression"}}}}
+	originalReport := repairJSON(report)
+	require.NoError(t, store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: "job", ReportJSON: originalReport}))
+	o := repair.Object{ID: "index", Kind: "index", Name: "ixexpr", SourceName: "IxExpr", Table: "orders", SourceTable: "SourceOrders", TargetName: "ixexpr", Schema: "app", Status: "failed", OriginalError: "unsupported expression"}
+	require.NoError(t, store.DB.Create(&store.MigrationRepairObject{JobID: "job", ObjectID: "index", ObjectJSON: repairJSON(o), Version: 1}).Error)
+	sql := `CREATE INDEX "app"."ixexpr" ON "app"."orders" ((id+1))`
+	body := repairJSON(map[string]any{"version": 1, "units": []repair.Unit{{ID: "manual", SQL: sql, Selected: true, OriginalSQL: sourceDDL, Status: "succeeded"}}})
+	w := repairRequest(t, http.MethodPut, "/jobs/job/repairs/index", body, 1, SaveMigrationRepairDraft)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	row, err := store.GetMigrationRepairObject("job", "index")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(row.ObjectJSON), &o))
+	require.Equal(t, sourceDDL, o.SourceDDL)
+	require.Empty(t, o.DDL)
+	require.Empty(t, o.Units[0].OriginalSQL) // Reference can't be forged into an executable original.
+	require.Equal(t, "pending", o.Units[0].Status)
+	require.Equal(t, "unsupported expression", o.OriginalError)
+	require.NoError(t, validateRepairUnits(o.Units))
+	require.NoError(t, validateRepairObjectScope(o, o.Units, "gaussdb"))
+	o.Units[0].SQL = `CREATE INDEX "other"."ixexpr" ON "app"."orders" (id)`
+	require.Error(t, validateRepairObjectScope(o, o.Units, "gaussdb"))
+	o.Units[0].SQL = `CREATE INDEX "app"."ixexpr" ON "app"."wrong" (id)`
+	require.Error(t, validateRepairObjectScope(o, o.Units, "gaussdb"))
+	savedReport, err := store.GetDataMigrationReport("job")
+	require.NoError(t, err)
+	require.Equal(t, originalReport, savedReport.ReportJSON)
+}
+
+func TestRepairDiagnosticAndDataCannotSaveOrExecuteDDL(t *testing.T) {
+	for _, diagnostic := range []bool{true, false} {
+		seedHandlerRepair(t)
+		o := repair.Object{ID: "table", Kind: "data", TargetName: "Orders", Table: "Orders", Schema: "app", DiagnosticOnly: diagnostic}
+		if diagnostic {
+			o.Kind = "table"
+			o.Name, o.TargetName = "元数据读取", "元数据读取"
+			o.DiagnosticOnly = false // Simulate a ledger created before the diagnostic flag.
+			report := datamigrate.MigrationReport{Tables: datamigrate.CategoryReport{Items: []datamigrate.ObjectResult{{Name: "元数据读取", Stage: "metadata", Error: "network error"}}}}
+			require.NoError(t, store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: "job", ReportJSON: repairJSON(report)}))
+		}
+		require.NoError(t, store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", "job", "table").Update("object_json", repairJSON(o)).Error)
+		for _, call := range []struct {
+			method string
+			fn     gin.HandlerFunc
+		}{{http.MethodPut, SaveMigrationRepairDraft}, {http.MethodPost, ExecuteMigrationRepair}} {
+			w := repairRequest(t, call.method, "/jobs/job/repairs/table", `{"version":1,"confirmed":true,"request_id":"manual"}`, 1, call.fn)
+			require.Equal(t, 400, w.Code, w.Body.String())
+		}
+		row, err := store.GetMigrationRepairObject("job", "table")
+		require.NoError(t, err)
+		require.Equal(t, 1, row.Version)
+	}
+}
+
+func TestRepairCompletionUsesExecutionResultForEveryObjectKind(t *testing.T) {
+	for _, kind := range []string{"table", "index", "foreign_key", "view", "sequence", "comment"} {
+		t.Run(kind, func(t *testing.T) {
+			seedHandlerRepair(t)
+			units := []repair.Unit{{ID: "manual", SQL: "CREATE INDEX app.ix ON app.Orders ((id+1))", Status: "succeeded"}}
+			a := &store.MigrationRepairAttempt{ID: "attempt", JobID: "job", ObjectID: "table", RequestID: "r", Kind: "ddl", Status: "running", UnitsJSON: repairJSON(units)}
+			require.NoError(t, store.DB.Create(a).Error)
+			finishRepair(a, repair.Object{ID: "table", Kind: kind, OriginalError: "original failure"}, nil)
+			row, err := store.GetMigrationRepairObject("job", "table")
+			require.NoError(t, err)
+			var object repair.Object
+			require.NoError(t, json.Unmarshal([]byte(row.ObjectJSON), &object))
+			require.Equal(t, "succeeded", object.Status)
+			require.Equal(t, "succeeded", object.Units[0].Status)
+			require.Equal(t, "original failure", object.OriginalError)
+			require.Nil(t, object.Verification)
+			require.Nil(t, object.ManualVerification)
+			var attempt store.MigrationRepairAttempt
+			require.NoError(t, store.DB.First(&attempt, "id = ?", a.ID).Error)
+			require.Equal(t, "succeeded", attempt.Status)
+			require.Empty(t, attempt.VerificationJSON)
+		})
+	}
+}
+
+func TestRepairCompletionDoesNotPromoteFailedOrUnknownExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name, step, want string
+		err              error
+	}{
+		{"DDL error", "failed", "failed", errors.New("invalid type")},
+		{"commit unknown", "unknown", "unknown", errors.New("commit connection lost")},
+		{"cancelled", "unknown", "unknown", context.Canceled},
+		{"result not durable", "unknown", "unknown", errors.New("SQL executed but persistence failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seedHandlerRepair(t)
+			units := []repair.Unit{{ID: "done", SQL: "CREATE TABLE t(id int)", Status: "succeeded"}, {ID: "next", SQL: "ALTER TABLE t ADD name text", Status: tc.step}}
+			a := &store.MigrationRepairAttempt{ID: "a", JobID: "job", ObjectID: "table", RequestID: "r", Kind: "ddl", Status: "running", UnitsJSON: repairJSON(units)}
+			require.NoError(t, store.DB.Create(a).Error)
+			finishRepair(a, repair.Object{ID: "table", Kind: "table"}, tc.err)
+			row, err := store.GetMigrationRepairObject("job", "table")
+			require.NoError(t, err)
+			var o repair.Object
+			require.NoError(t, json.Unmarshal([]byte(row.ObjectJSON), &o))
+			require.Equal(t, tc.want, o.Status)
+			require.Equal(t, "succeeded", o.Units[0].Status)
+			require.Equal(t, tc.step, o.Units[1].Status)
+		})
+	}
+}
+
+func TestRepairSavingUnchangedSuccessfulDraftPreservesCommittedSteps(t *testing.T) {
+	seedHandlerRepair(t)
+	o := repair.Object{ID: "table", Kind: "table", TargetName: "Orders", Table: "Orders", Schema: "app", Status: "succeeded", Units: []repair.Unit{{ID: "manual", SQL: `CREATE TABLE app.Orders(id int)`, Status: "succeeded"}}}
+	require.NoError(t, store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", "job", "table").Update("object_json", repairJSON(o)).Error)
+	o.Units[0].Selected = true // Client cannot reselect a committed unit.
+	w := repairRequest(t, http.MethodPut, "/jobs/job/repairs/table", repairJSON(map[string]any{"version": 1, "units": o.Units}), 1, SaveMigrationRepairDraft)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	row, err := store.GetMigrationRepairObject("job", "table")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(row.ObjectJSON), &o))
+	require.Equal(t, "succeeded", o.Status)
+	require.False(t, o.Units[0].Selected)
+	require.Error(t, validateRepairUnits(o.Units))
 }
 func TestRepairExecutionReplayDoesNotReconnect(t *testing.T) {
 	seedHandlerRepair(t)

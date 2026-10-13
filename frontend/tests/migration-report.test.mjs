@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 
-const { failureStage, describeFailure, categoryPresentation, reportCategories, formatReportCategories } = migrationReportUtils
+const { failureStage, describeFailure, categoryPresentation, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
 const failure = overrides => ({ name: 'idx_orders', ddl: '', error: 'index error', ...overrides })
 function report(indexes) {
@@ -69,4 +69,49 @@ test('same-name objects from different tables get distinct stable detail keys', 
   const keys = () => reportCategories(r).find(row => row.key === 'indexes').items.map(item => item.key)
   assert.equal(new Set(keys()).size, 3)
   assert.deepEqual(keys(), keys())
+})
+
+test('failed index details and exported reports identify both ends when names change', () => {
+  const definition = 'UNIQUE KEY `IxExpression` ((case when (`del_flag` = \'0\') then upper(`label_code`) else NULL end))'
+  const ddl = `CREATE TABLE \`Orders\` (\`id\` int, ${definition}, KEY \`Good\` (\`id\`))`
+  const item = failure({ name: 'orders_ixexpression', source_name: 'IxExpression', target_name: 'orders_ixexpression', table: 'Orders', target_table: 'orders', target_schema: 'dst', stage: 'unsupported', source_ddl: ddl })
+  const r = report({ total: 2, success: 1, failed: 1, items: [item] })
+  const detail = reportCategories(r).find(row => row.key === 'indexes').items[0]
+  assert.equal(detail.nameLabel, '索引名称：')
+  assert.equal(detail.sourceIndexDDL, definition)
+  assert.equal(detail.targetTableLabel, 'dst.orders')
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /源索引名称：IxExpression/)
+  assert.match(text, /目标索引名称（计划）：orders_ixexpression/)
+  assert.match(text, /目标表：dst.orders/)
+  assert.ok(text.includes(`源端失败索引定义（仅供参考，需适配目标库）：\n      ${definition}`))
+  assert.match(text, /未生成目标 DDL/)
+})
+
+test('executed index details show the actual target identity alongside failed SQL', () => {
+  const r = report({ total: 1, success: 0, failed: 1, items: [failure({ source_name: 'IxOrders', target_name: 'idx_orders', target_table: 'orders', stage: 'execute', ddl: 'CREATE INDEX idx_orders ON orders(id)' })] })
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /目标索引名称：idx_orders/)
+  assert.match(text, /目标表：orders/)
+  assert.doesNotMatch(text, /（计划）|undefined/)
+})
+
+test('source index extraction preserves nested expressions, quoting and multiline definitions', () => {
+  const definition = "UNIQUE KEY `Ix``Expr` (\n  (concat('a,b)''c', `Name`, 'd\\\'e'))\n) COMMENT '原始,定义'"
+  const ddl = `CREATE TABLE \`Orders(archive)\` (\`Name\` varchar(100) DEFAULT 'KEY fake (x)', ${definition}, KEY \`Other\` (\`Name\`))`
+  assert.equal(sourceIndexDefinition(ddl, 'Ix`Expr'), definition)
+  assert.equal(sourceIndexDefinition(ddl, 'ix`expr'), definition, 'legacy normalized index names remain supported')
+  assert.equal(sourceIndexDefinition(ddl, 'Missing'), '')
+  assert.equal(sourceIndexDefinition('CREATE INDEX Ix ON t(id)', 'Ix'), '')
+  assert.equal(sourceIndexDefinition('CREATE TABLE t(id int, KEY `Ix` (id), KEY `IX` (id))', 'ix'), '', 'ambiguous legacy names must not select another index')
+})
+
+test('legacy reports isolate their failed index without inventing missing target metadata', () => {
+  const definition = 'KEY `IxOrders` ((abs(`id`)))'
+  const r = report({ total: 1, success: 0, failed: 1, items: [failure({ name: 'ixorders', stage: 'unsupported', source_ddl: `CREATE TABLE t(id int, ${definition})` })] })
+  const item = reportCategories(r).find(row => row.key === 'indexes').items[0]
+  assert.equal(item.sourceIndexDDL, definition)
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /索引名称：ixorders/)
+  assert.doesNotMatch(text, /目标索引名称|目标表：|源索引名称/)
 })

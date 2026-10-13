@@ -115,6 +115,10 @@ export const createDataMigrateEventSource = (jobID: string): EventSource => {
 
 export interface ObjectResult {
   name: string
+  source_name?: string
+  target_name?: string
+  target_table?: string
+  target_schema?: string
   table?: string
   stage?: 'metadata' | 'unsupported' | 'execute'
   ddl: string

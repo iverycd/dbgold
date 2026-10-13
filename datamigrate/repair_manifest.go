@@ -715,6 +715,8 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			r.objects = append(r.objects, legacy)
 		} else {
 			o := &r.objects[match]
+			o.SourceDDL = legacy.SourceDDL
+			o.DiagnosticOnly = legacy.DiagnosticOnly
 			if o.Status == "pending" || o.Status == "blocked" {
 				o.Status = "failed"
 				o.Error = legacy.Error
@@ -758,6 +760,8 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 				continue
 			}
 			o := repair.Object{ID: repair.Hash([]any{c.kind, i, item.Name, item.DDL, item.Error})[:32], Kind: c.kind, Name: item.Name, SourceName: item.Name, TargetName: item.Name, Schema: schema, DDL: item.DDL, SuggestedDDL: item.SuggestedDDL, Error: item.Error, Status: "failed", Legacy: true, OriginalStatus: "failed", OriginalError: item.Error, RequiresReview: true, Dependencies: []string{}, Units: []repair.Unit{}}
+			o.SourceDDL = item.SourceDDL
+			o.DiagnosticOnly = repairDiagnostic(item)
 			if item.Table != "" {
 				o.Table, o.SourceTable = item.Table, item.Table
 				o.ID = repair.Hash([]any{c.kind, i, item.Table, item.Name, item.DDL, item.Error})[:32]

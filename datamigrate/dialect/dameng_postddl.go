@@ -51,6 +51,14 @@ func (d *DaMengDialect) uniqueIndexName(idx source.IndexInfo) string {
 	return idx.TableName + "_" + idx.IndexName
 }
 
+// IndexName keeps report and repair object names aligned with the emitted DDL.
+func (d *DaMengDialect) IndexName(idx source.IndexInfo) string {
+	if idx.IsPrimary {
+		return idx.IndexName
+	}
+	return strings.ToUpper(d.uniqueIndexName(idx))
+}
+
 // ForeignKeyStatements 达梦外键 DDL。达梦/Oracle 不支持 ON UPDATE 子句,予以丢弃;
 // ON DELETE 仅在非 NO ACTION 时输出(NO ACTION 为默认,可省略)。
 func (d *DaMengDialect) ForeignKeyStatements(schema string, fk source.FKInfo) []Statement {

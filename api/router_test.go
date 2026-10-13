@@ -36,6 +36,19 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 }
 
+func TestRepairVerificationRoutesAreRemoved(t *testing.T) {
+	r, _ := setupRouterTest(t)
+	executionRegistered := false
+	for _, route := range r.Routes() {
+		require.NotEqual(t, "/api/migration/data-migrate/:jobID/repairs/:objectID/verify", route.Path)
+		require.NotEqual(t, "/api/migration/data-migrate/:jobID/repairs/:objectID/confirm-verification", route.Path)
+		if route.Path == "/api/migration/data-migrate/:jobID/repairs/:objectID/execute" && route.Method == http.MethodPost {
+			executionRegistered = true
+		}
+	}
+	require.True(t, executionRegistered)
+}
+
 func TestStaticSiteAndSPAFallback(t *testing.T) {
 	r, _ := setupRouterTest(t)
 

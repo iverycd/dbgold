@@ -17,24 +17,21 @@
       </div>
       <div class="report-stats">
         <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
-        <div><span>失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
+        <div><span>原始失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
       </div>
-      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" />
+      <div class="report-repair-summary" aria-live="polite">
+        <span>原始失败 {{ failedCount }} 项，</span>
+        <span v-if="repairSummary.state === 'loading'">修复状态加载中</span>
+        <span v-else-if="repairSummary.state === 'unknown'">修复状态未知，请在对象修复中刷新重试</span>
+        <template v-else>
+          <span>已修复 {{ repairSummary.repaired }} 项，</span>
+          <span>{{ repairSummary.attention ? `当前待处理 ${repairSummary.attention} 个对象` : '当前无待处理对象' }}</span>
+        </template>
+      </div>
       <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
-      <a-tabs default-active-key="overview" :destroy-on-hide="false">
-        <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
-          <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
-          <a-table :data="report.warnings" :pagination="{ pageSize: 20 }" size="small">
-            <template #columns>
-              <a-table-column title="表" data-index="table" />
-              <a-table-column title="列" data-index="column" />
-              <a-table-column title="原因" data-index="reason" />
-              <a-table-column title="数量" data-index="count" :width="100" />
-            </template>
-          </a-table>
-        </a-tab-pane>
+      <a-tabs v-model:active-key="activeTab" :lazy-load="false" :destroy-on-hide="false">
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
           <a-table
@@ -78,7 +75,15 @@
                   :key="item.key"
                   class="failure-item"
                 >
-                  <div class="failure-name">{{ item.name }}</div>
+                  <div class="failure-heading">
+                    <div class="failure-name">{{ item.nameLabel }}{{ item.name }}</div>
+                    <a-button type="text" size="mini" @click="goToRepair(record.key, item)">去修复</a-button>
+                  </div>
+                  <template v-if="record.key === 'indexes'">
+                    <div v-if="item.source_name" class="failure-context">源索引名称：{{ item.source_name }}</div>
+                    <div v-if="item.target_name" class="failure-context">{{ item.targetNameLabel }}{{ item.target_name }}</div>
+                    <div v-if="item.targetTableLabel" class="failure-context">目标表：{{ item.targetTableLabel }}</div>
+                  </template>
                   <div v-if="item.table" class="failure-context">所属表：{{ item.table }}</div>
                   <div class="failure-context">失败阶段：{{ item.stageLabel }}</div>
                   <div class="failure-error">失败原因：{{ item.error }}</div>
@@ -93,11 +98,28 @@
                     <span v-else style="color: #86909c">目标 DDL：{{ item.emptyDDLMessage }}</span>
                   </div>
                   <div v-if="item.source_ddl?.trim()" class="failure-source-ddl">
-                    <div class="ddl-header">
-                      <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">复制源端表定义</a-button>
-                      <span>{{ item.sourceDDLLabel }}</span>
-                    </div>
-                    <pre class="ddl-code">{{ item.source_ddl }}</pre>
+                    <template v-if="item.sourceIndexDDL">
+                      <div class="ddl-header">
+                        <a-button size="mini" type="text" @click="copyDDL(item.sourceIndexDDL)">复制源端索引定义</a-button>
+                        <span>源端失败索引定义（仅供参考，需适配目标库）：</span>
+                      </div>
+                      <pre class="ddl-code">{{ item.sourceIndexDDL }}</pre>
+                    </template>
+                    <details v-if="item.sourceIndexDDL" class="source-table-details">
+                      <summary>查看完整源端表定义</summary>
+                      <div class="ddl-header">
+                        <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">复制源端表定义</a-button>
+                        <span>{{ item.sourceDDLLabel }}</span>
+                      </div>
+                      <pre class="ddl-code">{{ item.source_ddl }}</pre>
+                    </details>
+                    <template v-else>
+                      <div class="ddl-header">
+                        <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">复制源端表定义</a-button>
+                        <span>{{ item.sourceDDLLabel }}</span>
+                      </div>
+                      <pre class="ddl-code">{{ item.source_ddl }}</pre>
+                    </template>
                   </div>
                   <div v-if="item.suggestion || item.suggested_ddl || item.column_renames?.length" class="failure-suggestion">
                     <div class="ddl-header"><span>{{ item.suggested_ddl || item.column_renames?.length ? '建议 DDL（手动创建）' : '处理建议' }}</span></div>
@@ -169,6 +191,24 @@
             </a-table>
           </template>
         </a-tab-pane>
+        <a-tab-pane key="repair">
+          <template #title>
+            对象修复
+            <a-badge v-if="repairSummary.state === 'ready' && repairSummary.attention > 0" :count="repairSummary.attention" style="margin-left: 6px" />
+          </template>
+          <MigrationRepairPanel ref="repairPanel" :jobID="jobID" @summary-change="updateRepairSummary" />
+        </a-tab-pane>
+        <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
+          <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
+          <a-table :data="report.warnings" :pagination="{ pageSize: 20 }" size="small">
+            <template #columns>
+              <a-table-column title="表" data-index="table" />
+              <a-table-column title="列" data-index="column" />
+              <a-table-column title="原因" data-index="reason" />
+              <a-table-column title="数量" data-index="count" :width="100" />
+            </template>
+          </a-table>
+        </a-tab-pane>
       </a-tabs>
       <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
         <a-collapse v-model:active-key="preflightActiveKeys">
@@ -186,6 +226,7 @@ import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
 import { reportCategories, formatReportCategories } from '@/utils/migrationReport'
+import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
@@ -200,12 +241,25 @@ const props = defineProps<{ jobID: string }>()
 const emit = defineEmits<{ loaded: [jobID: string, report: MigrationReport] }>()
 
 const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
+const activeTab = ref('overview')
+const repairSummary = ref<RepairSummary>({ jobID: props.jobID, state: 'loading', repaired: 0, attention: 0 })
 const report = ref<MigrationReport | null>(null)
 const loading = ref(false)
 const fetchError = ref('')
 const noReport = ref(false)
 const preflightSection = ref<HTMLElement | null>(null)
 const preflightActiveKeys = ref<string[]>([])
+
+function updateRepairSummary(summary: RepairSummary) {
+  if (summary.jobID === props.jobID) repairSummary.value = summary
+}
+async function goToRepair(kind: string, item: Omit<RepairFocusTarget, 'kind'>) {
+  const jobID = props.jobID
+  activeTab.value = 'repair'
+  await nextTick()
+  if (jobID !== props.jobID) return
+  await repairPanel.value?.focusObject({ ...item, kind })
+}
 
 async function showPreflight() {
   if (!report.value?.preflight) return
@@ -233,6 +287,8 @@ async function loadReport() {
   fetchError.value = ''
   noReport.value = false
   report.value = null
+  activeTab.value = 'overview'
+  repairSummary.value = { jobID, state: 'loading', repaired: 0, attention: 0 }
   preflightActiveKeys.value = []
   try {
     const res = await getDataMigrationReport(jobID)
@@ -333,6 +389,8 @@ onUnmounted(() => { reportRequest++ })
   font-weight: 600;
   margin-bottom: 4px;
 }
+.failure-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.report-repair-summary { margin: -8px 0 20px; color: var(--color-text-2); font-size: 13px; }
 .failure-error {
   color: #f53f3f;
   margin-bottom: 4px;
@@ -340,6 +398,8 @@ onUnmounted(() => { reportRequest++ })
 }
 .failure-suggestion { margin-top: 12px; }
 .failure-source-ddl { margin-top: 12px; }
+.source-table-details { margin-top: 12px; }
+.source-table-details summary { cursor: pointer; color: var(--color-text-2); margin-bottom: 8px; }
 .failure-context { color: var(--color-text-2); font-size: 13px; margin-bottom: 4px; overflow-wrap: anywhere; }
 .column-renames { padding-left: 20px; overflow-wrap: anywhere; }
 .ddl-header {

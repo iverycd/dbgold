@@ -196,7 +196,7 @@ func inspectOrdinaryTable(ctx context.Context, a repairTarget, schema, table str
 
 func repairDefinitionEdited(obj repair.Object) bool {
 	for _, u := range obj.Units {
-		if u.OriginalSQL != "" && u.SQL != u.OriginalSQL {
+		if strings.TrimSpace(u.SQL) != "" && (u.OriginalSQL == "" || u.SQL != u.OriginalSQL) {
 			return true
 		}
 	}
