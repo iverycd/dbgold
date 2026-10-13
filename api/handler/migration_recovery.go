@@ -28,6 +28,7 @@ func recoveryConfig(b *store.MigrationRepairBinding) (datamigrate.Config, error)
 	cfg.TargetSchema = b.TargetSchema
 	cfg.CaptureRepair = false
 	cfg.RepairSink = nil
+	cfg.RepairObjectSink = nil
 	cfg.IntraTableParallel = 1
 	return cfg, nil
 }

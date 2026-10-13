@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
@@ -19,9 +20,14 @@ type RepairManifest struct {
 	Objects []repair.Object `json:"objects"`
 }
 type repairRecorder struct {
-	mu      sync.Mutex
-	objects []repair.Object
-	sinkErr error
+	mu           sync.Mutex
+	objects      []repair.Object
+	sinkErr      error
+	saveDuration time.Duration
+	fullSaves    int
+	objectSaves  int
+	objectWrites int
+	saveFailures int
 }
 
 func repairID(kind, table, name string) string { return repair.Hash([]string{kind, table, name})[:32] }
@@ -43,22 +49,67 @@ func destructiveRepairUnit(s string) bool {
 func (m *Migrator) manifestLocked() RepairManifest {
 	cfg := m.cfg
 	cfg.RepairSink = nil
+	cfg.RepairObjectSink = nil
 	return RepairManifest{Version: 1, Config: cfg, Objects: slices.Clone(m.repairs.objects)}
 }
 func (m *Migrator) flushRepairsLocked() error {
 	if m.cfg.RepairSink == nil {
 		return nil
 	}
-	if err := m.cfg.RepairSink(m.manifestLocked()); err != nil {
-		m.repairs.sinkErr = err
-		return fmt.Errorf("保存迁移对象执行记录失败: %w", err)
+	started := time.Now()
+	err := m.cfg.RepairSink(m.manifestLocked())
+	m.repairs.saveDuration += time.Since(started)
+	if err != nil {
+		return m.recordRepairSaveErrorLocked(err)
 	}
+	m.repairs.fullSaves++
+	m.repairs.objectWrites += len(m.repairs.objects)
 	return nil
 }
+
+// Full checkpoints bind the configuration and complete object list. Progress
+// updates only persist the changed object; legacy callers retain full snapshots.
+func (m *Migrator) flushRepairObjectLocked(o repair.Object) error {
+	if m.cfg.RepairObjectSink == nil {
+		return m.flushRepairsLocked()
+	}
+	started := time.Now()
+	err := m.cfg.RepairObjectSink(o)
+	m.repairs.saveDuration += time.Since(started)
+	if err != nil {
+		return m.recordRepairSaveErrorLocked(err)
+	}
+	m.repairs.objectSaves++
+	m.repairs.objectWrites++
+	return nil
+}
+
+func (m *Migrator) recordRepairSaveErrorLocked(err error) error {
+	err = fmt.Errorf("保存迁移对象执行记录失败: %w", err)
+	if m.repairs.sinkErr == nil {
+		m.repairs.sinkErr = err
+	}
+	m.repairs.saveFailures++
+	return err
+}
+
 func (m *Migrator) beginRepair(ctx context.Context) {
 	m.repairs = &repairRecorder{}
+	started := time.Now()
+	defer func() {
+		if m.log != nil {
+			m.log.Infof("修复清单准备：%d 个对象，耗时 %s", len(m.repairs.objects), time.Since(started).Round(time.Millisecond))
+		}
+	}()
+	if m.cfg.RepairObjectSink != nil && m.cfg.RepairSink == nil {
+		m.repairs.sinkErr = fmt.Errorf("单对象修复记录保存需要配置完整清单保存回调")
+		return
+	}
 	tables, err := m.reader.ListTables(ctx)
 	if err != nil {
+		// Incremental writes cannot establish the initial inventory/binding.
+		// Retry with a fresh Run instead of executing after an incomplete plan.
+		m.repairs.sinkErr = fmt.Errorf("准备迁移修复清单失败（读取源表列表）: %w", err)
 		return
 	}
 	tables = FilterTables(tables, m.cfg.Mode, m.cfg.Filter)
@@ -97,7 +148,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			continue
 		}
 		selected[t] = true
-		info, e := m.reader.GetTableDDLInfo(ctx, t)
+		info, e := m.sourceTableDDLInfo(ctx, t)
 		o := repair.Object{Kind: "table", Name: t, SourceName: t, SourceTable: t, Table: m.objName(t), TargetName: m.objName(t), ColumnMapping: map[string]string{}, DataStatus: "pending"}
 		if m.cfg.Content == "schema_only" || m.cfg.objectMode() || len(m.cfg.ViewNames) > 0 {
 			o.DataStatus = "not_required"
@@ -363,7 +414,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	if o.Comment != nil {
 		old.Comment = o.Comment
 	}
-	if err := m.flushRepairsLocked(); err != nil {
+	if err := m.flushRepairObjectLocked(*old); err != nil {
 		old.Status = "failed"
 		old.Error = err.Error()
 		r.mu.Unlock()
@@ -374,6 +425,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	ctx = repair.WithObserver(ctx, func(e repair.Event) error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if e.Status == "running" && r.sinkErr != nil {
+			return r.sinkErr
+		}
 		item := &r.objects[idx]
 		unit := -1
 		for i, u := range item.Units {
@@ -399,11 +453,14 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		item.Units[unit].Status = e.Status
 		item.Units[unit].Error = e.Error
 		item.Units[unit].Selected = e.Status != "succeeded" && !item.Units[unit].Destructive
-		return m.flushRepairsLocked()
+		return m.flushRepairObjectLocked(*item)
 	})
 	err := fn(ctx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err == nil && r.sinkErr != nil {
+		err = r.sinkErr
+	}
 	item := &r.objects[idx]
 	item.Status = "succeeded"
 	item.Error = ""
@@ -427,7 +484,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 			item.Status = "unknown"
 		}
 	}
-	if e := m.flushRepairsLocked(); e != nil {
+	if e := m.flushRepairObjectLocked(*item); e != nil {
 		return e
 	}
 	return err
@@ -464,25 +521,34 @@ func (m *Migrator) repairComment(ctx context.Context, v source.CommentInfo) erro
 func (m *Migrator) repairView(ctx context.Context, v source.ViewInfo) error {
 	return m.captureRepairCall(ctx, repair.Object{Kind: "view", Name: v.ViewName, TargetName: v.ViewName}, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateView(c, v) })
 }
-func (m *Migrator) repairViewDependencies(name string, dependencies []string) {
+func (m *Migrator) repairViewDependencies(name string, dependencies []string) error {
 	if m.repairs == nil {
-		return
+		return nil
 	}
 	m.repairs.mu.Lock()
 	defer m.repairs.mu.Unlock()
+	if m.repairs.sinkErr != nil {
+		return m.repairs.sinkErr
+	}
 	for i := range m.repairs.objects {
 		o := &m.repairs.objects[i]
 		if o.Kind != "view" || o.TargetName != m.objName(name) {
 			continue
 		}
+		changed := false
 		for _, dep := range dependencies {
 			for _, candidate := range m.repairs.objects {
 				if (candidate.Kind == "table" || candidate.Kind == "view") && candidate.TargetName == m.objName(dep) && !slices.Contains(o.Dependencies, candidate.ID) {
 					o.Dependencies = append(o.Dependencies, candidate.ID)
+					changed = true
 				}
 			}
 		}
+		if changed {
+			return m.flushRepairObjectLocked(*o)
+		}
 	}
+	return nil
 }
 func (m *Migrator) repairOwner(ctx context.Context, kind, name, owner string) error {
 	ss := m.repairOwnerStatements(kind, name, owner)
@@ -662,13 +728,22 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 		r.objects[i].OriginalStatus = r.objects[i].Status
 		r.objects[i].OriginalError = r.objects[i].Error
 	}
-	if err := m.flushRepairsLocked(); err != nil {
+	// A later successful checkpoint must not hide a failed synchronous save,
+	// including owner/distribution calls whose callers only emit a warning.
+	saveErr := m.flushRepairsLocked()
+	if saveErr == nil {
+		saveErr = r.sinkErr
+	}
+	if saveErr != nil {
 		report.Data.Failed++
 		report.Data.Total++
-		report.Data.Items = append(report.Data.Items, ObjectResult{Name: "修复记录持久化", Error: err.Error()})
+		report.Data.Items = append(report.Data.Items, ObjectResult{Name: "修复记录持久化", Error: saveErr.Error()})
 	}
 	manifest := m.manifestLocked()
 	report.RepairManifest = &manifest
+	if m.log != nil {
+		m.log.Infof("修复记录保存：耗时 %s，全量检查点 %d 次，单对象保存 %d 次，对象写入 %d 条，保存失败 %d 次", r.saveDuration.Round(time.Millisecond), r.fullSaves, r.objectSaves, r.objectWrites, r.saveFailures)
+	}
 }
 
 func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object {

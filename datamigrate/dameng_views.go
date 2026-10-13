@@ -129,7 +129,10 @@ func (m *Migrator) migrateDamengMappedViews(ctx context.Context, views []source.
 				continue
 			}
 			converted, err := tsqldameng.MappedView(v.Definition, m.cfg.TargetSchema, m.damengSourceSchema(), m.isSQLServerDameng(), catalog)
-			m.repairViewDependencies(v.ViewName, converted.Dependencies)
+			if saveErr := m.repairViewDependencies(v.ViewName, converted.Dependencies); saveErr != nil {
+				failure(v, saveErr)
+				continue
+			}
 			wait := false
 			for _, dep := range converted.Dependencies {
 				dk := strings.ToUpper(dep)

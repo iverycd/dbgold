@@ -10,14 +10,18 @@ import (
 	"time"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
 )
 
 // Config 迁移任务配置
 type Config struct {
-	CaptureRepair      bool                       `json:"CaptureRepair,omitempty"`
-	RepairSink         func(RepairManifest) error `json:"-"`
+	CaptureRepair bool                       `json:"CaptureRepair,omitempty"`
+	RepairSink    func(RepairManifest) error `json:"-"`
+	// RepairObjectSink synchronously saves execution progress. It requires
+	// RepairSink for full checkpoints; nil retains the legacy full-save behavior.
+	RepairObjectSink   func(repair.Object) error `json:"-"`
 	ExcludedObjects    []ObjectRef
 	ViewNames          []string
 	PageSize           int
@@ -51,6 +55,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	sourceDDLCache sourceTableDDLCache
 	repairs        *repairRecorder
 	dmPlans        map[string]*damengTablePlan
 	dmBlocked      map[string]bool
@@ -163,6 +168,8 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.resetSourceTableDDLCache()
+	defer m.clearSourceTableDDLCache()
 	if !m.cfg.CaptureRepair {
 		return m.run(ctx)
 	}
@@ -432,7 +439,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 	if p := m.dmPlans[table]; p != nil {
 		info = p.target
 	} else {
-		info, err = m.reader.GetTableDDLInfo(ctx, table)
+		info, err = m.sourceTableDDLInfo(ctx, table)
 	}
 	if err != nil {
 		return nil, "", err

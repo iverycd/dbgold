@@ -123,6 +123,7 @@ func initialRepairBinding(j *store.DataMigrationJob, cfgJSON string, legacy bool
 func persistMigrationManifest(j *store.DataMigrationJob, src, dst *store.Connection, m datamigrate.RepairManifest) error {
 	cfg := m.Config
 	cfg.RepairSink = nil
+	cfg.RepairObjectSink = nil
 	cfg.CaptureRepair = false
 	b := initialRepairBinding(j, repairJSON(cfg), false)
 	b.SourceFingerprint = connectionFingerprint(src)
@@ -133,14 +134,25 @@ func persistMigrationManifest(j *store.DataMigrationJob, src, dst *store.Connect
 			return e
 		}
 		for _, o := range m.Objects {
-			row := store.MigrationRepairObject{JobID: j.JobID, ObjectID: o.ID, ObjectJSON: repairJSON(o), Version: 1}
-			if e := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "job_id"}, {Name: "object_id"}}, DoUpdates: clause.AssignmentColumns([]string{"object_json", "updated_at"})}).Create(&row).Error; e != nil {
+			if e := upsertMigrationRepairObject(tx, j.JobID, o); e != nil {
 				return e
 			}
 		}
 		return nil
 	})
 }
+
+// Progress updates persist only the changed object. Binding/configuration and
+// the complete inventory are saved by the initial and final manifest writes.
+func persistMigrationRepairObject(jobID string, o repair.Object) error {
+	return upsertMigrationRepairObject(store.DB, jobID, o)
+}
+
+func upsertMigrationRepairObject(db *gorm.DB, jobID string, o repair.Object) error {
+	row := store.MigrationRepairObject{JobID: jobID, ObjectID: o.ID, ObjectJSON: repairJSON(o), Version: 1}
+	return db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "job_id"}, {Name: "object_id"}}, DoUpdates: clause.AssignmentColumns([]string{"object_json", "updated_at"})}).Create(&row).Error
+}
+
 func ensureRepairLedger(j *store.DataMigrationJob) error {
 	if _, e := store.GetMigrationRepairBinding(j.JobID); e == nil {
 		return nil
@@ -160,7 +172,10 @@ func ensureRepairLedger(j *store.DataMigrationJob) error {
 	legacy := true
 	if report.RepairManifest != nil {
 		objects = report.RepairManifest.Objects
-		cfg = repairJSON(report.RepairManifest.Config)
+		reportConfig := report.RepairManifest.Config
+		reportConfig.RepairSink = nil
+		reportConfig.RepairObjectSink = nil
+		cfg = repairJSON(reportConfig)
 		legacy = false
 	}
 	b := initialRepairBinding(j, cfg, legacy)
@@ -347,6 +362,7 @@ func UpdateMigrationRepairBinding(c *gin.Context) {
 		cfg.TargetDBType = j.DstDBType
 		cfg.CaptureRepair = false
 		cfg.RepairSink = nil
+		cfg.RepairObjectSink = nil
 		b.ConfigJSON = repairJSON(cfg)
 		b.Configured = true
 	}
@@ -944,6 +960,7 @@ func prepareMigrationRepair(ctx context.Context, j *store.DataMigrationJob, src,
 		return nil, e
 	}
 	cfg.RepairSink = func(m datamigrate.RepairManifest) error { return persistMigrationManifest(j, src, dst, m) }
+	cfg.RepairObjectSink = func(o repair.Object) error { return persistMigrationRepairObject(j.JobID, o) }
 	return func() {
 		if e := store.ReleaseMigrationScope(scope, j.JobID); e != nil {
 			slog.Error("release migration target lock", "job", j.JobID, "err", e)

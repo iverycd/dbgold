@@ -137,6 +137,7 @@ func recoveryName(cfg Config, dst, src, s string) string {
 func recoveryFingerprint(cfg Config, p repair.RecoveryPreview) string {
 	p.Fingerprint = ""
 	cfg.RepairSink = nil
+	cfg.RepairObjectSink = nil
 	return repair.Hash(struct {
 		Config  Config
 		Preview repair.RecoveryPreview
