@@ -551,7 +551,7 @@ func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Obje
 	switch {
 	case o.Index != nil:
 		v := *o.Index
-		if v.Definition != "" {
+		if v.Unsupported != "" || v.Definition != "" {
 			return o
 		}
 		v.Columns = names(v.Columns)

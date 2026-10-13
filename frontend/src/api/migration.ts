@@ -115,7 +115,10 @@ export const createDataMigrateEventSource = (jobID: string): EventSource => {
 
 export interface ObjectResult {
   name: string
+  table?: string
+  stage?: 'metadata' | 'unsupported' | 'execute'
   ddl: string
+  source_ddl?: string
   error: string
   suggested_ddl?: string
   suggestion?: string
@@ -124,6 +127,7 @@ export interface ObjectResult {
 
 export interface CategoryReport {
   total: number
+  total_unknown?: boolean
   success: number
   failed: number
   items: ObjectResult[]

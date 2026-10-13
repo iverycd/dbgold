@@ -149,7 +149,11 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			kind = "primary_key"
 		}
 		name := dialect.IndexName(m.writer.Dialect(), v)
-		add(repair.Object{Kind: kind, Name: name, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: name, Index: &v}, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v))
+		var ss []dialect.Statement
+		if v.Unsupported == "" {
+			ss = m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v)
+		}
+		add(repair.Object{Kind: kind, Name: name, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: name, Index: &v, Error: v.Unsupported}, ss)
 	}
 	if want("primary_keys") {
 		if values, e := m.reader.GetPrimaryKeys(ctx); e == nil {
@@ -437,7 +441,11 @@ func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) error {
 		k = "primary_key"
 	}
 	n := dialect.IndexName(m.writer.Dialect(), v)
-	return m.captureRepairCall(ctx, repair.Object{Kind: k, Name: n, Table: v.TableName, TargetName: n, Index: &v}, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateIndex(c, v) })
+	o := repair.Object{Kind: k, Name: n, Table: v.TableName, TargetName: n, Index: &v}
+	if v.Unsupported != "" {
+		return m.captureRepairCall(ctx, o, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
+	}
+	return m.captureRepairCall(ctx, o, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateIndex(c, v) })
 }
 func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, owner string) error {
 	n := dialect.SequenceName(m.writer.Dialect(), v)
@@ -621,23 +629,33 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			}
 		}
 
-		found := false
+		match := -1
 		for i := range r.objects {
 			o := &r.objects[i]
-			if o.Kind == legacy.Kind && (o.Name == legacy.Name || o.SourceName == legacy.Name || o.TargetName == legacy.Name || o.DDL == legacy.DDL && legacy.DDL != "") {
-				found = true
-				if o.Status == "pending" || o.Status == "blocked" {
-					o.Status = "failed"
-					o.Error = legacy.Error
+			if o.Kind != legacy.Kind || legacy.Table != "" && legacy.Table != o.SourceTable && legacy.Table != o.Table {
+				continue
+			}
+			if o.Name == legacy.Name || o.SourceName == legacy.Name || o.TargetName == legacy.Name || o.DDL == legacy.DDL && legacy.DDL != "" {
+				// Older reports omit the table. Keep an ambiguous failure separate
+				// instead of assigning it to the first same-named index.
+				if match >= 0 {
+					match = -1
+					break
 				}
-				if legacy.SuggestedDDL != "" {
-					o.SuggestedDDL = legacy.SuggestedDDL
-				}
-				break
+				match = i
 			}
 		}
-		if !found {
+		if match < 0 {
 			r.objects = append(r.objects, legacy)
+		} else {
+			o := &r.objects[match]
+			if o.Status == "pending" || o.Status == "blocked" {
+				o.Status = "failed"
+				o.Error = legacy.Error
+			}
+			if legacy.SuggestedDDL != "" {
+				o.SuggestedDDL = legacy.SuggestedDDL
+			}
 		}
 	}
 	for i := range r.objects {
@@ -665,6 +683,10 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 				continue
 			}
 			o := repair.Object{ID: repair.Hash([]any{c.kind, i, item.Name, item.DDL, item.Error})[:32], Kind: c.kind, Name: item.Name, SourceName: item.Name, TargetName: item.Name, Schema: schema, DDL: item.DDL, SuggestedDDL: item.SuggestedDDL, Error: item.Error, Status: "failed", Legacy: true, OriginalStatus: "failed", OriginalError: item.Error, RequiresReview: true, Dependencies: []string{}, Units: []repair.Unit{}}
+			if item.Table != "" {
+				o.Table, o.SourceTable = item.Table, item.Table
+				o.ID = repair.Hash([]any{c.kind, i, item.Table, item.Name, item.DDL, item.Error})[:32]
+			}
 			if c.kind == "table" || c.kind == "data" {
 				o.Table = item.Name
 				o.SourceTable = item.Name

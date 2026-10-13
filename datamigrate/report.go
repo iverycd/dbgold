@@ -10,7 +10,10 @@ import (
 // ObjectResult 单个失败对象的详情
 type ObjectResult struct {
 	Name          string                       `json:"name"`
+	Table         string                       `json:"table,omitempty"` // Original source table name.
+	Stage         string                       `json:"stage,omitempty"` // metadata | unsupported | execute
 	DDL           string                       `json:"ddl"`
+	SourceDDL     string                       `json:"source_ddl,omitempty"` // Source definition for reference, never executable target SQL.
 	Error         string                       `json:"error"`
 	SuggestedDDL  string                       `json:"suggested_ddl,omitempty"`
 	Suggestion    string                       `json:"suggestion,omitempty"`
@@ -31,10 +34,19 @@ func objectResultForError(name, ddl string, err error) ObjectResult {
 
 // CategoryReport 一类对象的迁移统计
 type CategoryReport struct {
-	Total   int            `json:"total"`
-	Success int            `json:"success"`
-	Failed  int            `json:"failed"`
-	Items   []ObjectResult `json:"items"`
+	TotalUnknown bool           `json:"total_unknown,omitempty"`
+	Total        int            `json:"total"`
+	Success      int            `json:"success"`
+	Failed       int            `json:"failed"`
+	Items        []ObjectResult `json:"items"`
+}
+
+// A metadata failure is one failure event, not one discovered database object.
+// Keep Failed nonzero for existing job-status and report consumers.
+func recordMetadataFailure(category *CategoryReport, err error) {
+	category.TotalUnknown = true
+	category.Failed++
+	category.Items = append(category.Items, ObjectResult{Name: "元数据读取", Stage: "metadata", Error: err.Error()})
 }
 
 // MigrationReport 完整迁移报告

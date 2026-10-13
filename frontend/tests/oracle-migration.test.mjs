@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -82,6 +83,7 @@ test('report export includes Oracle warnings and still accepts historical report
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
   const panel = execute(`${descriptor.scriptSetup.content}\nexport { report, exportReport };`, name => {
     if (name === '@/utils/autoRepairs') return autoRepairUtils
+    if (name === '@/utils/migrationReport') return migrationReportUtils
     if (name === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
     return {}
   }, {

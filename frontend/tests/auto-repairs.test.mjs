@@ -8,6 +8,7 @@ import { parse } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 const repairs = [
   { type: 'column_rename', table: 'gj_data', target_table: 'APP.GJ_DATA', source: 'ROWID', target: 'ROW_ID_2', reason: '达梦禁用列名', status: 'applied' },
@@ -27,6 +28,7 @@ function execute(path, exported, props = {}) {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'job-repairs' } }), useRouter: () => ({}) }
       if (id === '@/utils/autoRepairs') return autoRepairUtils
+      if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/api/migration' || id === '@/utils/clipboard') return {}
       if (id === '@arco-design/web-vue') return { Message: {} }
       throw new Error(`Unexpected import ${id}`)

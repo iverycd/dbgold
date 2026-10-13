@@ -662,9 +662,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		pks, err := m.reader.GetPrimaryKeys(ctx)
 		if err != nil {
 			m.log.Errorf("获取主键信息失败: %v", err)
-			report.PrimaryKeys.Total++
-			report.PrimaryKeys.Failed++
-			report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.PrimaryKeys, err)
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(pks))
 			for _, pk := range pks {
@@ -711,9 +709,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		seqs, err := m.reader.GetSequences(ctx)
 		if err != nil {
 			m.log.Errorf("获取序列信息失败: %v", err)
-			report.Sequences.Total++
-			report.Sequences.Failed++
-			report.Sequences.Items = append(report.Sequences.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.Sequences, err)
 		} else {
 			filtered := make([]source.SequenceInfo, 0, len(seqs))
 			for _, seq := range seqs {
@@ -760,9 +756,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		indexes, err := m.reader.GetIndexes(ctx)
 		if err != nil {
 			m.log.Errorf("获取索引信息失败: %v", err)
-			report.Indexes.Total++
-			report.Indexes.Failed++
-			report.Indexes.Items = append(report.Indexes.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.Indexes, err)
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(indexes))
 			for _, idx := range indexes {
@@ -771,6 +765,13 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 			}
 			report.Indexes.Total = len(filtered)
+			// Fetch original definitions only for selected unsupported indexes, once
+			// per table. Source SQL is reference material, never a target DDL unit.
+			type sourceDefinition struct {
+				ddl string
+				err error
+			}
+			sourceDefinitions := map[string]sourceDefinition{}
 			for _, idx := range filtered {
 				if ctx.Err() != nil {
 					return
@@ -784,15 +785,39 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				idxCopy.Columns = cols
 				indexName := dialect.IndexName(m.writer.Dialect(), idxCopy)
-				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
+				ddl, stage := "", "execute"
+				if idx.Unsupported == "" {
+					ddl = dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
+				} else {
+					stage = "unsupported"
+				}
 				if err := m.repairIndex(ctx, idxCopy); err != nil {
-					m.log.Errorf("创建索引失败 [%s]: %v", indexName, err)
+					m.log.Errorf("迁移索引失败 [%s.%s]: %v", idx.TableName, idx.IndexName, err)
 					report.Indexes.Failed++
-					report.Indexes.Items = append(report.Indexes.Items, ObjectResult{
+					result := ObjectResult{
 						Name:  indexName,
+						Table: idx.TableName,
+						Stage: stage,
 						DDL:   ddl,
 						Error: err.Error(),
-					})
+					}
+					if stage == "unsupported" {
+						result.Suggestion = "请根据源端定义手工适配目标库后创建索引。"
+						if reader, ok := m.reader.(interface {
+							GetTableSourceDDL(context.Context, string) (string, error)
+						}); ok {
+							definition, loaded := sourceDefinitions[idx.TableName]
+							if !loaded {
+								definition.ddl, definition.err = reader.GetTableSourceDDL(ctx, idx.TableName)
+								sourceDefinitions[idx.TableName] = definition
+							}
+							result.SourceDDL = definition.ddl
+							if definition.err != nil {
+								result.Suggestion += fmt.Sprintf("源端表定义读取失败：%v，请从源库手动获取。", definition.err)
+							}
+						}
+					}
+					report.Indexes.Items = append(report.Indexes.Items, result)
 				} else {
 					m.log.Indexf("创建索引 %s ... OK", indexName)
 					report.Indexes.Success++
@@ -809,9 +834,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
 			m.log.Errorf("获取外键信息失败: %v", err)
-			report.Constraints.Total++
-			report.Constraints.Failed++
-			report.Constraints.Items = append(report.Constraints.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.Constraints, err)
 		} else {
 			filtered := make([]source.FKInfo, 0, len(fks))
 			for _, fk := range fks {
@@ -878,9 +901,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		views, err := m.readViews(ctx)
 		if err != nil {
 			m.log.Errorf("获取视图信息失败: %v", err)
-			report.Views.Total++
-			report.Views.Failed++
-			report.Views.Items = append(report.Views.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.Views, err)
 		} else {
 			report.Views.Total = len(views)
 			if m.hasDamengRenames() {
@@ -919,9 +940,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		comments, err := m.reader.GetComments(ctx)
 		if err != nil {
 			m.log.Errorf("获取注释信息失败: %v", err)
-			report.Comments.Total++
-			report.Comments.Failed++
-			report.Comments.Items = append(report.Comments.Items, ObjectResult{Name: "元数据读取", Error: err.Error()})
+			recordMetadataFailure(&report.Comments, err)
 		} else {
 			matched := 0
 			for _, cm := range comments {

@@ -566,15 +566,17 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	indexMap := map[string]*IndexInfo{}
-	var order []string
+	type indexKey struct{ table, name string }
+	indexMap := map[indexKey]*IndexInfo{}
+	var order []indexKey
 	for rows.Next() {
-		var table, idxName, col string
+		var table, idxName string
+		var col sql.NullString
 		var nonUnique int
 		if err := rows.Scan(&table, &idxName, &col, &nonUnique); err != nil {
 			return nil, err
 		}
-		key := table + "." + idxName
+		key := indexKey{table: table, name: idxName}
 		if _, ok := indexMap[key]; !ok {
 			indexMap[key] = &IndexInfo{
 				TableName: table,
@@ -583,13 +585,36 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			}
 			order = append(order, key)
 		}
-		indexMap[key].Columns = append(indexMap[key].Columns, col)
+		idx := indexMap[key]
+		if !col.Valid {
+			// MySQL 函数/表达式索引的 COLUMN_NAME 为 NULL。整条索引不能
+			// 降级为仅包含普通列的索引，也不能阻断其他索引的元数据读取。
+			idx.Unsupported = "暂不支持 MySQL 函数/表达式索引的自动转换，请根据源端定义手工适配"
+			idx.Columns = nil
+		} else if idx.Unsupported == "" {
+			idx.Columns = append(idx.Columns, col.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	result := make([]IndexInfo, 0, len(order))
 	for _, k := range order {
 		result = append(result, *indexMap[k])
 	}
-	return result, rows.Err()
+	return result, nil
+}
+
+// GetTableSourceDDL 按需读取源表完整定义，供无法自动转换的对象人工适配。
+// 返回 SHOW CREATE TABLE 的原始 DDL，不做大小写或目标方言转换。
+func (r *MySQLReader) GetTableSourceDDL(ctx context.Context, table string) (string, error) {
+	query := fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`",
+		strings.ReplaceAll(r.dbName, "`", "``"), strings.ReplaceAll(table, "`", "``"))
+	var name, ddl string
+	if err := r.queryRowContext(ctx, query).Scan(&name, &ddl); err != nil {
+		return "", err
+	}
+	return ddl, nil
 }
 
 func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {

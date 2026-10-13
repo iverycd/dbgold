@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -27,6 +28,7 @@ function harness() {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === '@/api/migration') return {}
       if (id === '@/utils/autoRepairs') return autoRepairUtils
+      if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/clipboard') return { copyText: async value => copied.push(value) }
       if (id === '@arco-design/web-vue') return { Message: { success() {}, error: msg => assert.fail(msg) } }
       throw new Error(`Unexpected import ${id}`)
@@ -120,5 +122,51 @@ test('incomplete suggestion shows the reason and renames without a copy button',
     assert.match(html, /无法生成完整建议 DDL/)
     assert.match(html, /SRC_ROWID/)
     assert.ok(!h.clicks.some(c => c.label === '复制建议 DDL'))
+  } finally { scope.stop() }
+})
+
+test('unsupported index renders and copies source definition separately from target DDL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const sourceDDL = 'CREATE TABLE `Orders` (`id` int, KEY `idx_expr` ((abs(`id`))))'
+    h.p.report.value = report({ name: 'idx_expr', table: 'Orders', stage: 'unsupported', ddl: '',
+      source_ddl: sourceDDL, error: '表达式索引暂不支持自动转换',
+      suggestion: '请参考源端表定义，手动适配目标库索引。',
+    })
+    const html = await renderToString(h.app)
+    assert.match(html, /所属表：Orders/)
+    assert.match(html, /失败阶段：不支持自动转换/)
+    assert.match(html, /目标 DDL：该对象暂不支持自动转换，未生成目标 DDL。/)
+    assert.match(html, /源端表定义（仅供参考，需适配目标库）/)
+    assert.match(html, /处理建议/)
+    assert.doesNotMatch(html, /建议 DDL（手动创建）/)
+    const copy = h.clicks.find(c => c.label === '复制源端表定义')
+    assert.ok(copy)
+    assert.ok(!h.clicks.some(c => c.label === '复制 DDL'))
+    await copy.handler()
+    assert.deepEqual(h.copied, [sourceDDL])
+    await h.p.exportReport()
+    const text = await h.downloads[0].text()
+    assert.ok(text.includes(sourceDDL))
+    assert.match(text, /源端表定义（仅供参考，需适配目标库）：/)
+    assert.match(text, /失败阶段：不支持自动转换/)
+  } finally { scope.stop() }
+})
+
+test('legacy metadata failure explains absent DDL and keeps counting failure events', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    h.p.report.value = report({ name: '元数据读取', ddl: '', error: 'converting NULL to string is unsupported' })
+    const html = await renderToString(h.app)
+    assert.match(html, /元数据读取失败，尚未生成目标 DDL。/)
+    assert.doesNotMatch(html, /DDL：—/)
+    assert.equal(h.p.tableRows.value[0].totalLabel, '未知')
+    assert.equal(h.p.tableRows.value[0].failedLabel, '未知')
+    assert.equal(h.p.failedCount.value, 1)
+    assert.ok(!h.clicks.some(c => c.label.includes('复制')))
+    await h.p.exportReport()
+    assert.match(await h.downloads[0].text(), /总计 未知\s+成功 0\s+失败 未知/)
   } finally { scope.stop() }
 })

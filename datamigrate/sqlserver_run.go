@@ -273,7 +273,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			indexes, err = m.reader.GetIndexes(ctx)
 		}
 		if err != nil {
-			sqlServerResult(category, "元数据读取", "", err)
+			recordMetadataFailure(category, err)
 			continue
 		}
 		for _, i := range indexes {
@@ -282,19 +282,31 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			}
 			original := i.TableName
 			i = normIndex(i)
-			ss := dia.IndexStatements(m.cfg.TargetSchema, i)
+			var ss []dialect.Statement
+			if i.Unsupported == "" {
+				ss = dia.IndexStatements(m.cfg.TargetSchema, i)
+			}
+			stage := ""
 			err = dependency(original)
 			if err == nil {
+				stage = "execute"
+				if i.Unsupported != "" {
+					stage = "unsupported"
+				}
 				err = m.repairIndex(ctx, i)
 			}
-			sqlServerResult(category, i.TableName+"."+i.IndexName, dialect.JoinSQL(ss), err)
+			sqlServerResult(category, i.IndexName, dialect.JoinSQL(ss), err)
+			if err != nil {
+				item := &category.Items[len(category.Items)-1]
+				item.Table, item.Stage = original, stage
+			}
 		}
 	}
 	// Seed correction is also needed after append, even when other DDL is off.
 	if want("sequences") || !m.cfg.objectMode() && m.cfg.Content == "data_only" {
 		seqs, err := m.reader.GetSequences(ctx)
 		if err != nil {
-			sqlServerResult(&report.Sequences, "元数据读取", "", err)
+			recordMetadataFailure(&report.Sequences, err)
 		} else {
 			for _, s := range seqs {
 				if !eligible(s.TableName) {
@@ -315,7 +327,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if want("foreign_keys") {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
-			sqlServerResult(&report.Constraints, "元数据读取", "", err)
+			recordMetadataFailure(&report.Constraints, err)
 		} else {
 			for _, f := range fks {
 				if !eligible(f.TableName) {
@@ -348,7 +360,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if want("comments") {
 		comments, err := m.reader.GetComments(ctx)
 		if err != nil {
-			sqlServerResult(&report.Comments, "元数据读取", "", err)
+			recordMetadataFailure(&report.Comments, err)
 		} else {
 			for _, c := range comments {
 				if !eligible(c.TableName) {
@@ -402,7 +414,7 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 	}
 	views, e := m.reader.GetViews(ctx)
 	if e != nil {
-		sqlServerResult(category, "元数据读取", "", e)
+		recordMetadataFailure(category, e)
 		return
 	}
 	if infos == nil {
@@ -417,7 +429,7 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 	}
 	allTables, e := m.reader.ListTables(ctx)
 	if e != nil {
-		sqlServerResult(category, "元数据读取", "", e)
+		recordMetadataFailure(category, e)
 		return
 	}
 	type plan struct {

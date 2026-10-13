@@ -428,6 +428,24 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	if m.cfg.Content != "data_only" {
 		m.log.Info("=== 创建 Oracle 主键、自增、索引、外键和注释 ===")
 		d := m.writer.Dialect().(*dialect.OracleDialect)
+		sourceTables := map[string]string{}
+		for _, table := range p.tables {
+			sourceTables[m.objName(table)] = table
+		}
+		recordIndex := func(category *CategoryReport, i source.IndexInfo) {
+			ddl, stage := "", "execute"
+			if i.Unsupported == "" {
+				ddl = dialect.JoinSQL(d.IndexStatements(m.cfg.TargetSchema, i))
+			} else {
+				stage = "unsupported"
+			}
+			err := m.repairIndex(ctx, i)
+			m.recordOracleResult(category, d.IndexName(i), ddl, err)
+			if err != nil {
+				item := &category.Items[len(category.Items)-1]
+				item.Table, item.Stage = sourceTables[i.TableName], stage
+			}
+		}
 		for _, i := range p.pks {
 			if ctx.Err() != nil {
 				return report
@@ -435,8 +453,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[i.TableName] {
 				continue
 			}
-			e := m.repairIndex(ctx, i)
-			m.recordOracleResult(&report.PrimaryKeys, d.IndexName(i), dialect.JoinSQL(d.IndexStatements(m.cfg.TargetSchema, i)), e)
+			recordIndex(&report.PrimaryKeys, i)
 		}
 		for _, s := range p.sequences {
 			if ctx.Err() != nil {
@@ -456,8 +473,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if failed[i.TableName] {
 				continue
 			}
-			e := m.repairIndex(ctx, i)
-			m.recordOracleResult(&report.Indexes, d.IndexName(i), dialect.JoinSQL(d.IndexStatements(m.cfg.TargetSchema, i)), e)
+			recordIndex(&report.Indexes, i)
 		}
 		for _, f := range p.fks {
 			if ctx.Err() != nil {

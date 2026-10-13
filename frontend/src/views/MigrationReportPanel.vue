@@ -16,7 +16,7 @@
         </a-button>
       </div>
       <div class="report-stats">
-        <div><span>迁移表数</span><strong>{{ report.tables.total }}</strong></div>
+        <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
         <div><span>失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
@@ -48,7 +48,7 @@
           >
             <template #columns>
               <a-table-column title="对象类型" data-index="label" :width="120" />
-              <a-table-column title="总数" data-index="total" :width="80" />
+              <a-table-column title="总数" data-index="totalLabel" :width="80" />
               <a-table-column title="成功" :width="80">
                 <template #cell="{ record }">
                   <span v-if="record.isTrigger">—</span>
@@ -58,7 +58,7 @@
               <a-table-column title="失败" :width="80">
                 <template #cell="{ record }">
                   <span v-if="record.isTrigger">—</span>
-                  <span v-else :style="record.failed > 0 ? 'color: #f53f3f' : ''">{{ record.failed }}</span>
+                  <span v-else :style="record.failed > 0 ? 'color: #f53f3f' : ''">{{ record.failedLabel }}</span>
                 </template>
               </a-table-column>
               <a-table-column title="状态">
@@ -66,9 +66,7 @@
                   <span v-if="record.isTrigger" style="color: #86909c">
                     ⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）
                   </span>
-                  <a-tag v-else-if="record.failed > 0" color="orange">⚠ 部分失败</a-tag>
-                  <a-tag v-else-if="record.total === 0" color="gray">无对象</a-tag>
-                  <a-tag v-else color="green">✓ 全部成功</a-tag>
+                  <a-tag v-else :color="record.statusColor">{{ record.statusLabel }}</a-tag>
                 </template>
               </a-table-column>
             </template>
@@ -77,23 +75,32 @@
               <div class="failure-list">
                 <div
                   v-for="item in record.items"
-                  :key="item.name"
+                  :key="item.key"
                   class="failure-item"
                 >
                   <div class="failure-name">{{ item.name }}</div>
+                  <div v-if="item.table" class="failure-context">所属表：{{ item.table }}</div>
+                  <div class="failure-context">失败阶段：{{ item.stageLabel }}</div>
                   <div class="failure-error">失败原因：{{ item.error }}</div>
                   <div class="failure-ddl">
-                    <template v-if="item.ddl">
+                    <template v-if="item.ddl?.trim()">
                       <div class="ddl-header">
                         <a-button size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
-                        <span>DDL：</span>
+                        <span>目标 DDL：</span>
                       </div>
                       <pre class="ddl-code">{{ item.ddl }}</pre>
                     </template>
-                    <span v-else style="color: #86909c">DDL：—</span>
+                    <span v-else style="color: #86909c">目标 DDL：{{ item.emptyDDLMessage }}</span>
+                  </div>
+                  <div v-if="item.source_ddl?.trim()" class="failure-source-ddl">
+                    <div class="ddl-header">
+                      <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">复制源端表定义</a-button>
+                      <span>{{ item.sourceDDLLabel }}</span>
+                    </div>
+                    <pre class="ddl-code">{{ item.source_ddl }}</pre>
                   </div>
                   <div v-if="item.suggestion || item.suggested_ddl || item.column_renames?.length" class="failure-suggestion">
-                    <div class="ddl-header"><span>建议 DDL（手动创建）</span></div>
+                    <div class="ddl-header"><span>{{ item.suggested_ddl || item.column_renames?.length ? '建议 DDL（手动创建）' : '处理建议' }}</span></div>
                     <a-alert v-if="item.suggestion" type="warning">{{ item.suggestion }}</a-alert>
                     <ul v-if="item.column_renames?.length" class="column-renames">
                       <li v-for="(rename, index) in item.column_renames" :key="index">
@@ -178,13 +185,13 @@
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
+import { reportCategories, formatReportCategories } from '@/utils/migrationReport'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   getDataMigrationReport,
   type MigrationReport,
-  type ObjectResult,
   type TableRowCount,
 } from '@/api/migration'
 import { copyText } from '@/utils/clipboard'
@@ -209,39 +216,7 @@ async function showPreflight() {
 }
 defineExpose({ showPreflight })
 
-interface ReportRow {
-  key: string
-  label: string
-  total: number
-  success: number
-  failed: number
-  items: ObjectResult[]
-  isTrigger: boolean
-}
-
-const tableRows = computed<ReportRow[]>(() => {
-  if (!report.value) return []
-  const r = report.value
-  return [
-    { key: 'tables', label: '表', ...r.tables, isTrigger: false },
-    { key: 'data', label: '数据写入', ...r.data, isTrigger: false },
-    { key: 'primaryKeys', label: '主键', ...r.primaryKeys, isTrigger: false },
-    { key: 'views', label: '视图', ...r.views, isTrigger: false },
-    { key: 'indexes', label: '索引', ...r.indexes, isTrigger: false },
-    { key: 'constraints', label: '外键', ...r.constraints, isTrigger: false },
-    { key: 'sequences', label: '序列', ...r.sequences, isTrigger: false },
-    { key: 'comments', label: '注释', ...r.comments, isTrigger: false },
-    {
-      key: 'triggers',
-      label: '触发器',
-      total: r.triggers.total,
-      success: 0,
-      failed: 0,
-      items: [],
-      isTrigger: true,
-    },
-  ]
-})
+const tableRows = computed(() => report.value ? reportCategories(report.value) : [])
 
 const hasRowCounts = computed(() => (report.value?.rowCounts?.length ?? 0) > 0)
 const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? [])
@@ -294,59 +269,7 @@ async function exportReport() {
     for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
     lines.push('')
   }
-  lines.push('=== 迁移概览 ===')
-  const categories = [
-    { label: '表', cat: r.tables, isTrigger: false },
-    { label: '数据写入', cat: r.data, isTrigger: false },
-    { label: '主键', cat: r.primaryKeys, isTrigger: false },
-    { label: '视图', cat: r.views, isTrigger: false },
-    { label: '索引', cat: r.indexes, isTrigger: false },
-    { label: '外键', cat: r.constraints, isTrigger: false },
-    { label: '序列', cat: r.sequences, isTrigger: false },
-    { label: '注释', cat: r.comments, isTrigger: false },
-    { label: '触发器', cat: r.triggers, isTrigger: true },
-  ]
-  for (const { label, cat, isTrigger } of categories) {
-    if (isTrigger) {
-      const totalStr = cat.total === -1 ? '获取失败' : String(cat.total)
-      lines.push(`${label.padEnd(6)}总计 ${totalStr}  （未迁移）`)
-    } else {
-      lines.push(`${label.padEnd(6)}总计 ${cat.total}  成功 ${cat.success}  失败 ${cat.failed}`)
-    }
-  }
-  lines.push('')
-
-  const failedCategories = categories.filter(({ cat }) => cat.failed > 0 && cat.items.length > 0)
-  if (failedCategories.length > 0) {
-    lines.push('=== 失败对象详情 ===')
-    for (const { label, cat } of failedCategories) {
-      lines.push('')
-      lines.push(`【${label}】`)
-      for (const item of cat.items) {
-        lines.push(`  ● ${item.name}`)
-        lines.push(`    失败原因：${item.error}`)
-        if (item.ddl) {
-          lines.push('    DDL：')
-          for (const ddlLine of item.ddl.split('\n')) {
-            lines.push(`      ${ddlLine}`)
-          }
-        } else {
-          lines.push('    DDL：（无）')
-        }
-        if (item.suggestion) lines.push(`    建议：${item.suggestion}`)
-        for (const rename of item.column_renames ?? []) {
-          lines.push(`    建议列名：${rename.source} → ${rename.target}`)
-        }
-        if (item.suggested_ddl) {
-          lines.push('    建议 DDL（手动创建）：')
-          for (const ddlLine of item.suggested_ddl.split('\n')) {
-            lines.push(`      ${ddlLine}`)
-          }
-        }
-      }
-    }
-    lines.push('')
-  }
+  lines.push(...formatReportCategories(r))
 
   if (r.rowCounts && r.rowCounts.length > 0) {
     lines.push('=== 行数对比 ===')
@@ -416,6 +339,8 @@ onUnmounted(() => { reportRequest++ })
   font-size: 13px;
 }
 .failure-suggestion { margin-top: 12px; }
+.failure-source-ddl { margin-top: 12px; }
+.failure-context { color: var(--color-text-2); font-size: 13px; margin-bottom: 4px; overflow-wrap: anywhere; }
 .column-renames { padding-left: 20px; overflow-wrap: anywhere; }
 .ddl-header {
   display: flex;
