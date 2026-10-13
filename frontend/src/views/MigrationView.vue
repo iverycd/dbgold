@@ -279,12 +279,6 @@
             @view-report="showPGTaskResult('data', 'report')" @view-logs="showPGTaskResult('data', 'logs')"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
 
-          <!-- 目标表删除重建警告 -->
-          <a-alert type="warning" style="margin-bottom: 16px">
-            <template #title>注意：迁移前目标表将被删除重建</template>
-            迁移开始时会对目标库中同名表执行 <strong>删除并重新创建表</strong>，再重新建表并导入数据。目标表中的现有数据将被清空，请确认目标库中无需保留的数据已备份。
-          </a-alert>
-
           <section ref="dataResultsSection" tabindex="-1" v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
             <a-tabs v-model:active-key="dataMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
@@ -351,7 +345,7 @@
               type="primary"
               :disabled="!canStartMigration"
               :loading="dataMigrate.running"
-              @click="startDataMigration"
+              @click="requestDataMigration"
             >开始迁移</a-button>
             <a-button
               v-if="dataMigrate.running"
@@ -857,6 +851,36 @@
       </a-tab-pane>
 
     </a-tabs>
+
+    <a-modal
+      v-model:visible="dataMigrationConfirmVisible"
+      title="确认开始迁移"
+      modal-class="migration-confirm-modal"
+      width="min(560px, calc(100vw - 32px))"
+      :mask-closable="false"
+      :closable="true"
+      :esc-to-close="true"
+      ok-text="确认并开始"
+      cancel-text="取消"
+      :ok-button-props="{ status: dataMigrate.content === 'data_only' ? 'normal' : 'danger' }"
+      @ok="confirmDataMigration"
+    >
+      <dl class="migration-confirm-summary">
+        <div><dt>目标连接</dt><dd>{{ selectedDst?.name }} <span class="migration-confirm-address">{{ selectedDst?.host }}:{{ selectedDst?.port }}</span></dd></div>
+        <div><dt>目标数据库</dt><dd>{{ selectedDst ? targetDatabaseName(selectedDst, dataMigrate.dstSchema) : '未选择' }}</dd></div>
+        <div v-if="selectedDst?.db_type !== 'mysql'"><dt>目标 Schema</dt><dd>{{ dataMigrate.dstSchema || '默认 Schema' }}</dd></div>
+        <div><dt>迁移内容</dt><dd>{{ dataMigrationContentLabel }}</dd></div>
+        <div><dt>迁移范围</dt><dd>{{ dataMigrationScopeLabel }}</dd></div>
+      </dl>
+      <a-alert :type="dataMigrate.content === 'data_only' ? 'info' : 'warning'">
+        <template v-if="dataMigrate.content === 'data_only'">
+          本次迁移将向目标表写入数据，请确认目标表结构和数据符合迁移要求。
+        </template>
+        <template v-else>
+          本次迁移范围内的目标同名表将<strong>被删除重建</strong>，<strong>现有数据会丢失</strong>，请确认已完成备份。
+        </template>
+      </a-alert>
+    </a-modal>
   </div>
 </template>
 
@@ -934,6 +958,18 @@ const dataMigrate = reactive({
 })
 
 const tableFilterError = ref('')
+const dataMigrationConfirmVisible = ref(false)
+const dataMigrationStarting = ref(false)
+const dataMigrationContentLabel = computed(() => ({
+  both: '表结构 + 数据行',
+  schema_only: '仅创建表结构',
+  data_only: '仅迁移数据行',
+}[dataMigrate.content]))
+const dataMigrationScopeLabel = computed(() => {
+  if (dataMigrate.mode === 'all') return '全库迁移'
+  const label = dataMigrate.mode === 'include' ? '仅迁移指定表' : '排除指定表'
+  return `${label}：${dataMigrate.filter || '未指定表名'}`
+})
 
 function validateTableFilter(): boolean {
   if (!dataMigrate.filter || dataMigrate.mode === 'all') {
@@ -1019,7 +1055,9 @@ const canStartMigration = computed(() =>
   dataMigrate.dstConnId !== undefined &&
   dataMigrate.srcDatabase !== '' &&
   !dataMigrate.unsupportedMsg &&
-  !dataMigrate.running
+  !dataMigrate.running &&
+  !dataMigrationConfirmVisible.value &&
+  !dataMigrationStarting.value
 )
 
 function checkPairSupport() {
@@ -1071,6 +1109,27 @@ function getLogClass(line: string): string {
   if (line.includes('[WARN]')) return 'log-warn'
   if (line.includes('[DONE]')) return 'log-done'
   return ''
+}
+
+function requestDataMigration() {
+  if (!canStartMigration.value) return
+  if (!validateTableFilter()) return
+  if (dataMigrate.dstConnId && !dataMigrate.dstSchema && selectedDst.value?.db_type !== 'oracle') {
+    Message.error('请选择目标 Schema')
+    return
+  }
+  dataMigrationConfirmVisible.value = true
+}
+
+async function confirmDataMigration() {
+  if (!dataMigrationConfirmVisible.value || dataMigrationStarting.value || dataMigrate.running) return
+  dataMigrationConfirmVisible.value = false
+  dataMigrationStarting.value = true
+  try {
+    await startDataMigration()
+  } finally {
+    dataMigrationStarting.value = false
+  }
 }
 
 async function startDataMigration() {
@@ -1760,6 +1819,46 @@ watch(() => objMigrate.currentJobId, () => { objMigrateResultTab.value = 'logs' 
 </script>
 
 <style scoped>
+/* 全局主题覆盖了所有 primary 按钮，在此保留删除重建的危险状态。 */
+:global(.migration-confirm-modal .arco-btn-primary.arco-btn-status-danger) {
+  background: rgb(var(--danger-6)) !important;
+  border-color: rgb(var(--danger-6)) !important;
+  box-shadow: none !important;
+}
+:global(.migration-confirm-modal .arco-btn-primary.arco-btn-status-danger:hover) {
+  background: rgb(var(--danger-5)) !important;
+  border-color: rgb(var(--danger-5)) !important;
+}
+:global(.migration-confirm-modal .arco-btn-primary.arco-btn-status-danger:active) {
+  background: rgb(var(--danger-7)) !important;
+  border-color: rgb(var(--danger-7)) !important;
+}
+.migration-confirm-summary {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.migration-confirm-summary > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 12px;
+}
+.migration-confirm-summary dt {
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+.migration-confirm-summary dd {
+  margin: 0;
+  color: var(--color-text-1);
+  overflow-wrap: anywhere;
+}
+.migration-confirm-address {
+  display: block;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
 /* 高级设置 —— 轻量分组标题，替代厚重的 a-divider */
 .adv-section-title {
   font-size: 13px;
