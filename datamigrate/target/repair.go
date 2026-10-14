@@ -171,6 +171,11 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if len(selected) == 0 {
 		return out, fmt.Errorf("未选择执行步骤")
 	}
+	if a.family == "postgres" && repairKind(obj.Kind) == "view" {
+		if _, err := EnsureCompatibilityFunctions(ctx, w); err != nil {
+			return out, err
+		}
+	}
 	var tx *sql.Tx
 	var exec func(string) error
 	if oscar, ok := w.(*OscarWriter); ok {

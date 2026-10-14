@@ -138,6 +138,7 @@ func TestRepairResultPersistenceFailureAfterSQLIsUnknown(t *testing.T) {
 			kind := "index"
 			if transaction {
 				kind = "view"
+				expectUUIDReused(m)
 				m.ExpectBegin()
 				m.ExpectExec("SET LOCAL search_path").WillReturnResult(sqlmock.NewResult(0, 0))
 			} else {
@@ -198,6 +199,7 @@ func TestOriginalDDLObserverFailureIsNotIgnoredAsMissingTable(t *testing.T) {
 
 func TestRepairViewUsesOriginalSchemaAndCommit(t *testing.T) {
 	w, m := repairPGMock(t)
+	expectUUIDReused(m)
 	m.ExpectBegin()
 	m.ExpectExec(regexp.QuoteMeta(`SET LOCAL search_path TO "app"`)).WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectExec("CREATE OR REPLACE VIEW").WillReturnResult(sqlmock.NewResult(0, 0))

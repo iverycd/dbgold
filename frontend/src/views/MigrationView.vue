@@ -548,6 +548,7 @@
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views"
             @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
+          <CompatibilityFunctionsPanel v-if="viewMigrate.compatibilityFunctions" :report="viewMigrate.compatibilityFunctions" />
           <!-- 结果 -->
           <div v-if="viewMigrate.results.length > 0" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>迁移结果</h3></div>
@@ -893,6 +894,7 @@ import { applyTargetMigrationDefaults } from '@/utils/migrationOptions'
 import { copyText } from '@/utils/clipboard'
 import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
+import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
@@ -904,6 +906,7 @@ import {
   type PGMySQLPreflightRequest,
   type MigrationObjectRef,
   type MigrationReport,
+  type CompatibilityFunctionsReport,
   startDataMigration as apiStartMigration,
   cancelDataMigration as apiCancelMigration,
   createDataMigrateEventSource,
@@ -1289,6 +1292,7 @@ const viewMigrate = reactive({
   running: false,
   unsupportedMsg: '',
   results: [] as ObjectResult[],
+  compatibilityFunctions: undefined as CompatibilityFunctionsReport | undefined,
 })
 
 const vmSelectedSrc = computed(() => connections.value.find((c) => c.id === viewMigrate.srcConnId))
@@ -1310,6 +1314,10 @@ const vmCanMigrate = computed(() =>
   !viewMigrate.unsupportedMsg &&
   !viewMigrate.running
 )
+
+watch(() => [viewMigrate.srcConnId, viewMigrate.srcDatabase, viewMigrate.dstConnId, viewMigrate.dstSchema], () => {
+  viewMigrate.compatibilityFunctions = undefined
+})
 
 watch(() => viewMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
@@ -1369,6 +1377,7 @@ async function vmLoadViews() {
   viewMigrate.views = []
   viewMigrate.selected = []
   viewMigrate.results = []
+  viewMigrate.compatibilityFunctions = undefined
   try {
     const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined, vmSelectedDst.value?.db_type)
     if (request !== vmLoadViewsRequest) return
@@ -1398,6 +1407,7 @@ async function handleMigrateViews() {
   }
   viewMigrate.running = true
   viewMigrate.results = []
+  viewMigrate.compatibilityFunctions = undefined
   try {
     if (isPGMySQLSelection('views') && !(await ensurePGCheck('views'))?.ready) return
     const res = await apiMigrateViews({
@@ -1412,8 +1422,10 @@ async function handleMigrateViews() {
       strip_view_schemas: viewMigrate.stripViewSchemas || undefined,
     })
     viewMigrate.results = res.data.results ?? []
+    viewMigrate.compatibilityFunctions = res.data.compatibility_functions ?? undefined
     const fail = viewMigrate.results.filter((r) => r.error).length
-    if (fail > 0) Message.warning(`迁移完成，${fail} 个视图失败`)
+    if (viewMigrate.compatibilityFunctions?.failed) Message.error('兼容函数初始化失败，未执行视图迁移，请查看函数明细')
+    else if (fail > 0) Message.warning(`迁移完成，${fail} 个视图失败`)
     else Message.success(`成功迁移 ${viewMigrate.results.length} 个视图`)
   } catch (e: any) {
     Message.error(`迁移失败: ${e?.response?.data?.error ?? e?.message ?? e}`)

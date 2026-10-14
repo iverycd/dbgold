@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/target"
 	"dbgold/datamigrate/valueconv"
 )
 
@@ -55,20 +56,21 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
-	RepairManifest *RepairManifest              `json:"repair_manifest,omitempty"`
-	AutoRepairs    []AutoRepair                 `json:"auto_repairs,omitempty"`
-	Warnings       []valueconv.MigrationWarning `json:"warnings,omitempty"`
-	Preflight      *PGMySQLPreflight            `json:"preflight,omitempty"`
-	Tables         CategoryReport               `json:"tables"`
-	Data           CategoryReport               `json:"data"`
-	PrimaryKeys    CategoryReport               `json:"primaryKeys"`
-	Views          CategoryReport               `json:"views"`
-	Indexes        CategoryReport               `json:"indexes"`
-	Constraints    CategoryReport               `json:"constraints"`
-	Sequences      CategoryReport               `json:"sequences"`
-	Comments       CategoryReport               `json:"comments"`
-	Triggers       CategoryReport               `json:"triggers"`
-	RowCounts      []TableRowCount              `json:"rowCounts"`
+	CompatibilityFunctions *target.CompatibilityFunctionsReport `json:"compatibility_functions,omitempty"`
+	RepairManifest         *RepairManifest                      `json:"repair_manifest,omitempty"`
+	AutoRepairs            []AutoRepair                         `json:"auto_repairs,omitempty"`
+	Warnings               []valueconv.MigrationWarning         `json:"warnings,omitempty"`
+	Preflight              *PGMySQLPreflight                    `json:"preflight,omitempty"`
+	Tables                 CategoryReport                       `json:"tables"`
+	Data                   CategoryReport                       `json:"data"`
+	PrimaryKeys            CategoryReport                       `json:"primaryKeys"`
+	Views                  CategoryReport                       `json:"views"`
+	Indexes                CategoryReport                       `json:"indexes"`
+	Constraints            CategoryReport                       `json:"constraints"`
+	Sequences              CategoryReport                       `json:"sequences"`
+	Comments               CategoryReport                       `json:"comments"`
+	Triggers               CategoryReport                       `json:"triggers"`
+	RowCounts              []TableRowCount                      `json:"rowCounts"`
 }
 
 // AutoRepair is emitted only after successful CREATE or existing-column validation.
@@ -111,6 +113,9 @@ func newMigrationReport() MigrationReport {
 
 // HasFailures is shared by all job entrypoints; read/validation failures count.
 func (r MigrationReport) HasFailures() bool {
+	if r.CompatibilityFunctions != nil && r.CompatibilityFunctions.Failed > 0 {
+		return true
+	}
 	if r.Preflight != nil && !r.Preflight.Ready {
 		return true
 	}

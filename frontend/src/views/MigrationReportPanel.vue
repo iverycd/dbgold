@@ -40,8 +40,8 @@
             :pagination="false"
             :scroll="{ x: 600 }"
             size="small"
-            :row-class="record => record.failed > 0 && record.items?.length > 0 ? '' : 'report-row-no-details'"
-            :expandable="{ icon: (_, record) => record.failed > 0 && record.items?.length > 0 ? undefined : null }"
+            :row-class="record => (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? '' : 'report-row-no-details'"
+            :expandable="{ icon: (_, record) => (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? undefined : null }"
           >
             <template #columns>
               <a-table-column title="对象类型" data-index="label" :width="120" />
@@ -63,13 +63,14 @@
                   <span v-if="record.isTrigger" style="color: #86909c">
                     ⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）
                   </span>
-                  <a-tag v-else :color="record.statusColor">{{ record.statusLabel }}</a-tag>
+                  <template v-else><a-tag :color="record.statusColor">{{ record.statusLabel }}</a-tag><span v-if="record.isCompatibility"> 新建 {{ record.created }}，复用 {{ record.reused }}</span></template>
                 </template>
               </a-table-column>
             </template>
 
             <template #expand-row="{ record }">
-              <div class="failure-list">
+              <CompatibilityFunctionsPanel v-if="record.isCompatibility && report.compatibility_functions" :report="report.compatibility_functions" />
+              <div v-else class="failure-list">
                 <div
                   v-for="item in record.items"
                   :key="item.key"
@@ -223,6 +224,7 @@
 
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
+import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
 import { reportCategories, formatReportCategories } from '@/utils/migrationReport'

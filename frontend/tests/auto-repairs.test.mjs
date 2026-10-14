@@ -80,3 +80,27 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
     } finally { scope.stop() }
   })
 }
+
+for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
+  test(`${view} exports saved compatibility function results without changing business counts`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const h = scope.run(() => execute(`views/${view}`, `report, exportReport${view === 'DataMigrationJobDetailView' ? ', job, categoryRows, failedItems' : ', tableRows'}`, { jobID: 'job-repairs' }))
+      const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
+      const r = { rowCounts: [], compatibility_functions: { total: 2, success: 1, failed: 1, created: 0, reused: 1, items: [
+        { name: 'get_uuid', schema: 'saved_schema', status: 'reused', ddl: 'SAVED DEFINITION', error: '' },
+        { name: 'GET_UUID', schema: 'saved_schema', status: 'failed', ddl: 'SAVED FAILED DDL', error: 'permission denied' },
+      ] } }
+      for (const key of ['tables', 'data', 'primaryKeys', 'views', 'indexes', 'constraints', 'sequences', 'comments', 'triggers']) r[key] = empty()
+      h.values.report.value = r
+      if (h.values.job) h.values.job.value = { job_id: 'job-repairs' }
+      await h.values.exportReport()
+      const text = await h.downloads[0].text()
+      for (const value of ['saved_schema.get_uuid：复用', 'saved_schema.GET_UUID：失败', 'SAVED DEFINITION', 'SAVED FAILED DDL', 'permission denied']) assert.ok(text.includes(value), value)
+      const rows = h.values.categoryRows?.value ?? h.values.tableRows.value
+      assert.equal(rows.find(row => row.key === 'compatibility_functions').failed, 1)
+      assert.equal(rows.find(row => row.key === 'views').total, 0)
+      if (h.values.failedItems) assert.equal(h.values.failedItems.value.length, 0)
+    } finally { scope.stop() }
+  })
+}

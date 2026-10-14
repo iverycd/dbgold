@@ -893,7 +893,11 @@ func MigrateViews(c *gin.Context) {
 	close(job.LogCh)
 	<-done
 
-	c.JSON(http.StatusOK, gin.H{"results": results})
+	response := gin.H{"results": results}
+	if compatibility := m.CompatibilityFunctions(); compatibility != nil {
+		response["compatibility_functions"] = compatibility
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // CancelDataMigration 取消运行中的迁移任务

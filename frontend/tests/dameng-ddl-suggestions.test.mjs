@@ -10,6 +10,7 @@ import { parse } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
+import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
 const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel };`, {
@@ -50,6 +51,8 @@ function harness() {
     },
   })
   app.component('a-tab-pane', Arco.TabPane)
+  app.component('CompatibilityFunctionsPanel', createCompatibilityPanel(copied))
+  app.component('a-space', passthrough)
   app.component('MigrationRepairPanel', { props: ['jobID'], setup: props => {
     repairInstances.push(props.jobID)
     return () => Vue.h('div', '修复操作面板')
@@ -66,8 +69,8 @@ function harness() {
     props: ['data', 'expandable'],
     setup: (props, { slots }) => () => Vue.h('div', (props.data ?? []).flatMap(record => {
       if (!slots['expand-row']) return []
-      assert.equal(props.expandable.icon(null, record), record.failed > 0 && record.items?.length > 0 ? undefined : null)
-      return record.failed > 0 ? slots['expand-row']({ record }) : []
+      assert.equal(props.expandable.icon(null, record), (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? undefined : null)
+      return (record.isCompatibility || record.failed > 0) ? slots['expand-row']({ record }) : []
     })),
   })
   return { p, app, copied, downloads, clicks, tabStates, repairInstances }
@@ -309,4 +312,33 @@ test('legacy metadata failure explains absent DDL and keeps counting failure eve
     await h.p.exportReport()
     assert.match(await h.downloads[0].text(), /总计 未知\s+成功 0\s+失败 未知/)
   } finally { scope.stop() }
+})
+
+
+test('successful compatibility functions expand, copy actual DDL and export without repair actions', async () => {
+ const scope = Vue.effectScope()
+ try {
+  const h = scope.run(harness)
+  const r = report({ name: 'unused', error: '' })
+  r.tables = { total: 0, success: 0, failed: 0, items: [] }
+  const ddl = 'CREATE FUNCTION app.get_uuid() RETURNS varchar AS actual_definition'
+  r.compatibility_functions = { total: 2, success: 2, failed: 0, created: 1, reused: 1, items: [
+   { name: 'get_uuid', schema: 'app', status: 'created', generator: 'extensions.uuid_generate_v4', ddl, error: '' },
+   { name: 'GET_UUID', schema: 'app', status: 'reused', ddl: '', error: '', definition_warning: '无法读取已有函数定义: denied' },
+  ], extensions: [{ name: 'uuid-ossp', schema: 'extensions', status: 'installed', sql: 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"' }] }
+  h.p.report.value = r
+  const html = await renderToString(h.app)
+  for (const text of ['兼容函数', 'app.get_uuid()', 'app.GET_UUID()', '新建', '复用', 'actual_definition', '无法读取已有函数定义: denied', 'uuid-ossp', '已安装']) assert.ok(html.includes(text), text)
+  assert.equal(h.p.failedCount.value, 0)
+  assert.equal(h.clicks.some(button => button.label === '去修复'), false)
+  const copy = h.clicks.find(button => button.label === '复制 DDL')
+  assert.ok(copy)
+  await copy.handler()
+  assert.equal(h.copied[0], ddl)
+  await h.p.exportReport()
+  const exported = await h.downloads[0].text()
+  assert.ok(exported.includes(ddl))
+  assert.ok(exported.includes('app.GET_UUID：复用'))
+  assert.ok(exported.includes('CREATE EXTENSION IF NOT EXISTS'))
+ } finally { scope.stop() }
 })

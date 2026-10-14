@@ -144,7 +144,31 @@ export interface TableRowCount {
   match: boolean
 }
 
+export interface CompatibilityFunctionResult extends ObjectResult {
+  schema: string
+  status: 'created' | 'reused' | 'failed'
+  generator?: string
+  definition_warning?: string
+}
+export interface CompatibilityExtensionResult {
+  name: string
+  schema: string
+  status: 'installed' | 'reused' | 'failed' | 'rolled_back' | 'unknown'
+  sql?: string
+  error?: string
+}
+export interface CompatibilityFunctionsReport {
+  total: number
+  success: number
+  failed: number
+  created: number
+  reused: number
+  items: CompatibilityFunctionResult[]
+  extensions?: CompatibilityExtensionResult[]
+}
+
 export interface MigrationReport {
+ compatibility_functions?: CompatibilityFunctionsReport
 	 auto_repairs?: AutoRepair[]
 	 warnings?: { table: string; column: string; reason: string; count: number }[]
   preflight?: PGMySQLPreflight
@@ -429,7 +453,7 @@ export interface MigrateViewsRequest {
 
 // migrateViews 同步批量迁移选中的视图，返回每个视图的结果
 export const migrateViews = (data: MigrateViewsRequest) =>
-  api.post<{ results: ObjectResult[] }>('/migration/view-migrate', data, { timeout: 300000 })
+  api.post<{ results: ObjectResult[]; compatibility_functions?: CompatibilityFunctionsReport }>('/migration/view-migrate', data, { timeout: 300000 })
 
 // ===== 对象迁移（主键/索引/序列/外键）=====
 

@@ -75,13 +75,16 @@ export function reportCategories(report: MigrationReport) {
   const categories = [
     ['tables', '表'], ['data', '数据写入'], ['primaryKeys', '主键'], ['views', '视图'],
     ['indexes', '索引'], ['constraints', '外键'], ['sequences', '序列'],
-    ['comments', '注释'], ['triggers', '触发器'],
+    ['comments', '注释'], ['triggers', '触发器'], ['compatibility_functions', '兼容函数'],
   ] as const
   return categories.map(([key, label]) => {
-    const category = report[key]
+    const category = report[key] ?? { total: 0, success: 0, failed: 0, items: [] }
     const isTrigger = key === 'triggers'
+    const isCompatibility = key === 'compatibility_functions'
     return {
-      ...category, ...categoryPresentation(category), key, label, isTrigger,
+      ...category, ...categoryPresentation(category), key, label, isTrigger, isCompatibility,
+      created: isCompatibility ? report.compatibility_functions?.created ?? 0 : 0,
+      reused: isCompatibility ? report.compatibility_functions?.reused ?? 0 : 0,
       success: isTrigger ? 0 : category.success,
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
@@ -93,7 +96,7 @@ export function reportCategories(report: MigrationReport) {
         key: JSON.stringify([key, item.table ?? '', item.name, item.stage ?? '', index]),
       })),
     }
-  })
+  }).filter(row => row.key !== 'compatibility_functions' || !!report.compatibility_functions)
 }
 
 export function formatReportCategories(report: MigrationReport): string[] {
@@ -106,8 +109,25 @@ export function formatReportCategories(report: MigrationReport): string[] {
       lines.push(`${row.label.padEnd(6)}总计 ${row.totalLabel}  成功 ${row.success}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
     }
   }
+  const compatibility = report.compatibility_functions
+  if (compatibility) {
+    lines.push('', '=== 兼容函数明细 ===', `新建 ${compatibility.created}，复用 ${compatibility.reused}`)
+    for (const item of compatibility.items) {
+      const status = ({ created: '新建', reused: '复用', failed: '失败' })[item.status] || item.status
+      lines.push(`  ${item.schema}.${item.name}：${status}`)
+      if (item.generator) lines.push(`    底层函数：${item.generator}`)
+      if (item.error) lines.push(`    失败原因：${item.error}`)
+      if (item.ddl) lines.push('    函数 DDL：', ...item.ddl.split('\n').map(line => `      ${line}`))
+      else lines.push(`    ${item.definition_warning || '尚未生成函数 DDL'}`)
+    }
+    for (const extension of compatibility.extensions ?? []) {
+      lines.push(`  扩展 ${extension.schema}.${extension.name}：${({ installed: '已安装', reused: '已复用', failed: '失败', rolled_back: '已回滚', unknown: '结果待核验' })[extension.status]}`)
+      if (extension.sql) lines.push(`    SQL：${extension.sql}`)
+      if (extension.error) lines.push(`    原因：${extension.error}`)
+    }
+  }
   lines.push('')
-  const failedCategories = categories.filter(row => row.failed > 0 && row.items.length > 0)
+  const failedCategories = categories.filter(row => !row.isCompatibility && row.failed > 0 && row.items.length > 0)
   if (!failedCategories.length) return lines
   lines.push('=== 失败项详情 ===')
   for (const row of failedCategories) {

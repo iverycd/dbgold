@@ -110,10 +110,12 @@
               <div class="tab-toolbar">
                 <div><h2>分类迁移结果</h2><p>按对象类型核对迁移数量和失败情况。</p></div>
               </div>
-              <a-table :data="categoryRows" row-key="key" :pagination="false" size="small" :scroll="{ x: 760 }">
+              <a-table :data="categoryRows" row-key="key" :pagination="false" size="small" :scroll="{ x: 760 }"
+                :row-class="record => record.isCompatibility && record.items.length ? '' : 'category-no-details'"
+                :expandable="{ icon: (_, record) => record.isCompatibility && record.items.length ? undefined : null }">
                 <template #columns>
                   <a-table-column title="对象类型" data-index="label" :width="150" />
-                  <a-table-column title="总数" data-index="total" :width="100" />
+                  <a-table-column title="总数" data-index="totalLabel" :width="100" />
                   <a-table-column title="成功" :width="100"><template #cell="{ record }">{{ record.isTrigger ? '—' : record.success }}</template></a-table-column>
                   <a-table-column title="失败" :width="100"><template #cell="{ record }"><span :class="{ 'danger-text': record.failed > 0 }">{{ record.isTrigger ? '—' : record.failed }}</span></template></a-table-column>
                   <a-table-column title="成功率" :width="180">
@@ -128,8 +130,12 @@
                       <a-tag v-else-if="record.failed > 0" color="orange">部分失败</a-tag>
                       <a-tag v-else-if="record.total === 0" color="gray">无对象</a-tag>
                       <a-tag v-else color="green">全部成功</a-tag>
+                      <span v-if="record.isCompatibility"> 新建 {{ record.created }}，复用 {{ record.reused }}</span>
                     </template>
                   </a-table-column>
+                </template>
+                <template #expand-row="{ record }">
+                  <CompatibilityFunctionsPanel v-if="record.isCompatibility && report.compatibility_functions" :report="report.compatibility_functions" />
                 </template>
               </a-table>
             </div>
@@ -235,6 +241,8 @@
 
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
+import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
+import { reportCategories, formatReportCategories } from '@/utils/migrationReport'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -245,14 +253,12 @@ import { copyText } from '@/utils/clipboard'
 import {
   getDataMigrationJob,
   getDataMigrationReport,
-  type CategoryReport,
   type DataMigrationJob,
   type MigrationReport,
   type ObjectResult,
   type TableRowCount,
 } from '@/api/migration'
 
-interface CategoryRow extends CategoryReport { key: string; label: string; isTrigger: boolean }
 interface FailedItem extends ObjectResult { key: string; category: string; categoryLabel: string }
 interface RiskItem { key: string; level: 'warning' | 'danger'; title: string; description: string; tab?: string; action?: string }
 
@@ -276,23 +282,13 @@ let disposed = false
 let loadVersion = 0
 
 const jobID = computed(() => String(route.params.jobId || ''))
-const categoryRows = computed<CategoryRow[]>(() => report.value ? [
-  { key: 'tables', label: '表', ...report.value.tables, isTrigger: false },
-  { key: 'data', label: '数据写入', ...report.value.data, isTrigger: false },
-  { key: 'primaryKeys', label: '主键', ...report.value.primaryKeys, isTrigger: false },
-  { key: 'views', label: '视图', ...report.value.views, isTrigger: false },
-  { key: 'indexes', label: '索引', ...report.value.indexes, isTrigger: false },
-  { key: 'constraints', label: '外键', ...report.value.constraints, isTrigger: false },
-  { key: 'sequences', label: '序列', ...report.value.sequences, isTrigger: false },
-  { key: 'comments', label: '注释', ...report.value.comments, isTrigger: false },
-  { key: 'triggers', label: '触发器', ...report.value.triggers, isTrigger: true },
-] : [])
+const categoryRows = computed(() => report.value ? reportCategories(report.value) : [])
 const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isTrigger))
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))
 const objectSuccessCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.success, 0))
 const failedObjectCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.failed, 0))
-const failedItems = computed<FailedItem[]>(() => migratedCategories.value.flatMap(row => row.items.map((item, index) => ({ ...item, key: `${row.key}-${item.name}-${index}`, category: row.key, categoryLabel: row.label }))))
-const failedCategoryOptions = computed(() => migratedCategories.value.filter(row => row.items.length).map(row => ({ key: row.key, label: row.label })))
+const failedItems = computed<FailedItem[]>(() => migratedCategories.value.filter(row => !row.isCompatibility).flatMap(row => row.items.map((item, index) => ({ ...item, key: `${row.key}-${item.name}-${index}`, category: row.key, categoryLabel: row.label }))))
+const failedCategoryOptions = computed(() => migratedCategories.value.filter(row => !row.isCompatibility && row.items.length).map(row => ({ key: row.key, label: row.label })))
 const filteredFailedItems = computed(() => {
   const keyword = failureKeyword.value.trim().toLowerCase()
   return failedItems.value.filter(item => (failureCategory.value === 'all' || item.category === failureCategory.value) && (!keyword || item.name.toLowerCase().includes(keyword)))
@@ -330,7 +326,8 @@ const summaryText = computed(() => job.value?.summary || (job.value?.status === 
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
   if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
-  if (failedObjectCount.value) items.push({ key: 'objects', level: 'danger', title: `${failedObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
+  if (report.value?.compatibility_functions?.failed) items.push({ key: 'compatibility', level: 'danger', title: '兼容函数初始化失败', description: '在迁移概览展开兼容函数，查看底层函数探测、扩展准备和错误明细。', tab: 'overview', action: '查看兼容函数' })
+  if (failedObjectCount.value > (report.value?.compatibility_functions?.failed || 0)) items.push({ key: 'objects', level: 'danger', title: `${failedObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
   if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items
@@ -400,18 +397,7 @@ async function exportReport() {
   if (!report.value || !job.value) return
   const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   lines.push(...formatAutoRepairs(report.value.auto_repairs))
-  lines.push('=== 迁移概览 ===')
-  for (const row of categoryRows.value) {
-    lines.push(row.isTrigger
-      ? `${row.label.padEnd(6)}总计 ${row.total === -1 ? '获取失败' : row.total}（未迁移）`
-      : `${row.label.padEnd(6)}总计 ${row.total}  成功 ${row.success}  失败 ${row.failed}`)
-  }
-  if (failedItems.value.length) {
-    lines.push('', '=== 失败对象详情 ===')
-    for (const item of failedItems.value) {
-      lines.push('', `【${item.categoryLabel}】${item.name}`, `失败原因：${item.error || '—'}`, `DDL：${item.ddl || '—'}`)
-    }
-  }
+  lines.push(...formatReportCategories(report.value))
   if (allRowCounts.value.length) {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)
@@ -447,6 +433,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.detail-page :deep(.category-no-details .arco-table-expand-btn) { display: none; }
 .detail-page { width: min(100%, 1440px); margin: 0 auto; padding-bottom: 40px; }
 .page-loading { display: flex; justify-content: center; padding: 120px 0; }
 .task-header { position: sticky; z-index: 20; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 16px 20px; margin: -16px -4px 18px; border: 1px solid var(--border); border-radius: var(--radius-md); background: rgba(255,255,255,.96); box-shadow: var(--shadow-sm); backdrop-filter: blur(12px); }

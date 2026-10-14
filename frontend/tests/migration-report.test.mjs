@@ -115,3 +115,39 @@ test('legacy reports isolate their failed index without inventing missing target
   assert.match(text, /索引名称：ixorders/)
   assert.doesNotMatch(text, /目标索引名称|目标表：|源索引名称/)
 })
+
+test('compatibility functions show new and reused successes with actual definitions', () => {
+  const r = report(empty())
+  r.compatibility_functions = { total: 2, success: 2, failed: 0, created: 1, reused: 1, items: [
+    { name: 'get_uuid', schema: 'app', status: 'created', generator: 'extensions.uuid_generate_v4', ddl: 'CREATE FUNCTION app.get_uuid()', error: '' },
+    { name: 'GET_UUID', schema: 'app', status: 'reused', ddl: 'EXISTING BUSINESS FUNCTION', error: '' },
+  ], extensions: [{ name: 'uuid-ossp', schema: 'extensions', status: 'installed', sql: 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"' }] }
+  const rows = reportCategories(r)
+  const row = rows.find(row => row.key === 'compatibility_functions')
+  assert.equal(row.label, '兼容函数')
+  assert.equal(row.isCompatibility, true)
+  assert.equal(row.failed, 0)
+  assert.equal(row.created, 1)
+  assert.equal(row.reused, 1)
+  assert.equal(row.items.length, 2)
+  const text = formatReportCategories(r).join('\n')
+  for (const expected of ['兼容函数明细', '新建 1，复用 1', 'app.get_uuid：新建', 'app.GET_UUID：复用', 'EXISTING BUSINESS FUNCTION', '底层函数：extensions.uuid_generate_v4', '扩展 extensions.uuid-ossp：已安装', 'CREATE EXTENSION IF NOT EXISTS']) assert.ok(text.includes(expected), expected)
+  assert.doesNotMatch(text, /失败项详情|失败阶段：/)
+})
+
+test('compatibility failure and unreadable definitions remain explicit in exports', () => {
+  const r = report(empty())
+  r.compatibility_functions = { total: 2, success: 1, failed: 1, created: 0, reused: 1, items: [
+    { name: 'get_uuid', schema: 'app', status: 'reused', ddl: '', error: '', definition_warning: '无法读取已有函数定义: denied' },
+    { name: 'GET_UUID', schema: 'app', status: 'failed', ddl: 'CREATE FUNCTION app."GET_UUID"()', error: 'transaction rolled back' },
+  ], extensions: [{ name: 'uuid-ossp', schema: 'app', status: 'rolled_back', sql: 'CREATE EXTENSION', error: 'transaction rolled back' }] }
+  const row = reportCategories(r).find(row => row.isCompatibility)
+  assert.equal(row.failed, 1)
+  const text = formatReportCategories(r).join('\n')
+  for (const expected of ['无法读取已有函数定义: denied', 'transaction rolled back', 'app.GET_UUID：失败', '已回滚']) assert.ok(text.includes(expected), expected)
+})
+
+test('old and non-PG reports do not acquire compatibility function rows', () => {
+  assert.equal(reportCategories(report(empty())).some(row => row.isCompatibility), false)
+  assert.doesNotMatch(formatReportCategories(report(empty())).join('\n'), /兼容函数/)
+})

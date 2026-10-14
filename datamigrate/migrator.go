@@ -55,17 +55,18 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
-	sourceDDLCache sourceTableDDLCache
-	repairs        *repairRecorder
-	dmPlans        map[string]*damengTablePlan
-	dmBlocked      map[string]bool
-	dmUsable       map[string]bool
-	dmSourceSchema string
-	reader         source.Reader
-	writer         target.Writer
-	job            *Job
-	cfg            Config
-	log            *Logger
+	compatibilityFunctions *target.CompatibilityFunctionsReport
+	sourceDDLCache         sourceTableDDLCache
+	repairs                *repairRecorder
+	dmPlans                map[string]*damengTablePlan
+	dmBlocked              map[string]bool
+	dmUsable               map[string]bool
+	dmSourceSchema         string
+	reader                 source.Reader
+	writer                 target.Writer
+	job                    *Job
+	cfg                    Config
+	log                    *Logger
 }
 
 // sourceTypeSetter 由 Writer 可选实现,用于接收源库类型以驱动 ValueConverter。
@@ -168,23 +169,37 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.compatibilityFunctions = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	if !m.cfg.CaptureRepair {
-		return m.run(ctx)
+		report := m.runPrepared(ctx)
+		report.CompatibilityFunctions = m.compatibilityFunctions
+		return report
 	}
 	m.beginRepair(ctx)
 	if m.repairs.sinkErr != nil {
 		report := newMigrationReport()
+		report.CompatibilityFunctions = m.compatibilityFunctions
 		report.Tables.Total = 1
 		report.Tables.Failed = 1
 		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "修复记录持久化", Error: m.repairs.sinkErr.Error()})
 		m.finishRepair(ctx, &report)
 		return report
 	}
-	report := m.run(ctx)
+	report := m.runPrepared(ctx)
+	report.CompatibilityFunctions = m.compatibilityFunctions
 	m.finishRepair(ctx, &report)
 	return report
+}
+
+func (m *Migrator) runPrepared(ctx context.Context) MigrationReport {
+	if err := m.prepareCompatibilityFunctions(ctx); err != nil {
+		report := newMigrationReport()
+		report.CompatibilityFunctions = m.compatibilityFunctions
+		return report
+	}
+	return m.run(ctx)
 }
 
 func (m *Migrator) run(ctx context.Context) MigrationReport {
@@ -1062,8 +1077,12 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 // MigrateViews 按名称批量创建视图,返回每个视图的结果(复用 createOneView)。
 // viewNames 以源库原始大小写匹配 ViewInfo.ViewName。
 func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []ObjectResult {
+	m.compatibilityFunctions = nil
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if err := m.prepareCompatibilityFunctions(ctx); err != nil {
+		return []ObjectResult{}
 	}
 	if m.writer.DBType() == "dameng" {
 		if len(m.cfg.StripViewSchemas) > 0 && m.isSQLServerDameng() {
@@ -1163,4 +1182,29 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 		results = append(results, res)
 	}
 	return results
+}
+
+// CompatibilityFunctions returns the preparation snapshot for synchronous view jobs.
+func (m *Migrator) CompatibilityFunctions() *target.CompatibilityFunctionsReport {
+	return m.compatibilityFunctions
+}
+
+func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
+	if ctx.Err() != nil {
+		m.compatibilityFunctions = nil
+		m.log.Warn("任务已取消")
+		return ctx.Err()
+	}
+	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer)
+	m.compatibilityFunctions = report
+	if err != nil {
+		m.log.Errorf("GET_UUID 兼容函数初始化失败: %v", err)
+		return err
+	}
+	if report != nil {
+		for _, item := range report.Items {
+			m.log.DDLf("兼容函数 %s.%s: %s", item.Schema, item.Name, item.Status)
+		}
+	}
+	return nil
 }
