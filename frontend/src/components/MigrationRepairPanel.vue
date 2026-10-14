@@ -584,7 +584,8 @@ async function openBinding() {
     bindingForm.dst_conn_id = binding.value?.dst_conn_id || undefined
     const sourceConnection = connections.value.find(conn => conn.id === bindingForm.src_conn_id)
     const isPGSource = ['postgres', 'gaussdb', 'highgo', 'kingbase', 'gbase', 'vastbase', 'seabox'].includes(job.value?.src_db_type || '')
-    bindingForm.source_database = binding.value?.source_database || job.value?.source_database || sourceConnection?.database || (!isPGSource ? job.value?.src_conn?.database : '') || ''
+    // Older PG and Dameng snapshots contain the selected schema/owner, not the connection database.
+    bindingForm.source_database = binding.value?.source_database || job.value?.source_database || sourceConnection?.database || (!isPGSource && job.value?.src_db_type !== 'dameng' ? job.value?.src_conn?.database : '') || ''
     bindingForm.source_schema = binding.value?.source_schema || job.value?.source_schema || ''
     bindingForm.config = { Content: binding.value?.legacy && !binding.value.configured ? '' : 'both', PageSize: job.value?.page_size || 1000, LowerCaseNames: !!job.value?.lower_case_names, CharInLength: !!job.value?.char_in_length, UseNvarchar2: !!job.value?.use_nvarchar2, Distributed: false, ChangeOwner: !!job.value?.change_owner, TargetSchema: binding.value?.target_schema || job.value?.dst_schema || '', Objects: (job.value?.migrate_objects || '').split(',').map(value => value.trim()).filter(Boolean) }
     bindingVisible.value = true

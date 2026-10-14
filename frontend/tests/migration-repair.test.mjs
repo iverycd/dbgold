@@ -1051,6 +1051,94 @@ test('legacy PostgreSQL schema snapshot is not reused as the source database', a
   } finally { scope.stop() }
 })
 
+test('legacy Dameng binding keeps the connection database separate from the owner snapshot', async t => {
+  for (const [name, connections, expectedDatabase] of [
+    ['empty connection database', [{ id: 1, db_type: 'dameng', database: '' }], ''],
+    ['missing saved source connection', [], ''],
+    ['configured connection database', [{ id: 1, db_type: 'dameng', database: 'connection_default' }], 'connection_default'],
+  ]) await t.test(name, async () => {
+    const scope = Vue.effectScope()
+    try {
+      let submitted
+      const p = scope.run(() => panel({ jobID: 'job' }, {
+        listConnections: async () => ({ data: connections }),
+        bindRepairConnections: async (_job, request) => { submitted = JSON.parse(JSON.stringify(request)); return { data: {} } },
+      })); await tick()
+      p.job.value = { src_db_type: 'dameng', source_schema: 'EPOINTWEBBUILDER5_3_942', src_conn: { database: 'EPOINTWEBBUILDER5_3_942' } }
+      p.binding.value = { configured: false, legacy: true, src_conn_id: 1, dst_conn_id: 2 }
+      await p.openBinding()
+      assert.equal(p.bindingForm.source_database, expectedDatabase)
+      assert.equal(p.bindingForm.source_schema, 'EPOINTWEBBUILDER5_3_942')
+      p.bindingForm.config.Content = 'both'
+      await p.saveBinding()
+      assert.equal(submitted.source_database, expectedDatabase)
+      assert.equal(submitted.source_schema, 'EPOINTWEBBUILDER5_3_942')
+      p.lifecycle.unmount()
+    } finally { scope.stop() }
+  })
+})
+
+test('legacy database-source bindings still use their frozen database snapshot', async t => {
+  for (const type of ['mysql', 'sqlserver', 'oracle']) await t.test(type, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+      p.job.value = { src_db_type: type, src_conn: { database: 'source_database' } }
+      p.binding.value = { configured: false, legacy: true }
+      await p.openBinding()
+      assert.equal(p.bindingForm.source_database, 'source_database')
+      p.lifecycle.unmount()
+    } finally { scope.stop() }
+  })
+})
+
+test('binding identity errors display backend detail and keep the binding dialog open', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const message = '源连接与原任务不匹配：主机（原任务 "db-a"，所选 "db-b"）、账号（原任务 "sysdba"，所选 "other"）'
+    let calls = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, { bindRepairConnections: async () => { calls++; throw { response: { data: { error: message } } } } })); await tick()
+    p.binding.value = { configured: true, legacy: false, src_conn_id: 1, dst_conn_id: 2 }
+    await p.openBinding()
+    await p.saveBinding()
+    assert.equal(calls, 1)
+    assert.equal(p.error.value, message)
+    assert.deepEqual(p.messages, [message])
+    assert.equal(p.bindingVisible.value, true)
+    assert.equal(p.saving.value, false)
+    assert.equal(p.executeConfirmVisible.value, false)
+    assert.equal(p.recoveryPlan.value, null)
+    assert.ok((await renderPanel(p)).includes('源连接与原任务不匹配：主机'))
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('recovery identity errors display backend detail without enabling execution', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const message = '目标连接与原任务不匹配：数据库（原任务 "prod"，所选 "archive"）'
+    let starts = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      previewRecovery: async () => { throw { response: { data: { error: message } } } },
+      startRecovery: async () => { starts++; assert.fail('failed preview cannot submit recovery') },
+    })); await tick()
+    p.openRecovery(record())
+    await flush()
+    assert.equal(p.error.value, message)
+    assert.deepEqual(p.messages, [message])
+    assert.equal(p.recoveryVisible.value, true)
+    assert.equal(p.previewing.value, false)
+    assert.equal(p.recoveryPlan.value, null)
+    p.recoveryForm.sourceQuiesced = true; p.recoveryForm.targetQuiesced = true; p.recoveryForm.reviewed = true
+    assert.equal(p.canRecover.value, false)
+    await p.confirmRecovery()
+    assert.equal(starts, 0)
+    assert.equal(p.executeConfirmVisible.value, false)
+    assert.ok((await renderPanel(p)).includes('目标连接与原任务不匹配：数据库'))
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
 test('unknown execution results are unresolved and cannot be counted as success', () => {
   assert.equal(utils.repairStatus('unknown'), '执行结果未知')
   assert.equal(utils.repairStatus('unverified'), '执行结果未知')

@@ -112,12 +112,28 @@ func sourceOverride(b *store.MigrationRepairBinding, typ string) string {
 	}
 	return b.SourceDatabase
 }
+
+// Recover only the frozen source scope; the selected connection's default must
+// never replace the owner used by the original migration.
+func fillRepairSourceSchema(j *store.DataMigrationJob, b *store.MigrationRepairBinding) {
+	if b.SourceSchema != "" {
+		return
+	}
+	b.SourceSchema = j.SourceSchema
+	if b.SourceSchema == "" && j.RepairConfigJSON == "" && j.SrcDBType == "dameng" {
+		// Legacy Dameng snapshots stored the effective owner in SrcConnDatabase.
+		b.SourceSchema = strings.ToUpper(j.SrcConnDatabase)
+	}
+}
+
 func initialRepairBinding(j *store.DataMigrationJob, cfgJSON string, legacy bool) *store.MigrationRepairBinding {
 	schema := j.SourceSchema
 	if !legacy && schema == "" && source.IsPGFamily(j.SrcDBType) {
 		schema = "public"
 	}
-	return &store.MigrationRepairBinding{JobID: j.JobID, SrcConnID: j.SrcConnID, DstConnID: j.DstConnID, SourceDatabase: j.SourceDatabase, SourceSchema: schema, TargetSchema: j.DstSchema, ConfigJSON: cfgJSON, Configured: cfgJSON != "", Legacy: legacy, Version: 1}
+	b := &store.MigrationRepairBinding{JobID: j.JobID, SrcConnID: j.SrcConnID, DstConnID: j.DstConnID, SourceDatabase: j.SourceDatabase, SourceSchema: schema, TargetSchema: j.DstSchema, ConfigJSON: cfgJSON, Configured: cfgJSON != "", Legacy: legacy, Version: 1}
+	fillRepairSourceSchema(j, b)
+	return b
 }
 func persistMigrationManifest(j *store.DataMigrationJob, src, dst *store.Connection, m datamigrate.RepairManifest) error {
 	cfg := m.Config
@@ -227,6 +243,7 @@ func loadRepairObject(c *gin.Context, write bool) (*store.DataMigrationJob, *sto
 		repairError(c, e)
 		return nil, nil, nil, repair.Object{}, false
 	}
+	fillRepairSourceSchema(j, b)
 	row, e := store.GetMigrationRepairObject(j.JobID, c.Param("objectID"))
 	if e != nil {
 		c.JSON(404, gin.H{"error": "对象不存在"})
@@ -262,7 +279,12 @@ func ListMigrationRepairs(c *gin.Context) {
 	for i, o := range objects {
 		out = append(out, gin.H{"object": o, "version": rows[i].Version})
 	}
-	b, _ := store.GetMigrationRepairBinding(j.JobID)
+	b, e := store.GetMigrationRepairBinding(j.JobID)
+	if e != nil {
+		repairError(c, e)
+		return
+	}
+	fillRepairSourceSchema(j, b)
 	var a store.MigrationRepairAttempt
 	store.DB.Where("job_id = ? AND status = ?", j.JobID, "running").First(&a)
 	c.JSON(200, gin.H{"objects": out, "binding": bindingResponse(b, j), "running_attempt_id": a.ID})
@@ -277,15 +299,38 @@ func GetMigrationRepair(c *gin.Context) {
 // Snapshot comparisons intentionally ignore display names and credentials, but never endpoints or principals.
 func checkRepairConnection(j *store.DataMigrationJob, c *store.Connection, src bool) error {
 	typ, host, port, db, user := j.DstDBType, j.DstConnHost, j.DstConnPort, j.DstConnDatabase, j.DstConnUsername
+	checkDatabase := db != ""
+	role := "目标连接"
 	if src {
+		role = "源连接"
 		typ, host, port, user = j.SrcDBType, j.SrcConnHost, j.SrcConnPort, j.SrcConnUsername
 		db = j.SourceConnectionDatabase
-		if db == "" && !source.IsPGFamily(typ) {
+		// The repair config and source location were captured together. An empty
+		// connection database is therefore a real snapshot value, not missing data.
+		checkDatabase = j.RepairConfigJSON != "" || db != ""
+		if !checkDatabase && !source.IsPGFamily(typ) && typ != "dameng" {
 			db = j.SrcConnDatabase
+			checkDatabase = db != ""
 		}
 	}
-	if c.DBType != typ || (host != "" && !strings.EqualFold(host, c.Host)) || (port != 0 && port != c.Port) || (db != "" && db != c.Database) || (user != "" && user != c.Username) {
-		return fmt.Errorf("连接与原任务的数据库类型、主机、端口、数据库或账号不匹配")
+	var mismatches []string
+	if c.DBType != typ {
+		mismatches = append(mismatches, fmt.Sprintf("数据库类型（原任务 %q，当前连接 %q）", typ, c.DBType))
+	}
+	if host != "" && !strings.EqualFold(host, c.Host) {
+		mismatches = append(mismatches, fmt.Sprintf("主机（原任务 %q，当前连接 %q）", host, c.Host))
+	}
+	if port != 0 && port != c.Port {
+		mismatches = append(mismatches, fmt.Sprintf("端口（原任务 %d，当前连接 %d）", port, c.Port))
+	}
+	if checkDatabase && db != c.Database {
+		mismatches = append(mismatches, fmt.Sprintf("数据库（原任务 %q，当前连接 %q）", db, c.Database))
+	}
+	if user != "" && user != c.Username {
+		mismatches = append(mismatches, fmt.Sprintf("账号（原任务 %q，当前连接 %q）", user, c.Username))
+	}
+	if len(mismatches) != 0 {
+		return fmt.Errorf("%s与原任务不匹配：%s", role, strings.Join(mismatches, "；"))
 	}
 	return nil
 }
@@ -309,7 +354,12 @@ func UpdateMigrationRepairBinding(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
-	b, _ := store.GetMigrationRepairBinding(j.JobID)
+	b, e := store.GetMigrationRepairBinding(j.JobID)
+	if e != nil {
+		repairError(c, e)
+		return
+	}
+	fillRepairSourceSchema(j, b)
 	dst, e := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if e != nil {
 		c.JSON(404, gin.H{"error": "目标连接不存在"})
