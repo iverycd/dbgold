@@ -1,18 +1,28 @@
 <template>
-  <div ref="editorHost" class="sql-editor"></div>
+  <div class="sql-editor">
+    <div v-if="formatDbType" class="sql-format-toolbar">
+      <a-button size="mini" :disabled="formatDisabled || !modelValue.trim()" @mousedown.prevent @click="formatSQL">格式化 SQL</a-button>
+      <span>Ctrl / ⌘ + Shift + F · 选中时格式化选区，否则格式化全文</span>
+    </div>
+    <div ref="editorHost" class="sql-editor-host"></div>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { basicSetup } from 'codemirror'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorState, Compartment, Prec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { sql, MySQL, PostgreSQL } from '@codemirror/lang-sql'
+import { Message } from '@arco-design/web-vue'
+import { createSQLFormatTransaction } from '@/utils/sqlFormatting'
 
 const props = defineProps<{
   modelValue: string
   dialect: 'mysql' | 'postgres' | 'gaussdb'
   executionMode?: 'statement' | 'document'
+  formatDbType?: string
+  formatDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -89,6 +99,17 @@ function getExecutableSQL(): string {
   return view ? (props.executionMode === 'document' ? view.state.doc.toString().trim() : selectedOrCurrentSQL(view.state)) : props.modelValue.trim()
 }
 
+function formatSQL(): void {
+  if (!view || !props.formatDbType || props.formatDisabled) return
+  try {
+    const transaction = createSQLFormatTransaction(view.state, props.formatDbType)
+    if (transaction) view.dispatch(transaction)
+    view.focus()
+  } catch {
+    Message.warning('格式化失败，请检查 SQL 或目标数据库语法')
+  }
+}
+
 defineExpose({ getExecutableSQL })
 
 onMounted(() => {
@@ -100,6 +121,14 @@ onMounted(() => {
       extensions: [
         basicSetup,
         dialectCompartment.of(languageExtension()),
+        Prec.highest(keymap.of([{
+          key: 'Mod-Shift-f',
+          run: () => {
+            if (!props.formatDbType) return false
+            formatSQL()
+            return true
+          },
+        }])),
         keymap.of([{
           key: 'Mod-Enter',
           run: (stateView) => {
@@ -135,9 +164,26 @@ onBeforeUnmount(() => view?.destroy())
 
 <style scoped>
 .sql-editor {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 220px;
   background: #fff;
+}
+.sql-format-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border-2);
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+.sql-editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 .sql-editor :deep(.cm-editor) {
   height: 100%;

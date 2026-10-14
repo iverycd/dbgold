@@ -98,7 +98,7 @@
           <div class="unit-heading"><a-checkbox v-model="unit.selected" :disabled="unitCommitted(unit.status) || unit.destructive">执行步骤 {{ index + 1 }}</a-checkbox><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag><span v-if="unit.destructive" class="error-text">破坏性步骤禁止重放</span><a-button v-if="!unitCommitted(unit.status) && !unit.destructive" type="text" size="mini" @click="draftUnits.splice(index, 1)">移除此单元</a-button></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p>
           <pre v-if="unitCommitted(unit.status) || unit.destructive" class="sql-preview">{{ unit.sql }}</pre>
-          <SqlEditor v-else v-model="unit.sql" :dialect="editorDialect" execution-mode="document" @execute="prepareExecute" />
+          <SqlEditor v-else v-model="unit.sql" :dialect="editorDialect" :format-db-type="job?.dst_db_type" :format-disabled="busy || saving || editing.object.status === 'unknown'" execution-mode="document" @execute="prepareExecute" />
         </div>
         <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
         <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canEditRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">确认执行步骤</a-button></div>

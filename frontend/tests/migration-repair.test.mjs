@@ -8,6 +8,7 @@ import { parse } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
+import { formatDialect, postgresql } from 'sql-formatter'
 
 function transpile(source) { return ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText }
 const utilsContext = { exports: {} }
@@ -176,7 +177,7 @@ test('focus waits for loading and task changes clear pending navigation and old 
   } finally { scope.stop() }
 })
 
-async function renderPanel(p, onRender) {
+async function renderPanel(p, onRender, onEditor) {
   const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
   const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
   const app = Vue.createSSRApp({
@@ -192,7 +193,7 @@ async function renderPanel(p, onRender) {
     props: ['data'],
     setup: (props, { slots }) => () => Vue.h('div', props.data?.length ? props.data.flatMap(record => (slots.columns?.() || []).map(column => Vue.h('div', column.children?.cell?.({ record })))) : slots.empty?.()),
   })
-  app.component('SqlEditor', { props: ['modelValue'], setup: props => () => Vue.h('textarea', props.modelValue) })
+  app.component('SqlEditor', { props: ['modelValue', 'formatDbType', 'formatDisabled', 'executionMode'], setup: props => () => { onEditor?.(props); return Vue.h('textarea', props.modelValue) } })
   return renderToString(app)
 }
 
@@ -200,6 +201,59 @@ function findNodes(tree, predicate) {
   const children = Array.isArray(tree.children) ? tree.children.flatMap(child => findNodes(child, predicate)) : []
   return predicate(tree) ? [tree, ...children] : children
 }
+
+test('repair formatting uses the target dialect and honors read-only and busy states', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.job.value.dst_db_type = 'dameng'
+    p.openEditor(record({ units: [unit('pending', 'pending'), unit('success', 'succeeded'), unit('danger', 'pending', { destructive: true })] }))
+    let editors
+    const inspect = async () => { editors = []; return renderPanel(p, undefined, props => { editors.push(props) }) }
+    await inspect()
+    assert.equal(editors.length, 1, 'successful and destructive units stay read-only')
+    assert.equal(editors[0].formatDbType, 'dameng')
+    assert.equal(editors[0].formatDisabled, false)
+    p.saving.value = true; await inspect()
+    assert.equal(editors[0].formatDisabled, true)
+    p.saving.value = false; p.job.value.status = 'running'; await inspect()
+    assert.equal(editors[0].formatDisabled, true)
+    p.job.value.status = 'failed'; p.editing.value.object.status = 'unknown'; await inspect()
+    assert.equal(editors[0].formatDisabled, true)
+    p.openEditor(record({ diagnostic_only: true })); await inspect()
+    assert.equal(editors.length, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('formatted SQL persists through saving, reopening and execution confirmation', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const original = 'Create View "OrdersView" AS select Id, Name from "Orders" where Id > 1;'
+    let saved = record({ kind: 'view', ddl: original, units: [unit('view', 'failed', { sql: original, original_sql: original })] })
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => ({ data: { objects: [saved], binding: { configured: true } } }),
+      saveRepairDraft: async (_, __, draft) => {
+        saved = { version: saved.version + 1, object: { ...saved.object, units: draft.units.map(item => ({ ...item })) } }
+        return { data: saved }
+      },
+    })); await tick()
+    p.openEditor(saved)
+    const formatted = formatDialect(original, { dialect: postgresql, keywordCase: 'preserve', tabWidth: 2 })
+    p.draftUnits.value[0].sql = formatted
+    assert.equal(await p.saveDraft(), true)
+    p.closeEditor(); p.openEditor(saved)
+    assert.equal(p.draftUnits.value[0].sql, formatted)
+    assert.equal(p.draftUnits.value[0].original_sql, original)
+    assert.equal(p.editing.value.object.ddl, original)
+    await p.prepareExecute()
+    assert.equal(p.executeConfirmVisible.value, true)
+    assert.equal(p.executionSnapshot.value[0].sql, formatted)
+    p.draftUnits.value[0].sql = original
+    assert.equal(p.executeConfirmVisible.value, false, 'editing invalidates the previous confirmation')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('category buttons and dropdown filter the same objects and keep counts independent of search', async () => {
   const scope = Vue.effectScope()
