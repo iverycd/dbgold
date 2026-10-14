@@ -15,7 +15,7 @@ vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.
 const utils = utilsContext.exports
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
-const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, objectStatus, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing'
+const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, objectStatus, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
   let uuid = 0
@@ -157,7 +157,7 @@ test('focus waits for loading and task changes clear pending navigation and old 
     requests[0].resolve({ data: { objects: [record()], binding: { configured: true } } }); await tick(); await tick()
     assert.equal(p.highlightedObjectID.value, 'obj')
     assert.equal(p.filter.value, 'all')
-    p.keyword.value = 'Orders'; p.page.value = 4
+    p.selectRepairFilter('blocked'); p.keyword.value = 'Orders'; p.page.value = 4
     const refresh = p.refresh()
     await p.focusObject({ kind: 'tables', name: 'Orders' })
     props.jobID = 'new'; await tick()
@@ -176,10 +176,13 @@ test('focus waits for loading and task changes clear pending navigation and old 
   } finally { scope.stop() }
 })
 
-async function renderPanel(p) {
+async function renderPanel(p, onRender) {
   const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
   const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
-  const app = Vue.createSSRApp({ setup: () => ({ ...p, ...utils, getDbTypeLabel: value => value === 'gaussdb' ? 'GaussDB' : value }), render })
+  const app = Vue.createSSRApp({
+    setup: () => ({ ...p, ...utils, getDbTypeLabel: value => value === 'gaussdb' ? 'GaussDB' : value }),
+    render(...args) { const tree = render.apply(this, args); onRender?.(tree); return tree },
+  })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
   for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-tag', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
   app.component('a-empty', Arco.Empty)
@@ -192,6 +195,197 @@ async function renderPanel(p) {
   app.component('SqlEditor', { props: ['modelValue'], setup: props => () => Vue.h('textarea', props.modelValue) })
   return renderToString(app)
 }
+
+function findNodes(tree, predicate) {
+  const children = Array.isArray(tree.children) ? tree.children.flatMap(child => findNodes(child, predicate)) : []
+  return predicate(tree) ? [tree, ...children] : children
+}
+
+test('category buttons and dropdown filter the same objects and keep counts independent of search', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [
+      record({ id: 'fixed', status: 'succeeded', original_status: 'failed', data_status: 'pending' }),
+      record({ id: 'pending', status: 'pending' }),
+      record({ id: 'failed', status: 'failed' }),
+      record({ id: 'draft', status: 'draft' }),
+      record({ id: 'unknown', status: 'unknown' }),
+      record({ id: 'blocked', status: 'blocked', data_status: 'blocked' }),
+      record({ id: 'original-success', status: 'succeeded', original_status: 'succeeded' }),
+      record({ id: 'diagnostic', diagnostic_only: true, data_status: 'failed' }),
+      record({ id: 'index', kind: 'index', data_status: 'failed' }),
+    ]
+    const expected = {
+      repaired: ['fixed'], pending: ['pending', 'failed', 'draft', 'unknown', 'diagnostic', 'index'],
+      blocked: ['blocked'], data: ['fixed', 'blocked'],
+    }
+    let buttons, dropdown
+    await renderPanel(p, tree => {
+      buttons = findNodes(tree, node => node.type === 'button' && node.props?.class?.includes('repair-stat'))
+      dropdown = findNodes(tree, node => node.props?.style?.width === '150px' && node.props?.['onUpdate:modelValue'])[0]
+    })
+    assert.equal(buttons.length, 4)
+    assert.ok(dropdown)
+    for (const [index, category] of utils.repairCategories.entries()) {
+      p.keyword.value = 'unrelated'; p.page.value = 5
+      p.highlightedObjectID.value = 'fixed'; p.pendingFocus.value = { kind: 'tables', name: 'Orders' }
+      buttons[index].props.onClick()
+      await tick()
+      assert.equal(p.filter.value, category.key)
+      assert.equal(p.keyword.value, '')
+      assert.equal(p.page.value, 1)
+      assert.equal(p.highlightedObjectID.value, '')
+      assert.equal(p.pendingFocus.value, null)
+      assert.deepEqual(Array.from(p.visibleRecords.value, item => item.object.id), expected[category.key])
+      assert.equal(p.stats.value[category.key], expected[category.key].length)
+      let renderedDropdown
+      const html = await renderPanel(p, tree => {
+        renderedDropdown = findNodes(tree, node => node.props?.style?.width === '150px' && node.props?.['onUpdate:modelValue'])[0]
+      })
+      assert.equal(renderedDropdown.props.modelValue, category.key)
+      const renderedButtons = html.match(/<button\b[^>]*>.*?<\/button>/gs)
+      assert.equal(renderedButtons.length, 4)
+      assert.match(renderedButtons[index], /type="button"/)
+      assert.match(renderedButtons[index], /aria-pressed="true"/)
+      assert.match(renderedButtons[index], /repair-stat-active/)
+      assert.doesNotMatch(renderedButtons[index], /disabled/)
+    }
+    p.keyword.value = 'does-not-match'
+    dropdown.props['onUpdate:modelValue']('pending')
+    await tick()
+    assert.equal(p.filter.value, 'pending')
+    assert.equal(p.keyword.value, 'does-not-match')
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.stats.value.pending, expected.pending.length)
+    assert.equal(p.emptyDescription.value, '没有匹配的对象')
+    // Clicking the already selected category still clears the search and page.
+    p.page.value = 3; buttons[1].props.onClick(); await tick()
+    assert.equal(p.page.value, 1)
+    assert.equal(p.visibleRecords.value.length, expected.pending.length)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('zero-count categories stay clickable and explain empty results with a reset action', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [record({ status: 'succeeded', original_status: 'succeeded' })]
+    let buttons
+    await renderPanel(p, tree => { buttons = findNodes(tree, node => node.type === 'button') })
+    for (const [index, category] of utils.repairCategories.entries()) {
+      assert.equal(p.stats.value[category.key], 0)
+      assert.equal(buttons[index].props.disabled, undefined)
+      buttons[index].props.onClick(); await tick()
+      const html = await renderPanel(p)
+      assert.equal(p.visibleRecords.value.length, 0)
+      assert.ok(html.includes(category.empty))
+      assert.ok(html.includes('查看全部对象'))
+    }
+    p.showAllObjects(); await tick()
+    assert.equal(p.filter.value, 'all')
+    assert.equal(p.visibleRecords.value.length, 1)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('repaired category preserves legacy execution evidence and excludes verification-only success', () => {
+  const object = record({ status: 'succeeded', units: [] }).object
+  assert.equal(utils.matchesRepairFilter(object, 'repaired'), false)
+  for (const extra of [{ original_status: 'failed' }, { original_error: 'failed migration' }, { error: 'legacy failure' }, { units: [unit('create', 'succeeded')] }]) {
+    assert.equal(utils.matchesRepairFilter({ ...object, ...extra }, 'repaired'), true)
+  }
+  for (const kind of ['ddl', 'recovery']) {
+    assert.equal(utils.matchesRepairFilter(object, 'repaired', [{ object_id: 'obj', kind, status: 'succeeded' }]), true)
+  }
+  for (const kind of ['verification', 'manual_verification']) {
+    assert.equal(utils.matchesRepairFilter(object, 'repaired', [{ object_id: 'obj', kind, status: 'succeeded' }]), false)
+  }
+  assert.equal(utils.matchesRepairFilter(object, 'repaired', [{ object_id: 'other', kind: 'ddl', status: 'succeeded' }]), false)
+  assert.equal(utils.matchesRepairFilter({ ...object, original_status: 'succeeded', units: [unit('create', 'succeeded')] }, 'repaired'), false)
+  assert.equal(utils.matchesRepairFilter({ ...object, status: 'unknown', original_status: 'failed' }, 'repaired'), false)
+  for (const status of ['success', 'repaired']) assert.equal(utils.matchesRepairFilter({ ...object, status, original_status: 'failed' }, 'repaired'), true)
+  for (const data_status of [undefined, 'not_required', 'succeeded', 'success', 'repaired']) assert.equal(utils.matchesRepairFilter({ ...object, data_status }, 'data'), false)
+})
+
+test('refresh keeps category and search while repairs leave it and pagination shrinks', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let saved = Array.from({ length: 12 }, (_, index) => record({ id: `obj-${index}`, original_status: 'failed', original_error: 'original failure' }))
+    let fail = false
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => {
+      if (fail) throw new Error('refresh unavailable')
+      return { data: { objects: saved, binding: { configured: true } } }
+    } })); await tick()
+    p.selectRepairFilter('pending'); p.keyword.value = 'Orders'; await tick(); p.page.value = 2
+    saved = saved.map((item, index) => index >= 9 ? { ...item, object: { ...item.object, status: 'succeeded', units: [unit('create', 'succeeded')] } } : item)
+    await p.refresh(); await tick()
+    assert.equal(p.filter.value, 'pending')
+    assert.equal(p.keyword.value, 'Orders')
+    assert.equal(p.visibleRecords.value.length, 9)
+    assert.equal(p.page.value, 1)
+    assert.equal(p.stats.value.pending, 9)
+    assert.equal(p.stats.value.repaired, 3)
+    assert.equal(p.emitted.at(-1)[1].attention, 9)
+    fail = true; await p.refresh(); await tick()
+    assert.equal(p.summary.value.state, 'unknown')
+    assert.equal(p.emptyDescription.value, '修复状态未知，请刷新重试')
+    assert.equal(p.filter.value, 'pending')
+    assert.equal(p.keyword.value, 'Orders')
+    fail = false
+    saved = saved.map(item => ({ ...item, object: { ...item.object, status: 'succeeded', units: [unit('create', 'succeeded')] } }))
+    await p.refresh(); await tick()
+    assert.equal(p.summary.value.state, 'ready')
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.stats.value.pending, 0)
+    assert.equal(p.stats.value.repaired, 12)
+    assert.equal(p.emitted.at(-1)[1].attention, 0)
+    assert.equal(saved[0].object.original_error, 'original failure')
+    p.selectRepairFilter('repaired'); await tick()
+    assert.equal(p.visibleRecords.value.length, 12)
+    p.page.value = 2; await p.refresh(); await tick()
+    assert.equal(p.page.value, 2, 'valid page is preserved during refresh')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('data recovery completion updates category membership and summary through polling', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let saved = record({ status: 'succeeded', original_status: 'failed', data_status: 'pending' })
+    let completed = false
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => ({ data: { objects: [saved], binding: { configured: true } } }),
+      startRecovery: async () => ({ data: { id: 'recovery', kind: 'recovery', object_id: 'obj', status: 'running', units: [] } }),
+      getRepairAttempt: async () => ({ data: { id: 'recovery', kind: 'recovery', object_id: 'obj', status: completed ? 'succeeded' : 'running', units: [] } }),
+    })); await tick()
+    p.selectRepairFilter('repaired'); await tick()
+    assert.equal(p.visibleRecords.value.length, 1)
+    assert.equal(p.stats.value.data, 1)
+    p.selectRepairFilter('data'); await tick()
+    assert.equal(p.visibleRecords.value.length, 1)
+    p.recoveryObject.value = saved
+    p.recoveryPlan.value = { token: 'preview', preview: { data_required: true, target_rows: 0, related: [] } }
+    p.recoveryForm.sourceQuiesced = true; p.recoveryForm.targetQuiesced = true; p.recoveryForm.reviewed = true
+    await p.confirmRecovery()
+    assert.equal(p.activeAttempt.value.status, 'running')
+    completed = true; saved = { ...saved, object: { ...saved.object, data_status: 'succeeded' } }
+    p.scheduled.at(-1)()
+    await new Promise(resolve => setImmediate(resolve)); await tick()
+    assert.equal(p.activeAttempt.value.status, 'succeeded')
+    assert.equal(p.filter.value, 'data')
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.stats.value.data, 0)
+    assert.equal(p.stats.value.repaired, 1)
+    assert.equal(p.summary.value.attention, 0)
+    assert.equal(p.emitted.at(-1)[1].attention, 0)
+    assert.match(await renderPanel(p), /当前无待补数据对象/)
+    p.selectRepairFilter('repaired'); await tick()
+    assert.equal(p.visibleRecords.value.length, 1)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('rendered manual repair shows its entry and editor while keeping source definition read-only', async () => {
   const scope = Vue.effectScope()
@@ -582,15 +776,20 @@ test('manual expression-index execution immediately completes the repair without
       },
       getRepairAttempt: async () => ({ data: { id: 'ddl-attempt', object_id: 'obj', kind: 'ddl', status: 'succeeded', units: saved.object.units } }),
     }))
-    await tick(); p.openEditor(original)
+    await tick(); p.selectRepairFilter('pending'); p.openEditor(original)
     p.draftUnits.value[0].sql = 'CREATE UNIQUE INDEX ix_expr ON public.Orders ((id+1))'
     await p.prepareExecute(); await p.confirmExecute()
+    await tick()
     assert.equal(calls.length, 1)
+    assert.equal(p.filter.value, 'pending')
     assert.equal(p.stats.value.repaired, 1)
     assert.equal(p.stats.value.pending, 0)
     assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.emitted.at(-1)[1].repaired, 1)
+    assert.equal(p.emitted.at(-1)[1].attention, 0)
     await p.refresh()
-    p.filter.value = 'all'
+    p.selectRepairFilter('repaired')
+    assert.equal(p.visibleRecords.value.length, 1)
     const html = await renderPanel(p)
     assert.ok(html.includes('执行成功'))
     assert.ok(html.includes('编辑并执行'))

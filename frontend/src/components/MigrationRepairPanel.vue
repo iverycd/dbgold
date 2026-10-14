@@ -11,9 +11,10 @@
     <a-alert v-if="error" type="error">{{ error }}</a-alert>
     <a-alert v-if="job?.status === 'running'" type="info">原迁移仍在运行，结束后才能修复。</a-alert>
     <a-alert v-else-if="binding && !binding.configured" type="warning">此历史或批量任务需要先绑定匹配的已保存连接，并确认原迁移配置。</a-alert>
-    <div v-if="records.length" class="repair-stats">
-      <span>已修复 <strong>{{ stats.repaired }}</strong></span><span>待修复 <strong>{{ stats.pending }}</strong></span>
-      <span>依赖阻塞 <strong>{{ stats.blocked }}</strong></span><span>待补数据 <strong>{{ stats.data }}</strong></span>
+    <div v-if="records.length" class="repair-stats" role="group" aria-label="按修复状态筛选对象">
+      <button v-for="category in repairCategories" :key="category.key" type="button" class="repair-stat" :class="{ 'repair-stat-active': filter === category.key }" :aria-pressed="filter === category.key" @click="selectRepairFilter(category.key)">
+        {{ category.label }} <strong>{{ stats[category.key] }}</strong>
+      </button>
     </div>
     <div v-if="activeAttempt" class="attempt-banner">
       <a-tag :color="statusColor(activeAttempt.status)">{{ repairExecutionStatus(activeAttempt.status) }}</a-tag>
@@ -22,14 +23,17 @@
       <a-button v-if="attemptRunning(activeAttempt.status)" size="mini" status="danger" :loading="cancelling" @click="cancelAttempt">取消执行</a-button>
     </div>
     <div class="repair-filters" v-if="records.length">
-      <a-select v-model="filter" style="width: 150px"><a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option></a-select>
+      <a-select v-model="filter" style="width: 150px">
+        <a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option>
+        <a-option v-for="category in repairCategories" :key="category.key" :value="category.key">{{ category.label }}</a-option>
+      </a-select>
       <a-input-search v-model="keyword" placeholder="搜索模式名、对象、所属表或错误" allow-clear style="max-width: 300px" />
     </div>
     <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1100 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
-          <a-empty :description="error ? '修复状态未知，请刷新重试' : loading ? '修复状态加载中' : !keyword.trim() && filter === 'attention' ? '当前无待处理对象' : '没有匹配的对象'" />
-          <a-button v-if="filter === 'attention'" type="text" size="small" @click="showAllObjects">查看全部对象</a-button>
+          <a-empty :description="emptyDescription" />
+          <a-button v-if="filter !== 'all' || keyword.trim()" type="text" size="small" @click="showAllObjects">查看全部对象</a-button>
         </div>
       </template>
       <template #columns>
@@ -65,7 +69,7 @@
       </template>
     </a-table>
     <a-spin v-else-if="loading" />
-    <a-empty v-else-if="!error" :description="keyword.trim() ? '没有匹配的对象' : '当前无待处理对象'" />
+    <a-empty v-else-if="!error" :description="emptyDescription" />
 
     <a-modal v-model:visible="editorVisible" :mask-closable="false" :width="960" :footer="false" :title="`对象修复 · ${editing ? qualified(editing.object) : ''}`" @close="closeEditor">
       <template v-if="editing">
@@ -175,7 +179,7 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchesRepairFilter, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 
 const SqlEditor = defineAsyncComponent(() => import('@/components/SqlEditor.vue'))
@@ -194,7 +198,7 @@ const saving = ref(false)
 const submitting = ref(false)
 const cancelling = ref(false)
 const activeAttempt = ref<RepairAttempt | null>(null)
-const filter = ref('attention')
+const filter = ref<RepairFilter>('attention')
 const keyword = ref('')
 const editorVisible = ref(false)
 const editing = ref<RepairRecord | null>(null)
@@ -231,8 +235,13 @@ let disposed = false
 const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value)
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
-const visibleRecords = computed(() => records.value.filter(({ object }) => (filter.value === 'all' || needsRepairAttention(object)) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
-const stats = computed(() => ({ repaired: records.value.filter(({ object }) => unitCommitted(object.status) && object.original_status !== 'succeeded' && (!!object.original_status || !!object.original_error || !!object.error || object.units?.some(unit => unitCommitted(unit.status)) || attempts.value.some(attempt => attempt.object_id === object.id && ['ddl', 'recovery'].includes(attempt.kind) && unitCommitted(attempt.status)))).length, pending: records.value.filter(({ object }) => !unitCommitted(object.status) && object.status !== 'blocked').length, blocked: records.value.filter(({ object }) => object.status === 'blocked').length, data: records.value.filter(({ object }) => !object.diagnostic_only && isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)).length }))
+const visibleRecords = computed(() => records.value.filter(({ object }) => matchesRepairFilter(object, filter.value, attempts.value) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
+const stats = computed(() => {
+  const counts: Record<RepairCategory, number> = { repaired: 0, pending: 0, blocked: 0, data: 0 }
+  for (const { key } of repairCategories) counts[key] = records.value.filter(({ object }) => matchesRepairFilter(object, key, attempts.value)).length
+  return counts
+})
+const emptyDescription = computed(() => error.value ? '修复状态未知，请刷新重试' : loading.value ? '修复状态加载中' : keyword.value.trim() ? '没有匹配的对象' : filter.value === 'attention' ? '当前无待处理对象' : repairCategories.find(category => category.key === filter.value)?.empty || '当前无对象')
 const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: new Set(records.value.filter(({ object }) => needsRepairAttention(object)).map(({ object }) => object.id)).size }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
@@ -263,7 +272,11 @@ function newKey() {
 }
 function replaceRecord(record: RepairRecord) { records.value = records.value.map(item => item.object.id === record.object.id ? record : item) }
 
-function showAllObjects() { filter.value = 'all'; keyword.value = ''; page.value = 1 }
+function selectRepairFilter(value: RepairFilter) {
+  filter.value = value; keyword.value = ''; page.value = 1
+  highlightedObjectID.value = ''; pendingFocus.value = null
+}
+function showAllObjects() { selectRepairFilter('all') }
 async function focusObject(target: RepairFocusTarget) {
   pendingFocus.value = target
   await applyPendingFocus()
@@ -487,6 +500,7 @@ defineExpose({ exportHistory, focusObject })
 watch(summary, value => emit('summary-change', value), { immediate: true })
 watch(loading, value => { if (!value) void applyPendingFocus() })
 watch([filter, keyword], () => { page.value = 1 })
+watch(() => visibleRecords.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length / 10))) })
 watch([draftUnits, () => mappingForm.values], () => { draftRevision++; executeConfirmVisible.value = false }, { deep: true, flush: 'sync' })
 watch(() => props.jobID, () => {
   epoch++; refreshSerial++; previewSerial++; editorSerial++; historySerial++
@@ -509,7 +523,11 @@ onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
 .repair-heading h3 { margin: 0; font-size: 16px; }
 .repair-heading p, .muted { font-size: 12px; color: var(--color-text-3); overflow-wrap: anywhere; }
 .repair-heading p { margin: 6px 0 12px; }
-.repair-stats { display: flex; flex-wrap: wrap; gap: 24px; padding: 14px 0; }
+.repair-stats { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 0; }
+.repair-stat { padding: 6px 10px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--color-text-1); font: inherit; cursor: pointer; }
+.repair-stat:hover { background: var(--color-fill-2); }
+.repair-stat-active { border-color: rgb(var(--primary-6)); background: var(--color-primary-light-1); color: rgb(var(--primary-6)); }
+.repair-stat:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .repair-stats strong { margin-left: 5px; font-variant-numeric: tabular-nums; }
 .repair-filters, .attempt-banner, .editor-toolbar { margin: 12px 0; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }

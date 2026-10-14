@@ -13,6 +13,31 @@ export function needsRepairAttention(object: RepairObject): boolean {
   return !unitCommitted(object.status) || !!(object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status))
 }
 
+export const repairCategories = [
+  { key: 'repaired', label: '已修复', empty: '当前无已修复对象' },
+  { key: 'pending', label: '待修复', empty: '当前无待修复对象' },
+  { key: 'blocked', label: '依赖阻塞', empty: '当前无依赖阻塞对象' },
+  { key: 'data', label: '待补数据', empty: '当前无待补数据对象' },
+] as const
+export type RepairCategory = typeof repairCategories[number]['key']
+export type RepairFilter = 'attention' | 'all' | RepairCategory
+
+export function matchesRepairFilter(object: RepairObject, filter: RepairFilter, attempts: RepairAttempt[] = []): boolean {
+  switch (filter) {
+    case 'all': return true
+    case 'attention': return needsRepairAttention(object)
+    case 'repaired':
+      return unitCommitted(object.status) && object.original_status !== 'succeeded' && !!(
+        object.original_status || object.original_error || object.error ||
+        object.units?.some(unit => unitCommitted(unit.status)) ||
+        attempts.some(attempt => attempt.object_id === object.id && ['ddl', 'recovery'].includes(attempt.kind) && unitCommitted(attempt.status))
+      )
+    case 'pending': return !unitCommitted(object.status) && object.status !== 'blocked'
+    case 'blocked': return object.status === 'blocked'
+    case 'data': return !object.diagnostic_only && isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)
+  }
+}
+
 function canonicalRepairKind(kind: string): string {
   return ({ tables: 'table', data: 'table', primary_keys: 'primary_key', primaryKeys: 'primary_key', indexes: 'index', unique: 'index', foreign_keys: 'foreign_key', constraints: 'foreign_key', sequences: 'sequence', views: 'view', comments: 'comment' } as Record<string, string>)[kind] || kind
 }
