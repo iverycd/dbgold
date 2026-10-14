@@ -23,9 +23,9 @@
     </div>
     <div class="repair-filters" v-if="records.length">
       <a-select v-model="filter" style="width: 150px"><a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option></a-select>
-      <a-input-search v-model="keyword" placeholder="搜索对象、所属表或错误" allow-clear style="max-width: 300px" />
+      <a-input-search v-model="keyword" placeholder="搜索模式名、对象、所属表或错误" allow-clear style="max-width: 300px" />
     </div>
-    <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 880 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+    <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1100 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="error ? '修复状态未知，请刷新重试' : loading ? '修复状态加载中' : !keyword.trim() && filter === 'attention' ? '当前无待处理对象' : '没有匹配的对象'" />
@@ -33,7 +33,27 @@
         </div>
       </template>
       <template #columns>
-        <a-table-column title="对象" :width="230"><template #cell="{ record }"><strong :data-repair-object-id="record.object.id" tabindex="-1">{{ qualified(record.object) }}</strong><div class="muted">{{ repairKind(record.object.kind) }}<span v-if="record.object.table"> · 所属表 {{ record.object.table }}</span></div></template></a-table-column>
+        <a-table-column title="模式名" :width="180">
+          <template #cell="{ record }">
+            <a-tooltip>
+              <template #content><span class="repair-name-tooltip">{{ record.object.schema || '—' }}</span></template>
+              <span class="repair-name">{{ record.object.schema || '—' }}</span>
+            </a-tooltip>
+          </template>
+        </a-table-column>
+        <a-table-column title="对象名" :width="280">
+          <template #cell="{ record }">
+            <a-tooltip>
+              <template #content><span class="repair-name-tooltip">{{ record.object.target_name }}</span></template>
+              <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
+            </a-tooltip>
+            <div class="muted">{{ repairKind(record.object.kind) }}</div>
+            <a-tooltip v-if="record.object.table">
+              <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
+              <div class="repair-name muted">所属表：{{ record.object.table }}</div>
+            </a-tooltip>
+          </template>
+        </a-table-column>
         <a-table-column title="原始错误"><template #cell="{ record }"><div class="error-text">{{ (record.object.original_error ?? record.object.error) || '—' }}</div></template></a-table-column>
         <a-table-column title="修复状态" :width="140"><template #cell="{ record }"><a-tag :color="statusColor(record.object.status)">{{ objectStatus(record.object) }}</a-tag><div v-if="record.object.data_status" class="muted">数据：{{ repairStatus(record.object.data_status) }}</div></template></a-table-column>
         <a-table-column title="操作" :width="240"><template #cell="{ record }"><a-space wrap>
@@ -211,7 +231,7 @@ let disposed = false
 const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value)
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
-const visibleRecords = computed(() => records.value.filter(({ object }) => (filter.value === 'all' || needsRepairAttention(object)) && `${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
+const visibleRecords = computed(() => records.value.filter(({ object }) => (filter.value === 'all' || needsRepairAttention(object)) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
 const stats = computed(() => ({ repaired: records.value.filter(({ object }) => unitCommitted(object.status) && object.original_status !== 'succeeded' && (!!object.original_status || !!object.original_error || !!object.error || object.units?.some(unit => unitCommitted(unit.status)) || attempts.value.some(attempt => attempt.object_id === object.id && ['ddl', 'recovery'].includes(attempt.kind) && unitCommitted(attempt.status)))).length, pending: records.value.filter(({ object }) => !unitCommitted(object.status) && object.status !== 'blocked').length, blocked: records.value.filter(({ object }) => object.status === 'blocked').length, data: records.value.filter(({ object }) => !object.diagnostic_only && isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)).length }))
 const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: new Set(records.value.filter(({ object }) => needsRepairAttention(object)).map(({ object }) => object.id)).size }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
@@ -483,7 +503,7 @@ onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
 </script>
 
 <style scoped>
-.repair-panel { padding: 18px; margin: 18px 0; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
+.repair-panel { min-width: 0; padding: 18px; margin: 18px 0; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
 .repair-heading, .unit-heading, .editor-toolbar, .attempt-banner, .repair-filters, .modal-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .repair-heading, .editor-toolbar { justify-content: space-between; }
 .repair-heading h3 { margin: 0; font-size: 16px; }
@@ -494,6 +514,8 @@ onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
 .repair-filters, .attempt-banner, .editor-toolbar { margin: 12px 0; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
+.repair-name { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repair-name-tooltip { display: block; max-width: min(360px, calc(100vw - 48px)); overflow-wrap: anywhere; white-space: normal; }
 .repair-empty { text-align: center; }
 .repair-panel :deep(.repair-row-highlighted .arco-table-td) { background: var(--color-primary-light-1); }
 .repair-panel [data-repair-object-id]:focus { outline: 2px solid rgb(var(--primary-6)); outline-offset: 3px; }
