@@ -187,7 +187,7 @@ async function renderPanel(p, onRender, onEditor) {
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
   for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-tag', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
   app.component('a-empty', Arco.Empty)
-  for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', slots.default?.()) : null })
+  for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', [slots.default?.(), slots.footer?.()]) : null })
   app.component('a-table-column', { setup: () => () => null })
   app.component('a-table', {
     props: ['data'],

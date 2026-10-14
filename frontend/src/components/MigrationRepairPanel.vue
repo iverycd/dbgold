@@ -71,7 +71,16 @@
     <a-spin v-else-if="loading" />
     <a-empty v-else-if="!error" :description="emptyDescription" />
 
-    <a-modal v-model:visible="editorVisible" :mask-closable="false" :width="960" :footer="false" :title="`对象修复 · ${editing ? qualified(editing.object) : ''}`" @close="closeEditor">
+    <a-modal
+      v-model:visible="editorVisible"
+      :mask-closable="false"
+      width="min(960px, calc(100vw - 48px))"
+      :align-center="true"
+      :modal-style="{ display: 'inline-flex', flexDirection: 'column', boxSizing: 'border-box', maxHeight: 'calc(100dvh - 48px)' }"
+      :body-style="{ flex: '1 1 auto', minHeight: '0', overflow: 'auto' }"
+      :title="`对象修复 · ${editing ? qualified(editing.object) : ''}`"
+      @close="closeEditor"
+    >
       <template v-if="editing">
         <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
         <a-alert v-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。只重新创建或修复此对象；表数据及关联对象按需单独接续。</a-alert>
@@ -98,10 +107,14 @@
           <div class="unit-heading"><a-checkbox v-model="unit.selected" :disabled="unitCommitted(unit.status) || unit.destructive">执行步骤 {{ index + 1 }}</a-checkbox><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag><span v-if="unit.destructive" class="error-text">破坏性步骤禁止重放</span><a-button v-if="!unitCommitted(unit.status) && !unit.destructive" type="text" size="mini" @click="draftUnits.splice(index, 1)">移除此单元</a-button></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p>
           <pre v-if="unitCommitted(unit.status) || unit.destructive" class="sql-preview">{{ unit.sql }}</pre>
-          <SqlEditor v-else v-model="unit.sql" :dialect="editorDialect" :format-db-type="job?.dst_db_type" :format-disabled="busy || saving || editing.object.status === 'unknown'" execution-mode="document" @execute="prepareExecute" />
+          <SqlEditor v-else v-model="unit.sql" auto-height :dialect="editorDialect" :format-db-type="job?.dst_db_type" :format-disabled="busy || saving || editing.object.status === 'unknown'" execution-mode="document" @execute="prepareExecute" />
         </div>
-        <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
-        <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canEditRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">确认执行步骤</a-button></div>
+      </template>
+      <template #footer>
+        <div v-if="editing" class="repair-editor-footer">
+          <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
+          <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canEditRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">确认执行步骤</a-button></div>
+        </div>
       </template>
     </a-modal>
 
@@ -537,12 +550,15 @@ onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
 .repair-empty { text-align: center; }
 .repair-panel :deep(.repair-row-highlighted .arco-table-td) { background: var(--color-primary-light-1); }
 .repair-panel [data-repair-object-id]:focus { outline: 2px solid rgb(var(--primary-6)); outline-offset: 3px; }
-.unit-editor { border: 1px solid var(--color-border-2); border-radius: 4px; margin: 14px 0; overflow: hidden; }
+.unit-editor { border: 1px solid var(--color-border-2); border-radius: 4px; margin: 8px 0; overflow: hidden; }
 .unit-heading { padding: 10px; background: var(--color-fill-1); }
+.unit-editor > .unit-heading { padding: 6px 10px; gap: 8px; }
 .unit-editor > p { padding: 0 12px; }
-.unit-editor :deep(.sql-editor) { height: 250px; }
 .sql-preview { padding: 12px; border-radius: 4px; background: #111827; color: #e5e7eb; font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.unit-editor > .sql-preview { box-sizing: border-box; margin: 0; max-height: 240px; }
 .modal-actions { justify-content: flex-end; margin-top: 18px; }
+.repair-editor-footer { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.repair-editor-footer .modal-actions { margin-top: 0; }
 .editor-mapping { margin-top: 16px; }
 .mapping-list, .related-list { width: 100%; display: grid; gap: 8px; }
 .mapping-row { display: grid; grid-template-columns: minmax(100px, 1fr) 20px minmax(120px, 1fr); gap: 8px; align-items: center; }

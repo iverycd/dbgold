@@ -1,5 +1,5 @@
 <template>
-  <div class="sql-editor">
+  <div class="sql-editor" :class="{ 'sql-editor-auto-height': autoHeight }">
     <div v-if="formatDbType" class="sql-format-toolbar">
       <a-button size="mini" :disabled="formatDisabled || !modelValue.trim()" @mousedown.prevent @click="formatSQL">格式化 SQL</a-button>
       <span>Ctrl / ⌘ + Shift + F · 选中时格式化选区，否则格式化全文</span>
@@ -23,6 +23,7 @@ const props = defineProps<{
   executionMode?: 'statement' | 'document'
   formatDbType?: string
   formatDisabled?: boolean
+  autoHeight?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -187,5 +188,20 @@ onBeforeUnmount(() => view?.destroy())
 }
 .sql-editor :deep(.cm-editor) {
   height: 100%;
+}
+.sql-editor-auto-height {
+  height: auto;
+  min-height: 0;
+}
+.sql-editor-auto-height .sql-editor-host {
+  flex: none;
+}
+.sql-editor-auto-height :deep(.cm-editor) {
+  height: auto;
+}
+.sql-editor-auto-height :deep(.cm-scroller) {
+  min-height: 64px;
+  max-height: 240px;
+  overflow: auto;
 }
 </style>
