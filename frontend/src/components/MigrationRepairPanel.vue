@@ -29,7 +29,29 @@
       </a-select>
       <a-input-search v-model="keyword" placeholder="搜索模式名、对象、所属表或错误" allow-clear style="max-width: 300px" />
     </div>
-    <a-table v-if="records.length" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1100 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+    <div v-if="records.length" class="batch-toolbar">
+      <a-button type="primary" size="small" :loading="batchPreparing" :disabled="busy || loading || saving || !binding?.configured || !selectedObjectIDs.length" @click="prepareBatch">批量执行（{{ selectedObjectIDs.length }}）</a-button>
+      <a-button size="small" :disabled="busy || loading" @click="selectAllFiltered">全选当前筛选结果</a-button>
+      <a-button size="small" :disabled="busy || !selectedObjectIDs.length" @click="clearBatchSelection">清空选择</a-button>
+      <span class="muted">使用已保存的 SQL，按依赖顺序逐项执行</span>
+    </div>
+    <section v-if="batchHasRun" class="batch-progress" aria-label="批量修复进度" aria-live="polite">
+      <div class="unit-heading">
+        <strong>{{ batchRunning ? (batchStopped ? '正在结束当前执行' : '批量执行中') : '本次批量执行结果' }} · {{ batchCompletedCount }} / {{ batchItems.length }}</strong>
+        <a-button v-if="batchRunning" size="small" :disabled="batchStopped" @click="stopBatch">停止后续执行</a-button>
+      </div>
+      <p class="muted">刷新页面、关闭报告或离开页面后，尚未提交的对象停止排队；已提交的对象继续执行。</p>
+      <a-alert v-if="batchError" type="warning">{{ batchError }}</a-alert>
+      <div class="batch-results">
+        <div v-for="item in batchItems" :key="item.record.object.id" class="batch-result">
+          <a-tag :color="statusColor(item.status)">{{ batchItemStatus(item.status) }}</a-tag>
+          <span class="batch-object-name">{{ qualified(item.record.object) }}</span>
+          <a-button v-if="item.attemptID || item.status === 'unknown'" type="text" size="mini" @click="openHistory(item.record.object.id)">历史</a-button>
+          <span v-if="item.reason" class="muted batch-reason">{{ item.reason }}</span>
+        </div>
+      </div>
+    </section>
+    <a-table v-if="records.length" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1150 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="emptyDescription" />
@@ -52,6 +74,7 @@
               <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
             </a-tooltip>
             <div class="muted">{{ repairKind(record.object.kind) }}</div>
+            <div v-if="batchIneligibleReason(record.object)" class="muted">不可批量：{{ batchIneligibleReason(record.object) }}</div>
             <a-tooltip v-if="record.object.table">
               <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
               <div class="repair-name muted">所属表：{{ record.object.table }}</div>
@@ -70,6 +93,23 @@
     </a-table>
     <a-spin v-else-if="loading" />
     <a-empty v-else-if="!error" :description="emptyDescription" />
+
+    <a-modal v-model:visible="batchPreviewVisible" :mask-closable="false" width="min(960px, calc(100vw - 48px))" title="确认批量执行 DDL" :footer="false">
+      <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · 共选择 {{ batchItems.length }} 个对象，可执行 {{ batchExecutableCount }} 个</p>
+      <a-alert type="info">以下已保存的执行单元将依次提交。执行失败后跳过依赖它的对象，继续其他独立项。</a-alert>
+      <p class="muted">请保持当前页面打开。刷新页面、关闭报告或离开页面后，尚未提交的对象停止排队。</p>
+      <div class="batch-preview-items">
+        <article v-for="(item, index) in batchItems" :key="item.record.object.id" class="batch-preview-item">
+          <div class="unit-heading"><strong>{{ index + 1 }}. {{ qualified(item.record.object) }}</strong><a-tag>{{ batchItemStatus(item.status) }}</a-tag></div>
+          <p class="muted">{{ repairKind(item.record.object.kind) }} · Schema：{{ item.record.object.schema }} · 草稿版本 {{ item.record.version }}</p>
+          <p v-if="item.record.object.dependencies?.length" class="muted">依赖：{{ dependencyNames(item.record.object).join('、') }}</p>
+          <a-alert v-if="item.reason" type="warning">{{ item.reason }}</a-alert>
+          <pre v-for="unit in item.record.object.units.filter(unit => unit.selected && !unitCommitted(unit.status) && !unit.destructive)" :key="unit.id" class="sql-preview">{{ unit.sql }}</pre>
+        </article>
+      </div>
+      <a-checkbox v-model="batchReviewed" :disabled="!batchExecutableCount">我已核对以上执行单元、目标对象及历史提交状态</a-checkbox>
+      <div class="modal-actions"><a-button @click="batchPreviewVisible = false">返回列表</a-button><a-button type="primary" :disabled="!batchReviewed || !batchExecutableCount || busy || !binding?.configured" @click="confirmBatch">执行以上 {{ batchExecutableCount }} 个对象</a-button></div>
+    </a-modal>
 
     <a-modal
       v-model:visible="editorVisible"
@@ -141,7 +181,7 @@
           <a-form-item label="名称与类型设置"><a-space wrap><a-checkbox v-model="bindingForm.config.LowerCaseNames">名称转小写</a-checkbox><a-checkbox v-model="bindingForm.config.CharInLength">字符按长度</a-checkbox><a-checkbox v-model="bindingForm.config.UseNvarchar2">NVARCHAR2</a-checkbox><a-checkbox v-model="bindingForm.config.Distributed">分布属性</a-checkbox><a-checkbox v-model="bindingForm.config.ChangeOwner">修改 Owner</a-checkbox></a-space></a-form-item>
         </template>
       </a-form>
-      <div class="modal-actions"><a-button @click="bindingVisible = false">取消</a-button><a-button type="primary" :loading="saving" :disabled="!bindingForm.dst_conn_id || !!(binding?.legacy && !binding.configured && !bindingForm.config.Content)" @click="saveBinding">核验并保存绑定</a-button></div>
+      <div class="modal-actions"><a-button @click="bindingVisible = false">取消</a-button><a-button type="primary" :loading="saving" :disabled="busy || !bindingForm.dst_conn_id || !!(binding?.legacy && !binding.configured && !bindingForm.config.Content)" @click="saveBinding">核验并保存绑定</a-button></div>
     </a-modal>
 
     <a-modal v-model:visible="recoveryVisible" :mask-closable="false" :width="920" title="接续此表迁移" :footer="false" @close="invalidatePreview">
@@ -194,6 +234,7 @@ import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
 import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchesRepairFilter, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
+import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
 const SqlEditor = defineAsyncComponent(() => import('@/components/SqlEditor.vue'))
 const props = defineProps<{ jobID: string }>()
@@ -236,6 +277,18 @@ const historyVisible = ref(false)
 const loadingHistory = ref(false)
 const historyObjectID = ref('')
 const attempts = ref<RepairAttempt[]>([])
+const selectedObjectIDs = ref<string[]>([])
+const batchPreviewVisible = ref(false)
+const batchReviewed = ref(false)
+const batchPreparing = ref(false)
+const batchRunning = ref(false)
+const batchStopped = ref(false)
+const batchHasRun = ref(false)
+const batchItems = ref<RepairBatchItem[]>([])
+const batchError = ref('')
+let batchExpectedBinding = ''
+let batchSerial = 0
+let batchQueue: ReturnType<typeof createRepairBatchQueue> | undefined
 let epoch = 0
 let refreshSerial = 0
 let previewSerial = 0
@@ -243,12 +296,15 @@ let editorSerial = 0
 let draftRevision = 0
 let historySerial = 0
 let timer: ReturnType<typeof setTimeout> | undefined
+let pollSerial = 0
 let disposed = false
 
-const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value)
+const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value)
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
-const visibleRecords = computed(() => records.value.filter(({ object }) => matchesRepairFilter(object, filter.value, attempts.value) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id })))
+const visibleRecords = computed(() => records.value.filter(({ object }) => matchesRepairFilter(object, filter.value, attempts.value) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id, disabled: busy.value || loading.value || !!batchIneligibleReason(record.object) })))
+const batchExecutableCount = computed(() => batchItems.value.filter(item => item.status === 'pending').length)
+const batchCompletedCount = computed(() => batchItems.value.filter(item => !['pending', 'saving', 'running'].includes(item.status)).length)
 const stats = computed(() => {
   const counts: Record<RepairCategory, number> = { repaired: 0, pending: 0, blocked: 0, data: 0 }
   for (const { key } of repairCategories) counts[key] = records.value.filter(({ object }) => matchesRepairFilter(object, key, attempts.value)).length
@@ -284,6 +340,98 @@ function newKey() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 function replaceRecord(record: RepairRecord) { records.value = records.value.map(item => item.object.id === record.object.id ? record : item) }
+
+function batchItemStatus(status: RepairBatchItem['status']) {
+  return ({ pending: '等待执行', saving: '保存已审阅 SQL', running: '执行中', succeeded: '执行成功', failed: '执行失败', skipped: '已跳过', stopped: '未提交', unknown: '结果待核对' })[status]
+}
+function clearBatchSelection() {
+  selectedObjectIDs.value = []
+  if (!batchRunning.value) {
+    batchSerial++
+    batchPreparing.value = false
+    batchPreviewVisible.value = false
+    batchReviewed.value = false
+  }
+}
+function selectAllFiltered() {
+  if (busy.value || loading.value) return
+  selectedObjectIDs.value = visibleRecords.value.filter(record => !batchIneligibleReason(record.object)).map(record => record.object.id)
+}
+async function prepareBatch() {
+  if (busy.value || saving.value || loading.value || previewing.value || editorVisible.value || recoveryVisible.value || bindingVisible.value || !binding.value?.configured || !selectedObjectIDs.value.length) return
+  const scope = epoch, id = props.jobID, serial = ++batchSerial, selected = [...selectedObjectIDs.value]
+  batchPreparing.value = true
+  batchReviewed.value = false
+  try {
+    const [data, detail] = await Promise.all([listRepairs(id), getDataMigrationJob(id)])
+    if (!current(scope, id) || serial !== batchSerial) return
+    records.value = data.data.objects || []; binding.value = data.data.binding; job.value = detail.data
+    if (!binding.value.configured || job.value.status === 'running' || data.data.running_attempt_id) throw new Error('连接未配置或目标正在执行其他任务，请刷新后重试')
+    batchExpectedBinding = batchBindingKey(binding.value)
+    batchItems.value = buildRepairBatch(records.value, selected, newKey)
+    batchHasRun.value = false; batchStopped.value = false; batchError.value = ''
+    batchPreviewVisible.value = true
+  } catch (e) { if (current(scope, id) && serial === batchSerial) showError(e) }
+  finally { if (current(scope, id) && serial === batchSerial) batchPreparing.value = false }
+}
+function receiveAttempt(attempt: RepairAttempt) {
+  activeAttempt.value = attempt
+  attempts.value = [attempt, ...attempts.value.filter(item => item.id !== attempt.id)]
+  // A stopped queue may still have a server-side attempt. Refresh its result without resuming it.
+  if (!batchRunning.value) batchItems.value = batchItems.value.map(item => {
+    if (item.attemptID !== attempt.id) return item
+    const status = unitCommitted(attempt.status) ? 'succeeded' : attemptRunning(attempt.status) ? 'running' : attempt.status === 'failed' ? 'failed' : attempt.status === 'cancelled' ? 'stopped' : 'unknown'
+    return { ...item, status, reason: attempt.error || (status === 'unknown' ? '执行结果需在目标数据库核对' : status === 'stopped' ? '执行已取消' : '') }
+  })
+}
+function stopAttemptPolling() {
+  pollSerial++
+  if (timer) clearTimeout(timer)
+  timer = undefined
+}
+async function confirmBatch() {
+  if (!batchPreviewVisible.value || !batchReviewed.value || !batchExecutableCount.value || busy.value || !binding.value?.configured) return
+  const scope = epoch, id = props.jobID, serial = ++batchSerial
+  const valid = () => current(scope, id) && serial === batchSerial
+  batchRunning.value = true; batchStopped.value = false; batchHasRun.value = true
+  batchPreviewVisible.value = false; batchError.value = ''; selectedObjectIDs.value = []
+  stopAttemptPolling()
+  const queue = createRepairBatchQueue(batchItems.value, batchExpectedBinding, {
+    load: async () => {
+      const [data, detail] = await Promise.all([listRepairs(id), getDataMigrationJob(id)])
+      if (valid()) { records.value = data.data.objects || []; binding.value = data.data.binding; job.value = detail.data }
+      return { list: data.data, jobRunning: detail.data.status === 'running' }
+    },
+    save: async (objectID, record) => {
+      const saved = (await saveRepairDraft(id, objectID, { version: record.version, units: cloneRepairUnits(record.object.units), reviewed: true })).data
+      if (valid()) replaceRecord(saved)
+      return saved
+    },
+    execute: async (objectID, version, requestID) => (await executeRepair(id, objectID, { version, request_id: requestID, confirmed: true })).data,
+    getAttempt: async attemptID => (await getRepairAttempt(id, attemptID)).data,
+    onItems: items => { if (valid()) batchItems.value = items },
+    onAttempt: attempt => { if (valid()) receiveAttempt(attempt) },
+    onError: message => { if (valid()) { batchError.value = message; batchStopped.value = true } },
+  })
+  batchQueue = queue
+  try { await queue.run() }
+  finally {
+    if (valid()) {
+      batchQueue = undefined; batchRunning.value = false
+      await refresh()
+    }
+  }
+}
+function stopBatch() {
+  if (!batchRunning.value) return
+  batchStopped.value = true
+  batchQueue?.stop()
+}
+function disposeBatch() {
+  batchSerial++
+  batchQueue?.dispose(); batchQueue = undefined
+  batchRunning.value = false; batchPreparing.value = false
+}
 
 function selectRepairFilter(value: RepairFilter) {
   filter.value = value; keyword.value = ''; page.value = 1
@@ -324,30 +472,34 @@ async function refresh() {
     records.value = data.data.objects || []
     binding.value = data.data.binding
     job.value = detail.data
-    if (data.data.running_attempt_id && (activeAttempt.value?.id !== data.data.running_attempt_id || attemptRunning(activeAttempt.value.status))) await pollAttempt(data.data.running_attempt_id, scope, id)
+    const attemptID = data.data.running_attempt_id || (activeAttempt.value && attemptRunning(activeAttempt.value.status) ? activeAttempt.value.id : '')
+    if (!batchRunning.value && attemptID && (activeAttempt.value?.id !== attemptID || attemptRunning(activeAttempt.value.status))) await pollAttempt(attemptID, scope, id)
   } catch (e) { if (current(scope, id) && serial === refreshSerial) error.value = errorText(e) }
   finally { if (current(scope, id) && serial === refreshSerial) loading.value = false }
 }
 async function pollAttempt(attemptID: string, scope = epoch, id = props.jobID) {
+  if (batchRunning.value || !current(scope, id)) return
+  const serial = ++pollSerial
   if (timer) clearTimeout(timer)
   try {
     const attempt = (await getRepairAttempt(id, attemptID)).data
-    if (!current(scope, id)) return
-    activeAttempt.value = attempt
-    attempts.value = [attempt, ...attempts.value.filter(item => item.id !== attempt.id)]
+    if (!current(scope, id) || serial !== pollSerial || batchRunning.value) return
+    receiveAttempt(attempt)
     if (attemptRunning(attempt.status)) timer = setTimeout(() => void pollAttempt(attemptID, scope, id), 2000)
     else await refresh()
-  } catch (e) { if (current(scope, id)) { error.value = `进度暂时无法获取：${errorText(e)}。不会重新提交执行。`; timer = setTimeout(() => void pollAttempt(attemptID, scope, id), 5000) } }
+  } catch (e) { if (current(scope, id) && serial === pollSerial && !batchRunning.value) { error.value = `进度暂时无法获取：${errorText(e)}。不会重新提交执行。`; timer = setTimeout(() => void pollAttempt(attemptID, scope, id), 5000) } }
 }
 async function cancelAttempt() {
   if (!activeAttempt.value) return
+  stopBatch()
   const scope = epoch, id = props.jobID, attemptID = activeAttempt.value.id
   cancelling.value = true
-  try { await cancelRepairAttempt(id, attemptID); if (current(scope, id)) await pollAttempt(attemptID, scope, id) }
+  try { await cancelRepairAttempt(id, attemptID); if (current(scope, id) && !batchRunning.value) await pollAttempt(attemptID, scope, id) }
   catch (e) { if (current(scope, id)) showError(e) }
   finally { if (current(scope, id)) cancelling.value = false }
 }
 function openEditor(record: RepairRecord) {
+  if (batchRunning.value || batchPreparing.value || batchPreviewVisible.value) return
   editorSerial++
   editing.value = record
   draftUnits.value = cloneRepairUnits(record.object.units)
@@ -386,7 +538,7 @@ function useSuggested() {
   else draftUnits.value.push({ id: newKey(), sql: editing.value.object.suggested_ddl, original_sql: '', status: 'pending', selected: true, destructive: false })
 }
 async function saveDraft(): Promise<boolean> {
-  if (!editing.value || !canEditRepairDDL(editing.value.object) || saving.value || mappingError(mappingForm.values)) return false
+  if (batchRunning.value || batchPreparing.value || !editing.value || !canEditRepairDDL(editing.value.object) || saving.value || mappingError(mappingForm.values)) return false
   const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
   saving.value = true
   try {
@@ -410,7 +562,7 @@ async function prepareExecute() {
   executeConfirmVisible.value = true
 }
 async function confirmExecute() {
-  if (!editing.value || submitting.value || !executeConfirmVisible.value) return
+  if (batchRunning.value || batchPreparing.value || !editing.value || submitting.value || !executeConfirmVisible.value) return
   const scope = epoch, id = props.jobID, objectID = editing.value.object.id
   submitting.value = true
   try {
@@ -422,10 +574,11 @@ async function confirmExecute() {
   finally { if (current(scope, id)) submitting.value = false }
 }
 async function openBinding() {
+  if (busy.value || batchPreviewVisible.value) return
   const scope = epoch, id = props.jobID
   try {
     const result = await listConnections()
-    if (!current(scope, id)) return
+    if (!current(scope, id) || busy.value || batchPreviewVisible.value) return
     connections.value = result.data
     bindingForm.src_conn_id = binding.value?.src_conn_id || undefined
     bindingForm.dst_conn_id = binding.value?.dst_conn_id || undefined
@@ -442,6 +595,7 @@ function selectSourceConnection(value: unknown) {
   if (connection && binding.value?.legacy && !binding.value.configured) bindingForm.source_database = connection.database
 }
 async function saveBinding() {
+  if (busy.value || saving.value || batchPreviewVisible.value) return
   if (binding.value?.legacy && !binding.value.configured && !bindingForm.config.Content) { Message.error('请选择原任务的迁移内容'); return }
   const scope = epoch, id = props.jobID
   saving.value = true
@@ -454,6 +608,7 @@ async function saveBinding() {
 }
 function invalidatePreview() { previewSerial++; recoveryPlan.value = null; recoveryForm.reviewed = false; recoveryKey.value = ''; previewing.value = false }
 function openRecovery(record: RepairRecord) {
+  if (batchRunning.value || batchPreparing.value || batchPreviewVisible.value) return
   returnToRecovery.value = false
   invalidatePreview(); recoveryObject.value = record
   recoveryForm.mapping = { ...(record.object.column_mapping || {}) }
@@ -463,7 +618,7 @@ function openRecovery(record: RepairRecord) {
   void loadPreview()
 }
 async function loadPreview() {
-  if (!recoveryObject.value || previewing.value) return
+  if (batchRunning.value || batchPreparing.value || !recoveryObject.value || previewing.value) return
   const scope = epoch, id = props.jobID, objectID = recoveryObject.value.object.id, serial = ++previewSerial
   previewing.value = true; recoveryPlan.value = null; recoveryForm.reviewed = false
   try {
@@ -512,12 +667,14 @@ async function exportHistory() {
 defineExpose({ exportHistory, focusObject })
 watch(summary, value => emit('summary-change', value), { immediate: true })
 watch(loading, value => { if (!value) void applyPendingFocus() })
-watch([filter, keyword], () => { page.value = 1 })
+watch([filter, keyword], () => { page.value = 1; clearBatchSelection() }, { flush: 'sync' })
 watch(() => visibleRecords.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length / 10))) })
 watch([draftUnits, () => mappingForm.values], () => { draftRevision++; executeConfirmVisible.value = false }, { deep: true, flush: 'sync' })
 watch(() => props.jobID, () => {
+  disposeBatch(); stopAttemptPolling()
   epoch++; refreshSerial++; previewSerial++; editorSerial++; historySerial++
-  if (timer) clearTimeout(timer)
+  selectedObjectIDs.value = []; batchItems.value = []; batchPreviewVisible.value = false; batchReviewed.value = false
+  batchHasRun.value = false; batchStopped.value = false; batchError.value = ''; batchExpectedBinding = ''
   records.value = []; binding.value = null; job.value = null; activeAttempt.value = null; attempts.value = []
   filter.value = 'attention'; keyword.value = ''; page.value = 1; highlightedObjectID.value = ''; pendingFocus.value = null
   editorVisible.value = false; executeConfirmVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
@@ -526,12 +683,43 @@ watch(() => props.jobID, () => {
   returnToRecovery.value = false; editing.value = null; recoveryObject.value = null; draftUnits.value = []; recoveryPlan.value = null
   void refresh()
 }, { immediate: true })
-onUnmounted(() => { disposed = true; epoch++; if (timer) clearTimeout(timer) })
+function leaveBatchPage() {
+  const wasRunning = batchRunning.value
+  stopBatch()
+  disposeBatch(); stopAttemptPolling()
+  if (wasRunning) {
+    batchItems.value = batchItems.value.map(item => ['saving', 'running'].includes(item.status) ? { ...item, status: 'unknown', reason: '页面已离开，请通过执行历史核对提交结果' } : item)
+    batchError.value = '后续排队已停止，已提交对象的结果可通过刷新或执行历史查看。'
+  }
+}
+function restoreBatchPage(event: PageTransitionEvent) {
+  if (event.persisted && !disposed) void refresh()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', leaveBatchPage)
+  window.addEventListener('pageshow', restoreBatchPage)
+}
+onUnmounted(() => {
+  disposed = true; epoch++; leaveBatchPage()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('pagehide', leaveBatchPage)
+    window.removeEventListener('pageshow', restoreBatchPage)
+  }
+})
 </script>
 
 <style scoped>
 .repair-panel { min-width: 0; padding: 18px; margin: 18px 0; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
 .repair-heading, .unit-heading, .editor-toolbar, .attempt-banner, .repair-filters, .modal-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.batch-progress { border: 1px solid var(--color-border-2); border-radius: 6px; padding: 12px; margin: 12px 0; }
+.batch-results { max-height: 260px; overflow: auto; }
+.batch-result { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.batch-object-name { overflow-wrap: anywhere; }
+.batch-reason { flex-basis: 100%; }
+.batch-preview-items { max-height: 55vh; overflow: auto; margin: 16px 0; }
+.batch-preview-item { border-bottom: 1px solid var(--color-border-2); padding: 10px 0; }
+.batch-preview-item:first-child { padding-top: 0; }
 .repair-heading, .editor-toolbar { justify-content: space-between; }
 .repair-heading h3 { margin: 0; font-size: 16px; }
 .repair-heading p, .muted { font-size: 12px; color: var(--color-text-3); overflow-wrap: anywhere; }

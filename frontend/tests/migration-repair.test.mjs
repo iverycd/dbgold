@@ -14,12 +14,24 @@ function transpile(source) { return ts.transpileModule(source, { compilerOptions
 const utilsContext = { exports: {} }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const utils = utilsContext.exports
+const batchSource = transpile(readFileSync(new URL('../src/utils/migrationRepairBatch.ts', import.meta.url), 'utf8'))
+function loadBatchUtils(timers) {
+  const context = { exports: {}, ...timers, require: id => {
+    if (id === '@/utils/migrationRepair' || id === './migrationRepair') return utils
+    throw new Error(`Unexpected batch import ${id}`)
+  } }
+  vm.runInNewContext(batchSource, context)
+  return context.exports
+}
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
 const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, objectStatus, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
+const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
   let uuid = 0
+  const timers = { setTimeout: fn => { scheduled.push(fn); return scheduled.length }, clearTimeout() {} }
+  const batchUtils = loadBatchUtils(timers)
   const api = {
     listRepairs: async () => ({ data: { objects: [], binding: { configured: true } } }),
     listRepairAttempts: async () => ({ data: { items: [] } }),
@@ -28,19 +40,20 @@ function panel(props, overrides = {}) {
   const context = {
     exports: {}, defineProps: () => props, defineExpose() {}, defineEmits: () => (...args) => emitted.push(args),
     crypto: { randomUUID: () => `uuid-${++uuid}` },
-    setTimeout: fn => { scheduled.push(fn); return scheduled.length }, clearTimeout() {},
+    ...timers,
     require: id => {
       if (id === 'vue') return { ...Vue, onUnmounted: fn => { lifecycle.unmount = fn } }
       if (id === '@/utils/migrationRepair') return utils
+      if (id === '@/utils/migrationRepairBatch') return batchUtils
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } }) }
-      if (id === '@/api/connections') return { listConnections: async () => ({ data: [] }) }
+      if (id === '@/api/connections') return { listConnections: overrides.listConnections || (async () => ({ data: [] })) }
       if (id === '@arco-design/web-vue') return { Message: { success: text => messages.push(text), warning: text => messages.push(text), error: text => messages.push(text), info: text => messages.push(text) } }
       throw new Error(`Unexpected import ${id}`)
     },
   }
-  vm.runInNewContext(transpile(`${descriptor.scriptSetup.content}\nexport { ${fields}, ${renderFields} };`), context)
+  vm.runInNewContext(transpile(`${descriptor.scriptSetup.content}\nexport { ${fields}, ${renderFields}, ${batchFields} };`), context)
   return { ...context.exports, lifecycle, messages, scheduled, emitted }
 }
 const tick = async () => { await Vue.nextTick(); await Promise.resolve(); await Vue.nextTick() }
@@ -201,6 +214,247 @@ function findNodes(tree, predicate) {
   const children = Array.isArray(tree.children) ? tree.children.flatMap(child => findNodes(child, predicate)) : []
   return predicate(tree) ? [tree, ...children] : children
 }
+
+const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await tick() }
+const repairList = objects => ({ data: { objects: JSON.parse(JSON.stringify(objects)), binding: { configured: true, src_conn_id: 1, dst_conn_id: 2, source_database: 'source', source_schema: 'source_schema', target_schema: 'public', legacy: false } } })
+
+test('batch selection spans pages, excludes ineligible objects and resets when filters change', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const eligible = Array.from({ length: 23 }, (_, index) => record({ id: `object-${index}`, name: `Orders${index}`, target_name: `Orders${index}` }))
+    const objects = [...eligible, record({ id: 'done', status: 'succeeded' }), record({ id: 'unknown', status: 'unknown' }), record({ id: 'diagnostic', diagnostic_only: true }), record({ id: 'empty', units: [] }), record({ id: 'unchecked', units: [unit('unchecked', 'failed', { selected: false })] })]
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => repairList(objects) })); await tick()
+    p.showAllObjects(); await tick(); p.selectAllFiltered()
+    assert.deepEqual(Array.from(p.selectedObjectIDs.value), eligible.map(item => item.object.id))
+    p.page.value = 3; await tick()
+    assert.equal(p.selectedObjectIDs.value.length, 23, 'changing pages preserves selection')
+    let table
+    const html = await renderPanel(p, tree => { table = findNodes(tree, node => node.props?.['row-key'] === 'key')[0] })
+    assert.equal(table.props['row-selection'].onlyCurrent, false)
+    assert.equal(table.props['selected-keys'].length, 23)
+    assert.equal(p.visibleRecords.value.find(item => item.object.id === 'unknown').disabled, true)
+    for (const label of ['全选当前筛选结果', '清空选择', '批量执行（23）', '不可批量：']) assert.ok(html.includes(label), label)
+    p.keyword.value = 'Orders22'; await tick()
+    assert.equal(p.selectedObjectIDs.value.length, 0)
+    p.selectAllFiltered(); assert.deepEqual(Array.from(p.selectedObjectIDs.value), ['object-22'])
+    p.clearBatchSelection(); assert.equal(p.selectedObjectIDs.value.length, 0)
+    p.selectAllFiltered(); p.filter.value = 'blocked'; await tick()
+    assert.equal(p.selectedObjectIDs.value.length, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('batch preview refreshes saved units without adopting suggested SQL and requires one review', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let objects = [record({ kind: 'view', units: [unit('view', 'failed', { sql: 'STALE SQL' })] })], saves = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList(objects),
+      saveRepairDraft: async () => { saves++; throw new Error('review must precede execution') },
+    })); await tick()
+    p.selectAllFiltered()
+    const savedSQL = 'CREATE VIEW "OrdersView" AS\nSELECT "Id" FROM "Orders";'
+    objects = [{ version: 7, object: { ...objects[0].object, suggested_ddl: 'SUGGESTED SQL MUST NOT RUN', units: [
+      unit('view', 'failed', { sql: savedSQL }),
+      unit('unchecked', 'failed', { sql: 'UNCHECKED SQL MUST NOT RUN', selected: false }),
+      unit('done', 'succeeded', { sql: 'COMMITTED SQL MUST NOT RUN' }),
+      unit('drop', 'failed', { sql: 'DESTRUCTIVE SQL MUST NOT RUN', destructive: true }),
+    ] } }]
+    await p.prepareBatch()
+    assert.equal(p.batchPreviewVisible.value, true)
+    assert.equal(p.batchReviewed.value, false)
+    assert.equal(p.batchExecutableCount.value, 1)
+    assert.equal(p.batchItems.value[0].record.version, 7)
+    assert.equal(p.batchItems.value[0].record.object.units[0].sql, savedSQL)
+    assert.deepEqual(Array.from(p.batchItems.value[0].record.object.units, item => item.selected), [true, false, false, false])
+    assert.equal(p.editorVisible.value, false)
+    let preview
+    const html = await renderPanel(p, tree => { preview = findNodes(tree, node => node.props?.title === '确认批量执行 DDL')[0] })
+    assert.equal(preview.props['mask-closable'], false)
+    for (const label of ['目标数据库：postgres', 'Schema：public', '草稿版本 7', '我已核对以上执行单元']) assert.ok(html.includes(label), label)
+    assert.ok(html.includes('CREATE VIEW'))
+    assert.doesNotMatch(html, /STALE SQL|SUGGESTED SQL MUST NOT RUN|UNCHECKED SQL MUST NOT RUN|COMMITTED SQL MUST NOT RUN|DESTRUCTIVE SQL MUST NOT RUN/)
+    await p.confirmBatch()
+    assert.equal(saves, 0, 'confirming without the shared review checkbox cannot save or submit')
+    objects[0].object.units[0].sql = 'CHANGED AFTER PREVIEW'
+    assert.equal(p.batchItems.value[0].record.object.units[0].sql, savedSQL, 'confirmation holds an independent snapshot')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('batch confirmation saves the reviewed snapshot once and blocks competing editor actions', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let objects = [record({ kind: 'view', units: [unit('view', 'failed', { sql: 'CREATE VIEW saved AS SELECT 1' })] })], resolveSave, resolveConnections
+    const calls = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList(objects),
+      listConnections: () => new Promise(resolve => { resolveConnections = resolve }),
+      saveRepairDraft: (...args) => { calls.push(['save', ...args]); return new Promise(resolve => { resolveSave = resolve }) },
+      executeRepair: async (...args) => {
+        calls.push(['execute', ...args])
+        objects = [{ version: 3, object: { ...objects[0].object, status: 'succeeded', units: [unit('view', 'succeeded', { sql: objects[0].object.units[0].sql })] } }]
+        return { data: { id: 'batch-attempt', job_id: 'job', kind: 'ddl', object_id: 'obj', status: 'succeeded', units: [] } }
+      },
+      getRepairAttempt: async () => ({ data: { id: 'batch-attempt', job_id: 'job', kind: 'ddl', object_id: 'obj', status: 'succeeded', units: [] } }),
+    })); await tick()
+    const openingBinding = p.openBinding()
+    p.selectAllFiltered(); await p.prepareBatch(); p.batchReviewed.value = true
+    const run = p.confirmBatch(), duplicate = p.confirmBatch()
+    await flush()
+    assert.equal(p.batchRunning.value, true)
+    assert.equal(p.busy.value, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0][0], 'save')
+    assert.equal(calls[0][3].reviewed, true)
+    assert.equal(calls[0][3].version, 1)
+    assert.equal(calls[0][3].units[0].sql, 'CREATE VIEW saved AS SELECT 1')
+    resolveConnections({ data: [] }); await openingBinding
+    assert.equal(p.bindingVisible.value, false, 'a connection lookup started before the batch cannot open during execution')
+    p.openEditor(objects[0]); await p.openBinding(); p.openRecovery(objects[0])
+    assert.equal(p.editorVisible.value, false)
+    assert.equal(p.bindingVisible.value, false)
+    assert.equal(p.recoveryVisible.value, false)
+    resolveSave({ data: { version: 2, object: { ...objects[0].object, units: calls[0][3].units } } })
+    await Promise.all([run, duplicate]); await flush()
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1][0], 'execute')
+    assert.equal(calls[1][3].version, 2)
+    assert.equal(calls[1][3].confirmed, true)
+    assert.ok(calls[1][3].request_id)
+    assert.equal(p.batchRunning.value, false)
+    assert.equal(p.batchCompletedCount.value, 1)
+    assert.equal(p.batchItems.value[0].status, 'succeeded')
+    assert.match(await renderPanel(p), /本次批量执行结果/)
+    await p.confirmBatch(); assert.equal(calls.length, 2, 'a finished confirmation cannot be replayed')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+for (const leave of ['switch task', 'unmount', 'pagehide']) {
+  test(`batch does not execute a saved object after ${leave}`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const props = Vue.reactive({ jobID: 'old' }), objects = [record(), record({ id: 'next' })]
+      let resolveSave, saves = 0, executions = 0
+      const p = scope.run(() => panel(props, {
+        listRepairs: async id => repairList(id === 'old' ? objects : []),
+        saveRepairDraft: () => { saves++; return new Promise(resolve => { resolveSave = resolve }) },
+        executeRepair: async () => { executions++; throw new Error('stale queue must not execute') },
+      })); await tick()
+      p.selectAllFiltered(); await p.prepareBatch(); p.batchReviewed.value = true
+      const run = p.confirmBatch(); await flush()
+      assert.equal(saves, 1)
+      if (leave === 'switch task') { props.jobID = 'new'; await tick() } else if (leave === 'pagehide') p.leaveBatchPage(); else p.lifecycle.unmount()
+      resolveSave({ data: { version: 2, object: objects[0].object } })
+      await run; await flush()
+      assert.equal(executions, 0)
+      assert.equal(saves, 1, 'later queue items remain untouched')
+      if (leave === 'switch task') {
+        assert.equal(p.selectedObjectIDs.value.length, 0)
+        assert.equal(p.batchItems.value.length, 0)
+        assert.equal(p.batchPreviewVisible.value, false)
+        p.lifecycle.unmount()
+      }
+      if (leave === 'pagehide') p.lifecycle.unmount()
+    } finally { scope.stop() }
+  })
+}
+
+test('switching tasks while preparing a batch discards its late preview', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ jobID: 'old' }), objects = [record()]
+    let loadCount = 0, resolvePreview
+    const p = scope.run(() => panel(props, { listRepairs: id => {
+      if (id === 'old' && ++loadCount > 1) return new Promise(resolve => { resolvePreview = resolve })
+      return Promise.resolve(repairList(id === 'old' ? objects : []))
+    } })); await tick()
+    p.selectAllFiltered(); const preparation = p.prepareBatch()
+    props.jobID = 'new'; await tick()
+    resolvePreview(repairList(objects)); await preparation; await flush()
+    assert.equal(p.batchPreviewVisible.value, false)
+    assert.equal(p.batchItems.value.length, 0)
+    assert.equal(p.records.value.length, 0)
+    assert.equal(p.batchPreparing.value, false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+for (const action of ['stop queue', 'cancel attempt']) {
+  test(`${action} stops pending batch objects while the submitted attempt reaches a terminal result`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const objects = [record({ id: 'first', kind: 'view' }), record({ id: 'second', kind: 'view' })], saves = [], executions = [], cancellations = []
+      const attempt = { id: 'attempt-first', job_id: 'job', kind: 'ddl', object_id: 'first', status: 'running', units: [] }
+      const p = scope.run(() => panel({ jobID: 'job' }, {
+        listRepairs: async () => repairList(objects),
+        saveRepairDraft: async (_, id, draft) => { saves.push(id); return { data: { version: 2, object: { ...objects.find(item => item.object.id === id).object, units: draft.units } } } },
+        executeRepair: async (_, id) => { executions.push(id); return { data: { ...attempt } } },
+        getRepairAttempt: async () => ({ data: { ...attempt, status: action === 'cancel attempt' ? 'cancelled' : 'succeeded' } }),
+        cancelRepairAttempt: async (...args) => { cancellations.push(args); return {} },
+      })); await tick()
+      p.selectAllFiltered(); await p.prepareBatch(); p.batchReviewed.value = true
+      const run = p.confirmBatch(); await flush()
+      assert.equal(p.activeAttempt.value.id, attempt.id)
+      assert.equal(p.batchRunning.value, true)
+      assert.deepEqual(executions, ['first'], 'the second object must wait for an actual terminal result')
+      assert.match(await renderPanel(p), /停止后续执行/)
+      if (action === 'cancel attempt') await p.cancelAttempt(); else p.stopBatch()
+      assert.equal(p.batchStopped.value, true)
+      assert.equal(p.batchRunning.value, true, 'the accepted attempt remains monitored')
+      assert.equal(p.batchItems.value.find(item => item.record.object.id === 'second').status, 'stopped')
+      assert.equal(cancellations.length, action === 'cancel attempt' ? 1 : 0)
+      p.scheduled.at(-1)(); await run; await flush()
+      assert.deepEqual(saves, ['first'])
+      assert.deepEqual(executions, ['first'])
+      assert.equal(p.batchRunning.value, false)
+      assert.equal(p.batchCompletedCount.value, 2)
+      assert.equal(p.activeAttempt.value.status, action === 'cancel attempt' ? 'cancelled' : 'succeeded')
+      p.lifecycle.unmount()
+    } finally { scope.stop() }
+  })
+}
+
+test('restoring a cached page refreshes a completed server attempt without resuming its batch', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let objects = [record({ id: 'first', kind: 'view' }), record({ id: 'second', kind: 'view' })], accepted = false, completed = false
+    const saves = [], executions = [], polls = []
+    const attempt = { id: 'attempt-first', job_id: 'job', kind: 'ddl', object_id: 'first', status: 'running', units: [] }
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => {
+        const result = repairList(objects)
+        if (accepted && !completed) result.data.running_attempt_id = attempt.id
+        return result
+      },
+      saveRepairDraft: async (_, id, draft) => { saves.push(id); return { data: { version: 2, object: { ...objects.find(item => item.object.id === id).object, units: draft.units } } } },
+      executeRepair: async (_, id) => { executions.push(id); accepted = true; return { data: { ...attempt } } },
+      getRepairAttempt: async (_, id) => { polls.push(id); return { data: { ...attempt, status: completed ? 'succeeded' : 'running' } } },
+    })); await tick()
+    p.selectAllFiltered(); await p.prepareBatch(); p.batchReviewed.value = true
+    const run = p.confirmBatch(); await flush()
+    assert.equal(p.activeAttempt.value.status, 'running')
+    assert.deepEqual(executions, ['first'])
+    p.leaveBatchPage(); await run; await flush()
+    assert.equal(p.batchRunning.value, false)
+    assert.deepEqual(Array.from(p.batchItems.value, item => item.status), ['unknown', 'stopped'])
+    completed = true
+    objects = [{ version: 3, object: { ...objects[0].object, status: 'succeeded', units: [unit('table', 'succeeded')] } }, objects[1]]
+    p.restoreBatchPage({ persisted: true }); await flush()
+    assert.deepEqual(polls, ['attempt-first'], 'a server-completed attempt is polled even without running_attempt_id')
+    assert.equal(p.activeAttempt.value.status, 'succeeded')
+    assert.deepEqual(Array.from(p.batchItems.value, item => item.status), ['succeeded', 'stopped'])
+    assert.equal(p.batchRunning.value, false)
+    assert.equal(p.batchStopped.value, true)
+    assert.equal(p.busy.value, false)
+    assert.equal(p.batchCompletedCount.value, 2)
+    assert.equal(p.records.value.find(item => item.object.id === 'second').object.status, 'failed')
+    assert.deepEqual(saves, ['first'])
+    assert.deepEqual(executions, ['first'], 'returning to the page must never submit the remaining object')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('repair formatting uses the target dialect and honors read-only and busy states', async () => {
   const scope = Vue.effectScope()
@@ -454,6 +708,7 @@ test('rendered manual repair shows its entry and editor while keeping source def
     assert.match(html, /<textarea\b[^>]*><\/textarea>/)
     assert.ok(!html.includes('恢复原文'))
     p.openEditor(record({ diagnostic_only: true, units: [], ddl: '' }))
+    p.records.value = [] // Inspect diagnostic controls without the table's explanatory batch text.
     const diagnostic = await renderPanel(p)
     for (const label of ['添加执行单元', '保存草稿', '确认执行步骤']) assert.ok(!diagnostic.includes(label), label)
     p.lifecycle.unmount()
