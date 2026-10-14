@@ -20,7 +20,7 @@ function page(preflight, starts, errors, options = {}) {
     switch (id) {
       case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
-      case '@arco-design/web-vue': return { Message: { error: message => errors ? errors.push(message) : assert.fail(message), success() {}, warning() {} }, Modal: {} }
+      case '@arco-design/web-vue': return { Message: { error: message => errors ? errors.push(message) : assert.fail(message), success() {}, warning: message => options.warnings?.push(message) }, Modal: {} }
       case '@/utils/migrationOptions': return helpers
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}
@@ -29,7 +29,7 @@ function page(preflight, starts, errors, options = {}) {
         preflightDataMigration: preflight,
         startDataMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
         startObjectMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
-        migrateViews: async request => { starts.push(request); return { data: { results: [] } } },
+        migrateViews: options.migrateViews ?? (async request => { starts.push(request); return { data: { results: [] } } }),
         createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
       }
       default: throw new Error(`Unexpected import ${id}`)
@@ -371,4 +371,30 @@ test('clearing panel results resets filters, pages and selected DDL', async () =
     assert.equal(panel.selectedObjectKey.value, '')
     assert.equal(panel.selectedSQL.value, '')
   } finally { scope.stop() }
+})
+
+
+test('view migration retains actual successes and failures when compatibility preparation fails', async () => {
+ const scope = Vue.effectScope()
+ try {
+  const warnings = [], errors = [], starts = []
+  const compatibility = { total: 2, success: 0, failed: 2, created: 0, reused: 0, items: [] }
+  const results = [{ name: 'plain', error: '', ddl: 'CREATE VIEW plain AS SELECT 1' }, { name: 'dependent', error: 'function get_uuid does not exist', ddl: 'CREATE VIEW dependent AS SELECT get_uuid()' }]
+  const p = scope.run(() => page(async () => assert.fail('no PG/MySQL preflight'), starts, errors, {
+   warnings,
+   migrateViews: async request => { starts.push(request); return { data: { results, compatibility_functions: compatibility } } },
+  }))
+  p.connections.value = [{ id: 1, db_type: 'mysql' }, { id: 2, db_type: 'gaussdb' }]
+  p.viewMigrate.srcConnId = 1; p.viewMigrate.dstConnId = 2; p.viewMigrate.dstSchema = 'app'
+  await Vue.nextTick()
+  p.viewMigrate.selected = ['plain', 'dependent']
+  await p.handleMigrateViews()
+  assert.equal(starts.length, 1)
+  assert.equal(p.viewMigrate.results.length, 2)
+  assert.equal(p.viewMigrate.results[0].error, '')
+  assert.equal(p.viewMigrate.compatibilityFunctions.failed, 2)
+  assert.equal(errors.length, 0)
+  assert.match(warnings[0], /视图迁移成功 1 个，失败 1 个/)
+  assert.doesNotMatch(warnings[0], /未执行/)
+ } finally { scope.stop() }
 })

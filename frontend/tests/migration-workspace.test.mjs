@@ -40,6 +40,31 @@ function preflight() {
   }
 }
 
+test('row counts put late mismatches on the first page without changing report order', () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'job' },
+      'report, allRowCounts, sortedRowCounts, mismatchedRows, hasRowCounts'))
+    const rows = Array.from({ length: 65 }, (_, i) => ({
+      table: `Orders_${i}`, src: 10, dst: i === 24 || i === 64 ? 9 : 10, match: i !== 24 && i !== 64,
+    }))
+    const original = structuredClone(rows)
+    p.report.value = { rowCounts: rows }
+    const names = values => Array.from(values, row => row.table)
+    assert.deepEqual(names(p.sortedRowCounts.value.slice(0, 2)), ['Orders_24', 'Orders_64'])
+    assert.deepEqual(names(p.sortedRowCounts.value.slice(2)), names(rows.filter(row => row.match)))
+    assert.equal(p.sortedRowCounts.value.slice(0, 20).filter(row => !row.match).length, 2)
+    assert.deepEqual(names(p.allRowCounts.value), names(original))
+    assert.deepEqual(rows, original)
+    for (const sample of [rows.slice(0, 2), rows.filter(row => !row.match), []]) {
+      p.report.value = { rowCounts: sample }
+      assert.deepEqual(names(p.sortedRowCounts.value), names(sample))
+      assert.equal(p.mismatchedRows.value.length, sample.filter(row => !row.match).length)
+      assert.equal(p.hasRowCounts.value, sample.length > 0)
+    }
+  } finally { scope.stop() }
+})
+
 test('preflight filters search all pages and reset pagination; DDL selection and copying follow the visible object', async () => {
   const scope = Vue.effectScope()
   try {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/dialect"
@@ -42,8 +44,11 @@ func (w *compatibilityTestWriter) CreateTable(context.Context, []dialect.Stateme
 	w.calls = append(w.calls, "table")
 	return nil
 }
-func (w *compatibilityTestWriter) CreateView(context.Context, source.ViewInfo) error {
+func (w *compatibilityTestWriter) CreateView(_ context.Context, v source.ViewInfo) error {
 	w.calls = append(w.calls, "view")
+	if w.fail && strings.Contains(strings.ToLower(v.Definition), "get_uuid(") {
+		return errors.New("function get_uuid does not exist")
+	}
 	return nil
 }
 func (w *compatibilityTestWriter) CopyData(context.Context, string, []string, []string, [][]interface{}) error {
@@ -51,9 +56,15 @@ func (w *compatibilityTestWriter) CopyData(context.Context, string, []string, []
 	return nil
 }
 
-type compatibilityViewReader struct{ mockReader }
+type compatibilityViewReader struct {
+	mockReader
+	views []source.ViewInfo
+}
 
 func (r *compatibilityViewReader) GetViews(context.Context) ([]source.ViewInfo, error) {
+	if r.views != nil {
+		return r.views, nil
+	}
 	return []source.ViewInfo{{ViewName: "v", Definition: "SELECT get_uuid()"}}, nil
 }
 
@@ -80,21 +91,43 @@ func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 		})
 	}
 }
-func TestCompatibilityFailureStopsAllTargetWork(t *testing.T) {
-	r := &compatibilityViewReader{}
-	w := &compatibilityTestWriter{fail: true}
-	m, _ := newTestMigrator(r, w)
-	report := m.Run(context.Background())
-	require.True(t, report.HasFailures())
-	require.Equal(t, []string{"prepare"}, w.calls)
-	require.Zero(t, report.Views.Failed)
-	require.Zero(t, report.Tables.Failed)
-	encoded, err := json.Marshal(report)
-	require.NoError(t, err)
-	var saved MigrationReport
-	require.NoError(t, json.Unmarshal(encoded, &saved))
-	require.True(t, saved.HasFailures())
-	require.Equal(t, report.CompatibilityFunctions, saved.CompatibilityFunctions)
+func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		t.Run(fmt.Sprint(capture), func(t *testing.T) {
+			r := &compatibilityViewReader{mockReader: mockReader{
+				tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
+			}, views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT get_uuid()"}, {ViewName: "independent", Definition: "SELECT 1"}}}
+			w := &compatibilityTestWriter{fail: true}
+			m, _ := newTestMigrator(r, w)
+			m.cfg.CaptureRepair = capture
+			report := m.Run(context.Background())
+			require.True(t, report.HasFailures())
+			require.Equal(t, []string{"prepare", "table", "data", "view", "view"}, w.calls)
+			require.Equal(t, 1, report.Tables.Total)
+			require.Equal(t, 1, report.Tables.Success)
+			require.Equal(t, 1, report.Data.Success)
+			require.Equal(t, 1, report.Views.Success)
+			require.Equal(t, 1, report.Views.Failed)
+			require.Equal(t, "dependent", report.Views.Items[0].Name)
+			require.Contains(t, report.Views.Items[0].Error, "get_uuid does not exist")
+			if capture {
+				require.NotNil(t, report.RepairManifest)
+				statuses := map[string]string{}
+				for _, o := range report.RepairManifest.Objects {
+					statuses[o.Name] = o.Status
+				}
+				require.Equal(t, "succeeded", statuses["t"])
+				require.Equal(t, "succeeded", statuses["independent"])
+				require.Equal(t, "unknown", statuses["dependent"])
+			}
+			encoded, err := json.Marshal(report)
+			require.NoError(t, err)
+			var saved MigrationReport
+			require.NoError(t, json.Unmarshal(encoded, &saved))
+			require.True(t, saved.HasFailures())
+			require.Equal(t, report.CompatibilityFunctions, saved.CompatibilityFunctions)
+		})
+	}
 }
 func TestCompatibilityInitializedBeforeStandaloneAndFullViews(t *testing.T) {
 	for _, standalone := range []bool{true, false} {
@@ -125,11 +158,16 @@ func TestCompatibilityNonPGAndOldReportsStayUnchanged(t *testing.T) {
 	require.False(t, report.HasFailures())
 }
 
-func TestCompatibilityStandaloneFailureIsSeparateFromViewResults(t *testing.T) {
+func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	w := &compatibilityTestWriter{fail: true}
-	m, _ := newTestMigrator(&compatibilityViewReader{}, w)
-	results := m.MigrateViews(context.Background(), []string{"v"})
-	require.Empty(t, results)
+	reader := &compatibilityViewReader{views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT get_uuid()"}, {ViewName: "independent", Definition: "SELECT 1"}}}
+	m, _ := newTestMigrator(reader, w)
+	results := m.MigrateViews(context.Background(), []string{"dependent", "independent"})
+	require.Len(t, results, 2)
+	require.Equal(t, "dependent", results[0].Name)
+	require.Contains(t, results[0].Error, "get_uuid does not exist")
+	require.Equal(t, "independent", results[1].Name)
+	require.Empty(t, results[1].Error)
 	require.Equal(t, 2, m.CompatibilityFunctions().Failed)
-	require.Equal(t, []string{"prepare"}, w.calls)
+	require.Equal(t, []string{"prepare", "view", "view"}, w.calls)
 }

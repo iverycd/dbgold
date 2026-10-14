@@ -88,12 +88,22 @@ func expectUUIDCandidate(m sqlmock.Sqlmock, name, schema, typ string, sampleErr 
 }
 func expectUUIDCreates(m sqlmock.Sqlmock, generator, typ string, aliasErr error) {
 	m.ExpectExec(regexp.QuoteMeta(uuidFunctionDDL("app", "get_uuid", generator, typ))).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectUUIDSavepoint(m)
 	q := m.ExpectExec(regexp.QuoteMeta(uuidWrapperDDL("app", "GET_UUID", qualifiedFunction("app", "get_uuid"))))
 	if aliasErr != nil {
 		q.WillReturnError(aliasErr)
+		expectUUIDProbe(m, true)
+		if compatibilityRace(aliasErr) {
+			expectUUIDSavepoint(m)
+			m.ExpectQuery(regexp.QuoteMeta(`SELECT $1::regprocedure::oid, $2::regprocedure::oid`)).
+				WithArgs(qualifiedFunction("app", "get_uuid")+"()", qualifiedFunction("app", "GET_UUID")+"()").
+				WillReturnRows(sqlmock.NewRows([]string{"canonical", "alias"}).AddRow(41, 42))
+			expectUUIDProbe(m, false)
+		}
 		m.ExpectRollback()
 	} else {
 		q.WillReturnResult(sqlmock.NewResult(0, 0))
+		expectUUIDProbe(m, false)
 		m.ExpectCommit()
 	}
 }
@@ -169,7 +179,9 @@ func TestCompatibilityWrapsEitherExistingCaseAndQuotesSchema(t *testing.T) {
 			ddl := uuidWrapperDDL(w.schema, missing, qualifiedFunction(w.schema, existing))
 			require.Contains(t, ddl, `"a""b'c\d"`)
 			require.Contains(t, ddl, `\\d`)
+			expectUUIDSavepoint(m)
 			m.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnResult(sqlmock.NewResult(0, 0))
+			expectUUIDProbe(m, false)
 			m.ExpectCommit()
 			r, err := EnsureCompatibilityFunctions(context.Background(), w)
 			require.NoError(t, err)
@@ -325,7 +337,9 @@ func TestCompatibilityCommitFailureDoesNotClaimCreated(t *testing.T) {
 	expectUUIDMissing(m, "app")
 	expectUUIDCandidate(m, "gen_random_uuid", "pg_catalog", "uuid", nil)
 	m.ExpectExec("CREATE FUNCTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectUUIDSavepoint(m)
 	m.ExpectExec("CREATE FUNCTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectUUIDProbe(m, false)
 	m.ExpectCommit().WillReturnError(errors.New("connection lost"))
 	r, err := EnsureCompatibilityFunctions(context.Background(), w)
 	require.ErrorContains(t, err, "需核验")
@@ -333,13 +347,37 @@ func TestCompatibilityCommitFailureDoesNotClaimCreated(t *testing.T) {
 	require.Zero(t, r.Created)
 	require.NoError(t, m.ExpectationsWereMet())
 }
-func TestCompatibilityViewRepairPreparationFailureStopsSQL(t *testing.T) {
-	w, m := repairPGMock(t)
-	m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
-	units, err := ExecuteRepair(context.Background(), w, repair.Object{Kind: "view", Schema: "app"}, []repair.Unit{{SQL: "CREATE VIEW app.v AS SELECT 1", Selected: true}}, nil)
-	require.ErrorContains(t, err, "preparation unavailable")
-	require.Len(t, units, 1)
-	require.NoError(t, m.ExpectationsWereMet())
+func TestCompatibilityViewRepairPreparationFailureStillExecutesViewSQL(t *testing.T) {
+	for _, dependent := range []bool{false, true} {
+		t.Run(fmt.Sprint(dependent), func(t *testing.T) {
+			w, m := repairPGMock(t)
+			m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
+			m.ExpectBegin()
+			m.ExpectExec(regexp.QuoteMeta(`SET LOCAL search_path TO "app"`)).WillReturnResult(sqlmock.NewResult(0, 0))
+			q := m.ExpectExec("CREATE VIEW")
+			if dependent {
+				q.WillReturnError(errors.New("function get_uuid does not exist"))
+				m.ExpectRollback()
+			} else {
+				q.WillReturnResult(sqlmock.NewResult(0, 0))
+				m.ExpectCommit()
+			}
+			m.ExpectClose()
+			statement := "CREATE VIEW app.v AS SELECT 1"
+			if dependent {
+				statement = "CREATE VIEW app.v AS SELECT get_uuid()"
+			}
+			units, err := ExecuteRepair(context.Background(), w, repair.Object{Kind: "view", Schema: "app"}, []repair.Unit{{SQL: statement, Selected: true}}, nil)
+			if dependent {
+				require.ErrorContains(t, err, "get_uuid does not exist")
+				require.Equal(t, "failed", units[0].Status)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "succeeded", units[0].Status)
+			}
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
 }
 
 // Opt-in real SQL verification; the DSN must point to a disposable test database.
@@ -361,6 +399,13 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 	r, err := EnsureCompatibilityFunctions(ctx, w)
 	require.NoError(t, err)
 	require.Equal(t, 2, r.Created)
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	duplicate := CompatibilityFunctionResult{Name: "get_uuid", Schema: schema, DDL: uuidWrapperDDL(schema, "get_uuid", qualifiedFunction(schema, "get_uuid"))}
+	require.NoError(t, createCompatibilityAlias(ctx, tx, &duplicate, &r.Items[0]))
+	require.Equal(t, "reused", duplicate.Status)
+	require.Equal(t, r.Items[0].DDL, duplicate.DDL)
+	require.NoError(t, tx.Commit())
 	view := source.ViewInfo{ViewName: "v", Definition: "SELECT get_uuid() AS a, \"GET_UUID\"() AS b"}
 	require.NoError(t, w.CreateView(ctx, view))
 	var a, b string
@@ -532,5 +577,67 @@ func TestHighGoConcurrentExtensionCreationRetries(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, r.Created)
 	require.Equal(t, "reused", r.Extensions[0].Status)
+	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func expectUUIDEquivalentAlias(m sqlmock.Sqlmock, schema, canonical, alias, ddl string) {
+	expectUUIDSavepoint(m)
+	m.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnError(&pq.Error{Code: "42723", Message: "function already exists with same argument types"})
+	expectUUIDProbe(m, true)
+	expectUUIDSavepoint(m)
+	m.ExpectQuery(regexp.QuoteMeta(`SELECT $1::regprocedure::oid, $2::regprocedure::oid`)).
+		WithArgs(qualifiedFunction(schema, canonical)+"()", qualifiedFunction(schema, alias)+"()").
+		WillReturnRows(sqlmock.NewRows([]string{"canonical", "alias"}).AddRow(42, 42))
+	expectUUIDProbe(m, false)
+}
+func TestCompatibilityCaseEquivalentAliasPreservesNewFunction(t *testing.T) {
+	w, m := repairPGMock(t)
+	w.dbType = "gaussdb"
+	expectUUIDMissing(m, "app")
+	expectUUIDCandidate(m, "uuid", "pg_catalog", "uuid", nil)
+	nativeDDL := uuidFunctionDDL("app", "get_uuid", qualifiedFunction("pg_catalog", "uuid"), "uuid")
+	m.ExpectExec(regexp.QuoteMeta(nativeDDL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectUUIDEquivalentAlias(m, "app", "get_uuid", "GET_UUID", uuidWrapperDDL("app", "GET_UUID", qualifiedFunction("app", "get_uuid")))
+	m.ExpectCommit()
+	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Created)
+	require.Equal(t, 1, r.Reused)
+	require.Zero(t, r.Failed)
+	require.Equal(t, nativeDDL, r.Items[0].DDL)
+	require.Equal(t, nativeDDL, r.Items[1].DDL)
+	require.NotContains(t, r.Items[1].DDL, "LANGUAGE sql") // No recursive replacement wrapper.
+	require.NoError(t, m.ExpectationsWereMet())
+}
+func TestCompatibilityCaseEquivalentExistingFunctionIsReused(t *testing.T) {
+	for _, canonical := range []string{"get_uuid", "GET_UUID"} {
+		t.Run(canonical, func(t *testing.T) {
+			w, m := repairPGMock(t)
+			expectUUIDHeader(m, "app")
+			expectUUIDExisting(m, "app", "get_uuid", canonical == "get_uuid")
+			expectUUIDExisting(m, "app", "GET_UUID", canonical == "GET_UUID")
+			alias := "GET_UUID"
+			if canonical == alias {
+				alias = "get_uuid"
+			}
+			expectUUIDEquivalentAlias(m, "app", canonical, alias, uuidWrapperDDL("app", alias, qualifiedFunction("app", canonical)))
+			m.ExpectCommit()
+			r, err := EnsureCompatibilityFunctions(context.Background(), w)
+			require.NoError(t, err)
+			require.Equal(t, 2, r.Reused)
+			require.Zero(t, r.Created)
+			require.Zero(t, r.Failed)
+			require.Equal(t, "EXISTING "+canonical, r.Items[0].DDL)
+			require.Equal(t, r.Items[0].DDL, r.Items[1].DDL)
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
+}
+func TestCompatibilityViewRepairCancellationStillStopsSQL(t *testing.T) {
+	w, m := repairPGMock(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ExecuteRepair(ctx, w, repair.Object{Kind: "view", Schema: "app"}, []repair.Unit{{SQL: "CREATE VIEW app.v AS SELECT 1", Selected: true}}, nil)
+	require.ErrorIs(t, err, context.Canceled)
 	require.NoError(t, m.ExpectationsWereMet())
 }

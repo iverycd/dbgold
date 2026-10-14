@@ -194,7 +194,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 }
 
 func (m *Migrator) runPrepared(ctx context.Context) MigrationReport {
-	if err := m.prepareCompatibilityFunctions(ctx); err != nil {
+	if err := m.prepareCompatibilityFunctions(ctx); err != nil && ctx.Err() != nil {
 		report := newMigrationReport()
 		report.CompatibilityFunctions = m.compatibilityFunctions
 		return report
@@ -1081,7 +1081,7 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
 	}
-	if err := m.prepareCompatibilityFunctions(ctx); err != nil {
+	if err := m.prepareCompatibilityFunctions(ctx); err != nil && ctx.Err() != nil {
 		return []ObjectResult{}
 	}
 	if m.writer.DBType() == "dameng" {
@@ -1198,7 +1198,7 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer)
 	m.compatibilityFunctions = report
 	if err != nil {
-		m.log.Errorf("GET_UUID 兼容函数初始化失败: %v", err)
+		m.log.Errorf("GET_UUID 兼容函数初始化失败，继续迁移，依赖该函数的对象以实际执行结果为准: %v", err)
 		return err
 	}
 	if report != nil {

@@ -222,10 +222,9 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 			item := &report.Items[i]
 			item.Generator = qualifiedFunction(schema, report.Items[existing].Name)
 			item.DDL = uuidWrapperDDL(schema, item.Name, item.Generator)
-			if _, err = tx.ExecContext(ctx, item.DDL); err != nil {
+			if err = createCompatibilityAlias(ctx, tx, item, &report.Items[existing]); err != nil {
 				return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, item.Name, err)
 			}
-			item.Status = "created"
 		}
 	} else {
 		generator, typ, findErr := findUUIDGenerator(ctx, tx, schema, catalog, product, report)
@@ -242,10 +241,9 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 		alias := &report.Items[1]
 		alias.Generator = qualifiedFunction(schema, item.Name)
 		alias.DDL = uuidWrapperDDL(schema, alias.Name, alias.Generator)
-		if _, err = tx.ExecContext(ctx, alias.DDL); err != nil {
+		if err = createCompatibilityAlias(ctx, tx, alias, item); err != nil {
 			return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, alias.Name, err)
 		}
-		alias.Status = "created"
 	}
 	if err = tx.Commit(); err != nil {
 		for i := range report.Extensions {
@@ -257,6 +255,40 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 		return report, fmt.Errorf("提交 GET_UUID 初始化事务失败，执行结果需核验: %w", err)
 	}
 	return report, nil
+}
+
+// Some compatibility modes treat quoted function names case-insensitively.
+// Keep the canonical function when the alternate spelling resolves to the same
+// OID. A duplicate alone is not proof: distinct concurrent functions must still
+// trigger the normal rollback/re-discovery path, never CREATE OR REPLACE.
+func createCompatibilityAlias(ctx context.Context, tx *sql.Tx, alias, canonical *CompatibilityFunctionResult) error {
+	err := compatibilityProbe(ctx, tx, func() error {
+		_, e := tx.ExecContext(ctx, alias.DDL)
+		return e
+	})
+	if err == nil {
+		alias.Status = "created"
+		return nil
+	}
+	if !compatibilityRace(err) {
+		return err
+	}
+	var canonicalOID, aliasOID int64
+	resolveErr := compatibilityProbe(ctx, tx, func() error {
+		return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid, $2::regprocedure::oid`,
+			qualifiedFunction(canonical.Schema, canonical.Name)+"()",
+			qualifiedFunction(alias.Schema, alias.Name)+"()").Scan(&canonicalOID, &aliasOID)
+	})
+	if resolveErr != nil {
+		return errors.Join(err, fmt.Errorf("核验大小写函数引用失败: %w", resolveErr))
+	}
+	if canonicalOID == 0 || canonicalOID != aliasOID {
+		return err
+	}
+	alias.Status = "reused"
+	alias.DDL = canonical.DDL
+	alias.DefinitionWarning = canonical.DefinitionWarning
+	return nil
 }
 
 func qualifiedFunction(schema, name string) string {

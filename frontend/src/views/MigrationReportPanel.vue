@@ -154,10 +154,15 @@
             />
           </template>
 
+          <div class="row-count-summary">
+            <span>共 {{ allRowCounts.length }} 张表</span>
+            <span :class="{ 'row-count-mismatch': mismatchedRows.length > 0 }">{{ mismatchedRows.length }} 张表行数不一致</span>
+            <span>不一致项优先展示</span>
+          </div>
           <a-table
-            :data="allRowCounts"
-            :pagination="{ pageSize: 50 }"
-            :scroll="{ x: 600 }"
+            :data="sortedRowCounts"
+            :pagination="{ pageSize: 20 }"
+            :scroll="{ x: 760, maxHeight: '420px' }"
             size="small"
             row-key="table"
           >
@@ -165,6 +170,11 @@
               <a-table-column title="表名" data-index="table" />
               <a-table-column title="源行数" data-index="src" :width="120" />
               <a-table-column title="目标行数" data-index="dst" :width="120" />
+              <a-table-column title="差异" :width="100">
+                <template #cell="{ record }">
+                  <span :class="{ 'row-count-mismatch': !record.match }">{{ record.dst - record.src }}</span>
+                </template>
+              </a-table-column>
               <a-table-column title="状态" :width="100">
                 <template #cell="{ record }">
                   <a-tag v-if="record.match" color="green">✓ 一致</a-tag>
@@ -174,23 +184,6 @@
             </template>
           </a-table>
 
-          <template v-if="mismatchedRows.length > 0">
-            <div style="color: #ff7d00; margin: 16px 0 8px">
-              ⚠ {{ mismatchedRows.length }} 张表行数不一致
-            </div>
-            <a-table :data="mismatchedRows" :pagination="false" size="small" row-key="table">
-              <template #columns>
-                <a-table-column title="表名" data-index="table" />
-                <a-table-column title="源行数" data-index="src" :width="120" />
-                <a-table-column title="目标行数" data-index="dst" :width="120" />
-                <a-table-column title="差异" :width="100">
-                  <template #cell="{ record }">
-                    <span style="color: #ff7d00">{{ record.dst - record.src }}</span>
-                  </template>
-                </a-table-column>
-              </template>
-            </a-table>
-          </template>
         </a-tab-pane>
         <a-tab-pane key="repair">
           <template #title>
@@ -279,6 +272,10 @@ const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? 
 const mismatchedRows = computed<TableRowCount[]>(() =>
   report.value?.rowCounts?.filter((r) => !r.match) ?? []
 )
+const sortedRowCounts = computed<TableRowCount[]>(() => [
+  ...mismatchedRows.value,
+  ...allRowCounts.value.filter(row => row.match),
+])
 const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isTrigger ? 0 : row.failed), 0))
 let reportRequest = 0
 
@@ -432,6 +429,8 @@ onUnmounted(() => { reportRequest++ })
 .report-stats span { display: block; color: var(--color-text-3); font-size: 12px; margin-bottom: 8px; }
 .report-stats strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .report-danger { color: #dc2626; }
+.row-count-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; color: var(--color-text-2); font-size: 13px; }
+.row-count-mismatch { color: #ff7d00; }
 .failure-error, .failure-name { overflow-wrap: anywhere; }
 .migration-report-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
 /* Arco 2.58 falls back to its default icon for null. Keep the icon contract,

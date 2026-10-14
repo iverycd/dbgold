@@ -172,8 +172,10 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		return out, fmt.Errorf("未选择执行步骤")
 	}
 	if a.family == "postgres" && repairKind(obj.Kind) == "view" {
-		if _, err := EnsureCompatibilityFunctions(ctx, w); err != nil {
-			return out, err
+		// Preparation is best effort. Let the selected view SQL determine whether
+		// it actually depends on GET_UUID; unrelated views must remain repairable.
+		if _, err := EnsureCompatibilityFunctions(ctx, w); err != nil && ctx.Err() != nil {
+			return out, ctx.Err()
 		}
 	}
 	var tx *sql.Tx

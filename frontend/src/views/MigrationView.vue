@@ -1424,7 +1424,7 @@ async function handleMigrateViews() {
     viewMigrate.results = res.data.results ?? []
     viewMigrate.compatibilityFunctions = res.data.compatibility_functions ?? undefined
     const fail = viewMigrate.results.filter((r) => r.error).length
-    if (viewMigrate.compatibilityFunctions?.failed) Message.error('兼容函数初始化失败，未执行视图迁移，请查看函数明细')
+    if (viewMigrate.compatibilityFunctions?.failed) Message.warning(`兼容函数初始化失败；视图迁移成功 ${viewMigrate.results.length - fail} 个，失败 ${fail} 个，请查看明细`)
     else if (fail > 0) Message.warning(`迁移完成，${fail} 个视图失败`)
     else Message.success(`成功迁移 ${viewMigrate.results.length} 个视图`)
   } catch (e: any) {
