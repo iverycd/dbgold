@@ -3,9 +3,7 @@ package datamigrate
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"dbgold/datamigrate/dialect"
@@ -99,7 +97,7 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			p.ColumnMapping[c.Name] = recoveryName(cfg, w.DBType(), r.DBType(), c.Name)
 		}
 	}
-	if err = validateRecoveryColumns(r.DBType(), w, cfg, p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
+	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
 	p.SourceRows, err = r.CountRows(ctx, p.SourceTable)
@@ -163,7 +161,9 @@ func repairKindOrder(k string) int {
 	return 7
 }
 
-func validateRecoveryColumns(src string, w target.Writer, cfg Config, sourceCols, targetCols []source.ColumnInfo, mapping map[string]string) error {
+// Recovery uses the repaired target types. Validate column mapping and
+// writability here; let the writer and target database handle value conversion.
+func validateRecoveryColumns(sourceCols, targetCols []source.ColumnInfo, mapping map[string]string) error {
 	actual := map[string]source.ColumnInfo{}
 	for _, c := range targetCols {
 		actual[c.Name] = c
@@ -187,10 +187,6 @@ func validateRecoveryColumns(src string, w target.Writer, cfg Config, sourceCols
 		if dst.Generated != "" && !strings.EqualFold(dst.Generated, "NEVER") {
 			return fmt.Errorf("目标列 %s 为生成列，不能写入", n)
 		}
-		expected := w.Dialect().MapType(c, src, dialect.TypeOpt{CharInLength: cfg.CharInLength, UseNvarchar2: cfg.UseNvarchar2})
-		if !compatibleRecoveryType(expected, dst) {
-			return fmt.Errorf("列 %s → %s 的目标类型 %s 不兼容原映射 %s；不支持缩窄或跨类型转换", c.Name, n, dst.DataType, expected)
-		}
 		if c.IsNullable && !dst.IsNullable {
 			return fmt.Errorf("列 %s → %s 收紧了可空性，请先核对数据及列定义", c.Name, n)
 		}
@@ -207,86 +203,6 @@ func validateRecoveryColumns(src string, w target.Writer, cfg Config, sourceCols
 		return fmt.Errorf("未映射的目标必填列 %s 没有默认值", c.Name)
 	}
 	return nil
-}
-
-var recoveryTypeParams = regexp.MustCompile(`\(\s*(-?\d+)(?:\s*,\s*(\d+))?\s*(?:CHAR|BYTE)?\s*\)`)
-var recoveryTemporalType = regexp.MustCompile(`^(TIMESTAMP|TIME)(\([^)]*\))? (WITH|WITHOUT) TIME ZONE$`)
-
-func normalizedRecoveryType(t string) string {
-	t = strings.ToUpper(strings.TrimSpace(t))
-	t = strings.Join(strings.Fields(t), " ")
-	if parts := recoveryTemporalType.FindStringSubmatch(t); len(parts) > 0 {
-		base := parts[1]
-		if parts[3] == "WITH" {
-			base += "TZ"
-		}
-		return base + parts[2]
-	}
-	aliases := map[string]string{"CHARACTER VARYING": "VARCHAR", "CHARACTER": "CHAR", "INT4": "INTEGER", "INT": "INTEGER", "INT8": "BIGINT", "INT2": "SMALLINT", "DEC": "DECIMAL", "NUMERIC": "DECIMAL", "DOUBLE PRECISION": "DOUBLE", "BOOL": "BOOLEAN", "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP", "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ", "TIME WITHOUT TIME ZONE": "TIME", "TIME WITH TIME ZONE": "TIMETZ"}
-	for from, to := range aliases {
-		if t == from {
-			return to
-		}
-		if strings.HasPrefix(t, from+"(") {
-			return to + t[len(from):]
-		}
-	}
-	return t
-}
-func compatibleRecoveryType(expected string, actual source.ColumnInfo) bool {
-	e := normalizedRecoveryType(expected)
-	a := normalizedRecoveryType(actual.DataType)
-	eb := strings.TrimSpace(recoveryTypeParams.ReplaceAllString(e, ""))
-	ab := strings.TrimSpace(recoveryTypeParams.ReplaceAllString(a, ""))
-	if eb == "" || ab == "" {
-		return false
-	}
-	if eb != ab {
-		// Integer widening preserves the same writer conversion and signedness.
-		width := map[string]int{"TINYINT": 8, "SMALLINT": 16, "MEDIUMINT": 24, "INTEGER": 32, "BIGINT": 64}
-		es, as := strings.TrimSuffix(eb, " UNSIGNED"), strings.TrimSuffix(ab, " UNSIGNED")
-		if width[es] > 0 && width[as] >= width[es] && strings.HasSuffix(eb, " UNSIGNED") == strings.HasSuffix(ab, " UNSIGNED") {
-			return true
-		}
-		if eb == ab+"(MAX)" {
-			return actual.Length < 0
-		}
-		return false
-	}
-	match := recoveryTypeParams.FindStringSubmatch(e)
-	if len(match) == 0 {
-		return true
-	}
-	size, _ := strconv.ParseInt(match[1], 10, 64)
-	scale := int64(0)
-	if len(match) > 2 {
-		scale, _ = strconv.ParseInt(match[2], 10, 64)
-	}
-	am := recoveryTypeParams.FindStringSubmatch(a)
-	actualSize := actual.Length
-	actualScale := actual.Scale
-	if eb == "DECIMAL" || eb == "NUMBER" {
-		actualSize = actual.Precision
-	}
-	if len(am) > 0 {
-		actualSize, _ = strconv.ParseInt(am[1], 10, 64)
-		if len(am) > 2 && am[2] != "" {
-			actualScale, _ = strconv.ParseInt(am[2], 10, 64)
-		}
-	}
-	if size < 0 {
-		return actualSize < 0
-	}
-	if actualSize < 0 {
-		return true
-	}
-	if eb == "DECIMAL" || eb == "NUMBER" {
-		return actualSize > 0 && actualScale >= scale && actualSize-actualScale >= size-scale
-	}
-	if eb == "TIMESTAMP" || eb == "TIME" || eb == "TIMESTAMPTZ" || eb == "TIMETZ" || eb == "DATETIME" || eb == "DATETIME2" {
-		return actual.DateTimePrecision >= size || actualSize >= size
-	}
-	return actualSize >= size
 }
 
 // RunRecovery never appends after a failed run. Recheck the preview before TRUNCATE;

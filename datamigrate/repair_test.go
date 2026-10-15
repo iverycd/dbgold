@@ -153,28 +153,72 @@ func TestLegacyRepairNeverSplitsProceduralBodiesOrReplaysDrop(t *testing.T) {
 	require.Equal(t, objects, LegacyRepairObjects(report, "dst"))
 	require.NotEqual(t, repairID("index", "a", "same"), repairID("index", "b", "same"))
 }
-func TestRecoveryTypeCompatibility(t *testing.T) {
+func TestRecoveryPreviewAllowsRepairedTypes(t *testing.T) {
 	tests := []struct {
-		name, expected string
-		actual         source.ColumnInfo
-		ok             bool
+		name   string
+		source source.ColumnInfo
+		target source.ColumnInfo
 	}{
-		{"widen varchar", "VARCHAR(50)", source.ColumnInfo{DataType: "character varying", Length: 100}, true},
-		{"narrow varchar", "VARCHAR(50)", source.ColumnInfo{DataType: "varchar", Length: 20}, false},
-		{"different family", "INTEGER", source.ColumnInfo{DataType: "text"}, false},
-		{"numeric capacity", "NUMERIC(12,2)", source.ColumnInfo{DataType: "numeric", Precision: 14, Scale: 3}, true},
-		{"numeric integer loss", "NUMERIC(12,2)", source.ColumnInfo{DataType: "numeric", Precision: 12, Scale: 4}, false},
-		{"sqlserver max", "NVARCHAR(MAX)", source.ColumnInfo{DataType: "nvarchar", Length: -1}, true},
-		{"sqlserver max narrowed", "NVARCHAR(MAX)", source.ColumnInfo{DataType: "nvarchar", Length: 4000}, false},
-		{"postgres time alias", "TIME", source.ColumnInfo{DataType: "time without time zone"}, true},
-		{"timezone distinction", "TIME", source.ColumnInfo{DataType: "time with time zone"}, false},
-		{"timestamp precision", "TIMESTAMP(3) WITH TIME ZONE", source.ColumnInfo{DataType: "timestamp with time zone", DateTimePrecision: 6}, true},
-		{"wider integer", "INTEGER", source.ColumnInfo{DataType: "bigint"}, true},
-		{"narrow integer", "BIGINT", source.ColumnInfo{DataType: "integer"}, false},
-		{"signedness", "BIGINT UNSIGNED", source.ColumnInfo{DataType: "bigint"}, false},
+		{"decimal to bigint", source.ColumnInfo{DataType: "decimal", Precision: 20, Scale: 2}, source.ColumnInfo{DataType: "bigint"}},
+		{"different family", source.ColumnInfo{DataType: "int"}, source.ColumnInfo{DataType: "text"}},
+		{"shorter text", source.ColumnInfo{DataType: "varchar", Length: 100}, source.ColumnInfo{DataType: "varchar", Length: 20}},
+		{"lower numeric precision", source.ColumnInfo{DataType: "decimal", Precision: 20, Scale: 4}, source.ColumnInfo{DataType: "numeric", Precision: 12, Scale: 4}},
+		{"lower numeric scale", source.ColumnInfo{DataType: "decimal", Precision: 20, Scale: 4}, source.ColumnInfo{DataType: "numeric", Precision: 20, Scale: 2}},
+		{"smaller integer", source.ColumnInfo{DataType: "bigint"}, source.ColumnInfo{DataType: "integer"}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) { require.Equal(t, tt.ok, compatibleRecoveryType(tt.expected, tt.actual)) })
+		t.Run(tt.name, func(t *testing.T) {
+			r, w, cfg, o, ops, truncated := recoveryFixture(t)
+			tt.source.Name, tt.target.Name = "ID", "renamed"
+			r.ddl[o.SourceTable].Columns = []source.ColumnInfo{tt.source}
+			o.SourceColumns = r.ddl[o.SourceTable].Columns
+			ops.inspect = func(context.Context, target.Writer, string) ([]source.ColumnInfo, error) {
+				return []source.ColumnInfo{tt.target}, nil
+			}
+			p, e := previewRecovery(context.Background(), r, w, cfg, o, nil, nil, ops)
+			require.NoError(t, e)
+			require.Equal(t, []source.ColumnInfo{tt.source}, p.SourceColumns)
+			require.Equal(t, []source.ColumnInfo{tt.target}, p.TargetColumns)
+			require.Zero(t, *truncated)
+			require.Zero(t, w.writes)
+		})
+	}
+}
+
+func TestRecoveryPreviewPreservesColumnGuards(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  []source.ColumnInfo
+		target  []source.ColumnInfo
+		mapping map[string]string
+		err     string
+	}{
+		{name: "missing target column", target: []source.ColumnInfo{{Name: "other", DataType: "int"}}, err: "目标列不存在"},
+		{name: "duplicate mapping", source: []source.ColumnInfo{{Name: "ID", DataType: "int"}, {Name: "Other", DataType: "int"}}, mapping: map[string]string{"ID": "renamed", "Other": "renamed"}, err: "多个源列映射到目标列"},
+		{name: "generated target column", target: []source.ColumnInfo{{Name: "renamed", DataType: "int", Generated: "computed"}}, err: "为生成列"},
+		{name: "nullable source", source: []source.ColumnInfo{{Name: "ID", DataType: "int", IsNullable: true}}, err: "收紧了可空性"},
+		{name: "unmapped required target column", target: []source.ColumnInfo{{Name: "renamed", DataType: "int"}, {Name: "required", DataType: "int"}}, err: "未映射的目标必填列"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, w, cfg, o, ops, truncated := recoveryFixture(t)
+			if tt.source != nil {
+				r.ddl[o.SourceTable].Columns = tt.source
+				o.SourceColumns = tt.source
+			}
+			if tt.target != nil {
+				ops.inspect = func(context.Context, target.Writer, string) ([]source.ColumnInfo, error) {
+					return tt.target, nil
+				}
+			}
+			if tt.mapping != nil {
+				o.ColumnMapping = tt.mapping
+			}
+			_, e := previewRecovery(context.Background(), r, w, cfg, o, nil, nil, ops)
+			require.ErrorContains(t, e, tt.err)
+			require.Zero(t, *truncated)
+			require.Zero(t, w.writes)
+		})
 	}
 }
 func TestRecoveryMappingDoesNotReplaceHandwrittenSQL(t *testing.T) {
@@ -310,6 +354,26 @@ func TestRecoveryValidatesBeforeTruncatingAndBindsPreview(t *testing.T) {
 	require.Error(t, e)
 	require.Zero(t, *truncated)
 }
+
+func TestRecoveryRejectsTargetTypeChangedAfterPreview(t *testing.T) {
+	r, w, cfg, o, ops, truncated := recoveryFixture(t)
+	w.count = 3
+	actual := source.ColumnInfo{Name: "renamed", DataType: "integer"}
+	ops.inspect = func(context.Context, target.Writer, string) ([]source.ColumnInfo, error) {
+		return []source.ColumnInfo{actual}, nil
+	}
+	p, e := previewRecovery(context.Background(), r, w, cfg, o, nil, nil, ops)
+	require.NoError(t, e)
+	actual.DataType = "bigint"
+	res, e := runRecovery(context.Background(), r, w, cfg, p, true, nil, ops)
+	require.ErrorContains(t, e, "源／目标结构或行数已变化")
+	require.Zero(t, res.CommittedRows)
+	require.Zero(t, *truncated)
+	require.Zero(t, w.writes)
+	require.Equal(t, int64(3), w.count)
+	require.Empty(t, r.readOffsets)
+}
+
 func TestRecoverySchemaOnlyNeverCopiesOrTruncates(t *testing.T) {
 	r, w, cfg, o, ops, truncated := recoveryFixture(t)
 	cfg.Content = "schema_only"
