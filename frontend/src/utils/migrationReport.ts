@@ -115,7 +115,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
     lines.push('', '=== 兼容函数明细 ===', `新建 ${compatibility.created}，复用 ${compatibility.reused}`)
     for (const item of compatibility.items) {
       const status = ({ created: '新建', reused: '复用', failed: '失败' })[item.status] || item.status
-      lines.push(`  ${item.schema}.${item.name}：${status}`)
+      lines.push(`  ${item.schema}.${item.signature || item.name}：${status}`)
       if (item.generator) lines.push(`    底层函数：${item.generator}`)
       if (item.error) lines.push(`    失败原因：${item.error}`)
       if (item.ddl) lines.push('    函数 DDL：', ...item.ddl.split('\n').map(line => `      ${line}`))

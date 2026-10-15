@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createSSRApp, h } from 'vue'
+import { renderToString } from '@vue/server-renderer'
+import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 const { failureStage, describeFailure, categoryPresentation, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
@@ -183,6 +186,47 @@ test('historical compatibility functions show new and reused successes with actu
   const text = formatReportCategories(r).join('\n')
   for (const expected of ['兼容函数明细', '新建 1，复用 1', 'app.get_uuid：新建', 'app.GET_UUID：复用', 'EXISTING BUSINESS FUNCTION', '底层函数：extensions.uuid_generate_v4', '扩展 extensions.uuid-ossp：已安装', 'CREATE EXTENSION IF NOT EXISTS']) assert.ok(text.includes(expected), expected)
   assert.doesNotMatch(text, /失败项详情|失败阶段：/)
+})
+
+test('four compatibility functions preserve parameter signatures and partial failure details', () => {
+  const r = report(empty())
+  r.compatibility_functions = { total: 4, success: 3, failed: 1, created: 2, reused: 1, items: [
+    { name: 'get_uuid', signature: 'get_uuid()', schema: 'app', status: 'reused', ddl: 'EXISTING UUID', error: '' },
+    { name: 'auto_increase_itemid', signature: 'auto_increase_itemid()', schema: 'app', status: 'created', ddl: 'CREATE FUNCTION app.auto_increase_itemid()', error: '' },
+    { name: 'count_rows', signature: 'count_rows(table_name varchar, owner varchar DEFAULT NULL)', schema: 'app', status: 'created', ddl: 'CREATE FUNCTION app.count_rows(table_name varchar, owner varchar DEFAULT NULL)', error: '' },
+    { name: 'fun_getpy', signature: 'fun_getpy(p_name varchar)', schema: 'app', status: 'failed', ddl: 'CREATE FUNCTION app.fun_getpy(p_name varchar)', error: 'pinyin mapping unavailable' },
+  ] }
+  const row = reportCategories(r).find(row => row.isCompatibility)
+  assert.equal(row.totalLabel, '4')
+  assert.equal(row.success, 3)
+  assert.equal(row.failed, 1)
+  assert.equal(row.created, 2)
+  assert.equal(row.reused, 1)
+  assert.equal(row.items.length, 4)
+  assert.equal(row.items[2].signature, 'count_rows(table_name varchar, owner varchar DEFAULT NULL)')
+  const text = formatReportCategories(r).join('\n')
+  for (const expected of [
+    '兼容函数', '新建 2，复用 1', 'app.get_uuid()：复用', 'app.auto_increase_itemid()：新建',
+    'app.count_rows(table_name varchar, owner varchar DEFAULT NULL)：新建',
+    'app.fun_getpy(p_name varchar)：失败', 'pinyin mapping unavailable',
+  ]) assert.ok(text.includes(expected), expected)
+  assert.doesNotMatch(text, /app.count_rows\(\)：|app.fun_getpy\(\)：|失败项详情|失败阶段：/)
+})
+
+test('compatibility panel renders argument signatures and keeps legacy name fallback', async () => {
+  const panel = createCompatibilityPanel()
+  const app = createSSRApp({ render: () => h(panel, { report: {
+    total: 3, success: 3, failed: 0, created: 2, reused: 1, items: [
+      { name: 'get_uuid', schema: 'app', status: 'reused', ddl: '', error: '' },
+      { name: 'count_rows', signature: 'count_rows(table_name varchar, owner varchar DEFAULT NULL)', schema: 'app', status: 'created', ddl: '', error: '' },
+      { name: 'fun_getpy', signature: 'fun_getpy(p_name varchar)', schema: 'app', status: 'created', ddl: '', error: '' },
+    ],
+  } }) })
+  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+  const html = await renderToString(app)
+  for (const expected of ['app.get_uuid()', 'app.count_rows(table_name varchar, owner varchar DEFAULT NULL)', 'app.fun_getpy(p_name varchar)']) assert.ok(html.includes(expected), expected)
+  assert.doesNotMatch(html, /app.count_rows\(\)<|app.fun_getpy\(\)</)
 })
 
 test('compatibility failure and unreadable definitions remain explicit in exports', () => {

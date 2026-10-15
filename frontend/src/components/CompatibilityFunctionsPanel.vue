@@ -7,7 +7,7 @@
     </a-space>
     <article v-for="item in report.items" :key="`${item.schema}.${item.name}`">
       <div class="function-heading">
-        <strong>{{ item.schema }}.{{ item.name }}()</strong>
+        <strong>{{ item.schema }}.{{ item.signature || `${item.name}()` }}</strong>
         <a-tag :color="item.status === 'failed' ? 'red' : item.status === 'reused' ? 'blue' : 'green'">{{ functionStatus[item.status] }}</a-tag>
         <a-button v-if="item.ddl" size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
       </div>

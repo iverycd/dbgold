@@ -145,6 +145,7 @@ export interface TableRowCount {
 }
 
 export interface CompatibilityFunctionResult extends ObjectResult {
+  signature?: string
   schema: string
   status: 'created' | 'reused' | 'failed'
   generator?: string

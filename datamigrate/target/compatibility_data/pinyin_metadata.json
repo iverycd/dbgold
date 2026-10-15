@@ -1,0 +1,15 @@
+{
+  "unicode_version": "17.0.0",
+  "source_url": "https://www.unicode.org/Public/17.0.0/ucd/Unihan.zip",
+  "source_sha256": "f7a48b2b545acfaa77b2d607ae28747404ce02baefee16396c5d2d7a8ef34b5e",
+  "property": "kMandarin",
+  "reading": "first value (zh-Hans); first NFD letter without tone marks",
+  "first_codepoint": 13312,
+  "last_codepoint": 205705,
+  "unmapped_marker": "?",
+  "mapped_count": 44348,
+  "mapping_bytes": 192394,
+  "mapping_sha256": "7095903cd3bb7239e9b1c9394a5b5a8a76d3e4c08d77008d292d720ecd7ad103",
+  "license": "LICENSE-UNICODE.txt",
+  "specification_url": "https://www.unicode.org/reports/tr38/tr38-39.html#kMandarin"
+}

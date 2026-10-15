@@ -1196,7 +1196,7 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer)
 	m.compatibilityFunctions = report
 	if err != nil {
-		m.log.Errorf("get_uuid 兼容函数初始化失败，继续迁移，依赖该函数的对象以实际执行结果为准: %v", err)
+		m.log.Errorf("兼容函数初始化失败，继续迁移，依赖失败函数的对象以实际执行结果为准: %v", err)
 		return err
 	}
 	if report != nil {

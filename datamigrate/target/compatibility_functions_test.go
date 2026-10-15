@@ -57,6 +57,21 @@ func expectUUIDReused(m sqlmock.Sqlmock) {
 	expectUUIDExisting(m, "app", "get_uuid", true)
 	m.ExpectRollback()
 }
+func expectBuiltinFunctionsReused(m sqlmock.Sqlmock, schema string) {
+	for _, spec := range builtinCompatibilitySpecs {
+		expectUUIDHeader(m, schema)
+		m.ExpectQuery("SELECT p.oid,p.pronargdefaults,p.proretset,p.provariadic,p.prorettype FROM").
+			WithArgs(schema, spec.name).
+			WillReturnRows(sqlmock.NewRows([]string{"oid", "defaults", "set", "variadic", "return_type"}).AddRow(42, spec.minDefaults, false, 0, 1043))
+		m.ExpectQuery("SELECT EXISTS .*p.proname=COALESCE").WithArgs(schema, spec.name, int64(42)).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		expectUUIDSavepoint(m)
+		m.ExpectQuery(regexp.QuoteMeta("SELECT pg_get_functiondef($1::oid)")).WithArgs(int64(42)).
+			WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow("EXISTING " + spec.name))
+		expectUUIDProbe(m, false)
+		m.ExpectRollback()
+	}
+}
 func expectUUIDMissing(m sqlmock.Sqlmock, schema string) {
 	expectUUIDHeader(m, schema)
 	if schema == "" {
@@ -128,24 +143,11 @@ func TestCompatibilityNativeUUIDAcrossProducts(t *testing.T) {
 		t.Run(product, func(t *testing.T) {
 			w, m := repairPGMock(t)
 			w.dbType = product
-			var actual Writer = w
-			switch product {
-			case "highgo":
-				actual = &HighGoWriter{db: w.db, schema: w.schema}
-			case "gaussdb":
-				actual = &GaussDBWriter{db: w.db, schema: w.schema}
-			case "kingbase":
-				actual = &KingbaseWriter{db: w.db, schema: w.schema}
-			case "vastbase":
-				actual = &VastbaseWriter{PostgresWriter: w}
-			case "gbase":
-				actual = &GBaseWriter{PostgresWriter: w}
-			}
 			expectUUIDMissing(m, "app")
 			native := uuidCandidates(product)[0]
 			expectUUIDCandidate(m, native, "native", "uuid", nil)
 			expectUUIDCreates(m, qualifiedFunction("native", native), "uuid", nil)
-			r, err := EnsureCompatibilityFunctions(context.Background(), actual)
+			r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 			require.NoError(t, err)
 			require.Equal(t, 1, r.Created)
 			require.Equal(t, 1, r.Success)
@@ -161,7 +163,7 @@ func TestCompatibilityKingbaseSysGUIDUsesPortableNormalization(t *testing.T) {
 	for _, typ := range []string{"name", "text", "bytea"} {
 		t.Run(typ, func(t *testing.T) {
 			w, m := repairPGMock(t)
-			actual := &KingbaseWriter{db: w.db, schema: w.schema}
+			w.dbType = "kingbase"
 			expectUUIDMissing(m, "app")
 			expectUUIDSavepoint(m)
 			m.ExpectQuery("SELECT n.nspname,t.typname FROM .*pg_proc").
@@ -183,7 +185,7 @@ func TestCompatibilityKingbaseSysGUIDUsesPortableNormalization(t *testing.T) {
 			expectUUIDProbe(m, false)
 			expectUUIDCreates(m, `"pg_catalog"."sys_guid"`, typ, nil)
 
-			r, err := EnsureCompatibilityFunctions(context.Background(), actual)
+			r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 			require.NoError(t, err)
 			require.Equal(t, 1, r.Created)
 			require.Zero(t, r.Failed)
@@ -197,7 +199,7 @@ func TestCompatibilityKingbaseSysGUIDUsesPortableNormalization(t *testing.T) {
 func TestCompatibilityExistingFunctionsAreNeverReplaced(t *testing.T) {
 	w, m := repairPGMock(t)
 	expectUUIDReused(m)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Reused)
 	require.Zero(t, r.Created)
@@ -212,7 +214,7 @@ func TestCompatibilityQuotesTargetSchema(t *testing.T) {
 	ddl := uuidFunctionDDL(w.schema, "get_uuid", qualifiedFunction("pg_catalog", "gen_random_uuid"), "uuid")
 	m.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectCommit()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Total)
 	require.Equal(t, 1, r.Created)
@@ -226,7 +228,7 @@ func TestCompatibilityReadsDefaultSchema(t *testing.T) {
 	expectUUIDMissing(m, "")
 	expectUUIDCandidate(m, "gen_random_uuid", "pg_catalog", "uuid", nil)
 	expectUUIDCreates(m, qualifiedFunction("pg_catalog", "gen_random_uuid"), "uuid", nil)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, "app", r.Items[0].Schema)
 	require.NoError(t, m.ExpectationsWereMet())
@@ -237,7 +239,7 @@ func TestCompatibilityFailedProbeFallsBackWithinTransaction(t *testing.T) {
 	expectUUIDCandidate(m, "gen_random_uuid", "pg_catalog", "uuid", errors.New("permission denied"))
 	expectUUIDCandidate(m, "uuid_generate_v4", "extensions", "uuid", nil)
 	expectUUIDCreates(m, qualifiedFunction("extensions", "uuid_generate_v4"), "uuid", nil)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, `"extensions"."uuid_generate_v4"`, r.Items[0].Generator)
 	require.NoError(t, m.ExpectationsWereMet())
@@ -248,7 +250,7 @@ func TestCompatibilityByteaGeneratorAndRollback(t *testing.T) {
 	expectUUIDMissing(m, "app")
 	expectUUIDCandidate(m, "sys_guid", "sys_catalog", "bytea", nil)
 	expectUUIDCreates(m, qualifiedFunction("sys_catalog", "sys_guid"), "bytea", errors.New("cannot create function"))
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.ErrorContains(t, err, "cannot create function")
 	require.Zero(t, r.Created)
 	require.Zero(t, r.Success)
@@ -301,7 +303,7 @@ func TestHighGoUUIDExtensionInstallReuseAndRollback(t *testing.T) {
 				expectUUIDCandidate(m, "uuid_generate_v4", "extensions", "uuid", nil)
 				expectUUIDCreates(m, qualifiedFunction("extensions", "uuid_generate_v4"), "uuid", errorAfter)
 			}
-			r, err := EnsureCompatibilityFunctions(context.Background(), w)
+			r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 			if installErr != nil || errorAfter != nil {
 				require.Error(t, err)
 				require.Equal(t, 1, r.Failed)
@@ -323,7 +325,7 @@ func TestCompatibilityConcurrentFunctionCreationRetriesDiscovery(t *testing.T) {
 	expectUUIDCandidate(m, "gen_random_uuid", "pg_catalog", "uuid", nil)
 	expectUUIDCreates(m, qualifiedFunction("pg_catalog", "gen_random_uuid"), "uuid", &pq.Error{Code: "42723", Message: "already exists"})
 	expectUUIDReused(m)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Reused)
 	require.Zero(t, r.Created)
@@ -336,7 +338,7 @@ func TestCompatibilityNoGeneratorReportsAllAttempts(t *testing.T) {
 		expectUUIDCandidate(m, name, "", "", nil)
 	}
 	m.ExpectRollback()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.Error(t, err)
 	require.Equal(t, 1, r.Failed)
 	require.Zero(t, r.Success)
@@ -353,7 +355,7 @@ func TestCompatibilityDefinitionReadFailureDoesNotInventDDL(t *testing.T) {
 	m.ExpectQuery("SELECT pg_get_functiondef").WillReturnError(errors.New("definition denied"))
 	expectUUIDProbe(m, true)
 	m.ExpectRollback()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Empty(t, r.Items[0].DDL)
 	require.Contains(t, r.Items[0].DefinitionWarning, "definition denied")
@@ -366,7 +368,7 @@ func TestCompatibilityCommitFailureDoesNotClaimCreated(t *testing.T) {
 	expectUUIDCandidate(m, "gen_random_uuid", "pg_catalog", "uuid", nil)
 	m.ExpectExec("CREATE FUNCTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectCommit().WillReturnError(errors.New("connection lost"))
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.ErrorContains(t, err, "需核验")
 	require.Equal(t, 1, r.Failed)
 	require.Zero(t, r.Created)
@@ -376,7 +378,9 @@ func TestCompatibilityViewRepairPreparationFailureStillExecutesViewSQL(t *testin
 	for _, dependent := range []bool{false, true} {
 		t.Run(fmt.Sprint(dependent), func(t *testing.T) {
 			w, m := repairPGMock(t)
-			m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
+			for i := 0; i < 4; i++ {
+				m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
+			}
 			m.ExpectBegin()
 			m.ExpectExec(regexp.QuoteMeta(`SET LOCAL search_path TO "app"`)).WillReturnResult(sqlmock.NewResult(0, 0))
 			q := m.ExpectExec("CREATE VIEW")
@@ -431,10 +435,10 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 			w := &PostgresWriter{db: db, schema: schema, dbType: "postgres", dia: dialect.NewPostgres("postgres")}
 			r, err := EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1, r.Total)
-			require.Equal(t, 1, r.Created)
+			require.Equal(t, 4, r.Total)
+			require.Equal(t, 4, r.Created)
 			require.Zero(t, r.Reused)
-			require.Len(t, r.Items, 1)
+			require.Len(t, r.Items, 4)
 			require.Equal(t, "get_uuid", r.Items[0].Name)
 			var count int
 			require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname IN ('get_uuid','GET_UUID')`, schema).Scan(&count))
@@ -457,8 +461,8 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 			require.NotEqual(t, a, b)
 			r, err = EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1, r.Total)
-			require.Equal(t, 1, r.Reused)
+			require.Equal(t, 4, r.Total)
+			require.Equal(t, 4, r.Reused)
 			require.Zero(t, r.Created)
 			require.True(t, strings.Contains(r.Items[0].DDL, "CREATE"))
 		})
@@ -558,7 +562,7 @@ func TestCompatibilityPostgresByteaAndConcurrencyIntegration(t *testing.T) {
 				}
 				_, err = db.ExecContext(ctx, "CREATE FUNCTION "+qualifiedFunction(schema, "sys_guid")+"() RETURNS "+typ+" LANGUAGE sql VOLATILE AS "+sqlFunctionBody("SELECT "+expression))
 				require.NoError(t, err)
-				r, err := ensurePGCompatibility(ctx, db, schema, "kingbase")
+				r, err := ensurePGUUIDCompatibility(ctx, db, schema, "kingbase")
 				require.NoError(t, err)
 				require.Equal(t, 1, r.Created)
 				var a, b string
@@ -576,7 +580,7 @@ func TestCompatibilityPostgresByteaAndConcurrencyIntegration(t *testing.T) {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						r, err := ensurePGCompatibility(ctx, db, schema, "postgres")
+						r, err := ensurePGUUIDCompatibility(ctx, db, schema, "postgres")
 						if err == nil && r.Success != 1 {
 							err = fmt.Errorf("unexpected snapshot: %+v", r)
 						}
@@ -609,7 +613,7 @@ func TestCompatibilityKingbaseCatalogFallback(t *testing.T) {
 	m.ExpectExec(regexp.QuoteMeta(`SET LOCAL search_path TO "app", sys_catalog, public`)).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectUUIDExisting(m, "app", "get_uuid", true)
 	m.ExpectRollback()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Reused)
 	require.NoError(t, m.ExpectationsWereMet())
@@ -626,7 +630,7 @@ func TestHighGoConcurrentExtensionCreationRetries(t *testing.T) {
 	expectUUIDExtension(m, true, nil)
 	expectUUIDCandidate(m, "uuid_generate_v4", "extensions", "uuid", nil)
 	expectUUIDCreates(m, qualifiedFunction("extensions", "uuid_generate_v4"), "uuid", nil)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Created)
 	require.Equal(t, "reused", r.Extensions[0].Status)
@@ -644,7 +648,7 @@ func TestCompatibilityCaseEquivalentExistingFunctionIsReused(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow("EXISTING GET_UUID"))
 	expectUUIDProbe(m, false)
 	m.ExpectRollback()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Total)
 	require.Equal(t, 1, r.Reused)
@@ -662,7 +666,7 @@ func TestCompatibilityFunctionResolutionFailureDoesNotCreate(t *testing.T) {
 	expectUUIDExisting(m, "app", "get_uuid", false)
 	expectUUIDResolution(m, "app", 0, &pq.Error{Code: "42501", Message: "permission denied"})
 	m.ExpectRollback()
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.ErrorContains(t, err, "permission denied")
 	require.Equal(t, 1, r.Total)
 	require.Equal(t, 1, r.Failed)
@@ -688,7 +692,7 @@ func TestCompatibilityMissingFunctionProbeCleanupFailureDoesNotCreate(t *testing
 				m.ExpectExec("RELEASE SAVEPOINT uuid_probe").WillReturnError(cleanupErr)
 			}
 			m.ExpectRollback()
-			r, err := EnsureCompatibilityFunctions(context.Background(), w)
+			r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 			require.ErrorIs(t, err, cleanupErr)
 			require.Equal(t, 1, r.Total)
 			require.Equal(t, 1, r.Failed)
@@ -707,7 +711,7 @@ func TestCompatibilityOpenGaussMissingFunctionUsesSQLState(t *testing.T) {
 	expectUUIDResolution(m, "app", 0, &opengauss.Error{Code: "42883", Message: "function does not exist"})
 	expectUUIDCandidate(m, "uuid", "pg_catalog", "uuid", nil)
 	expectUUIDCreates(m, qualifiedFunction("pg_catalog", "uuid"), "uuid", nil)
-	r, err := EnsureCompatibilityFunctions(context.Background(), w)
+	r, err := ensurePGUUIDCompatibility(context.Background(), w.db, w.schema, w.DBType())
 	require.NoError(t, err)
 	require.Equal(t, 1, r.Total)
 	require.Equal(t, 1, r.Created)

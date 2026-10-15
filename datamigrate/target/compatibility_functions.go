@@ -25,6 +25,7 @@ type CompatibilityFunctionsReport struct {
 
 type CompatibilityFunctionResult struct {
 	Name              string `json:"name"`
+	Signature         string `json:"signature,omitempty"`
 	Schema            string `json:"schema"`
 	Status            string `json:"status"` // created | reused | failed
 	Generator         string `json:"generator,omitempty"`
@@ -108,10 +109,37 @@ func compatibilityRace(err error) bool {
 }
 
 func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product string) (*CompatibilityFunctionsReport, error) {
+	report, uuidErr := ensurePGUUIDCompatibility(ctx, db, schema, product)
+	var failures []error
+	if uuidErr != nil {
+		failures = append(failures, uuidErr)
+	}
+	// Resolve a default schema once so all functions belong to the same target,
+	// even though each function owns an independent transaction.
+	if schema == "" && len(report.Items) > 0 {
+		schema = report.Items[0].Schema
+	}
+	for _, spec := range builtinCompatibilitySpecs {
+		itemReport, err := ensurePGBuiltinCompatibility(ctx, db, schema, spec)
+		report.Items = append(report.Items, itemReport.Items...)
+		if schema == "" && len(itemReport.Items) > 0 {
+			schema = itemReport.Items[0].Schema
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	// Per-function reports have already accounted for their own rollback. An
+	// unrelated failure must not relabel committed functions or UUID extensions.
+	report.finish(nil)
+	return report, errors.Join(failures...)
+}
+
+func ensurePGUUIDCompatibility(ctx context.Context, db *sql.DB, schema, product string) (*CompatibilityFunctionsReport, error) {
 	var report *CompatibilityFunctionsReport
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		report, err = preparePGCompatibility(ctx, db, schema, product)
+		report, err = preparePGUUIDCompatibility(ctx, db, schema, product)
 		if err == nil || !compatibilityRace(err) || ctx.Err() != nil {
 			break
 		}
@@ -163,7 +191,7 @@ func compatibilityProbe(ctx context.Context, tx *sql.Tx, fn func() error) error 
 	return errors.Join(err, releaseErr)
 }
 
-func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product string) (report *CompatibilityFunctionsReport, resultErr error) {
+func preparePGUUIDCompatibility(ctx context.Context, db *sql.DB, schema, product string) (report *CompatibilityFunctionsReport, resultErr error) {
 	report = &CompatibilityFunctionsReport{Items: []CompatibilityFunctionResult{
 		{Name: "get_uuid", Schema: schema},
 	}}
