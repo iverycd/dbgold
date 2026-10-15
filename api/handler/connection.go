@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"dbgold/datamigrate/source"
 	"dbgold/driver"
+	"dbgold/internal/pgschema"
 	"dbgold/middleware"
 	"dbgold/store"
 	"fmt"
@@ -383,6 +384,9 @@ func ListConnectionSchemas(c *gin.Context) {
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
+			continue
+		}
+		if pgschema.IsHidden(s) {
 			continue
 		}
 		schemas = append(schemas, s)

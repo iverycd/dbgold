@@ -153,6 +153,44 @@ func TestCompatibilityNativeUUIDAcrossProducts(t *testing.T) {
 		})
 	}
 }
+
+func TestCompatibilityKingbaseSysGUIDUsesPortableNormalization(t *testing.T) {
+	for _, typ := range []string{"name", "text", "bytea"} {
+		t.Run(typ, func(t *testing.T) {
+			w, m := repairPGMock(t)
+			actual := &KingbaseWriter{db: w.db, schema: w.schema}
+			expectUUIDMissing(m, "app")
+			expectUUIDSavepoint(m)
+			m.ExpectQuery("SELECT n.nspname,t.typname FROM .*pg_proc").
+				WithArgs("sys_guid", "pg_catalog", "app").
+				WillReturnRows(sqlmock.NewRows([]string{"schema", "type"}).AddRow("pg_catalog", typ))
+			expectUUIDProbe(m, false)
+
+			// Keep these SQL expectations independent of the production generators:
+			// PostgreSQL accepts multi-character TRIM, but Kingbase rejects it.
+			probeExpression := "lower(replace(ltrim(rtrim((CAST(v AS text)), '{}'), '{}'), '-', ''))"
+			ddlExpression := "lower(replace(ltrim(rtrim((CAST(raw_guid AS text)), '{}'), '{}'), '-', ''))"
+			if typ == "bytea" {
+				probeExpression = "lower(replace(ltrim(rtrim((CASE WHEN octet_length(v)=16 THEN encode(v,'hex') WHEN octet_length(v)=32 THEN convert_from(v,'UTF8') ELSE NULL END), '{}'), '{}'), '-', ''))"
+				ddlExpression = "lower(replace(ltrim(rtrim((CASE WHEN octet_length(raw_guid)=16 THEN encode(raw_guid,'hex') WHEN octet_length(raw_guid)=32 THEN convert_from(raw_guid,'UTF8') ELSE NULL END), '{}'), '{}'), '-', ''))"
+			}
+			expectUUIDSavepoint(m)
+			m.ExpectQuery(regexp.QuoteMeta("SELECT " + probeExpression + ` FROM (SELECT "pg_catalog"."sys_guid"() AS v OFFSET 0) uuid_sample`)).
+				WillReturnRows(sqlmock.NewRows([]string{"guid"}).AddRow("0123456789abcdef0123456789abcdef"))
+			expectUUIDProbe(m, false)
+			expectUUIDCreates(m, `"pg_catalog"."sys_guid"`, typ, nil)
+
+			r, err := EnsureCompatibilityFunctions(context.Background(), actual)
+			require.NoError(t, err)
+			require.Equal(t, 2, r.Created)
+			require.Zero(t, r.Failed)
+			require.Equal(t, `"pg_catalog"."sys_guid"`, r.Items[0].Generator)
+			require.Contains(t, r.Items[0].DDL, "guid := "+strings.ReplaceAll(ddlExpression, "'", "''")+";")
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestCompatibilityExistingFunctionsAreNeverReplaced(t *testing.T) {
 	w, m := repairPGMock(t)
 	expectUUIDReused(m)

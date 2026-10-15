@@ -304,7 +304,8 @@ func uuidNormalizer(typ, value string) string {
 	} else {
 		value = "CAST(" + value + " AS text)"
 	}
-	return "lower(replace(trim(both '{}' from (" + value + ")), '-', ''))"
+	// Kingbase TRIM only accepts one character; LTRIM/RTRIM support a set.
+	return "lower(replace(ltrim(rtrim((" + value + "), '{}'), '{}'), '-', ''))"
 }
 
 func uuidFunctionDDL(schema, name, generator, typ string) string {

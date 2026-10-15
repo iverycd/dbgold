@@ -4,6 +4,7 @@ package source
 import (
 	"context"
 	"database/sql"
+	"dbgold/internal/pgschema"
 	"fmt"
 	"strings"
 	"time"
@@ -85,6 +86,9 @@ func (r *PostgresReader) ListDatabases(ctx context.Context) ([]string, error) {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
+		}
+		if pgschema.IsHidden(name) {
+			continue
 		}
 		dbs = append(dbs, name)
 	}

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"dbgold/internal/pgschema"
 	"dbgold/middleware"
 	"dbgold/store"
 	"encoding/base64"
@@ -118,6 +119,9 @@ func ListQueryNamespaces(c *gin.Context) {
 	for rows.Next() {
 		var name string
 		if rows.Scan(&name) == nil {
+			if conn.DBType != "mysql" && pgschema.IsHidden(name) {
+				continue
+			}
 			list = append(list, name)
 		}
 	}
