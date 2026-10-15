@@ -143,6 +143,11 @@ func PreviewMigrationRecovery(c *gin.Context) {
 	if req.ColumnMapping != nil {
 		mapping = req.ColumnMapping
 	}
+	previewObject, e := recoveryPreviewObject(j.JobID, o)
+	if e != nil {
+		repairError(c, e)
+		return
+	}
 	r, w, e := openRecovery(src, dst, b)
 	if e != nil {
 		repairError(c, e)
@@ -150,7 +155,7 @@ func PreviewMigrationRecovery(c *gin.Context) {
 	}
 	defer r.Close()
 	defer w.Close()
-	p, e := datamigrate.PreviewRecovery(c.Request.Context(), r, w, cfg, o, related, mapping)
+	p, e := datamigrate.PreviewRecovery(c.Request.Context(), r, w, cfg, previewObject, related, mapping)
 	if e != nil {
 		repairError(c, e)
 		return
@@ -307,7 +312,12 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 		}
 		defer r.Close()
 		defer w.Close()
-		fresh, e := datamigrate.PreviewRecovery(ctx, r, w, cfg, o, p.Related, p.ColumnMapping)
+		previewObject, e := recoveryPreviewObject(j.JobID, o)
+		if e != nil {
+			finishRepair(a, o, e)
+			return
+		}
+		fresh, e := datamigrate.PreviewRecovery(ctx, r, w, cfg, previewObject, p.Related, p.ColumnMapping)
 		if e != nil {
 			finishRepair(a, o, e)
 			return

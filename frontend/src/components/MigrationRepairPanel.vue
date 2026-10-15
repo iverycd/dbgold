@@ -1,7 +1,7 @@
 <template>
   <section ref="repairSection" class="repair-panel" aria-label="对象修复" tabindex="-1">
     <div class="repair-heading">
-      <div><h3>对象修复</h3><p>表结构执行与数据导入分别记录，结构执行成功后可继续接续数据与关联对象。原始报告保持不变。</p></div>
+      <div><h3>对象修复</h3><p>同一张表的结构与数据结果合并展示，结构执行成功后可继续接续数据与关联对象。原始报告保持不变。</p></div>
       <a-space wrap>
         <a-button size="small" :disabled="busy" @click="openBinding">连接与配置</a-button>
         <a-button size="small" @click="openHistory()">执行历史</a-button>
@@ -81,11 +81,14 @@
             </a-tooltip>
           </template>
         </a-table-column>
-        <a-table-column title="原始错误"><template #cell="{ record }"><div class="error-text">{{ (record.object.original_error ?? record.object.error) || '—' }}</div></template></a-table-column>
+        <a-table-column title="原始错误"><template #cell="{ record }">
+          <div v-for="detail in repairDisplayErrors(record)" :key="`${detail.label}:${detail.text}`" class="error-text repair-error"><strong v-if="detail.label">{{ detail.label }}：</strong>{{ detail.text }}</div>
+          <span v-if="!repairDisplayErrors(record).length">—</span>
+        </template></a-table-column>
         <a-table-column title="修复状态" :width="240">
           <template #cell="{ record }">
             <div class="repair-statuses">
-              <div v-for="state in repairObjectStatuses(record.object)" :key="state.label" class="repair-status-line">
+              <div v-for="state in repairDisplayStatuses(record)" :key="state.label" class="repair-status-line">
                 <span v-if="state.label" class="repair-status-label">{{ state.label }}：</span>
                 <a-tag :color="statusColor(state.status)">{{ state.text }}</a-tag>
               </div>
@@ -93,9 +96,9 @@
           </template>
         </a-table-column>
         <a-table-column title="操作" :width="240"><template #cell="{ record }"><a-space wrap>
-          <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(record)">{{ hasRepairDDL(record.object) ? '编辑并执行' : '手动编写 DDL' }}</a-button>
-          <a-button v-else type="text" size="mini" @click="openEditor(record)">查看诊断</a-button>
-          <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(record)">接续此表迁移</a-button>
+          <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ hasRepairDDL(record.object) ? '编辑并执行' : '手动编写 DDL' }}</a-button>
+          <a-button v-else type="text" size="mini" @click="openEditor(primaryRecord(record))">查看诊断</a-button>
+          <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(primaryRecord(record))">接续此表迁移</a-button>
           <a-button type="text" size="mini" @click="openHistory(record.object.id)">历史</a-button>
         </a-space></template></a-table-column>
       </template>
@@ -241,7 +244,7 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchesRepairFilter, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairExecutionStatus, repairKind, repairObjectStatuses, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
@@ -311,23 +314,29 @@ let disposed = false
 const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value)
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
-const visibleRecords = computed(() => records.value.filter(({ object }) => matchesRepairFilter(object, filter.value, attempts.value) && `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase())).map(record => ({ ...record, key: record.object.id, disabled: busy.value || loading.value || !!batchIneligibleReason(record.object) })))
+const displayRecords = computed(() => groupRepairRecords(records.value))
+const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => ({ ...record, key: record.object.id, disabled: busy.value || loading.value || !!batchIneligibleReason(record.object) })))
 const batchExecutableCount = computed(() => batchItems.value.filter(item => item.status === 'pending').length)
 const batchCompletedCount = computed(() => batchItems.value.filter(item => !['pending', 'saving', 'running'].includes(item.status)).length)
 const stats = computed(() => {
   const counts: Record<RepairCategory, number> = { repaired: 0, pending: 0, blocked: 0, data: 0 }
-  for (const { key } of repairCategories) counts[key] = records.value.filter(({ object }) => matchesRepairFilter(object, key, attempts.value)).length
+  for (const { key } of repairCategories) counts[key] = displayRecords.value.filter(record => matchesRepairDisplayFilter(record, key, attempts.value)).length
   return counts
 })
 const emptyDescription = computed(() => error.value ? '修复状态未知，请刷新重试' : loading.value ? '修复状态加载中' : keyword.value.trim() ? '没有匹配的对象' : filter.value === 'attention' ? '当前无待处理对象' : repairCategories.find(category => category.key === filter.value)?.empty || '当前无对象')
-const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: new Set(records.value.filter(({ object }) => needsRepairAttention(object)).map(({ object }) => object.id)).size }))
+const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: displayRecords.value.filter(needsRepairDisplayAttention).length }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
 const relatedCandidates = computed(() => {
   const object = recoveryObject.value?.object
   return object ? records.value.filter(record => record.object.id !== object.id && !isTableRepair(record.object) && !unitCommitted(record.object.status) && (record.object.table === (object.table || object.name) || record.object.dependencies?.includes(object.id))) : []
 })
-const visibleAttempts = computed(() => attempts.value.filter(attempt => !historyObjectID.value || historyObjectID.value === attempt.object_id))
+const historyObjectIDs = computed(() => {
+  if (!historyObjectID.value) return null
+  const row = displayRecords.value.find(record => record.members.some(member => member.object.id === historyObjectID.value))
+  return new Set(row ? row.members.map(member => member.object.id) : [historyObjectID.value])
+})
+const visibleAttempts = computed(() => attempts.value.filter(attempt => !historyObjectIDs.value || historyObjectIDs.value.has(attempt.object_id)))
 const canRecover = computed(() => {
   const preview = recoveryPlan.value?.preview
   return !!preview && !(preview.related || []).some(object => object.requires_review) && !busy.value && !previewing.value && !mappingError(recoveryForm.mapping) && recoveryForm.sourceQuiesced && recoveryForm.targetQuiesced && recoveryForm.reviewed && (!preview.data_required || preview.target_rows === 0 || recoveryForm.truncate && recoveryForm.confirmation === preview.qualified_target)
@@ -337,6 +346,7 @@ const errorText = (e: any) => e?.response?.data?.error || e?.message || '请求�
 function showError(e: unknown) { error.value = errorText(e); Message.error(error.value) }
 function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : status === 'not_required' ? 'gray' : 'orange' }
 function qualified(object: RepairObject) { return object.schema ? `${object.schema}.${object.target_name}` : object.target_name }
+function primaryRecord(row: RepairDisplayRow): RepairRecord { return row.members.find(member => member.object.id === row.object.id)! }
 function objectName(id: string) { const object = records.value.find(record => record.object.id === id)?.object; return object ? qualified(object) : id }
 function dependencyNames(object: RepairObject) { return (object.dependencies || []).map(objectName) }
 function connectionLabel(conn: Connection) { return `${conn.name} · ${conn.host}:${conn.port}/${conn.database} · ${conn.username}` }
@@ -455,7 +465,8 @@ async function applyPendingFocus() {
   const scope = epoch, id = props.jobID, target = pendingFocus.value
   pendingFocus.value = null
   showAllObjects()
-  const matches = matchingRepairRecords(records.value, target)
+  const matchedIDs = new Set(matchingRepairRecords(records.value, target).map(record => record.object.id))
+  const matches = displayRecords.value.filter(record => record.members.some(member => matchedIDs.has(member.object.id)))
   const match = matches.length === 1 ? matches[0] : undefined
   highlightedObjectID.value = match?.object.id || ''
   if (!match) keyword.value = target.target_name || target.source_name || target.name
@@ -745,6 +756,7 @@ onUnmounted(() => {
 .repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-2); }
 .repair-status-line :deep(.arco-tag) { height: auto; min-height: 24px; white-space: normal; overflow-wrap: anywhere; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
+.repair-error + .repair-error { margin-top: 8px; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
 .repair-name { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repair-name-tooltip { display: block; max-width: min(360px, calc(100vw - 48px)); overflow-wrap: anywhere; white-space: normal; }

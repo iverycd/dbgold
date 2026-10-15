@@ -25,7 +25,7 @@ function loadBatchUtils(timers) {
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
-const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
+const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -288,7 +288,7 @@ test('rendered repair statuses label each phase, color failures and show data re
       { text: '数据：导入成功', colors: ['green'] },
       { text: '数据：导入失败，待接续', colors: ['red'] },
     ])
-    assert.match(html, /表结构执行与数据导入分别记录，结构执行成功后可继续接续数据与关联对象。/)
+    assert.match(html, /同一张表的结构与数据结果合并展示，结构执行成功后可继续接续数据与关联对象。/)
     assert.match(html, /表结构已执行成功，无需重复执行 DDL/)
     assert.doesNotMatch(html, /执行成功即完成修复/)
     p.lifecycle.unmount()
@@ -297,6 +297,136 @@ test('rendered repair statuses label each phase, color failures and show data re
 
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await tick() }
 const repairList = objects => ({ data: { objects: JSON.parse(JSON.stringify(objects)), binding: { configured: true, src_conn_id: 1, dst_conn_id: 2, source_database: 'source', source_schema: 'source_schema', target_schema: 'public', legacy: false } } })
+
+function tableDataFailure() {
+  const table = { version: 7, object: { ...record().object, id: 'table', source_name: 'Orders', source_table: 'Orders', table: 'orders', target_name: 'orders', status: 'succeeded', original_status: 'succeeded', original_error: '', data_status: 'failed', units: [unit('table', 'succeeded', { selected: false })] } }
+  const data = record({ id: 'data', kind: 'data', source_name: 'Orders', source_table: 'Orders', table: 'orders', target_name: 'orders', dependencies: ['table'], ddl: '', units: [], status: 'failed', original_status: 'failed', data_status: 'failed', original_error: 'numeric field overflow: updatetime', error: 'numeric field overflow: updatetime' })
+  return [table, data]
+}
+
+test('table and data failure render once, share counts and remain searchable by the data error', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => repairList(tableDataFailure()) })); await tick()
+    p.selectRepairFilter('data'); await tick()
+    assert.equal(p.visibleRecords.value.length, 1)
+    assert.equal(p.stats.value.data, 1)
+    assert.equal(p.summary.value.attention, 1)
+    const row = p.visibleRecords.value[0]
+    assert.equal(row.object.id, 'table')
+    assert.equal(row.version, 7)
+    assert.equal(row.members.length, 2)
+    assert.equal(row.object.original_error, '', 'data error must not be written onto the table object')
+    const html = await renderPanel(p)
+    assert.deepEqual(statusCells(html), [{ text: '表结构：执行成功数据：导入失败，待接续', colors: ['green', 'red'] }])
+    assert.equal(html.match(/接续此表迁移/g)?.length, 1)
+    assert.equal(html.match(/numeric field overflow: updatetime/g)?.length, 1)
+    assert.match(html, /数据：/)
+    p.keyword.value = 'updatetime'; await tick()
+    assert.equal(p.visibleRecords.value[0].object.id, 'table')
+    p.keyword.value = 'unrelated'; await tick()
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.stats.value.data, 1, 'counts stay independent of the search')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('group history includes both IDs from either entry and full export keeps original records', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const objects = tableDataFailure()
+    const history = ['table', 'data', 'unrelated'].map((object_id, index) => ({ id: `attempt-${index}`, object_id, kind: 'recovery', status: 'failed', units: [], created_at: '' }))
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList(objects),
+      listRepairAttempts: async () => ({ data: { items: history } }),
+    })); await tick()
+    for (const objectID of ['table', 'data']) {
+      p.openHistory(objectID); await tick()
+      assert.deepEqual(Array.from(p.visibleAttempts.value, attempt => attempt.object_id), ['table', 'data'])
+    }
+    p.openHistory(); await tick()
+    assert.equal(p.visibleAttempts.value.length, 3)
+    const exported = (await p.exportHistory()).join('\n')
+    assert.match(exported, /【表】public.orders/)
+    assert.match(exported, /【数据】public.orders/)
+    assert.match(exported, /对象 table/)
+    assert.match(exported, /对象 data/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('report focus resolves table and data matches to one grouped row on the correct page', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [...Array.from({ length: 12 }, (_, index) => record({ id: `view-${index}`, kind: 'view', name: `View${index}`, target_name: `View${index}` })), ...tableDataFailure()]
+    const actions = []
+    p.repairSection.value = { querySelectorAll: () => [{ dataset: { repairObjectId: 'table' }, focus: () => actions.push('focus'), scrollIntoView: () => actions.push('scroll') }] }
+    await p.focusObject({ kind: 'data', name: 'Orders', source_name: 'Orders', target_name: 'orders', table: 'Orders', target_table: 'orders', target_schema: 'public' })
+    assert.equal(p.highlightedObjectID.value, 'table')
+    assert.equal(p.keyword.value, '')
+    assert.equal(p.page.value, 2)
+    assert.equal(p.visibleRecords.value.length, 13)
+    assert.deepEqual(actions, ['focus', 'scroll'])
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('grouped actions retain the original table version and never batch replay completed DDL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const objects = tableDataFailure(), calls = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList(objects),
+      previewRecovery: async (job, object, request) => {
+        calls.push({ job, object, request })
+        return { data: { token: 'preview', preview: { data_required: true, target_rows: 0, column_mapping: {}, related: [] } } }
+      },
+    })); await tick()
+    const row = p.visibleRecords.value[0], primary = p.primaryRecord(row)
+    assert.equal(primary, p.records.value[0])
+    p.openEditor(primary)
+    assert.equal(p.editing.value.version, 7)
+    assert.equal(p.editing.value.object.id, 'table')
+    assert.equal(p.draftUnits.value[0].selected, false)
+    p.closeEditor()
+    p.selectAllFiltered()
+    assert.equal(p.selectedObjectIDs.value.length, 0)
+    p.openRecovery(primary); await tick(); await tick()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].object, 'table')
+    assert.equal(calls[0].request.version, 7)
+    assert.equal(objects[0].object.original_error, '')
+    assert.equal(objects[1].object.error, 'numeric field overflow: updatetime')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('group data conflict stays visible until all records converge after refresh', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const objects = tableDataFailure()
+    objects[0].object.data_status = 'succeeded'
+    objects[1].object.data_status = 'unknown'
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => repairList(objects) })); await tick()
+    p.selectRepairFilter('data'); await tick()
+    assert.equal(p.visibleRecords.value.length, 1)
+    assert.equal(p.stats.value.data, 1)
+    assert.equal(p.summary.value.attention, 1)
+    assert.deepEqual(statusCells(await renderPanel(p)), [{ text: '表结构：执行成功数据：数据状态待核对', colors: ['green', 'orange'] }])
+    objects[1].object.status = 'succeeded'
+    objects[1].object.data_status = 'succeeded'
+    await p.refresh(); await tick()
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.stats.value.data, 0)
+    assert.equal(p.summary.value.attention, 0)
+    assert.equal(p.stats.value.repaired, 1)
+    p.showAllObjects(); await tick()
+    assert.deepEqual(statusCells(await renderPanel(p)), [{ text: '表结构：执行成功数据：导入成功', colors: ['green', 'green'] }])
+    assert.match(await renderPanel(p), /numeric field overflow: updatetime/, 'original error remains available after successful recovery')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('batch selection spans pages, excludes ineligible objects and resets when filters change', async () => {
   const scope = Vue.effectScope()

@@ -22,6 +22,11 @@ export const repairCategories = [
 export type RepairCategory = typeof repairCategories[number]['key']
 export type RepairFilter = 'attention' | 'all' | RepairCategory
 
+// The primary record stays untouched so commands retain its ID and draft version.
+export interface RepairDisplayRow extends RepairRecord {
+  members: RepairRecord[]
+}
+
 export function matchesRepairFilter(object: RepairObject, filter: RepairFilter, attempts: RepairAttempt[] = []): boolean {
   switch (filter) {
     case 'all': return true
@@ -131,4 +136,117 @@ export function formatRepairHistory(records: RepairRecord[], attempts: RepairAtt
     if (attempt.result) lines.push(`已提交 ${attempt.result.committed_rows} 行；源 ${attempt.result.source_rows} 行 / 目标 ${attempt.result.target_rows} 行；${attempt.result.error || ''}`)
   }
   return lines
+}
+
+function repairTableIdentity(object: RepairObject, source = false): { name: string; valid: boolean } {
+  const names = (source ? [object.source_table, object.source_name] : [object.table, object.target_name]).filter((name): name is string => !!name)
+  return { name: names[0] || '', valid: new Set(names).size <= 1 }
+}
+
+function compatibleRepairTable(table: RepairObject, data: RepairObject): boolean {
+  if (table.schema !== data.schema) return false
+  const tableTarget = repairTableIdentity(table)
+  const dataTarget = repairTableIdentity(data)
+  const tableSource = repairTableIdentity(table, true)
+  const dataSource = repairTableIdentity(data, true)
+  if (![tableTarget, dataTarget, tableSource, dataSource].every(identity => identity.valid)) return false
+  if (tableTarget.name && dataTarget.name && tableTarget.name !== dataTarget.name) return false
+  return !(tableSource.name && dataSource.name && tableSource.name !== dataSource.name)
+}
+
+export function groupRepairRecords(records: RepairRecord[]): RepairDisplayRow[] {
+  const recordsByID = new Map<string, RepairRecord>()
+  for (const record of records) {
+    if (!recordsByID.has(record.object.id)) recordsByID.set(record.object.id, record)
+  }
+  const uniqueRecords = [...recordsByID.values()]
+  const tableRecords = uniqueRecords.filter(({ object }) => ['table', 'tables'].includes(object.kind))
+  const groups = new Map<RepairRecord, RepairDisplayRow>()
+  const memberships = new Map<RepairRecord, RepairDisplayRow>()
+
+  for (const data of uniqueRecords) {
+    if (data.object.kind !== 'data' || data.object.diagnostic_only) continue
+    const dependencies = new Set(data.object.dependencies || [])
+    const tableDependencies = tableRecords.filter(({ object }) => dependencies.has(object.id))
+    let table: RepairRecord | undefined
+    if (dependencies.size) {
+      // Explicit dependencies must resolve; missing or contradictory IDs cannot fall back to a name.
+      if (tableDependencies.length !== 1 || [...dependencies].some(id => !recordsByID.has(id))) continue
+      const candidate = tableDependencies[0]!
+      if (!candidate.object.diagnostic_only && compatibleRepairTable(candidate.object, data.object)) table = candidate
+    } else {
+      const identity = repairTableIdentity(data.object)
+      if (!identity.valid || !identity.name) continue
+      const candidates = tableRecords.filter(({ object }) => !object.diagnostic_only && object.schema === data.object.schema && repairTableIdentity(object).name === identity.name)
+      if (candidates.length === 1 && compatibleRepairTable(candidates[0]!.object, data.object)) table = candidates[0]
+    }
+    if (!table) continue
+    let group = groups.get(table)
+    if (!group) {
+      group = { ...table, members: [table] }
+      groups.set(table, group)
+      memberships.set(table, group)
+    }
+    group.members.push(data)
+    memberships.set(data, group)
+  }
+
+  for (const group of groups.values()) {
+    const sourceNames = group.members.map(({ object }) => repairTableIdentity(object, true).name).filter(Boolean)
+    if (new Set(sourceNames).size <= 1) continue
+    // Missing table metadata must not let the first data record claim a shared target.
+    for (const member of group.members) memberships.delete(member)
+  }
+
+  const emitted = new Set<RepairDisplayRow>()
+  const rows: RepairDisplayRow[] = []
+  for (const record of uniqueRecords) {
+    const row = memberships.get(record) || { ...record, members: [record] }
+    if (emitted.has(row)) continue
+    emitted.add(row)
+    rows.push(row)
+  }
+  return rows
+}
+
+export function repairDisplayErrors(row: RepairDisplayRow): { label: '结构' | '数据' | ''; text: string }[] {
+  const errors: { label: '结构' | '数据' | ''; text: string }[] = []
+  for (const { object } of row.members) {
+    const text = object.original_error ?? object.error
+    if (!text) continue
+    const label = object.kind === 'data' ? '数据' : ['table', 'tables'].includes(object.kind) ? '结构' : ''
+    if (!errors.some(error => error.label === label && error.text === text)) errors.push({ label, text })
+  }
+  return errors
+}
+
+function normalizedRepairDataStatus(status: string): string {
+  if (unitCommitted(status)) return 'succeeded'
+  if (['unknown', 'unverified', 'needs_verification'].includes(status)) return 'unknown'
+  return ['pending', 'not_started', 'skipped', 'needs_data', 'draft'].includes(status) ? 'pending' : status
+}
+
+function repairDisplayDataStatus(row: RepairDisplayRow): { status: string; text: string; conflict: boolean } | undefined {
+  const statuses = row.members.map(({ object }) => object.kind === 'data' ? object.data_status || object.status : object.data_status).filter((status): status is string => !!status)
+  if (!statuses.length) return undefined
+  if (new Set(statuses.map(normalizedRepairDataStatus)).size > 1) return { status: 'needs_verification', text: '数据状态待核对', conflict: true }
+  return { status: statuses[0]!, text: repairDataStatus(statuses[0]!), conflict: false }
+}
+
+export function repairDisplayStatuses(row: RepairDisplayRow): { label: string; status: string; text: string }[] {
+  if (row.members.length === 1) return repairObjectStatuses(row.object)
+  const statuses = [{ label: '表结构', status: row.object.status, text: repairStatus(row.object.status) }]
+  const data = repairDisplayDataStatus(row)
+  if (data) statuses.push({ label: '数据', status: data.status, text: data.text })
+  return statuses
+}
+
+export function needsRepairDisplayAttention(row: RepairDisplayRow): boolean {
+  return row.members.some(({ object }) => needsRepairAttention(object)) || repairDisplayDataStatus(row)?.conflict === true
+}
+
+export function matchesRepairDisplayFilter(row: RepairDisplayRow, filter: RepairFilter, attempts: RepairAttempt[] = []): boolean {
+  if (filter === 'attention') return needsRepairDisplayAttention(row)
+  if (filter === 'data' && row.members.length > 1 && repairDisplayDataStatus(row)?.conflict === true) return true
+  return row.members.some(({ object }) => matchesRepairFilter(object, filter, attempts))
 }
