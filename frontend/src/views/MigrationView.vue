@@ -1143,14 +1143,22 @@ async function startDataMigration() {
   }
   dataMigrate.running = true
   dataMigrate.finished = false
-  dataMigrate.logs = []
+  dataMigrate.logs = ['[INFO] 正在提交迁移任务…']
   dataMigrate.currentJobId = ''
   pgSubmissions.data = null
   try {
-    if (isPGMySQLSelection('data') && !(await ensurePGCheck('data'))?.ready) { dataMigrate.running = false; return }
+    if (isPGMySQLSelection('data')) {
+      dataMigrate.logs.push('[INFO] 正在执行迁移预检…')
+      if (!(await ensurePGCheck('data'))?.ready) {
+        dataMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
+        dataMigrate.running = false
+        return
+      }
+    }
     const submitted = preparePGSubmission('data')
     const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
+    dataMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
     savePGSubmission('data', res.data.job_id, submitted)
     connectSSE(res.data.job_id)
   } catch (e: any) {
@@ -1592,9 +1600,16 @@ async function startObjectMigration() {
   objMigrate.finished = false
   objMigrate.currentJobId = ''
   pgSubmissions.objects = null
-  objMigrate.logs = []
+  objMigrate.logs = ['[INFO] 正在提交迁移任务…']
   try {
-    if (isPGMySQLSelection('objects') && !(await ensurePGCheck('objects'))?.ready) { objMigrate.running = false; return }
+    if (isPGMySQLSelection('objects')) {
+      objMigrate.logs.push('[INFO] 正在执行迁移预检…')
+      if (!(await ensurePGCheck('objects'))?.ready) {
+        objMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
+        objMigrate.running = false
+        return
+      }
+    }
     const submitted = preparePGSubmission('objects')
     const res = await apiStartObjectMigration({
       excluded_objects: pgExclusions.objects,
@@ -1609,6 +1624,7 @@ async function startObjectMigration() {
       distributed: objMigrate.distributed,
     })
     objMigrate.currentJobId = res.data.job_id
+    objMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
     savePGSubmission('objects', res.data.job_id, submitted)
     omConnectSSE(res.data.job_id)
   } catch (e: any) {

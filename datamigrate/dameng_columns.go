@@ -22,13 +22,15 @@ func (m *Migrator) planDamengTable(ctx context.Context, table string) (*damengTa
 	if p := m.dmPlans[table]; p != nil {
 		return p, nil
 	}
-	reader := m.reader
-	if snapshot, ok := reader.(*sqlServerDamengSnapshot); ok {
+	var info *source.TableDDLInfo
+	var err error
+	if snapshot, ok := m.reader.(*sqlServerDamengSnapshot); ok {
 		// Selected tables are already cached above. Object-only foreign keys
 		// may additionally reference an existing table outside that snapshot.
-		reader = snapshot.Reader
+		info, err = snapshot.Reader.GetTableDDLInfo(ctx, table)
+	} else {
+		info, err = m.sourceTableDDLInfo(ctx, table)
 	}
-	info, err := reader.GetTableDDLInfo(ctx, table)
 	if err != nil {
 		return nil, err
 	}

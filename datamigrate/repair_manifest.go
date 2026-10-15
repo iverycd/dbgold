@@ -98,13 +98,30 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	started := time.Now()
 	defer func() {
 		if m.log != nil {
-			m.log.Infof("修复清单准备：%d 个对象，耗时 %s", len(m.repairs.objects), time.Since(started).Round(time.Millisecond))
+			if ctx.Err() != nil {
+				m.log.Warnf("修复清单准备已取消，耗时 %s", time.Since(started).Round(time.Millisecond))
+			} else if m.repairs.sinkErr != nil {
+				m.log.Errorf("修复清单准备失败: %v，耗时 %s", m.repairs.sinkErr, time.Since(started).Round(time.Millisecond))
+			} else {
+				m.log.Infof("修复清单准备：%d 个对象，耗时 %s", len(m.repairs.objects), time.Since(started).Round(time.Millisecond))
+			}
 		}
 	}()
+	cancelled := func() bool {
+		if err := ctx.Err(); err != nil {
+			m.repairs.sinkErr = err
+			return true
+		}
+		return false
+	}
+	if cancelled() {
+		return
+	}
 	if m.cfg.RepairObjectSink != nil && m.cfg.RepairSink == nil {
 		m.repairs.sinkErr = fmt.Errorf("单对象修复记录保存需要配置完整清单保存回调")
 		return
 	}
+	finishStage := startRepairPreparationStage(m.log, "读取迁移表列表")
 	tables, err := m.reader.ListTables(ctx)
 	if err != nil {
 		// Incremental writes cannot establish the initial inventory/binding.
@@ -115,11 +132,39 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	tables = FilterTables(tables, m.cfg.Mode, m.cfg.Filter)
 	if m.cfg.objectMode() && len(m.cfg.TableNames) > 0 {
 		tables = nil
+		seen := map[string]bool{}
 		for _, t := range m.cfg.TableNames {
-			if !slices.Contains(tables, t) {
+			if !seen[t] {
 				tables = append(tables, t)
+				seen[t] = true
 			}
 		}
+	}
+	finishStage()
+	if cancelled() {
+		return
+	}
+	excludedTables := map[string]bool{}
+	for _, excluded := range m.cfg.ExcludedObjects {
+		if excluded.Kind == "table" {
+			excludedTables[excluded.Name] = true
+		}
+	}
+	participating := make([]string, 0, len(tables))
+	for _, table := range tables {
+		if !excludedTables[table] {
+			participating = append(participating, table)
+		}
+	}
+	m.log.Infof("正在读取表结构，共 %d 张表…", len(participating))
+	progress := newRepairMetadataProgress(m.log, time.Now)
+	prewarmed, err := m.prewarmSourceTableDDL(ctx, participating, progress)
+	if err != nil {
+		m.repairs.sinkErr = err
+		return
+	}
+	if prewarmed == nil && len(participating) == 0 {
+		progress(0, 0)
 	}
 	selected := map[string]bool{}
 	add := func(o repair.Object, ss []dialect.Statement) {
@@ -137,18 +182,23 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		}
 		m.repairs.objects = append(m.repairs.objects, o)
 	}
-	for _, t := range tables {
-		excluded := false
-		for _, e := range m.cfg.ExcludedObjects {
-			if e.Kind == "table" && e.Name == t {
-				excluded = true
-			}
-		}
-		if excluded {
-			continue
+	for i, t := range participating {
+		if cancelled() {
+			return
 		}
 		selected[t] = true
-		info, e := m.sourceTableDDLInfo(ctx, t)
+		var info *source.TableDDLInfo
+		var e error
+		if prewarmed != nil {
+			result := prewarmed[t]
+			info, e = result.info, result.err
+		} else {
+			info, e = m.sourceTableDDLInfo(ctx, t)
+			progress(i+1, len(participating))
+		}
+		if cancelled() {
+			return
+		}
 		o := repair.Object{Kind: "table", Name: t, SourceName: t, SourceTable: t, Table: m.objName(t), TargetName: m.objName(t), ColumnMapping: map[string]string{}, DataStatus: "pending"}
 		if m.cfg.Content == "schema_only" || m.cfg.objectMode() || len(m.cfg.ViewNames) > 0 {
 			o.DataStatus = "not_required"
@@ -174,6 +224,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			o.Error = e.Error()
 		}
 		add(o, ss)
+	}
+	if cancelled() {
+		return
 	}
 	want := func(kind string) bool {
 		if len(m.cfg.ViewNames) > 0 {
@@ -207,21 +260,36 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		add(repair.Object{Kind: kind, Name: name, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: name, Index: &v, Error: v.Unsupported}, ss)
 	}
 	if want("primary_keys") {
+		finishStage = startRepairPreparationStage(m.log, "收集主键")
 		if values, e := m.reader.GetPrimaryKeys(ctx); e == nil {
 			for _, v := range values {
 				v.IsPrimary = true
 				addIndex(v)
 			}
+		} else {
+			m.log.Warnf("收集主键失败: %v", e)
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	if want("indexes") {
+		finishStage = startRepairPreparationStage(m.log, "收集索引")
 		if values, e := m.reader.GetIndexes(ctx); e == nil {
 			for _, v := range values {
 				addIndex(v)
 			}
+		} else {
+			m.log.Warnf("收集索引失败: %v", e)
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	if want("sequences") {
+		finishStage = startRepairPreparationStage(m.log, "收集序列")
 		if values, e := m.reader.GetSequences(ctx); e == nil {
 			for _, v := range values {
 				if !selected[v.TableName] {
@@ -237,9 +305,16 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				}
 				add(repair.Object{Kind: "sequence", Name: name, Table: v.TableName, SourceTable: src, TargetName: name, Sequence: &v}, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner))
 			}
+		} else {
+			m.log.Warnf("收集序列失败: %v", e)
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL()) {
+		finishStage = startRepairPreparationStage(m.log, "收集外键")
 		if values, e := m.reader.GetForeignKeys(ctx); e == nil {
 			for _, v := range values {
 				if !selected[v.TableName] {
@@ -259,9 +334,16 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				}
 				add(repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: v.ConstraintName, ForeignKey: &v, Dependencies: []string{repairID("table", v.RefTable, v.RefTable)}}, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v))
 			}
+		} else {
+			m.log.Warnf("收集外键失败: %v", e)
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	if want("comments") {
+		finishStage = startRepairPreparationStage(m.log, "收集注释")
 		if values, e := m.reader.GetComments(ctx); e == nil {
 			for _, v := range values {
 				if !selected[v.TableName] {
@@ -281,16 +363,27 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					add(repair.Object{Kind: "comment", Name: name, Table: v.TableName, SourceTable: src, TargetName: name, Comment: &v}, ss)
 				}
 			}
+		} else {
+			m.log.Warnf("收集注释失败: %v", e)
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	if want("views") {
+		finishStage = startRepairPreparationStage(m.log, "收集视图")
 		var values []source.ViewInfo
+		var viewErr error
 		if r, ok := m.reader.(interface {
 			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
 		}); ok {
-			values, _ = r.GetViewsForTarget(ctx, m.writer.DBType())
+			values, viewErr = r.GetViewsForTarget(ctx, m.writer.DBType())
 		} else {
-			values, _ = m.reader.GetViews(ctx)
+			values, viewErr = m.reader.GetViews(ctx)
+		}
+		if viewErr != nil {
+			m.log.Warnf("收集视图失败: %v", viewErr)
 		}
 		for _, v := range values {
 			src := v.ViewName
@@ -299,6 +392,10 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			}
 			v.ViewName = m.objName(src)
 			add(repair.Object{Kind: "view", Name: v.ViewName, SourceName: src, TargetName: v.ViewName}, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
+		}
+		finishStage()
+		if cancelled() {
+			return
 		}
 	}
 	// Administrative attributes are separate recoverable work even when their
@@ -314,18 +411,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			add(repair.Object{Kind: "distribution", Name: parent.Table, Table: parent.Table, SourceTable: parent.SourceTable, TargetName: parent.Table, Dependencies: []string{parent.ID}}, m.repairDistributeStatements(parent.Table, parent.Index.Columns))
 		}
 	}
-	for i := range m.repairs.objects {
-		o := &m.repairs.objects[i]
-		if o.ForeignKey == nil {
-			continue
-		}
-		for _, key := range m.repairs.objects {
-			if key.Index != nil && (key.Index.IsPrimary || key.Index.IsUnique) && key.Table == o.ForeignKey.RefTable && slices.Equal(key.Index.Columns, o.ForeignKey.RefColumns) {
-				o.Dependencies = append(o.Dependencies, key.ID)
-				break
-			}
-		}
-	}
+	linkRepairForeignKeys(m.repairs.objects)
 	// Remove explicitly excluded objects without creating fictitious failed work.
 	kept := m.repairs.objects[:0]
 	for _, o := range m.repairs.objects {
@@ -342,29 +428,16 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	m.repairs.objects = kept
 	// Keep the mapping used to generate each structured object; later manual column
 	// changes can regenerate its draft without guessing replacements in SQL text.
-	for i := range m.repairs.objects {
-		o := &m.repairs.objects[i]
-		if o.Kind == "table" {
-			continue
-		}
-		for _, table := range m.repairs.objects {
-			if table.Kind == "table" && o.ForeignKey != nil && table.Table == o.ForeignKey.RefTable {
-				o.RefColumnMapping = map[string]string{}
-				for k, v := range table.ColumnMapping {
-					o.RefColumnMapping[k] = v
-				}
-			}
-			if table.Kind == "table" && table.Table == o.Table {
-				o.ColumnMapping = map[string]string{}
-				for k, v := range table.ColumnMapping {
-					o.ColumnMapping[k] = v
-				}
-			}
-		}
+	attachRepairColumnMappings(m.repairs.objects)
+	if cancelled() {
+		return
 	}
+	finishStage = startRepairPreparationStage(m.log, "保存迁移对象清单")
 	m.repairs.mu.Lock()
 	defer m.repairs.mu.Unlock()
-	_ = m.flushRepairsLocked()
+	if err := m.flushRepairsLocked(); err == nil {
+		finishStage()
+	}
 }
 
 // captureRepairCall keeps the original writer behavior; its observer sees physical units,

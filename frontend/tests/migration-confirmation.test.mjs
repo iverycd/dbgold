@@ -12,12 +12,12 @@ const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vu
 const modalTemplate = descriptor.template.content.match(/<a-modal[\s\S]*?<\/a-modal>/)[0]
 const renderModal = new Function('Vue', compile(modalTemplate, { mode: 'function' }).code)(Vue)
 
-function page({ start, preflight } = {}) {
+function page({ start, preflight, objectStart } = {}) {
   const starts = [], checks = [], errors = []
   const compiled = ts.transpileModule(`${descriptor.scriptSetup.content}
     export { connections, dataMigrate, canStartMigration, requestDataMigration, confirmDataMigration,
       dataMigrationConfirmVisible, dataMigrationStarting, dataMigrationContentLabel,
-      dataMigrationScopeLabel, selectedDst, targetDatabaseName };`, {
+      dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
   const context = {
@@ -30,6 +30,7 @@ function page({ start, preflight } = {}) {
         case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
         case '@/api/migration': return {
           startDataMigration: async request => { starts.push(request); return start ? start(request) : { data: { job_id: 'new-job' } } },
+          startObjectMigration: async request => objectStart ? objectStart(request) : { data: { job_id: 'object-job' } },
           preflightDataMigration: async request => { checks.push(request); return preflight ? preflight(request) : { data: { ready: true } } },
           createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
         }
@@ -150,6 +151,8 @@ test('confirmation submits once and blocks repeated clicks while the request or 
     const pending = p.confirmDataMigration()
     assert.equal(p.dataMigrationConfirmVisible.value, false)
     assert.equal(p.dataMigrationStarting.value, true)
+    assert.match(p.dataMigrate.logs[0], /正在提交迁移任务/)
+    assert.equal(p.dataMigrate.currentJobId, '', 'submission feedback precedes the task ID and log stream')
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)
@@ -157,10 +160,28 @@ test('confirmation submits once and blocks repeated clicks while the request or 
     await pending
     assert.equal(p.dataMigrationStarting.value, false)
     assert.equal(p.dataMigrate.currentJobId, 'new-job')
+    assert.match(p.dataMigrate.logs.at(-1), /迁移任务已创建/)
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)
     assert.equal(p.canStartMigration.value, false)
+  } finally { scope.stop() }
+})
+
+test('object migration shows submission feedback while awaiting the task ID', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let resolveStart
+    const { p } = scope.run(() => page({ objectStart: () => new Promise(resolve => { resolveStart = resolve }) }))
+    Object.assign(p.objMigrate, { srcConnId: 1, dstConnId: 2, dstSchema: 'public', selected: ['MixedTable'], objects: ['indexes'] })
+    const pending = p.startObjectMigration()
+    assert.equal(p.objMigrate.running, true)
+    assert.match(p.objMigrate.logs[0], /正在提交迁移任务/)
+    assert.equal(p.objMigrate.currentJobId, '')
+    resolveStart({ data: { job_id: 'object-job' } })
+    await pending
+    assert.equal(p.objMigrate.currentJobId, 'object-job')
+    assert.match(p.objMigrate.logs.at(-1), /迁移任务已创建/)
   } finally { scope.stop() }
 })
 
@@ -178,6 +199,7 @@ test('PG/MySQL preflight runs only after confirmation and a blocked check allows
     assert.equal(checks.length, 1)
     assert.equal(starts.length, 0)
     assert.equal(p.canStartMigration.value, true)
+    assert.match(p.dataMigrate.logs.at(-1), /迁移预检未通过，尚未启动任务/)
     ready = true
     p.requestDataMigration()
     await p.confirmDataMigration()

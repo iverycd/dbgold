@@ -72,6 +72,118 @@ func countRepairPersistenceWrites(t testing.TB, db *gorm.DB) *repairPersistenceW
 	return writes
 }
 
+func TestPersistMigrationManifestBatchesCompleteInventory(t *testing.T) {
+	for _, count := range []int{0, 1, 100, 101, 118, 2704} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			db := repairPersistenceDB(t)
+			j, src, dst, m := repairPersistenceFixture(count)
+			writes := countRepairPersistenceWrites(t, db)
+			require.NoError(t, db.Callback().Create().After("gorm:create").Register("test:check-repair-batch-parameters", func(tx *gorm.DB) {
+				if tx.Statement.Table == "migration_repair_objects" {
+					require.LessOrEqual(t, len(tx.Statement.Vars), 500)
+				}
+			}))
+			require.NoError(t, persistMigrationManifest(j, src, dst, m))
+			require.Equal(t, repairPersistenceWrites{objects: (count + 99) / 100, bindings: 1}, *writes)
+			rows, err := store.ListMigrationRepairObjects(j.JobID)
+			require.NoError(t, err)
+			require.Len(t, rows, count)
+			for i, row := range rows {
+				require.Equal(t, m.Objects[i].ID, row.ObjectID)
+				require.Equal(t, 1, row.Version)
+				require.JSONEq(t, repairJSON(m.Objects[i]), row.ObjectJSON)
+			}
+			_, err = store.GetMigrationRepairBinding(j.JobID)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestPersistMigrationManifestPreservesVersionsAndDuplicateOrder(t *testing.T) {
+	db := repairPersistenceDB(t)
+	j, src, dst, m := repairPersistenceFixture(101)
+	seed := m
+	seed.Objects = m.Objects[:3]
+	require.NoError(t, persistMigrationManifest(j, src, dst, seed))
+	require.NoError(t, db.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", j.JobID, m.Objects[0].ID).Updates(map[string]any{"version": 7, "updated_at": time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)}).Error)
+	require.NoError(t, db.Model(&store.MigrationRepairBinding{}).Where("job_id = ?", j.JobID).Update("version", 9).Error)
+	before, err := store.ListMigrationRepairObjects(j.JobID)
+	require.NoError(t, err)
+	firstDuplicate := m.Objects[1]
+	firstDuplicate.Status = "running"
+	lastDuplicate := m.Objects[0]
+	lastDuplicate.Status = "failed"
+	objects := append([]repair.Object{}, m.Objects[:3]...)
+	objects = append(objects, firstDuplicate)
+	objects = append(objects, m.Objects[3:]...)
+	m.Objects = append(objects, lastDuplicate)
+	require.NoError(t, persistMigrationManifest(j, src, dst, m))
+	rows, err := store.ListMigrationRepairObjects(j.JobID)
+	require.NoError(t, err)
+	require.Len(t, rows, 101)
+	for i, row := range rows {
+		require.Equal(t, fmt.Sprintf("table_%04d", i), row.ObjectID)
+		if i < len(before) {
+			require.Equal(t, before[i].ID, row.ID)
+			require.Equal(t, before[i].Version, row.Version)
+		} else {
+			require.Equal(t, 1, row.Version)
+		}
+	}
+	require.True(t, rows[0].UpdatedAt.After(before[0].UpdatedAt))
+	require.JSONEq(t, repairJSON(lastDuplicate), rows[0].ObjectJSON)
+	require.JSONEq(t, repairJSON(firstDuplicate), rows[1].ObjectJSON)
+	binding, err := store.GetMigrationRepairBinding(j.JobID)
+	require.NoError(t, err)
+	require.Equal(t, 9, binding.Version)
+}
+
+func TestPersistMigrationManifestLaterBatchFailureRollsBackInventoryAndBinding(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			db := repairPersistenceDB(t)
+			j, src, dst, m := repairPersistenceFixture(101)
+			if existing {
+				seed := m
+				seed.Objects = m.Objects[:1]
+				require.NoError(t, persistMigrationManifest(j, src, dst, seed))
+			}
+			before, err := store.ListMigrationRepairObjects(j.JobID)
+			require.NoError(t, err)
+			binding, bindingErr := store.GetMigrationRepairBinding(j.JobID)
+			if existing {
+				require.NoError(t, bindingErr)
+			} else {
+				require.ErrorIs(t, bindingErr, gorm.ErrRecordNotFound)
+			}
+			diskErr := errors.New("simulated second batch failure")
+			batches := 0
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:fail-second-repair-batch", func(tx *gorm.DB) {
+				if tx.Statement.Table == "migration_repair_objects" {
+					batches++
+					if batches == 2 {
+						tx.AddError(diskErr)
+					}
+				}
+			}))
+			m.Config.TargetSchema = "changed"
+			m.Objects[0].Status = "succeeded"
+			require.ErrorIs(t, persistMigrationManifest(j, src, dst, m), diskErr)
+			require.Equal(t, 2, batches)
+			after, err := store.ListMigrationRepairObjects(j.JobID)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			afterBinding, err := store.GetMigrationRepairBinding(j.JobID)
+			if existing {
+				require.NoError(t, err)
+				require.Equal(t, binding, afterBinding)
+			} else {
+				require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+			}
+		})
+	}
+}
+
 func TestPersistMigrationRepairObjectUpdatesOnlyCurrentRecord(t *testing.T) {
 	db := repairPersistenceDB(t)
 	j, src, dst, m := repairPersistenceFixture(3)
@@ -202,7 +314,7 @@ func TestPersistMigrationRepairObjectWriteCountIndependentOfManifestSize(t *test
 }
 
 func BenchmarkMigrationRepairProgressPersistence(b *testing.B) {
-	for _, count := range []int{100, 1000, 2704} {
+	for _, count := range []int{100, 118, 1000, 2704} {
 		for _, incremental := range []bool{false, true} {
 			name := "full"
 			if incremental {

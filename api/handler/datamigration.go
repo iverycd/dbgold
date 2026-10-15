@@ -276,45 +276,57 @@ type migrationParams struct {
 func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.DataMigrationJob,
 	srcConn, dstConn *store.Connection, p migrationParams) {
 
+	startup := newMigrationStartup(ctx, job, dbJob)
+	started, proceed := startup.begin("连接源数据库")
+	if !proceed {
+		return
+	}
 	srcPool := source.ConnPoolConfig{
 		MaxOpenConns:    p.SrcMaxOpenConns,
 		MaxIdleConns:    p.SrcMaxIdleConns,
 		ConnMaxLifetime: time.Duration(p.SrcConnMaxLifetime) * time.Second,
 	}
 	reader, readerErr := buildSrcReader(srcConn, p.SrcDatabase, srcPool, dstConn.DBType)
-	if readerErr != nil {
+	if readerErr == nil {
+		defer reader.Close()
+	}
+	if readerErr != nil && ctx.Err() == nil {
 		slog.Warn("连接源库失败", "job_id", dbJob.JobID, "db_type", srcConn.DBType, "err", readerErr)
-		job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
-		updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
+	}
+	if !startup.finish("连接源数据库", started, readerErr) {
 		return
 	}
-	defer reader.Close()
 
+	started, proceed = startup.begin("连接目标数据库")
+	if !proceed {
+		return
+	}
 	dstPool := target.ConnPoolConfig{
 		MaxOpenConns:    p.DstMaxOpenConns,
 		MaxIdleConns:    p.DstMaxIdleConns,
 		ConnMaxLifetime: time.Duration(p.DstConnMaxLifetime) * time.Second,
 	}
 	writer, writerErr := buildDstWriter(dstConn, p.TargetSchema, dstPool)
-	if writerErr != nil {
+	if writerErr == nil {
+		defer writer.Close()
+	}
+	if writerErr != nil && ctx.Err() == nil {
 		slog.Warn("连接目标库失败", "job_id", dbJob.JobID, "db_type", dstConn.DBType, "err", writerErr)
-		job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
-		updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
+	}
+	if !startup.finish("连接目标数据库", started, writerErr) {
 		return
 	}
-	defer writer.Close()
 
 	if p.TargetSchema != "" {
-		exists, err := writer.SchemaExists(ctx, p.TargetSchema)
-		if err != nil {
-			job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
+		started, proceed = startup.begin("检查目标 Schema")
+		if !proceed {
 			return
 		}
-		if !exists {
-			msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", p.TargetSchema)
-			job.LogCh <- "[ERROR] " + msg
-			updateJobStatus(dbJob, "failed", msg)
+		exists, err := writer.SchemaExists(ctx, p.TargetSchema)
+		if err == nil && !exists {
+			err = fmt.Errorf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", p.TargetSchema)
+		}
+		if !startup.finish("检查目标 Schema", started, err) {
 			return
 		}
 	}
@@ -342,12 +354,17 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		TargetDBType:       dstConn.DBType,
 		StripViewSchemas:   stripSchemas,
 	}
-	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, p.SrcDatabase, &cfg, writer)
-	if repairErr != nil {
-		updateJobStatus(dbJob, "failed", repairErr.Error())
+	started, proceed = startup.begin("初始化迁移准备信息")
+	if !proceed {
 		return
 	}
-	defer releaseRepair()
+	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, p.SrcDatabase, &cfg, writer)
+	if releaseRepair != nil {
+		defer releaseRepair()
+	}
+	if !startup.finish("初始化迁移准备信息", started, repairErr) {
+		return
+	}
 	m := datamigrate.NewMigrator(reader, writer, job, cfg)
 	report := m.Run(ctx)
 
@@ -472,45 +489,57 @@ func StartObjectMigration(c *gin.Context) {
 			datamigrate.Registry.Remove(jobID)
 		}()
 
+		startup := newMigrationStartup(ctx, job, dbJob)
+		started, proceed := startup.begin("连接源数据库")
+		if !proceed {
+			return
+		}
 		srcPool := source.ConnPoolConfig{
 			MaxOpenConns:    req.SrcMaxOpenConns,
 			MaxIdleConns:    req.SrcMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
 		}
 		reader, readerErr := buildSrcReader(srcConn, req.SrcDatabase, srcPool, dstConn.DBType)
-		if readerErr != nil {
+		if readerErr == nil {
+			defer reader.Close()
+		}
+		if readerErr != nil && ctx.Err() == nil {
 			slog.Warn("连接源库失败", "job_id", jobID, "db_type", srcConn.DBType, "err", readerErr)
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接源库失败: %v", readerErr)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接源库失败: %v", readerErr))
+		}
+		if !startup.finish("连接源数据库", started, readerErr) {
 			return
 		}
-		defer reader.Close()
 
+		started, proceed = startup.begin("连接目标数据库")
+		if !proceed {
+			return
+		}
 		dstPool := target.ConnPoolConfig{
 			MaxOpenConns:    req.DstMaxOpenConns,
 			MaxIdleConns:    req.DstMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
 		}
 		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool)
-		if writerErr != nil {
+		if writerErr == nil {
+			defer writer.Close()
+		}
+		if writerErr != nil && ctx.Err() == nil {
 			slog.Warn("连接目标库失败", "job_id", jobID, "db_type", dstConn.DBType, "err", writerErr)
-			job.LogCh <- fmt.Sprintf("[ERROR] 连接目标库失败: %v", writerErr)
-			updateJobStatus(dbJob, "failed", fmt.Sprintf("连接目标库失败: %v", writerErr))
+		}
+		if !startup.finish("连接目标数据库", started, writerErr) {
 			return
 		}
-		defer writer.Close()
 
 		if req.TargetSchema != "" {
-			exists, err := writer.SchemaExists(ctx, req.TargetSchema)
-			if err != nil {
-				job.LogCh <- fmt.Sprintf("[ERROR] 检查目标 Schema 失败: %v", err)
-				updateJobStatus(dbJob, "failed", fmt.Sprintf("检查目标 Schema 失败: %v", err))
+			started, proceed = startup.begin("检查目标 Schema")
+			if !proceed {
 				return
 			}
-			if !exists {
-				msg := fmt.Sprintf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema)
-				job.LogCh <- "[ERROR] " + msg
-				updateJobStatus(dbJob, "failed", msg)
+			exists, err := writer.SchemaExists(ctx, req.TargetSchema)
+			if err == nil && !exists {
+				err = fmt.Errorf("目标 Schema '%s' 不存在，请先在目标数据库中创建该 Schema", req.TargetSchema)
+			}
+			if !startup.finish("检查目标 Schema", started, err) {
 				return
 			}
 		}
@@ -526,12 +555,17 @@ func StartObjectMigration(c *gin.Context) {
 			ChangeOwner:     changeOwner,
 			TargetDBType:    dstConn.DBType,
 		}
-		releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, req.SrcDatabase, &cfg, writer)
-		if repairErr != nil {
-			updateJobStatus(dbJob, "failed", repairErr.Error())
+		started, proceed = startup.begin("初始化迁移准备信息")
+		if !proceed {
 			return
 		}
-		defer releaseRepair()
+		releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, req.SrcDatabase, &cfg, writer)
+		if releaseRepair != nil {
+			defer releaseRepair()
+		}
+		if !startup.finish("初始化迁移准备信息", started, repairErr) {
+			return
+		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)
 
@@ -587,43 +621,7 @@ func StreamDataMigration(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在或已完成"})
 		return
 	}
-	job := datamigrate.Registry.Get(jobID)
-	if job == nil {
-		// goroutine 可能已退出（如连接失败），从数据库读取 summary 通过 SSE 推给前端
-		dbJob := ownerJob
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("X-Accel-Buffering", "no")
-		if dbJob.Summary != "" {
-			c.SSEvent("message", "[ERROR] "+dbJob.Summary)
-		}
-		c.SSEvent("message", "[STREAM_END]")
-		c.Writer.Flush()
-		return
-	}
-
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	clientGone := c.Request.Context().Done()
-	for {
-		select {
-		case <-clientGone:
-			return
-		case msg, ok := <-job.LogCh:
-			if !ok {
-				// channel 关闭，迁移结束
-				c.SSEvent("message", "[STREAM_END]")
-				c.Writer.Flush()
-				return
-			}
-			c.SSEvent("message", msg)
-			c.Writer.Flush()
-		}
-	}
+	streamDataMigrationLogs(c, ownerJob, datamigrate.Registry.Get(jobID), dataMigrationHeartbeatInterval)
 }
 
 // buildSrcReader 根据连接与可选的 srcDatabase 构造源库 Reader。

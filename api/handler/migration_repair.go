@@ -144,16 +144,20 @@ func persistMigrationManifest(j *store.DataMigrationJob, src, dst *store.Connect
 	b.SourceFingerprint = connectionFingerprint(src)
 	b.TargetFingerprint = connectionFingerprint(dst)
 	b.TargetSchema = cfg.TargetSchema
+	rows := make([]store.MigrationRepairObject, 0, len(m.Objects))
+	for _, o := range m.Objects {
+		rows = append(rows, store.MigrationRepairObject{JobID: j.JobID, ObjectID: o.ID, ObjectJSON: repairJSON(o), Version: 1})
+	}
 	return store.DB.Transaction(func(tx *gorm.DB) error {
 		if e := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "job_id"}}, DoUpdates: clause.AssignmentColumns([]string{"config_json", "target_schema"})}).Create(b).Error; e != nil {
 			return e
 		}
-		for _, o := range m.Objects {
-			if e := upsertMigrationRepairObject(tx, j.JobID, o); e != nil {
-				return e
-			}
+		if len(rows) == 0 {
+			return nil
 		}
-		return nil
+		// Five bound columns per row keep each batch below the conservative
+		// SQLite limit of 999. Conflicts preserve the row ID and draft version.
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "job_id"}, {Name: "object_id"}}, DoUpdates: clause.AssignmentColumns([]string{"object_json", "updated_at"})}).CreateInBatches(&rows, 100).Error
 	})
 }
 
