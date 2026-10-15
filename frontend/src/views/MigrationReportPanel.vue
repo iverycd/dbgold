@@ -88,7 +88,7 @@
                   <div v-if="item.table" class="failure-context">所属表：{{ item.table }}</div>
                   <div class="failure-context">失败阶段：{{ item.stageLabel }}</div>
                   <div class="failure-error">失败原因：{{ item.error }}</div>
-                  <div class="failure-ddl">
+                  <div v-if="item.showTargetDDL" class="failure-ddl">
                     <template v-if="item.ddl?.trim()">
                       <div class="ddl-header">
                         <a-button size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
@@ -394,6 +394,7 @@ onUnmounted(() => { reportRequest++ })
   color: #f53f3f;
   margin-bottom: 4px;
   font-size: 13px;
+  white-space: pre-wrap;
 }
 .failure-suggestion { margin-top: 12px; }
 .failure-source-ddl { margin-top: 12px; }

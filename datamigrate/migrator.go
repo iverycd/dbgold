@@ -483,10 +483,10 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 // migrateTableDataSerial 串行分页迁移单张表
 func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks []string) (bool, string) {
 	var offset int64
-	pageNum := 0
 	firstErr := ""
 	hasError := false
 	for {
+		pageNum := offset/int64(m.cfg.PageSize) + 1
 		if ctx.Err() != nil {
 			if firstErr == "" {
 				firstErr = "任务已取消"
@@ -495,14 +495,14 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		}
 		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
-			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
+			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
 			if m.isOracle() || m.isSQLServer() {
 				return false, fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
 			}
 			return false, err.Error()
 		}
 		if len(rows) == 0 {
-			if pageNum == 0 {
+			if offset == 0 {
 				m.log.Dataf("迁移 %s: 空表 ... OK", table)
 			}
 			break
@@ -513,18 +513,18 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 			dstCols[i] = m.targetColumn(table, c)
 		}
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
-			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum+1, err)
+			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
+			m.log.Errorf("%s", message)
 			if m.isOracle() || m.isSQLServer() {
-				return false, fmt.Sprintf("表 %s 第 %d 页写入失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
+				return false, message
 			}
 			if !hasError {
-				firstErr = err.Error()
+				firstErr = message
 				hasError = true
 			}
 			offset += int64(m.cfg.PageSize)
 			continue
 		}
-		pageNum++
 		m.log.Dataf("迁移 %s: 第 %d 页 (%d 行) ... OK", table, pageNum, len(rows))
 		if len(rows) < m.cfg.PageSize {
 			break
@@ -573,13 +573,11 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 
 	writePage := func(pageNum int, rows [][]interface{}) {
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
-			m.log.Errorf("写入数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
+			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
+			m.log.Errorf("%s", message)
 			mu.Lock()
 			if !hasError {
-				firstErr = err.Error()
-				if m.isOracle() {
-					firstErr = fmt.Sprintf("表 %s 第 %d 页写入失败: %v", table, pageNum, err)
-				}
+				firstErr = message
 				hasError = true
 			}
 			mu.Unlock()

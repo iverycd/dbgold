@@ -47,15 +47,16 @@ export function failureStage(item: ObjectResult): ObjectResult['stage'] {
   return undefined
 }
 
-export function describeFailure(item: ObjectResult) {
+export function describeFailure(item: ObjectResult, category?: string) {
   const stage = failureStage(item)
   const stageLabel = stage === 'metadata' ? '元数据读取失败'
     : stage === 'unsupported' ? '不支持自动转换'
-    : stage === 'execute' ? 'DDL 执行失败' : '失败阶段未记录'
+    : stage === 'execute' ? 'DDL 执行失败'
+    : category === 'data' ? '数据迁移失败' : '失败阶段未记录'
   const emptyDDLMessage = stage === 'metadata' ? '元数据读取失败，尚未生成目标 DDL。'
     : stage === 'unsupported' ? '该对象暂不支持自动转换，未生成目标 DDL。'
     : stage === 'execute' ? 'DDL 执行失败，但报告未记录目标 DDL。' : '未记录 DDL。'
-  return { stageLabel, emptyDDLMessage, sourceDDLLabel }
+  return { stageLabel, emptyDDLMessage, sourceDDLLabel, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
 }
 
 export function categoryPresentation(category: CategoryReport) {
@@ -88,7 +89,7 @@ export function reportCategories(report: MigrationReport) {
       success: isTrigger ? 0 : category.success,
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
-        ...item, ...describeFailure(item),
+        ...item, ...describeFailure(item, key),
         nameLabel: key === 'indexes' && failureStage(item) !== 'metadata' ? '索引名称：' : '',
         targetNameLabel: failureStage(item) === 'unsupported' ? '目标索引名称（计划）：' : '目标索引名称：',
         targetTableLabel: item.target_table ? [item.target_schema, item.target_table].filter(Boolean).join('.') : '',
@@ -143,7 +144,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
       lines.push(`    失败阶段：${item.stageLabel}`, `    失败原因：${item.error}`)
       if (item.ddl?.trim()) {
         lines.push('    目标 DDL：', ...item.ddl.split('\n').map(line => `      ${line}`))
-      } else {
+      } else if (item.showTargetDDL) {
         lines.push(`    目标 DDL：${item.emptyDDLMessage}`)
       }
       if (item.source_ddl?.trim()) {

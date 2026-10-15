@@ -64,6 +64,30 @@ test('unknown counts without metadata details are never labeled successful', () 
   assert.equal(categoryPresentation({ ...empty(), total_unknown: true }).statusLabel, '对象总数未知')
 })
 
+test('data failures retain column diagnostics and use their category for legacy stages', () => {
+  const error = 'pq: numeric field overflow\nSQLSTATE: 22003\nDetail: A field with precision 8, scale 2 must round to an absolute value less than 10^6.\nWhere: COPY cg_purchasebudgetandou, line 42, column Amount: "1000000"'
+  const r = report(empty())
+  r.data = { total: 1, success: 0, failed: 1, items: [failure({ name: 'cg_purchasebudgetandou', error })] }
+  const item = reportCategories(r).find(row => row.key === 'data').items[0]
+  assert.equal(item.stageLabel, '数据迁移失败')
+  assert.equal(item.showTargetDDL, false)
+  assert.equal(item.error, error)
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /失败阶段：数据迁移失败/)
+  assert.ok(text.includes(error))
+  assert.doesNotMatch(text, /目标 DDL：|失败阶段未记录/)
+})
+
+test('data failures preserve recorded stages and target DDL when available', () => {
+  const r = report(empty())
+  r.data = { total: 1, success: 0, failed: 1, items: [failure({ stage: 'metadata' })] }
+  assert.equal(reportCategories(r).find(row => row.key === 'data').items[0].stageLabel, '元数据读取失败')
+  r.data.items = [failure({ ddl: 'CREATE TABLE t (Amount numeric(8, 2))' })]
+  const item = reportCategories(r).find(row => row.key === 'data').items[0]
+  assert.equal(item.showTargetDDL, true)
+  assert.match(formatReportCategories(r).join('\n'), /目标 DDL：\n\s+CREATE TABLE t/)
+})
+
 test('same-name objects from different tables get distinct stable detail keys', () => {
   const r = report({ total: 3, success: 0, failed: 3, items: [failure({ table: 'Orders' }), failure({ table: 'Archive' }), failure({ table: 'Orders' })] })
   const keys = () => reportCategories(r).find(row => row.key === 'indexes').items.map(item => item.key)

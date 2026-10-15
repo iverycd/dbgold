@@ -244,6 +244,25 @@ test('old reports omit the suggestion section and remain exportable', async () =
   } finally { scope.stop() }
 })
 
+test('data failures display and export multiline column diagnostics without an empty DDL section', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const error = 'pq: numeric field overflow\nSQLSTATE: 22003\nDetail: precision 8, scale 2\nWhere: COPY cg_purchasebudgetandou, line 42, column Amount: "1000000"'
+    h.p.report.value = report({ name: 'cg_purchasebudgetandou', ddl: '', error }, 'data')
+    const html = await renderToString(h.app)
+    assert.match(html, /失败阶段：数据迁移失败/)
+    assert.match(html, /numeric field overflow\nSQLSTATE: 22003\nDetail: precision 8, scale 2\nWhere: COPY cg_purchasebudgetandou, line 42, column Amount/)
+    assert.doesNotMatch(html, /目标 DDL：|失败阶段未记录/)
+    assert.ok(!h.clicks.some(c => c.label === '复制 DDL'))
+    h.p.exportReport()
+    const text = await h.downloads[0].text()
+    assert.ok(text.includes(error))
+    assert.match(text, /失败阶段：数据迁移失败/)
+    assert.doesNotMatch(text, /目标 DDL：/)
+  } finally { scope.stop() }
+})
+
 test('incomplete suggestion shows the reason and renames without a copy button', async () => {
   const scope = Vue.effectScope()
   try {
