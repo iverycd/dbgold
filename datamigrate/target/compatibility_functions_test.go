@@ -185,7 +185,7 @@ func TestCompatibilityKingbaseSysGUIDUsesPortableNormalization(t *testing.T) {
 			require.Equal(t, 2, r.Created)
 			require.Zero(t, r.Failed)
 			require.Equal(t, `"pg_catalog"."sys_guid"`, r.Items[0].Generator)
-			require.Contains(t, r.Items[0].DDL, "guid := "+strings.ReplaceAll(ddlExpression, "'", "''")+";")
+			require.Contains(t, r.Items[0].DDL, "guid := "+ddlExpression+";")
 			require.NoError(t, m.ExpectationsWereMet())
 		})
 	}
@@ -214,9 +214,7 @@ func TestCompatibilityWrapsEitherExistingCaseAndQuotesSchema(t *testing.T) {
 			if existing == missing {
 				missing = "get_uuid"
 			}
-			ddl := uuidWrapperDDL(w.schema, missing, qualifiedFunction(w.schema, existing))
-			require.Contains(t, ddl, `"a""b'c\d"`)
-			require.Contains(t, ddl, `\\d`)
+			ddl := fmt.Sprintf(`CREATE FUNCTION "a""b'c\d"."%s"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold$SELECT CAST("a""b'c\d"."%s"() AS varchar)$dbgold$`, missing, existing)
 			expectUUIDSavepoint(m)
 			m.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnResult(sqlmock.NewResult(0, 0))
 			expectUUIDProbe(m, false)
@@ -547,7 +545,7 @@ func TestCompatibilityPostgresByteaAndConcurrencyIntegration(t *testing.T) {
 					typ = "bytea"
 					expression = "convert_to(" + expression + ",'UTF8')"
 				}
-				_, err = db.ExecContext(ctx, "CREATE FUNCTION "+qualifiedFunction(schema, "sys_guid")+"() RETURNS "+typ+" LANGUAGE sql VOLATILE AS "+sqlString("SELECT "+expression))
+				_, err = db.ExecContext(ctx, "CREATE FUNCTION "+qualifiedFunction(schema, "sys_guid")+"() RETURNS "+typ+" LANGUAGE sql VOLATILE AS "+sqlFunctionBody("SELECT "+expression))
 				require.NoError(t, err)
 				r, err := ensurePGCompatibility(ctx, db, schema, "kingbase")
 				require.NoError(t, err)

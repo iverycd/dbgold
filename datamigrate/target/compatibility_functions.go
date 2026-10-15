@@ -294,8 +294,14 @@ func createCompatibilityAlias(ctx context.Context, tx *sql.Tx, alias, canonical 
 func qualifiedFunction(schema, name string) string {
 	return source.QuotePGIdent(schema) + "." + source.QuotePGIdent(name)
 }
-func sqlString(s string) string {
-	return "E'" + strings.ReplaceAll(strings.ReplaceAll(s, "\\", "\\\\"), "'", "''") + "'"
+
+// sqlFunctionBody preserves quotes and backslashes without escape-string parsing.
+func sqlFunctionBody(body string) string {
+	delimiter := "$dbgold$"
+	for suffix := 1; strings.Contains(body, delimiter); suffix++ {
+		delimiter = fmt.Sprintf("$dbgold_%d$", suffix)
+	}
+	return delimiter + body + delimiter
 }
 
 func uuidNormalizer(typ, value string) string {
@@ -324,10 +330,10 @@ BEGIN
  END IF;
  RETURN substr(guid,1,8)||'-'||substr(guid,9,4)||'-'||substr(guid,13,4)||'-'||substr(guid,17,4)||'-'||substr(guid,21,12);
 END;`, rawType, generator, uuidNormalizer(typ, "raw_guid"))
-	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE plpgsql VOLATILE AS " + sqlString(body)
+	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE plpgsql VOLATILE AS " + sqlFunctionBody(body)
 }
 func uuidWrapperDDL(schema, name, generator string) string {
-	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE sql VOLATILE AS " + sqlString("SELECT CAST("+generator+"() AS varchar)")
+	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE sql VOLATILE AS " + sqlFunctionBody("SELECT CAST("+generator+"() AS varchar)")
 }
 
 var uuidHex = regexp.MustCompile(`^[0-9a-f]{32}$`)
