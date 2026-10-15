@@ -68,43 +68,6 @@ END;$dbgold_2$`
 	require.True(t, strings.HasSuffix(ddl, "END;$dbgold$"))
 }
 
-func TestUUIDWrapperDollarQuotedDDL(t *testing.T) {
-	for _, tt := range []struct {
-		name, schema, alias, generatorSchema, generatorName, want string
-	}{
-		{
-			name:   "ordinary",
-			schema: "app", alias: "GET_UUID", generatorSchema: "app", generatorName: "get_uuid",
-			want: `CREATE FUNCTION "app"."GET_UUID"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold$SELECT CAST("app"."get_uuid"() AS varchar)$dbgold$`,
-		},
-		{
-			name:   "quoted_identifiers",
-			schema: `app'"\$$`, alias: `GET'"\$$`, generatorSchema: `native'"\$$`, generatorName: `get'"\$$`,
-			want: `CREATE FUNCTION "app'""\$$"."GET'""\$$"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold$SELECT CAST("native'""\$$"."get'""\$$"() AS varchar)$dbgold$`,
-		},
-		{
-			name:   "schema_delimiter_collision",
-			schema: "app$dbgold$", alias: "GET_UUID", generatorSchema: "app$dbgold$", generatorName: "get_uuid",
-			want: `CREATE FUNCTION "app$dbgold$"."GET_UUID"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold_1$SELECT CAST("app$dbgold$"."get_uuid"() AS varchar)$dbgold_1$`,
-		},
-		{
-			name:   "generator_delimiter_collision",
-			schema: "app", alias: "GET_UUID", generatorSchema: "native$dbgold$", generatorName: "get_uuid$dbgold_1$",
-			want: `CREATE FUNCTION "app"."GET_UUID"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold_2$SELECT CAST("native$dbgold$"."get_uuid$dbgold_1$"() AS varchar)$dbgold_2$`,
-		},
-		{
-			name:   "header_delimiters_only",
-			schema: "app$dbgold$", alias: "GET_UUID$dbgold_1$", generatorSchema: "native", generatorName: "get_uuid",
-			want: `CREATE FUNCTION "app$dbgold$"."GET_UUID$dbgold_1$"() RETURNS varchar LANGUAGE sql VOLATILE AS $dbgold$SELECT CAST("native"."get_uuid"() AS varchar)$dbgold$`,
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			generator := qualifiedFunction(tt.generatorSchema, tt.generatorName)
-			require.Equal(t, tt.want, uuidWrapperDDL(tt.schema, tt.alias, generator))
-		})
-	}
-}
-
 func TestUUIDFunctionDollarQuotingPostgresIntegration(t *testing.T) {
 	db := openUUIDIntegrationDB(t, "DBGOLD_TEST_POSTGRES_DSN")
 	// Both delimiter candidates occur in the native function's qualified name.
@@ -112,7 +75,6 @@ func TestUUIDFunctionDollarQuotingPostgresIntegration(t *testing.T) {
 	schema := fmt.Sprintf(`dbgold_q_%d_'"\$$$dbgold$`, time.Now().UnixNano())
 	const nativeName = `sys'"\$$$dbgold_1$`
 	const canonicalName = `get'"\$$`
-	const aliasName = `GET'"\$$`
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, err := db.ExecContext(ctx, "CREATE SCHEMA "+source.QuotePGIdent(schema))
@@ -131,14 +93,11 @@ func TestUUIDFunctionDollarQuotingPostgresIntegration(t *testing.T) {
 	_, err = db.ExecContext(ctx, mainDDL)
 	require.NoError(t, err)
 	canonical := qualifiedFunction(schema, canonicalName)
-	_, err = db.ExecContext(ctx, uuidWrapperDDL(schema, aliasName, canonical))
-	require.NoError(t, err)
-	var mainValue, aliasValue string
-	err = db.QueryRowContext(ctx, "SELECT "+canonical+"(), "+qualifiedFunction(schema, aliasName)+"()").Scan(&mainValue, &aliasValue)
+	var mainValue string
+	err = db.QueryRowContext(ctx, "SELECT "+canonical+"()").Scan(&mainValue)
 	require.NoError(t, err)
 	const want = "01234567-89ab-cdef-0123-456789abcdef"
 	require.Equal(t, want, mainValue)
-	require.Equal(t, want, aliasValue)
 	var body string
 	err = db.QueryRowContext(ctx, `SELECT p.prosrc FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2`, schema, canonicalName).Scan(&body)
 	require.NoError(t, err)

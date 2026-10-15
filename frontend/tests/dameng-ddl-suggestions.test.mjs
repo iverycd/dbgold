@@ -334,7 +334,40 @@ test('legacy metadata failure explains absent DDL and keeps counting failure eve
 })
 
 
-test('successful compatibility functions expand, copy actual DDL and export without repair actions', async () => {
+for (const status of ['created', 'reused']) {
+ test(`single lowercase ${status} compatibility function renders and copies its only definition`, async () => {
+  const scope = Vue.effectScope()
+  try {
+   const h = scope.run(harness)
+   const r = report({ name: 'unused', error: '' })
+   r.tables = { total: 0, success: 0, failed: 0, items: [] }
+   const created = status === 'created' ? 1 : 0
+   const reused = status === 'reused' ? 1 : 0
+   const ddl = 'CREATE FUNCTION app.get_uuid() RETURNS varchar AS single_definition'
+   r.compatibility_functions = { total: 1, success: 1, failed: 0, created, reused, items: [
+    { name: 'get_uuid', schema: 'app', status, ddl, error: '' },
+   ] }
+   h.p.report.value = r
+   const html = await renderToString(h.app)
+   for (const text of ['总数 1', '成功 1', '失败 0', `新建 ${created}`, `复用 ${reused}`, 'app.get_uuid()', 'single_definition']) assert.ok(html.includes(text), text)
+   assert.equal((html.match(/<article>/g) || []).length, 1)
+   assert.doesNotMatch(html, /GET_UUID/)
+   assert.equal(h.p.failedCount.value, 0)
+   assert.equal(h.clicks.some(button => button.label === '去修复'), false)
+   const copies = h.clicks.filter(button => button.label === '复制 DDL')
+   assert.equal(copies.length, 1)
+   await copies[0].handler()
+   assert.deepEqual(h.copied, [ddl])
+   await h.p.exportReport()
+   const exported = await h.downloads[0].text()
+   assert.match(exported, /兼容函数\s+总计 1\s+成功 1\s+失败 0/)
+   assert.ok(exported.includes(`新建 ${created}，复用 ${reused}`))
+   assert.doesNotMatch(exported, /GET_UUID/)
+  } finally { scope.stop() }
+ })
+}
+
+test('historical successful compatibility functions expand, copy actual DDL and export without repair actions', async () => {
  const scope = Vue.effectScope()
  try {
   const h = scope.run(harness)

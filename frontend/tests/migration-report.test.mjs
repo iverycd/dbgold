@@ -140,7 +140,33 @@ test('legacy reports isolate their failed index without inventing missing target
   assert.doesNotMatch(text, /目标索引名称|目标表：|源索引名称/)
 })
 
-test('compatibility functions show new and reused successes with actual definitions', () => {
+for (const status of ['created', 'reused']) {
+  test(`single lowercase compatibility function preserves ${status} counts and definition in exports`, () => {
+    const r = report(empty())
+    const created = status === 'created' ? 1 : 0
+    const reused = status === 'reused' ? 1 : 0
+    const ddl = 'CREATE FUNCTION app.get_uuid() RETURNS varchar AS actual_definition'
+    r.compatibility_functions = { total: 1, success: 1, failed: 0, created, reused, items: [
+      { name: 'get_uuid', schema: 'app', status, ddl, error: '' },
+    ] }
+    const row = reportCategories(r).find(row => row.isCompatibility)
+    assert.equal(row.totalLabel, '1')
+    assert.equal(row.success, 1)
+    assert.equal(row.failed, 0)
+    assert.equal(row.created, created)
+    assert.equal(row.reused, reused)
+    assert.equal(row.items.length, 1)
+    assert.equal(row.items[0].name, 'get_uuid')
+    const text = formatReportCategories(r).join('\n')
+    assert.match(text, /兼容函数\s+总计 1\s+成功 1\s+失败 0/)
+    assert.ok(text.includes(`新建 ${created}，复用 ${reused}`))
+    assert.ok(text.includes(`app.get_uuid：${created ? '新建' : '复用'}`))
+    assert.ok(text.includes(ddl))
+    assert.doesNotMatch(text, /GET_UUID|失败项详情|失败阶段：/)
+  })
+}
+
+test('historical compatibility functions show new and reused successes with actual definitions', () => {
   const r = report(empty())
   r.compatibility_functions = { total: 2, success: 2, failed: 0, created: 1, reused: 1, items: [
     { name: 'get_uuid', schema: 'app', status: 'created', generator: 'extensions.uuid_generate_v4', ddl: 'CREATE FUNCTION app.get_uuid()', error: '' },

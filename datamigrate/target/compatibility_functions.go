@@ -78,16 +78,32 @@ func uuidCandidates(product string) []string {
 	}
 }
 
+func compatibilitySQLState(err error) string {
+	// A probe can join its query error with a savepoint cleanup failure.
+	// Never classify that combined failure by only the query's SQL state.
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 1 {
+			return compatibilitySQLState(causes[0])
+		}
+		return ""
+	}
+	if state, ok := err.(interface{ SQLState() string }); ok {
+		if code := state.SQLState(); code != "" {
+			return code
+		}
+	}
+	if legacy, ok := err.(interface{ Get(byte) string }); ok {
+		return legacy.Get('C')
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return compatibilitySQLState(wrapped.Unwrap())
+	}
+	return ""
+}
+
 func compatibilityRace(err error) bool {
-	var state interface{ SQLState() string }
-	code := ""
-	if errors.As(err, &state) {
-		code = state.SQLState()
-	}
-	var legacy interface{ Get(byte) string }
-	if code == "" && errors.As(err, &legacy) {
-		code = legacy.Get('C')
-	}
+	code := compatibilitySQLState(err)
 	return code == "42723" || code == "42710" || code == "23505"
 }
 
@@ -149,12 +165,12 @@ func compatibilityProbe(ctx context.Context, tx *sql.Tx, fn func() error) error 
 
 func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product string) (report *CompatibilityFunctionsReport, resultErr error) {
 	report = &CompatibilityFunctionsReport{Items: []CompatibilityFunctionResult{
-		{Name: "get_uuid", Schema: schema}, {Name: "GET_UUID", Schema: schema},
+		{Name: "get_uuid", Schema: schema},
 	}}
 	defer func() { report.finish(resultErr) }()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return report, fmt.Errorf("GET_UUID 兼容函数初始化失败: %w", err)
+		return report, fmt.Errorf("get_uuid 兼容函数初始化失败: %w", err)
 	}
 	defer tx.Rollback()
 	if schema == "" {
@@ -163,13 +179,12 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 			return report, err
 		}
 		if !current.Valid || current.String == "" {
-			return report, fmt.Errorf("GET_UUID 兼容函数初始化失败: 目标 current_schema() 为空")
+			return report, fmt.Errorf("get_uuid 兼容函数初始化失败: 目标 current_schema() 为空")
 		}
 		schema = current.String
 	}
-	for i := range report.Items {
-		report.Items[i].Schema = schema
-	}
+	item := &report.Items[0]
+	item.Schema = schema
 	// Kingbase versions can expose their compatibility catalogs in sys_catalog.
 	catalog := ""
 	var catalogErr error
@@ -184,25 +199,30 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 		}
 	}
 	if catalog == "" {
-		return report, fmt.Errorf("探测 GET_UUID 系统目录失败: %w", catalogErr)
+		return report, fmt.Errorf("探测 get_uuid 系统目录失败: %w", catalogErr)
 	}
 	// Transaction-local only; extension installation defaults to the target schema.
 	if _, err = tx.ExecContext(ctx, "SET LOCAL search_path TO "+source.QuotePGIdent(schema)+", "+catalog+", public"); err != nil {
 		return report, err
 	}
-	existing := -1
-	for i := range report.Items {
-		item := &report.Items[i]
-		var oid int64
-		err = tx.QueryRowContext(ctx, `SELECT p.oid FROM `+catalog+`.pg_proc p JOIN `+catalog+`.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2 AND p.pronargs=0 AND p.prorettype<>0`, schema, item.Name).Scan(&oid)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+	var oid int64
+	err = tx.QueryRowContext(ctx, `SELECT p.oid FROM `+catalog+`.pg_proc p JOIN `+catalog+`.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2 AND p.pronargs=0 AND p.prorettype<>0`, schema, item.Name).Scan(&oid)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Compatibility modes can resolve a lowercase call to an existing
+		// uppercase catalog entry. Resolve only our schema-qualified lowercase
+		// name, without creating or changing an uppercase alias.
+		err = compatibilityProbe(ctx, tx, func() error {
+			return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid`, qualifiedFunction(schema, item.Name)+"()").Scan(&oid)
+		})
+		if compatibilitySQLState(err) == "42883" {
+			err = nil // No function resolves to the lowercase call.
 		}
-		if err != nil {
-			return report, fmt.Errorf("检查 %s.%s 失败: %w", schema, item.Name, err)
-		}
+	}
+	if err != nil {
+		return report, fmt.Errorf("检查 %s.%s 失败: %w", schema, item.Name, err)
+	}
+	if oid != 0 {
 		item.Status = "reused"
-		existing = i
 		definitionErr := compatibilityProbe(ctx, tx, func() error {
 			return tx.QueryRowContext(ctx, `SELECT pg_get_functiondef($1::oid)`, oid).Scan(&item.DDL)
 		})
@@ -210,41 +230,18 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 			item.DDL = ""
 			item.DefinitionWarning = "无法读取已有函数定义: " + definitionErr.Error()
 		}
-	}
-	if report.Items[0].Status == "reused" && report.Items[1].Status == "reused" {
 		return report, nil // Read-only discovery; the deferred rollback releases the transaction.
 	}
-	if existing >= 0 {
-		for i := range report.Items {
-			if report.Items[i].Status == "reused" {
-				continue
-			}
-			item := &report.Items[i]
-			item.Generator = qualifiedFunction(schema, report.Items[existing].Name)
-			item.DDL = uuidWrapperDDL(schema, item.Name, item.Generator)
-			if err = createCompatibilityAlias(ctx, tx, item, &report.Items[existing]); err != nil {
-				return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, item.Name, err)
-			}
-		}
-	} else {
-		generator, typ, findErr := findUUIDGenerator(ctx, tx, schema, catalog, product, report)
-		if findErr != nil {
-			return report, findErr
-		}
-		item := &report.Items[0]
-		item.Generator = generator
-		item.DDL = uuidFunctionDDL(schema, item.Name, generator, typ)
-		if _, err = tx.ExecContext(ctx, item.DDL); err != nil {
-			return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, item.Name, err)
-		}
-		item.Status = "created"
-		alias := &report.Items[1]
-		alias.Generator = qualifiedFunction(schema, item.Name)
-		alias.DDL = uuidWrapperDDL(schema, alias.Name, alias.Generator)
-		if err = createCompatibilityAlias(ctx, tx, alias, item); err != nil {
-			return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, alias.Name, err)
-		}
+	generator, typ, findErr := findUUIDGenerator(ctx, tx, schema, catalog, product, report)
+	if findErr != nil {
+		return report, findErr
 	}
+	item.Generator = generator
+	item.DDL = uuidFunctionDDL(schema, item.Name, generator, typ)
+	if _, err = tx.ExecContext(ctx, item.DDL); err != nil {
+		return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, item.Name, err)
+	}
+	item.Status = "created"
 	if err = tx.Commit(); err != nil {
 		for i := range report.Extensions {
 			if report.Extensions[i].Status == "installed" {
@@ -252,43 +249,9 @@ func preparePGCompatibility(ctx context.Context, db *sql.DB, schema, product str
 				report.Extensions[i].Error = err.Error()
 			}
 		}
-		return report, fmt.Errorf("提交 GET_UUID 初始化事务失败，执行结果需核验: %w", err)
+		return report, fmt.Errorf("提交 get_uuid 初始化事务失败，执行结果需核验: %w", err)
 	}
 	return report, nil
-}
-
-// Some compatibility modes treat quoted function names case-insensitively.
-// Keep the canonical function when the alternate spelling resolves to the same
-// OID. A duplicate alone is not proof: distinct concurrent functions must still
-// trigger the normal rollback/re-discovery path, never CREATE OR REPLACE.
-func createCompatibilityAlias(ctx context.Context, tx *sql.Tx, alias, canonical *CompatibilityFunctionResult) error {
-	err := compatibilityProbe(ctx, tx, func() error {
-		_, e := tx.ExecContext(ctx, alias.DDL)
-		return e
-	})
-	if err == nil {
-		alias.Status = "created"
-		return nil
-	}
-	if !compatibilityRace(err) {
-		return err
-	}
-	var canonicalOID, aliasOID int64
-	resolveErr := compatibilityProbe(ctx, tx, func() error {
-		return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid, $2::regprocedure::oid`,
-			qualifiedFunction(canonical.Schema, canonical.Name)+"()",
-			qualifiedFunction(alias.Schema, alias.Name)+"()").Scan(&canonicalOID, &aliasOID)
-	})
-	if resolveErr != nil {
-		return errors.Join(err, fmt.Errorf("核验大小写函数引用失败: %w", resolveErr))
-	}
-	if canonicalOID == 0 || canonicalOID != aliasOID {
-		return err
-	}
-	alias.Status = "reused"
-	alias.DDL = canonical.DDL
-	alias.DefinitionWarning = canonical.DefinitionWarning
-	return nil
 }
 
 func qualifiedFunction(schema, name string) string {
@@ -331,9 +294,6 @@ BEGIN
  RETURN substr(guid,1,8)||'-'||substr(guid,9,4)||'-'||substr(guid,13,4)||'-'||substr(guid,17,4)||'-'||substr(guid,21,12);
 END;`, rawType, generator, uuidNormalizer(typ, "raw_guid"))
 	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE plpgsql VOLATILE AS " + sqlFunctionBody(body)
-}
-func uuidWrapperDDL(schema, name, generator string) string {
-	return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS varchar LANGUAGE sql VOLATILE AS " + sqlFunctionBody("SELECT CAST("+generator+"() AS varchar)")
 }
 
 var uuidHex = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -393,7 +353,7 @@ func findUUIDGenerator(ctx context.Context, tx *sql.Tx, schema, catalog, product
 			attempts = append(attempts, full+": "+err.Error())
 		}
 	}
-	return "", "", fmt.Errorf("GET_UUID 兼容函数初始化失败 [%s]: 无可用 UUID 函数；%s", schema, strings.Join(attempts, "；"))
+	return "", "", fmt.Errorf("get_uuid 兼容函数初始化失败 [%s]: 无可用 UUID 函数；%s", schema, strings.Join(attempts, "；"))
 }
 
 func prepareUUIDExtension(ctx context.Context, tx *sql.Tx, catalog, schema string, report *CompatibilityFunctionsReport) error {
@@ -423,7 +383,7 @@ func prepareUUIDExtension(ctx context.Context, tx *sql.Tx, catalog, schema strin
 	if err != nil {
 		extension.Error = err.Error()
 		report.Extensions = append(report.Extensions, extension)
-		return fmt.Errorf("HighGo GET_UUID 初始化失败，执行 %s: %w", extension.SQL, err)
+		return fmt.Errorf("HighGo get_uuid 初始化失败，执行 %s: %w", extension.SQL, err)
 	}
 	extension.Status = "installed"
 	// A concurrent installer may have chosen another schema. Always resolve it.

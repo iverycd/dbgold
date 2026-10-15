@@ -127,19 +127,25 @@ func TestCompatibilityKingbaseNativeIntegration(t *testing.T) {
 			defer cancel()
 			report, err := EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 2, report.Success)
+			require.Equal(t, 1, report.Total)
+			require.Equal(t, 1, report.Success)
 			require.Zero(t, report.Failed)
+			require.Len(t, report.Items, 1)
+			require.Equal(t, "get_uuid", report.Items[0].Name)
 			if phase == "reuse" {
-				require.Equal(t, 2, report.Reused)
+				require.Equal(t, 1, report.Reused)
 				require.Zero(t, report.Created)
+			} else {
+				require.Equal(t, 1, report.Created)
+				require.Zero(t, report.Reused)
 			}
-			// Some Kingbase modes resolve quoted and unquoted spellings to
-			// the same function, so initial Created need not be two.
-			var lower, upper string
-			query := "SELECT " + source.QuotePGIdent(schema) + `.get_uuid(), ` + source.QuotePGIdent(schema) + `."GET_UUID"()`
-			require.NoError(t, db.QueryRowContext(ctx, query).Scan(&lower, &upper))
-			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, lower)
-			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, upper)
+			var first, second string
+			function := qualifiedFunction(schema, "get_uuid")
+			query := "SELECT " + function + "(), " + function + "()"
+			require.NoError(t, db.QueryRowContext(ctx, query).Scan(&first, &second))
+			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, first)
+			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, second)
+			require.NotEqual(t, first, second)
 		})
 	}
 }

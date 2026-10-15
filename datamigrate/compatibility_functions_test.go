@@ -29,9 +29,9 @@ func (w *compatibilityTestWriter) DBType() string {
 }
 func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(context.Context) (*target.CompatibilityFunctionsReport, error) {
 	w.calls = append(w.calls, "prepare")
-	r := &target.CompatibilityFunctionsReport{Total: 2, Success: 2, Created: 1, Reused: 1, Items: []target.CompatibilityFunctionResult{{Name: "get_uuid", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"}, {Name: "GET_UUID", Schema: "app", Status: "reused", DDL: "existing definition"}}}
+	r := &target.CompatibilityFunctionsReport{Total: 1, Success: 1, Created: 1, Items: []target.CompatibilityFunctionResult{{Name: "get_uuid", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"}}}
 	if w.fail {
-		r.Success, r.Created, r.Reused, r.Failed = 0, 0, 0, 2
+		r.Success, r.Created, r.Reused, r.Failed = 0, 0, 0, 1
 		for i := range r.Items {
 			r.Items[i].Status = "failed"
 			r.Items[i].Error = "no UUID"
@@ -86,7 +86,11 @@ func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 			require.False(t, report.HasFailures())
 			require.NotNil(t, report.CompatibilityFunctions)
 			require.Equal(t, "prepare", w.calls[0])
+			require.Equal(t, 1, report.CompatibilityFunctions.Total)
+			require.Equal(t, 1, report.CompatibilityFunctions.Success)
 			require.Equal(t, 1, report.CompatibilityFunctions.Created)
+			require.Zero(t, report.CompatibilityFunctions.Reused)
+			require.Len(t, report.CompatibilityFunctions.Items, 1)
 			require.Zero(t, report.Views.Total)
 		})
 	}
@@ -158,6 +162,23 @@ func TestCompatibilityNonPGAndOldReportsStayUnchanged(t *testing.T) {
 	require.False(t, report.HasFailures())
 }
 
+func TestCompatibilityHistoricalTwoFunctionReportRoundTrip(t *testing.T) {
+	legacy := &target.CompatibilityFunctionsReport{
+		Total: 2, Success: 2, Created: 1, Reused: 1,
+		Items: []target.CompatibilityFunctionResult{
+			{Name: "get_uuid", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"},
+			{Name: "GET_UUID", Schema: "app", Status: "reused", DDL: "existing definition"},
+		},
+	}
+	report := MigrationReport{CompatibilityFunctions: legacy}
+	raw, err := json.Marshal(report)
+	require.NoError(t, err)
+	var saved MigrationReport
+	require.NoError(t, json.Unmarshal(raw, &saved))
+	require.Equal(t, legacy, saved.CompatibilityFunctions)
+	require.False(t, saved.HasFailures())
+}
+
 func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	w := &compatibilityTestWriter{fail: true}
 	reader := &compatibilityViewReader{views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT get_uuid()"}, {ViewName: "independent", Definition: "SELECT 1"}}}
@@ -168,6 +189,6 @@ func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	require.Contains(t, results[0].Error, "get_uuid does not exist")
 	require.Equal(t, "independent", results[1].Name)
 	require.Empty(t, results[1].Error)
-	require.Equal(t, 2, m.CompatibilityFunctions().Failed)
+	require.Equal(t, 1, m.CompatibilityFunctions().Failed)
 	require.Equal(t, []string{"prepare", "view", "view"}, w.calls)
 }
