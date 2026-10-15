@@ -26,7 +26,7 @@
         <span v-if="repairSummary.state === 'loading'">修复状态加载中</span>
         <span v-else-if="repairSummary.state === 'unknown'">修复状态未知，请在对象修复中刷新重试</span>
         <template v-else>
-          <span>已修复 {{ repairSummary.repaired }} 项，</span>
+          <span>修复执行成功 {{ repairSummary.repaired }} 项，</span>
           <span>{{ repairSummary.attention ? `当前待处理 ${repairSummary.attention} 个对象` : '当前无待处理对象' }}</span>
         </template>
       </div>

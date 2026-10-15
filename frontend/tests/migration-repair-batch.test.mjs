@@ -58,6 +58,13 @@ test('eligibility rejects unknown history anywhere, non-executable objects, and 
   for (const status of ['running', 'queued', 'cancelling']) assert.match(batchIneligibleReason(record('x', { units: [unit('old', { status, selected: false })] }).object), /正在执行/)
   assert.match(batchIneligibleReason(record('x', { diagnostic_only: true }).object), /诊断/)
   assert.match(batchIneligibleReason(record('x', { status: 'succeeded' }).object), /成功/)
+  for (const kind of ['table', 'tables']) {
+    const table = record('table', { kind, status: 'succeeded', data_status: 'failed' })
+    const [item] = buildRepairBatch([table], ['table'], () => 'request')
+    assert.equal(item.status, 'skipped', 'failed data must not replay successful table DDL')
+    assert.equal(item.reason, '表结构已执行成功，无需重复执行 DDL')
+    assert.match(batchIneligibleReason({ ...table.object, data_status: 'unknown' }), /未知/)
+  }
   assert.match(batchIneligibleReason(record('x', { schema: '' }).object), /目标对象/)
   assert.match(batchIneligibleReason(record('x', { units: [], suggested_ddl: 'CREATE VIEW x' }).object), /没有/)
   assert.match(batchIneligibleReason(record('x', { units: [unit('x'), unit('blank', { sql: ' ' })] }).object), /空 SQL/)

@@ -25,7 +25,7 @@ function loadBatchUtils(timers) {
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
-const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, objectStatus, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
+const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -59,6 +59,51 @@ function panel(props, overrides = {}) {
 const tick = async () => { await Vue.nextTick(); await Promise.resolve(); await Vue.nextTick() }
 const unit = (id, status, extra = {}) => ({ id, status, sql: `CREATE ${id}`, original_sql: `CREATE ${id}`, selected: true, destructive: false, ...extra })
 const record = (extra = {}) => ({ version: 1, object: { id: 'obj', kind: 'table', name: 'Orders', target_name: 'Orders', schema: 'public', ddl: 'CREATE TABLE Orders (id INT)', status: 'failed', units: [unit('table', 'failed')], dependencies: [], legacy: false, requires_review: false, ...extra } })
+
+test('data status text distinguishes import outcomes and preserves unfamiliar statuses', () => {
+  const cases = [
+    [['succeeded', 'success', 'repaired'], '导入成功'],
+    [['failed'], '导入失败，待接续'],
+    [['pending', 'not_started', 'skipped', 'needs_data', 'draft', ''], '待导入'],
+    [['running'], '导入中'], [['queued'], '等待导入'], [['cancelling'], '取消中'],
+    [['cancelled'], '已取消'], [['unknown', 'unverified', 'needs_verification'], '导入结果未知'],
+    [['blocked'], '依赖阻塞'], [['not_required'], '无需导入'], [['future_state'], 'future_state'],
+  ]
+  for (const [statuses, expected] of cases) {
+    for (const status of statuses) assert.equal(utils.repairDataStatus(status), expected, status)
+  }
+})
+
+test('object status presentation separates table structure and data without duplicating data records', () => {
+  const statuses = extra => JSON.parse(JSON.stringify(utils.repairObjectStatuses(record(extra).object)))
+  for (const kind of ['table', 'tables']) {
+    assert.deepEqual(statuses({ kind, status: 'succeeded', data_status: 'failed' }), [
+      { label: '表结构', status: 'succeeded', text: '执行成功' },
+      { label: '数据', status: 'failed', text: '导入失败，待接续' },
+    ])
+    assert.deepEqual(statuses({ kind, status: 'succeeded' }), [{ label: '表结构', status: 'succeeded', text: '执行成功' }])
+  }
+  assert.deepEqual(statuses({ kind: 'data', status: 'failed', data_status: 'succeeded' }), [{ label: '数据', status: 'succeeded', text: '导入成功' }])
+  for (const data_status of [undefined, '']) {
+    assert.deepEqual(statuses({ kind: 'data', status: 'failed', data_status }), [{ label: '数据', status: 'failed', text: '导入失败，待接续' }])
+  }
+  assert.deepEqual(statuses({ kind: 'index', status: 'unknown', data_status: 'not_required' }), [
+    { label: '', status: 'unknown', text: '执行结果未知' },
+    { label: '数据', status: 'not_required', text: '无需导入' },
+  ])
+})
+
+test('repair history labels table structure and data separately and exports each data result once', () => {
+  const tableHistory = utils.formatRepairHistory([record({ status: 'succeeded', data_status: 'failed', original_error: 'numeric field overflow' })], []).join('\n')
+  assert.match(tableHistory, /表结构：执行成功/)
+  assert.match(tableHistory, /数据：导入失败，待接续/)
+  assert.match(tableHistory, /原始错误：numeric field overflow/)
+  for (const [data_status, expected] of [['succeeded', '导入成功'], [undefined, '导入失败，待接续']]) {
+    const history = utils.formatRepairHistory([record({ kind: 'data', status: 'failed', data_status, units: [] })], []).join('\n')
+    assert.equal(history.match(new RegExp(`数据：${expected}`, 'g'))?.length, 1)
+    assert.doesNotMatch(history, /表结构：|数据状态：|：待修复/)
+  }
+})
 
 test('summary counts attention objects once and updates after DDL and data completion', async () => {
   const scope = Vue.effectScope()
@@ -198,13 +243,14 @@ async function renderPanel(p, onRender, onEditor) {
     render(...args) { const tree = render.apply(this, args); onRender?.(tree); return tree },
   })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-tag', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  app.component('a-tag', { props: ['color'], setup: (props, { slots }) => () => Vue.h('span', { 'data-status-color': props.color }, slots.default?.()) })
   app.component('a-empty', Arco.Empty)
   for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', [slots.default?.(), slots.footer?.()]) : null })
   app.component('a-table-column', { setup: () => () => null })
   app.component('a-table', {
     props: ['data'],
-    setup: (props, { slots }) => () => Vue.h('div', props.data?.length ? props.data.flatMap(record => (slots.columns?.() || []).map(column => Vue.h('div', column.children?.cell?.({ record })))) : slots.empty?.()),
+    setup: (props, { slots }) => () => Vue.h('div', props.data?.length ? props.data.flatMap(record => (slots.columns?.() || []).map(column => Vue.h('section', { 'data-table-column': column.props?.title }, column.children?.cell?.({ record })))) : slots.empty?.()),
   })
   app.component('SqlEditor', { props: ['modelValue', 'formatDbType', 'formatDisabled', 'executionMode'], setup: props => () => { onEditor?.(props); return Vue.h('textarea', props.modelValue) } })
   return renderToString(app)
@@ -214,6 +260,40 @@ function findNodes(tree, predicate) {
   const children = Array.isArray(tree.children) ? tree.children.flatMap(child => findNodes(child, predicate)) : []
   return predicate(tree) ? [tree, ...children] : children
 }
+
+const statusCells = html => Array.from(html.matchAll(/<section data-table-column="修复状态">([\s\S]*?)<\/section>/g), match => ({
+  text: match[1].replace(/<[^>]*>/g, '').replace(/\s+/g, ''),
+  colors: Array.from(match[1].matchAll(/data-status-color="([^"]*)"/g), color => color[1]),
+}))
+
+test('rendered repair statuses label each phase, color failures and show data records only once', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [
+      record({ id: 'data-failed', status: 'succeeded', data_status: 'failed' }),
+      record({ id: 'all-succeeded', status: 'succeeded', data_status: 'succeeded' }),
+      record({ id: 'no-data', status: 'succeeded', data_status: 'not_required' }),
+      record({ id: 'unknown', status: 'unknown', data_status: 'unverified' }),
+      record({ id: 'data-preferred', kind: 'data', status: 'failed', data_status: 'succeeded' }),
+      record({ id: 'data-fallback', kind: 'data', status: 'failed' }),
+    ]
+    p.showAllObjects(); await tick()
+    const html = await renderPanel(p)
+    assert.deepEqual(statusCells(html), [
+      { text: '表结构：执行成功数据：导入失败，待接续', colors: ['green', 'red'] },
+      { text: '表结构：执行成功数据：导入成功', colors: ['green', 'green'] },
+      { text: '表结构：执行成功数据：无需导入', colors: ['green', 'gray'] },
+      { text: '表结构：执行结果未知数据：导入结果未知', colors: ['orange', 'orange'] },
+      { text: '数据：导入成功', colors: ['green'] },
+      { text: '数据：导入失败，待接续', colors: ['red'] },
+    ])
+    assert.match(html, /表结构执行与数据导入分别记录，结构执行成功后可继续接续数据与关联对象。/)
+    assert.match(html, /表结构已执行成功，无需重复执行 DDL/)
+    assert.doesNotMatch(html, /执行成功即完成修复/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await tick() }
 const repairList = objects => ({ data: { objects: JSON.parse(JSON.stringify(objects)), binding: { configured: true, src_conn_id: 1, dst_conn_id: 2, source_database: 'source', source_schema: 'source_schema', target_schema: 'public', legacy: false } } })
@@ -528,6 +608,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
       repaired: ['fixed'], pending: ['pending', 'failed', 'draft', 'unknown', 'diagnostic', 'index'],
       blocked: ['blocked'], data: ['fixed', 'blocked'],
     }
+    assert.equal(utils.repairCategories.find(category => category.key === 'repaired').label, '修复执行成功')
     let buttons, dropdown
     await renderPanel(p, tree => {
       buttons = findNodes(tree, node => node.type === 'button' && node.props?.class?.includes('repair-stat'))
@@ -558,6 +639,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
       assert.match(renderedButtons[index], /aria-pressed="true"/)
       assert.match(renderedButtons[index], /repair-stat-active/)
       assert.doesNotMatch(renderedButtons[index], /disabled/)
+      assert.ok(renderedButtons[index].includes(category.label))
     }
     p.keyword.value = 'does-not-match'
     dropdown.props['onUpdate:modelValue']('pending')
@@ -580,6 +662,7 @@ test('zero-count categories stay clickable and explain empty results with a rese
   try {
     const p = scope.run(() => panel({ jobID: 'job' })); await tick()
     p.records.value = [record({ status: 'succeeded', original_status: 'succeeded' })]
+    assert.equal(utils.repairCategories.find(category => category.key === 'repaired').empty, '当前无修复执行成功的对象')
     let buttons
     await renderPanel(p, tree => { buttons = findNodes(tree, node => node.type === 'button') })
     for (const [index, category] of utils.repairCategories.entries()) {
@@ -673,6 +756,7 @@ test('data recovery completion updates category membership and summary through p
     assert.equal(p.stats.value.data, 1)
     p.selectRepairFilter('data'); await tick()
     assert.equal(p.visibleRecords.value.length, 1)
+    assert.equal(statusCells(await renderPanel(p))[0].text, '表结构：执行成功数据：待导入')
     p.recoveryObject.value = saved
     p.recoveryPlan.value = { token: 'preview', preview: { data_required: true, target_rows: 0, related: [] } }
     p.recoveryForm.sourceQuiesced = true; p.recoveryForm.targetQuiesced = true; p.recoveryForm.reviewed = true
@@ -691,6 +775,7 @@ test('data recovery completion updates category membership and summary through p
     assert.match(await renderPanel(p), /当前无待补数据对象/)
     p.selectRepairFilter('repaired'); await tick()
     assert.equal(p.visibleRecords.value.length, 1)
+    assert.deepEqual(statusCells(await renderPanel(p)), [{ text: '表结构：执行成功数据：导入成功', colors: ['green', 'green'] }])
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })

@@ -29,7 +29,7 @@ const hasUnknownResult = (object: RepairObject) => unknownStatus(object.status) 
 export function batchIneligibleReason(object: RepairObject): string {
   if (hasUnknownResult(object)) return '存在执行结果未知的记录，请先在目标数据库核对'
   if (object.diagnostic_only) return '仅供诊断的记录不可执行'
-  if (unitCommitted(object.status)) return '对象已执行成功，无需再次执行'
+  if (unitCommitted(object.status)) return ['table', 'tables'].includes(object.kind) ? '表结构已执行成功，无需重复执行 DDL' : '对象已执行成功，无需再次执行'
   if (attemptRunning(object.status) || (object.units || []).some(unit => attemptRunning(unit.status))) return '对象正在执行'
   if (!canEditRepairDDL(object)) return '缺少可执行的目标对象信息'
   const selected = cloneRepairUnits(object.units).filter(unit => unit.selected)

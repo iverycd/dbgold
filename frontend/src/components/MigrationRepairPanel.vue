@@ -1,7 +1,7 @@
 <template>
   <section ref="repairSection" class="repair-panel" aria-label="对象修复" tabindex="-1">
     <div class="repair-heading">
-      <div><h3>对象修复</h3><p>修改失败对象的 DDL，执行成功即完成修复，按需接续数据与关联对象。原始报告保持不变。</p></div>
+      <div><h3>对象修复</h3><p>表结构执行与数据导入分别记录，结构执行成功后可继续接续数据与关联对象。原始报告保持不变。</p></div>
       <a-space wrap>
         <a-button size="small" :disabled="busy" @click="openBinding">连接与配置</a-button>
         <a-button size="small" @click="openHistory()">执行历史</a-button>
@@ -51,7 +51,7 @@
         </div>
       </div>
     </section>
-    <a-table v-if="records.length" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1150 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+    <a-table v-if="records.length" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1250 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="emptyDescription" />
@@ -82,7 +82,16 @@
           </template>
         </a-table-column>
         <a-table-column title="原始错误"><template #cell="{ record }"><div class="error-text">{{ (record.object.original_error ?? record.object.error) || '—' }}</div></template></a-table-column>
-        <a-table-column title="修复状态" :width="140"><template #cell="{ record }"><a-tag :color="statusColor(record.object.status)">{{ objectStatus(record.object) }}</a-tag><div v-if="record.object.data_status" class="muted">数据：{{ repairStatus(record.object.data_status) }}</div></template></a-table-column>
+        <a-table-column title="修复状态" :width="240">
+          <template #cell="{ record }">
+            <div class="repair-statuses">
+              <div v-for="state in repairObjectStatuses(record.object)" :key="state.label" class="repair-status-line">
+                <span v-if="state.label" class="repair-status-label">{{ state.label }}：</span>
+                <a-tag :color="statusColor(state.status)">{{ state.text }}</a-tag>
+              </div>
+            </div>
+          </template>
+        </a-table-column>
         <a-table-column title="操作" :width="240"><template #cell="{ record }"><a-space wrap>
           <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(record)">{{ hasRepairDDL(record.object) ? '编辑并执行' : '手动编写 DDL' }}</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(record)">查看诊断</a-button>
@@ -232,7 +241,7 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchesRepairFilter, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, hasRepairDDL, isTableRepair, mappingError, matchesRepairFilter, matchingRepairRecords, needsRepairAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairExecutionStatus, repairKind, repairObjectStatuses, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
@@ -326,9 +335,8 @@ const canRecover = computed(() => {
 const current = (scope: number, id: string) => !disposed && scope === epoch && id === props.jobID
 const errorText = (e: any) => e?.response?.data?.error || e?.message || '请求失败，请重试'
 function showError(e: unknown) { error.value = errorText(e); Message.error(error.value) }
-function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : 'orange' }
+function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : status === 'not_required' ? 'gray' : 'orange' }
 function qualified(object: RepairObject) { return object.schema ? `${object.schema}.${object.target_name}` : object.target_name }
-function objectStatus(object: RepairObject) { return repairStatus(object.status) }
 function objectName(id: string) { const object = records.value.find(record => record.object.id === id)?.object; return object ? qualified(object) : id }
 function dependencyNames(object: RepairObject) { return (object.dependencies || []).map(objectName) }
 function connectionLabel(conn: Connection) { return `${conn.name} · ${conn.host}:${conn.port}/${conn.database} · ${conn.username}` }
@@ -732,6 +740,10 @@ onUnmounted(() => {
 .repair-stat:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .repair-stats strong { margin-left: 5px; font-variant-numeric: tabular-nums; }
 .repair-filters, .attempt-banner, .editor-toolbar { margin: 12px 0; }
+.repair-statuses { display: flex; flex-direction: column; gap: 6px; }
+.repair-status-line { display: flex; align-items: center; gap: 4px; }
+.repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-2); }
+.repair-status-line :deep(.arco-tag) { height: auto; min-height: 24px; white-space: normal; overflow-wrap: anywhere; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
 .repair-name { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

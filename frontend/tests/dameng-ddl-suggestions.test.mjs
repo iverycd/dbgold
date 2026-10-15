@@ -185,7 +185,7 @@ test('report summary and repair badge distinguish loaded, failed and completed r
     h.p.report.value = report({ name: 'Orders', ddl: '', error: 'original error' })
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'ready', repaired: 1, attention: 2 })
     let html = await renderToString(h.app)
-    assert.match(html, /原始失败 1 项，[^]*已修复 1 项，[^]*当前待处理 2 个对象/)
+    assert.match(html, /原始失败 1 项，[^]*修复执行成功 1 项，[^]*当前待处理 2 个对象/)
     const titleBadge = () => h.tabStates.at(-1).panes.find(pane => pane.key === 'repair').children.title().find(vnode => vnode.props?.count)
     assert.equal(titleBadge().props.count, 2)
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'unknown', repaired: 1, attention: 0 })
@@ -195,7 +195,7 @@ test('report summary and repair badge distinguish loaded, failed and completed r
     assert.equal(titleBadge(), undefined)
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'ready', repaired: 1, attention: 0 })
     html = await renderToString(h.app)
-    assert.match(html, /已修复 1 项，[^]*当前无待处理对象/)
+    assert.match(html, /修复执行成功 1 项，[^]*当前无待处理对象/)
     assert.equal(titleBadge(), undefined)
     assert.equal(h.p.failedCount.value, 1, 'original report failure is retained')
   } finally { scope.stop() }
