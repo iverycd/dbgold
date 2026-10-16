@@ -13,10 +13,60 @@
   --primary-6: 22, 163, 74;
   --primary-7: 21, 128, 61;
 }
-.migration-workspace .migration-page-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin: 8px 0 24px; }
-.migration-workspace .migration-page-heading h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.5px; }
-.migration-workspace .migration-page-heading p { margin: 8px 0 0; color: var(--color-text-3); font-size: 13px; }
-.migration-workspace .migration-page-label { display: flex; gap: 8px; align-items: center; color: var(--color-text-3); font-size: 12px; padding: 8px 12px; background: var(--color-bg-1); border: 1px solid var(--color-border-2); border-radius: 20px; }
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav {
+  box-sizing: border-box;
+  height: 64px;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-extra {
+  order: -1;
+  flex: 0 0 auto;
+  min-width: 0;
+  line-height: 28px;
+}
+.migration-workspace .migration-page-heading h2 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+  letter-spacing: -.5px;
+  white-space: nowrap;
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab { min-width: 0; }
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list {
+  padding: 1px;
+  background: var(--color-bg-2);
+  border-radius: 8px;
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab {
+  height: 36px;
+  padding: 0 14px;
+  color: var(--color-text-3);
+  font-weight: 500;
+  line-height: 20px;
+  border-radius: 7px;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab::before { display: none; }
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab:hover {
+  color: var(--color-text-1);
+  background: var(--color-fill-2);
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab-active,
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab-active:hover {
+  color: #15803d;
+  font-weight: 600;
+  background: #f0fdf4;
+}
+.migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab > .arco-tabs-nav-tab-list > .arco-tabs-tab:focus-visible {
+  outline: 2px solid #15803d;
+  outline-offset: -2px;
+}
 .migration-workspace .migration-form, .migration-workspace .incremental-panel { margin-top: 8px; }
 .migration-workspace .migration-surface { min-width: 0; margin-bottom: 20px; padding: 24px; background: var(--color-bg-1); border: 1px solid var(--color-border-2); border-radius: 10px; }
 .migration-workspace .migration-section-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
@@ -64,6 +114,9 @@
   .migration-workspace .migration-advanced-grid > .arco-col + .arco-col { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--color-border-2); }
 }
 @container (max-width: 767px) {
+  .migration-workspace .migration-mode-tabs > .arco-tabs-nav { height: auto; flex-wrap: wrap; gap: 8px; }
+  .migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-extra { flex-basis: 100%; }
+  .migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab { justify-content: flex-start; }
   .migration-workspace .migration-connections { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .migration-workspace .migration-connection-arrow { height: 24px; transform: rotate(90deg); }
   .migration-workspace .migration-surface { padding: 16px; }
@@ -71,7 +124,6 @@
   .migration-workspace .migration-settings .arco-col { flex: 0 0 100%; max-width: 100%; }
   .migration-workspace .migration-settings .arco-radio { padding: 6px 10px; }
   .migration-workspace .migration-settings .arco-input-wrapper { max-width: 100%; }
-  .migration-workspace .migration-page-label { display: none; }
 }
 
 .migration-workspace .migration-row-no-details .arco-table-expand-btn { display: none; }

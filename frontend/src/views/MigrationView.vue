@@ -1,13 +1,17 @@
 <template>
   <div class="migration-workspace">
-    <header class="migration-page-heading">
-      <div>
-        <h2>数据库迁移</h2>
-        <p>配置迁移范围，检查兼容性，追踪执行结果。</p>
-      </div>
-      <span class="migration-page-label"><icon-swap /> 数据迁移工作台</span>
-    </header>
-    <a-tabs v-model:active-key="activeTab" class="migration-mode-tabs" :destroy-on-hide="false" :lazy-load="false">
+    <a-tabs
+      v-model:active-key="activeTab"
+      class="migration-mode-tabs"
+      type="capsule"
+      :destroy-on-hide="false"
+      :lazy-load="false"
+    >
+      <template #extra>
+        <header class="migration-page-heading">
+          <h2>数据库迁移</h2>
+        </header>
+      </template>
       <a-tab-pane key="data-migrate" title="单次迁移">
         <a-form :model="dataMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
