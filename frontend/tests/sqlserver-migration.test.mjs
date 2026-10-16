@@ -1,3 +1,4 @@
+import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -24,9 +25,11 @@ test('SQL Server is selectable in all three forms and submits fixed target defau
       loadDstSchemas, vmLoadDstSchemas, omLoadDstSchemas, startDataMigration, handleMigrateViews, startObjectMigration,
       checkPairSupport, vmCheckPairSupport, omCheckPairSupport };`, name => {
     switch (name) {
-      case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
+      case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
       case '@arco-design/web-vue': return { Message: { error: message => assert.fail(message), success() {}, warning() {} }, Modal: {} }
+      case '@/utils/connectionDatabase': return connectionDatabaseUtils
+      case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
       case '@/api/connections': return { listConnectionSchemas: async id => { schemaRequests.push(id); return { data: ['dbo', 'APP'] } } }
       case '@/api/migration': return { startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }) }

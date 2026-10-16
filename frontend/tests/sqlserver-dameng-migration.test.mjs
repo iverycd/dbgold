@@ -1,3 +1,4 @@
+import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -40,9 +41,11 @@ function page(requests, queue) {
   }
   return load(`${descriptor.scriptSetup.content}\nexport { connections, viewMigrate, objMigrate, vmLoadViews, omLoadTables };`, id => {
     switch (id) {
-      case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
+      case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
       case '@arco-design/web-vue': return { Message: { error: msg => assert.fail(msg), success() {}, warning() {} }, Modal: {} }
+      case '@/utils/connectionDatabase': return connectionDatabaseUtils
+      case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return helper
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}
@@ -83,6 +86,7 @@ test('older list responses cannot overwrite the current destination scope', asyn
     const old = new Promise(resolve => { finishOld = resolve })
     const p = scope.run(() => page([], [old, Promise.resolve({ data: ['current'] })]))
     p.viewMigrate.srcConnId = 1
+    p.viewMigrate.srcDatabase = 'SourceDb'
     const first = p.vmLoadViews()
     await p.vmLoadViews()
     finishOld({ data: ['stale'] })

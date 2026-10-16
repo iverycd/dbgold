@@ -1,3 +1,4 @@
+import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -24,10 +25,12 @@ function page({ start, preflight, objectStart } = {}) {
     exports: {}, AbortController,
     require: id => {
       switch (id) {
-        case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
+        case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
         case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
         case '@arco-design/web-vue': return { Message: { error: msg => errors.push(msg) }, Modal: {} }
-        case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
+        case '@/utils/connectionDatabase': return connectionDatabaseUtils
+      case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
+      case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
         case '@/api/migration': return {
           startDataMigration: async request => { starts.push(request); return start ? start(request) : { data: { job_id: 'new-job' } } },
           startObjectMigration: async request => objectStart ? objectStart(request) : { data: { job_id: 'object-job' } },

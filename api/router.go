@@ -36,7 +36,7 @@ func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
@@ -72,9 +72,11 @@ func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 		authed.GET("/connections", handler.GetConnections)
 		authed.POST("/connections", handler.CreateConnection)
 		authed.PUT("/connections/:id", handler.UpdateConnection)
+		authed.PATCH("/connections/:id/database", handler.UpdateConnectionDatabase)
 		authed.DELETE("/connections/:id", handler.DeleteConnection)
 		authed.POST("/connections/:id/test", handler.TestConnection)
 		authed.GET("/connections/:id/databases", handler.ListConnectionDatabases)
+		authed.GET("/connections/:id/catalogs", handler.ListConnectionCatalogs)
 		authed.GET("/connections/:id/schemas", handler.ListConnectionSchemas)
 		authed.GET("/connections/:id/views", handler.ListConnectionViews)
 		authed.GET("/connections/:id/tables", handler.ListConnectionTables)

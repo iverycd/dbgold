@@ -8,13 +8,17 @@ import (
 	"dbgold/internal/pgschema"
 	"dbgold/middleware"
 	"dbgold/store"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode"
 
 	_ "gitee.com/chunanyong/dm"
 	"github.com/gin-gonic/gin"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	goora "github.com/sijms/go-ora/v2"
 )
@@ -50,43 +54,43 @@ type connectionWithOwner struct {
 func buildDSN(c *store.Connection) string {
 	switch c.DBType {
 	case "mysql":
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
-			c.Username, c.Password, c.Host, c.Port, c.Database)
-	case "postgres":
+		cfg := mysql.NewConfig()
+		cfg.User, cfg.Passwd, cfg.DBName = c.Username, c.Password, c.Database
+		cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+		cfg.ParseTime = true
+		cfg.Params = map[string]string{"charset": "utf8mb4"}
+		return cfg.FormatDSN()
+	case "postgres", "gaussdb", "seabox", "highgo", "vastbase", "gbase", "kingbase":
 		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
+			pgDSNValue(c.Host), c.Port, pgDSNValue(c.Username), pgDSNValue(c.Password), pgDSNValue(c.Database))
 	case "oracle":
 		return goora.BuildUrl(c.Host, c.Port, c.Database, c.Username, c.Password, nil)
 	case "sqlserver":
-		// 使用 key=value 格式，避免密码含 @ 或 host 含 \ 破坏 URL 解析
-		return fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
-			c.Host, c.Port, c.Database, c.Username, c.Password)
-	case "gaussdb":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
-	case "seabox":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
-	case "highgo":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
-	case "vastbase":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
-	case "gbase":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
-	case "kingbase":
-		return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.Username, c.Password, c.Database)
+		// ODBC braced values preserve semicolons, braces and whitespace without
+		// letting a database name or password add connection-string options.
+		return fmt.Sprintf("odbc:server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
+			odbcDSNValue(c.Host), c.Port, odbcDSNValue(c.Database), odbcDSNValue(c.Username), odbcDSNValue(c.Password))
 	case "dameng":
 		return fmt.Sprintf("dm://%s:%s@%s:%d",
 			c.Username, c.Password, c.Host, c.Port)
 	case "oscar":
 		// Credentials travel in the private bridge frame, never in the URL or argv.
-		return fmt.Sprintf("jdbc:oscar://%s:%d/%s", c.Host, c.Port, c.Database)
+		// Oscar's JDBC parser does not URL-decode DBNAME. Preserve Unicode and
+		// spaces; the database editor rejects JDBC delimiters before testing.
+		return fmt.Sprintf("jdbc:oscar://%s/%s", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), c.Database)
 	}
 	return ""
+}
+
+func pgDSNValue(value string) string {
+	if value != "" && !strings.ContainsAny(value, "\\'") && strings.IndexFunc(value, unicode.IsSpace) < 0 {
+		return value
+	}
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(value) + "'"
+}
+
+func odbcDSNValue(value string) string {
+	return "{" + strings.ReplaceAll(value, "}", "}}") + "}"
 }
 
 // pgCompatibleDriverName 返回各 PostgreSQL 兼容库使用的 database/sql 驱动名。
@@ -187,7 +191,15 @@ func UpdateConnection(c *gin.Context) {
 	if body.Password != "" {
 		updates["password"] = body.Password
 	}
-	if err := store.UpdateConnection(uint(id), updates); err != nil {
+	// Serialize the final save with CDC's post-preflight snapshot check.
+	incrementalStartMu.Lock()
+	err = store.UpdateConnection(uint(id), updates)
+	incrementalStartMu.Unlock()
+	if err != nil {
+		if errors.Is(err, store.ErrConnectionInUse) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -220,15 +232,7 @@ func TestConnection(c *gin.Context) {
 	if !ok {
 		return
 	}
-	d, err := driver.NewDriver(conn.DBType)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	defer d.Close()
-	if err := d.Connect(c.Request.Context(), driver.ConnectOptions{
-		DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
-	}); err != nil {
+	if err := testDatabaseConnection(c.Request.Context(), conn); err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return

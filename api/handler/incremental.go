@@ -42,6 +42,7 @@ type incrementalRequest struct {
 }
 
 var incrementalStartMu sync.Mutex
+var errIncrementalTargetInUse = errors.New("该目标连接和 Schema 已有未终止的增量任务；请先恢复或放弃原任务，避免并发删表/写入")
 
 var incrementalTargetTypes = map[string]bool{
 	"postgres": true,
@@ -172,28 +173,47 @@ func StartIncremental(c *gin.Context) {
 		LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategiesJSON: string(locatorJSON), PrimaryLocatorCount: primaryCount,
 		UniqueLocatorCount: uniqueCount, FullRowLocatorCount: fullRowCount, BootstrapState: "pending", Status: "initializing", Phase: "initializing",
 		EffectiveJSON: effectiveJSON, ExcludedJSON: excludedJSON, EffectiveCount: len(scopeRecord.EffectiveTables), ExcludedCount: len(scopeRecord.ExcludedTables), ManifestHash: scopeRecord.ManifestHash}
+	if e := createIncrementalAfterPreflight(j, src, dst, func() {
+		if len(scopeRecord.ExcludedTables) > 0 {
+			names := make([]string, 0, len(scopeRecord.ExcludedTables))
+			for _, issue := range scopeRecord.ExcludedTables {
+				names = append(names, issue.Table)
+			}
+			appendIncrementalLifecycleLog(jobID, "preflight", "warn", fmt.Sprintf("用户确认排除 %d 张缺失目标表: %s", len(names), strings.Join(names, ", ")))
+		}
+		launchIncremental(j, src, dst)
+	}); e != nil {
+		switch {
+		case errors.Is(e, store.ErrConnectionChanged):
+			c.JSON(http.StatusConflict, gin.H{"error": "预检期间连接配置已变化，请刷新后重新预检"})
+		case errors.Is(e, errIncrementalTargetInUse):
+			c.JSON(http.StatusConflict, gin.H{"error": e.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": e.Error()})
+		}
+		return
+	}
+	c.JSON(200, gin.H{"job_id": jobID, "preflight": pf})
+}
+
+func createIncrementalAfterPreflight(j *store.IncrementalMigrationJob, src, dst *store.Connection, launch func()) error {
 	incrementalStartMu.Lock()
 	defer incrementalStartMu.Unlock()
-	if exists, e := store.HasOpenIncrementalTarget(req.DstConnID, req.TargetSchema); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
-		return
+	if err := store.CheckConnectionSnapshots(src, dst); err != nil {
+		return err
+	}
+	if exists, err := store.HasOpenIncrementalTarget(j.DstConnID, j.TargetSchema); err != nil {
+		return err
 	} else if exists {
-		c.JSON(409, gin.H{"error": "该目标连接和 Schema 已有未终止的增量任务；请先恢复或放弃原任务，避免并发删表/写入"})
-		return
+		return errIncrementalTargetInUse
 	}
-	if e := store.CreateIncrementalJob(j); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
-		return
+	if err := store.CreateIncrementalJob(j); err != nil {
+		return err
 	}
-	if len(scopeRecord.ExcludedTables) > 0 {
-		names := make([]string, 0, len(scopeRecord.ExcludedTables))
-		for _, issue := range scopeRecord.ExcludedTables {
-			names = append(names, issue.Table)
-		}
-		appendIncrementalLifecycleLog(jobID, "preflight", "warn", fmt.Sprintf("用户确认排除 %d 张缺失目标表: %s", len(names), strings.Join(names, ", ")))
-	}
-	launchIncremental(j, src, dst)
-	c.JSON(200, gin.H{"job_id": jobID, "preflight": pf})
+	// Registration is synchronous; the runner's network work is asynchronous.
+	// Abort must not observe a persisted task before it is in the registry.
+	launch()
+	return nil
 }
 
 func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connection) {

@@ -45,17 +45,18 @@
                 </a-select>
                 <div v-if="selectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
-                  <span v-if="selectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedSrc.database }}</span>
+                  <span v-if="selectedSrc.database && !supportsDatabaseEditing(selectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ selectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedSrc.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="selectedSrc" />
                 <a-select
-                  v-if="dataMigrate.srcDatabases.length > 0"
+                  v-if="sourceUsesSchema(selectedSrc)"
                   v-model="dataMigrate.srcDatabase"
-                  placeholder="选择要迁移的数据库"
+                  placeholder="选择要迁移的 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                 >
-                  <template #prefix><span class="migration-select-label">源数据库</span></template>
+                  <template #prefix><span class="migration-select-label">源 Schema</span></template>
                   <a-option v-for="db in dataMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
                 <a-tooltip
@@ -68,6 +69,7 @@
                     long
                     style="margin-top: 10px"
                     :loading="exportingRoutines"
+                    :disabled="databaseSelectionBlocked('data')"
                     @click="handleExportRoutines"
                   >
                     <template #icon><icon-download /></template>
@@ -108,11 +110,12 @@
                 </a-select>
                 <div v-if="selectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}</span>
+                  <span v-if="!supportsDatabaseEditing(selectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="selectedDst" />
                 <a-select
-                  v-if="dataMigrate.dstConnId"
+                  v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'"
                   v-model="dataMigrate.dstSchema"
                   :placeholder="selectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                   :allow-clear="selectedDst?.db_type === 'oracle'"
@@ -122,10 +125,10 @@
                   <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
-                <div v-if="dataMigrate.dstConnId" class="schema-permission-tip">
+                <div v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
                   <span v-if="selectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
-                  <span v-else-if="selectedDst?.db_type === 'sqlserver'">目标数据库取自连接配置，Schema 默认 dbo。</span>
+                  <span v-else-if="selectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。</span>
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
@@ -279,7 +282,7 @@
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')"
             :result="pgTaskSummaries.data ? (pgTaskSummaries.data.preflight ?? pgTaskSummaries.data.preview) : pgChecks.data"
             :compact="!!pgTaskSummaries.data" :summary-source="pgTaskSummaries.data?.preflight ? 'report' : 'page'"
-            :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running"
+            :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running || databaseSelectionBlocked('data')"
             @view-report="showPGTaskResult('data', 'report')" @view-logs="showPGTaskResult('data', 'logs')"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
 
@@ -308,33 +311,36 @@
                 <!-- 迁移报告 -->
                 <div v-if="dataMigrate.finished && dataMigrate.currentJobId" style="margin-top: 16px">
                   <!-- 连接信息摘要条 -->
-                  <div v-if="selectedSrc && selectedDst" class="report-conn-bar">
+                  <div v-if="dataExecutionRoute" class="report-conn-bar">
                     <div class="report-conn-side">
-                      <a-tag :color="getDbTypeColor(selectedSrc.db_type)" size="small" class="report-conn-type-tag">
-                        {{ getDbTypeLabel(selectedSrc.db_type) }}
+                      <a-tag :color="getDbTypeColor(dataExecutionRoute.src.db_type)" size="small" class="report-conn-type-tag">
+                        {{ getDbTypeLabel(dataExecutionRoute.src.db_type) }}
                       </a-tag>
-                      <span class="report-conn-name">{{ selectedSrc.name }}</span>
+                      <span class="report-conn-name">{{ dataExecutionRoute.src.name }}</span>
                       <span class="report-conn-detail">
-                        <span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}
+                        <span class="conn-meta-label">地址</span>{{ dataExecutionRoute.src.host }}:{{ dataExecutionRoute.src.port }}
                       </span>
-                      <span v-if="dataMigrate.srcDatabase" class="report-conn-detail">
-                        <span class="conn-meta-label">库</span>{{ dataMigrate.srcDatabase }}
+                      <span v-if="dataExecutionRoute.srcDatabase" class="report-conn-detail">
+                        <span class="conn-meta-label">库</span>{{ dataExecutionRoute.srcDatabase }}
+                      </span>
+                      <span v-if="dataExecutionRoute.srcSchema" class="report-conn-detail">
+                        <span class="conn-meta-label">Schema</span>{{ dataExecutionRoute.srcSchema }}
                       </span>
                     </div>
                     <icon-arrow-right class="report-conn-arrow" />
                     <div class="report-conn-side">
-                      <a-tag :color="getDbTypeColor(selectedDst.db_type)" size="small" class="report-conn-type-tag">
-                        {{ getDbTypeLabel(selectedDst.db_type) }}
+                      <a-tag :color="getDbTypeColor(dataExecutionRoute.dst.db_type)" size="small" class="report-conn-type-tag">
+                        {{ getDbTypeLabel(dataExecutionRoute.dst.db_type) }}
                       </a-tag>
-                      <span class="report-conn-name">{{ selectedDst.name }}</span>
+                      <span class="report-conn-name">{{ dataExecutionRoute.dst.name }}</span>
                       <span class="report-conn-detail">
-                        <span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}
+                        <span class="conn-meta-label">地址</span>{{ dataExecutionRoute.dst.host }}:{{ dataExecutionRoute.dst.port }}
                       </span>
                       <span class="report-conn-detail">
-                        <span class="conn-meta-label">库</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}
+                        <span class="conn-meta-label">库</span>{{ targetDatabaseName(dataExecutionRoute.dst, dataExecutionRoute.dstSchema) }}
                       </span>
-                      <span v-if="dataMigrate.dstSchema" class="report-conn-detail">
-                        <span class="conn-meta-label">Schema</span>{{ dataMigrate.dstSchema }}
+                      <span v-if="dataExecutionRoute.dstSchema && dataExecutionRoute.dst.db_type !== 'mysql'" class="report-conn-detail">
+                        <span class="conn-meta-label">Schema</span>{{ dataExecutionRoute.dstSchema }}
                       </span>
                     </div>
                   </div>
@@ -366,7 +372,7 @@
       </a-tab-pane>
 
       <a-tab-pane key="incremental" title="增量迁移">
-        <IncrementalMigrationPanel />
+        <IncrementalMigrationPanel :connections="connections" />
       </a-tab-pane>
 
       <a-tab-pane key="view-migrate" title="视图迁移">
@@ -402,18 +408,19 @@
                 </a-select>
                 <div v-if="vmSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedSrc.host }}:{{ vmSelectedSrc.port }}</span>
-                  <span v-if="vmSelectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ vmSelectedSrc.database }}</span>
+                  <span v-if="vmSelectedSrc.database && !supportsDatabaseEditing(vmSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ vmSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedSrc.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="vmSelectedSrc" />
                 <a-select
-                  v-if="viewMigrate.srcDatabases.length > 0"
+                  v-if="sourceUsesSchema(vmSelectedSrc)"
                   v-model="viewMigrate.srcDatabase"
-                  placeholder="选择数据库"
+                  placeholder="选择 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                   @change="vmLoadViews"
                 >
-                  <template #prefix><span class="migration-select-label">源数据库</span></template>
+                  <template #prefix><span class="migration-select-label">源 Schema</span></template>
                   <a-option v-for="db in viewMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
               </a-card>
@@ -450,11 +457,12 @@
                 </a-select>
                 <div v-if="vmSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedDst.host }}:{{ vmSelectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(vmSelectedDst, viewMigrate.dstSchema) }}</span>
+                  <span v-if="!supportsDatabaseEditing(vmSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(vmSelectedDst, viewMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedDst.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="vmSelectedDst" />
                 <a-select
-                  v-if="viewMigrate.dstConnId"
+                  v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'"
                   v-model="viewMigrate.dstSchema"
                   :placeholder="vmSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                   :allow-clear="vmSelectedDst?.db_type === 'oracle'"
@@ -464,10 +472,10 @@
                   <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in viewMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
-                <div v-if="viewMigrate.dstConnId" class="schema-permission-tip">
+                <div v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
                   <span v-if="vmSelectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
-                  <span v-else-if="vmSelectedDst?.db_type === 'sqlserver'">目标数据库取自连接配置，Schema 默认 dbo。</span>
+                  <span v-else-if="vmSelectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。</span>
                   <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
                 </div>
               </a-card>
@@ -549,7 +557,7 @@
 
           </section>
 
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views"
+          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views" :disabled="viewMigrate.running || databaseSelectionBlocked('views')"
             @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
           <CompatibilityFunctionsPanel v-if="viewMigrate.compatibilityFunctions" :report="viewMigrate.compatibilityFunctions" />
@@ -637,18 +645,19 @@
                 </a-select>
                 <div v-if="omSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedSrc.host }}:{{ omSelectedSrc.port }}</span>
-                  <span v-if="omSelectedSrc.database" class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ omSelectedSrc.database }}</span>
+                  <span v-if="omSelectedSrc.database && !supportsDatabaseEditing(omSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ omSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedSrc.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="omSelectedSrc" />
                 <a-select
-                  v-if="objMigrate.srcDatabases.length > 0"
+                  v-if="sourceUsesSchema(omSelectedSrc)"
                   v-model="objMigrate.srcDatabase"
-                  placeholder="选择数据库"
+                  placeholder="选择 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
                   @change="omLoadTables"
                 >
-                  <template #prefix><span class="migration-select-label">源数据库</span></template>
+                  <template #prefix><span class="migration-select-label">源 Schema</span></template>
                   <a-option v-for="db in objMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
               </a-card>
@@ -685,11 +694,12 @@
                 </a-select>
                 <div v-if="omSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedDst.host }}:{{ omSelectedDst.port }}</span>
-                  <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ targetDatabaseName(omSelectedDst, objMigrate.dstSchema) }}</span>
+                  <span v-if="!supportsDatabaseEditing(omSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(omSelectedDst, objMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedDst.username }}</span>
                 </div>
+                <DatabaseNameEditor :connection="omSelectedDst" />
                 <a-select
-                  v-if="objMigrate.dstConnId"
+                  v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'"
                   v-model="objMigrate.dstSchema"
                   :placeholder="omSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                   :allow-clear="omSelectedDst?.db_type === 'oracle'"
@@ -699,7 +709,7 @@
                   <template #prefix><span class="migration-select-label">目标 Schema</span></template>
                   <a-option v-for="s in objMigrate.dstSchemas" :key="s" :value="s" :label="s" />
                 </a-select>
-                <div v-if="objMigrate.dstConnId" class="schema-permission-tip">
+                <div v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
                   <icon-info-circle style="flex-shrink:0" />
                   对象迁移仅向目标库已存在的表补建对象，请确保目标表与引用表已迁移完成。
                 </div>
@@ -800,7 +810,7 @@
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')"
             :result="pgTaskSummaries.objects ? (pgTaskSummaries.objects.preflight ?? pgTaskSummaries.objects.preview) : pgChecks.objects"
             :compact="!!pgTaskSummaries.objects" :summary-source="pgTaskSummaries.objects?.preflight ? 'report' : 'page'"
-            :excluded="pgExclusions.objects" :busy="pgBusy.objects" :disabled="objMigrate.running"
+            :excluded="pgExclusions.objects" :busy="pgBusy.objects" :disabled="objMigrate.running || databaseSelectionBlocked('objects')"
             @view-report="showPGTaskResult('objects', 'report')" @view-logs="showPGTaskResult('objects', 'logs')"
             @check="runPGCheck('objects')" @exclude="excludePGObject('objects', $event)" @restore="restorePGObject('objects', $event)" />
 
@@ -890,7 +900,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
@@ -901,6 +911,9 @@ import MigrationReportPanel from './MigrationReportPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
+import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
+import { createConnectionDatabaseEditors, CONNECTION_DATABASE_EDITORS_KEY } from '@/composables/connectionDatabaseEditors'
+import { supportsDatabaseEditing } from '@/utils/connectionDatabase'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
 import { downloadRoutines } from '@/api/schema'
 import {
@@ -967,6 +980,13 @@ const dataMigrate = reactive({
 const tableFilterError = ref('')
 const dataMigrationConfirmVisible = ref(false)
 const dataMigrationStarting = ref(false)
+const dataExecutionRoute = ref<{
+  src: Connection
+  dst: Connection
+  srcDatabase: string
+  srcSchema: string
+  dstSchema: string
+} | null>(null)
 const dataMigrationContentLabel = computed(() => ({
   both: '表结构 + 数据行',
   schema_only: '仅创建表结构',
@@ -1028,7 +1048,7 @@ const canExportRoutines = computed(() =>
 )
 const exportingRoutines = ref(false)
 const handleExportRoutines = async () => {
-  if (!dataMigrate.srcConnId || !dataMigrate.srcDatabase) return
+  if (!dataMigrate.srcConnId || !dataMigrate.srcDatabase || databaseSelectionBlocked('data')) return
   exportingRoutines.value = true
   try {
     await downloadRoutines(dataMigrate.srcConnId, dataMigrate.srcDatabase)
@@ -1051,6 +1071,10 @@ const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )
 
+function sourceUsesSchema(connection?: Connection): boolean {
+  return !!connection && connection.db_type !== 'mysql' && connection.db_type !== 'sqlserver'
+}
+
 watch(() => dataMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
   applyTargetMigrationDefaults(dataMigrate, dst?.db_type)
@@ -1061,6 +1085,7 @@ const canStartMigration = computed(() =>
   dataMigrate.srcConnId !== undefined &&
   dataMigrate.dstConnId !== undefined &&
   dataMigrate.srcDatabase !== '' &&
+  !databaseSelectionBlocked('data') &&
   !dataMigrate.unsupportedMsg &&
   !dataMigrate.running &&
   !dataMigrationConfirmVisible.value &&
@@ -1084,31 +1109,11 @@ function checkPairSupport() {
 }
 
 async function loadSrcDatabases(connId: number) {
-  dataMigrate.srcDatabase = ''
-  dataMigrate.srcDatabases = []
-  try {
-    const res = await listConnectionDatabases(connId)
-    dataMigrate.srcDatabases = res.data ?? []
-  } catch (e: any) {
-    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
-    if (e?.response?.status !== 400) {
-      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-    }
-  }
+  await loadSourceSchemas('data', connId)
 }
 
 async function loadDstSchemas(connId: number) {
-  dataMigrate.dstSchema = ''
-  dataMigrate.dstSchemas = []
-  const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
-  try {
-    const res = await listConnectionSchemas(connId)
-    dataMigrate.dstSchemas = res.data ?? []
-    if (dst.db_type === 'sqlserver' && dataMigrate.dstSchemas.includes('dbo')) dataMigrate.dstSchema = 'dbo'
-  } catch (e: any) {
-    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-  }
+  await loadTargetSchemas('data', connId)
 }
 
 function getLogClass(line: string): string {
@@ -1129,7 +1134,7 @@ function requestDataMigration() {
 }
 
 async function confirmDataMigration() {
-  if (!dataMigrationConfirmVisible.value || dataMigrationStarting.value || dataMigrate.running) return
+  if (!dataMigrationConfirmVisible.value || dataMigrationStarting.value || dataMigrate.running || databaseSelectionBlocked('data')) return
   dataMigrationConfirmVisible.value = false
   dataMigrationStarting.value = true
   try {
@@ -1140,6 +1145,7 @@ async function confirmDataMigration() {
 }
 
 async function startDataMigration() {
+  if (databaseSelectionBlocked('data')) return
   if (!validateTableFilter()) return
   if (dataMigrate.dstConnId && !dataMigrate.dstSchema && selectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
@@ -1160,6 +1166,14 @@ async function startDataMigration() {
       }
     }
     const submitted = preparePGSubmission('data')
+    if (selectedSrc.value && selectedDst.value) {
+      dataExecutionRoute.value = {
+        src: { ...selectedSrc.value }, dst: { ...selectedDst.value },
+        srcDatabase: sourceUsesSchema(selectedSrc.value) ? selectedSrc.value.database : dataMigrate.srcDatabase,
+        srcSchema: sourceUsesSchema(selectedSrc.value) ? dataMigrate.srcDatabase : '',
+        dstSchema: dataMigrate.dstSchema,
+      }
+    }
     const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
     dataMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
@@ -1212,6 +1226,7 @@ function resetDataMigration() {
   dataMigrate.finished = false
   dataMigrate.logs = []
   dataMigrate.currentJobId = ''
+  dataExecutionRoute.value = null
   clearPGCheck('data', true)
 }
 
@@ -1259,7 +1274,10 @@ onMounted(async () => {
     checkPairSupport()
     // 等源库数据库列表加载完成后，再按工单携带的库名预选（目标 schema 不预选）。
     await loadSrcDatabases(srcQ)
-    if (srcDbQ) {
+    if (srcDbQ && selectedSrc.value && !sourceUsesSchema(selectedSrc.value)) {
+      // A ticket's alternate database is a draft until explicitly validated and saved.
+      databaseEditors.editorFor(selectedSrc.value).setDraft(srcDbQ)
+    } else if (srcDbQ) {
       // 精确匹配 → 忽略大小写匹配 → 兜底直接塞入并选中，确保工单库名一定带入。
       const exact = dataMigrate.srcDatabases.find((db) => db === srcDbQ)
       const ci = exact ?? dataMigrate.srcDatabases.find((db) => db.toLowerCase() === srcDbQ.toLowerCase())
@@ -1324,6 +1342,7 @@ const vmCanMigrate = computed(() =>
   viewMigrate.dstConnId !== undefined &&
   viewMigrate.selected.length > 0 &&
   !viewMigrate.unsupportedMsg &&
+  !databaseSelectionBlocked('views') &&
   !viewMigrate.running
 )
 
@@ -1350,41 +1369,18 @@ function vmCheckPairSupport() {
 }
 
 async function vmLoadSrcDatabases(connId: number) {
-  viewMigrate.srcDatabase = ''
-  viewMigrate.srcDatabases = []
-  viewMigrate.views = []
-  viewMigrate.selected = []
-  try {
-    const res = await listConnectionDatabases(connId)
-    viewMigrate.srcDatabases = res.data ?? []
-  } catch (e: any) {
-    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
-    if (e?.response?.status !== 400) {
-      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-    }
-  }
-  // 无可选库列表时（如 oracle），直接按连接默认库加载视图
-  if (viewMigrate.srcDatabases.length === 0) await vmLoadViews()
+  if (await loadSourceSchemas('views', connId) && viewMigrate.srcDatabase) await vmLoadViews()
 }
 
 async function vmLoadDstSchemas(connId: number) {
-  viewMigrate.dstSchema = ''
-  viewMigrate.dstSchemas = []
-  const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
-  try {
-    const res = await listConnectionSchemas(connId)
-    viewMigrate.dstSchemas = res.data ?? []
-    if (dst.db_type === 'sqlserver' && viewMigrate.dstSchemas.includes('dbo')) viewMigrate.dstSchema = 'dbo'
-  } catch (e: any) {
-    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-  }
+  await loadTargetSchemas('views', connId)
 }
 
 let vmLoadViewsRequest = 0
 async function vmLoadViews() {
   const request = ++vmLoadViewsRequest
-  if (!viewMigrate.srcConnId) return
+  const contextKey = sourceObjectsContextKey('views')
+  if (!viewMigrate.srcConnId || !viewMigrate.srcDatabase || databaseSelectionBlocked('views')) return
   viewMigrate.loadingViews = true
   viewMigrate.views = []
   viewMigrate.selected = []
@@ -1392,10 +1388,10 @@ async function vmLoadViews() {
   viewMigrate.compatibilityFunctions = undefined
   try {
     const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined, vmSelectedDst.value?.db_type)
-    if (request !== vmLoadViewsRequest) return
+    if (request !== vmLoadViewsRequest || contextKey !== sourceObjectsContextKey('views')) return
     viewMigrate.views = res.data ?? []
   } catch (e: any) {
-    if (request !== vmLoadViewsRequest) return
+    if (request !== vmLoadViewsRequest || contextKey !== sourceObjectsContextKey('views')) return
     Message.error(`加载视图失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
   } finally {
     if (request === vmLoadViewsRequest) viewMigrate.loadingViews = false
@@ -1413,6 +1409,7 @@ function vmClearSelection() {
 }
 
 async function handleMigrateViews() {
+  if (databaseSelectionBlocked('views')) return
   if (viewMigrate.dstConnId && !viewMigrate.dstSchema && vmSelectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
@@ -1506,6 +1503,7 @@ const omCanMigrate = computed(() =>
   omFinalTables.value.length > 0 &&
   objMigrate.objects.length > 0 &&
   !objMigrate.unsupportedMsg &&
+  !databaseSelectionBlocked('objects') &&
   !objMigrate.running
 )
 
@@ -1528,49 +1526,27 @@ function omCheckPairSupport() {
 }
 
 async function omLoadSrcDatabases(connId: number) {
-  objMigrate.srcDatabase = ''
-  objMigrate.srcDatabases = []
-  objMigrate.tables = []
-  objMigrate.selected = []
-  try {
-    const res = await listConnectionDatabases(connId)
-    objMigrate.srcDatabases = res.data ?? []
-  } catch (e: any) {
-    // 400 表示该类型不支持列库,静默忽略;其他错误(如密码错误)提示用户
-    if (e?.response?.status !== 400) {
-      Message.error(`获取源数据库列表失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-    }
-  }
-  if (objMigrate.srcDatabases.length === 0) await omLoadTables()
+  if (await loadSourceSchemas('objects', connId) && objMigrate.srcDatabase) await omLoadTables()
 }
 
 async function omLoadDstSchemas(connId: number) {
-  objMigrate.dstSchema = ''
-  objMigrate.dstSchemas = []
-  const dst = connections.value.find((c) => c.id === connId)
-  if (!dst || (dst.db_type !== 'postgres' && dst.db_type !== 'gaussdb' && dst.db_type !== 'seabox' && dst.db_type !== 'dameng' && dst.db_type !== 'highgo' && dst.db_type !== 'vastbase' && dst.db_type !== 'gbase' && dst.db_type !== 'kingbase' && dst.db_type !== 'mysql' && dst.db_type !== 'oscar' && dst.db_type !== 'oracle' && dst.db_type !== 'sqlserver')) return
-  try {
-    const res = await listConnectionSchemas(connId)
-    objMigrate.dstSchemas = res.data ?? []
-    if (dst.db_type === 'sqlserver' && objMigrate.dstSchemas.includes('dbo')) objMigrate.dstSchema = 'dbo'
-  } catch (e: any) {
-    Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败,请检查连接配置'}`)
-  }
+  await loadTargetSchemas('objects', connId)
 }
 
 let omLoadTablesRequest = 0
 async function omLoadTables() {
   const request = ++omLoadTablesRequest
-  if (!objMigrate.srcConnId) return
+  const contextKey = sourceObjectsContextKey('objects')
+  if (!objMigrate.srcConnId || !objMigrate.srcDatabase || databaseSelectionBlocked('objects')) return
   objMigrate.loadingTables = true
   objMigrate.tables = []
   objMigrate.selected = []
   try {
     const res = await listConnectionTables(objMigrate.srcConnId, objMigrate.srcDatabase || undefined, omSelectedDst.value?.db_type)
-    if (request !== omLoadTablesRequest) return
+    if (request !== omLoadTablesRequest || contextKey !== sourceObjectsContextKey('objects')) return
     objMigrate.tables = res.data ?? []
   } catch (e: any) {
-    if (request !== omLoadTablesRequest) return
+    if (request !== omLoadTablesRequest || contextKey !== sourceObjectsContextKey('objects')) return
     Message.error(`加载表失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
   } finally {
     if (request === omLoadTablesRequest) objMigrate.loadingTables = false
@@ -1588,6 +1564,7 @@ function omClearSelection() {
 }
 
 async function startObjectMigration() {
+  if (databaseSelectionBlocked('objects')) return
   if (objMigrate.dstConnId && !objMigrate.dstSchema && omSelectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
@@ -1683,6 +1660,126 @@ function resetObjectMigration() {
 
 function copyObjLogs() {
   copyText(objMigrate.logs.join('\n')).catch(() => Message.error('复制失败'))
+}
+
+const databaseEditors = createConnectionDatabaseEditors(connections, onConnectionDatabaseSaved, (id) =>
+  [dataMigrate, viewMigrate, objMigrate].some(state => state.running && (state.srcConnId === id || state.dstConnId === id)) ||
+  (exportingRoutines.value && dataMigrate.srcConnId === id) ||
+  (dataMigrationStarting.value && (dataMigrate.srcConnId === id || dataMigrate.dstConnId === id))
+)
+provide(CONNECTION_DATABASE_EDITORS_KEY, databaseEditors)
+onUnmounted(() => databaseEditors.dispose())
+
+function migrationState(kind: PGCheckKind) {
+  return kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
+}
+function databaseSelectionBlocked(kind: PGCheckKind): boolean {
+  const state = migrationState(kind)
+  return databaseEditors.isBlocked(state.srcConnId) || databaseEditors.isBlocked(state.dstConnId)
+}
+function databaseContextKey(kind: PGCheckKind): string {
+  const state = migrationState(kind)
+  return JSON.stringify([state.srcConnId, state.dstConnId, state.srcDatabase, state.dstSchema,
+    connections.value.find(c => c.id === state.srcConnId)?.database,
+    connections.value.find(c => c.id === state.dstConnId)?.database])
+}
+function sourceObjectsContextKey(kind: PGCheckKind): string {
+  const state = migrationState(kind)
+  const src = connections.value.find(c => c.id === state.srcConnId)
+  const dst = connections.value.find(c => c.id === state.dstConnId)
+  return JSON.stringify([state.srcConnId, src?.database, state.srcDatabase, src?.db_type === 'sqlserver' ? dst?.db_type : undefined])
+}
+const metadataRequests = new Map<string, number>()
+function resetSourceObjects(kind: PGCheckKind) {
+  if (kind === 'views') {
+    ++vmLoadViewsRequest
+    viewMigrate.loadingViews = false
+    viewMigrate.views = []
+    viewMigrate.selected = []
+    viewMigrate.results = []
+    viewMigrate.compatibilityFunctions = undefined
+  } else if (kind === 'objects') {
+    ++omLoadTablesRequest
+    objMigrate.loadingTables = false
+    objMigrate.tables = []
+    objMigrate.selected = []
+    objMigrate.manualTables = ''
+  } else {
+    dataMigrate.filter = ''
+    dataMigrate.mode = 'all'
+    tableFilterError.value = ''
+    dataMigrationConfirmVisible.value = false
+  }
+  clearPGCheck(kind, true)
+}
+async function loadSourceSchemas(kind: PGCheckKind, connId: number): Promise<boolean> {
+  const state = migrationState(kind)
+  const key = `${kind}:source`
+  const request = (metadataRequests.get(key) ?? 0) + 1
+  metadataRequests.set(key, request)
+  state.srcDatabase = ''
+  state.srcDatabases = []
+  resetSourceObjects(kind)
+  const conn = connections.value.find(c => c.id === connId)
+  if (!conn) return false
+  if (!sourceUsesSchema(conn)) {
+    state.srcDatabase = conn.database
+    return true
+  }
+  const current = () => metadataRequests.get(key) === request && state.srcConnId === connId &&
+    connections.value.find(c => c.id === connId)?.database === conn.database
+  try {
+    const res = await listConnectionDatabases(connId)
+    if (!current()) return false
+    state.srcDatabases = res.data ?? []
+    return true
+  } catch (e: any) {
+    if (current()) Message.error(`获取源 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败，请检查连接配置'}`)
+    return false
+  }
+}
+async function loadTargetSchemas(kind: PGCheckKind, connId: number) {
+  const state = migrationState(kind)
+  const key = `${kind}:target`
+  const request = (metadataRequests.get(key) ?? 0) + 1
+  metadataRequests.set(key, request)
+  state.dstSchema = ''
+  state.dstSchemas = []
+  clearPGCheck(kind, true)
+  const conn = connections.value.find(c => c.id === connId)
+  if (!conn) return
+  if (conn.db_type === 'mysql') {
+    state.dstSchema = conn.database
+    return
+  }
+  const current = () => metadataRequests.get(key) === request && state.dstConnId === connId &&
+    connections.value.find(c => c.id === connId)?.database === conn.database
+  try {
+    const res = await listConnectionSchemas(connId)
+    if (!current()) return
+    state.dstSchemas = res.data ?? []
+    if (conn.db_type === 'sqlserver' && state.dstSchemas.includes('dbo')) state.dstSchema = 'dbo'
+  } catch (e: any) {
+    if (current()) Message.error(`获取目标 Schema 失败: ${e?.response?.data?.error ?? e?.message ?? '连接失败，请检查连接配置'}`)
+  }
+}
+function onConnectionDatabaseSaved(connection: Connection) {
+  for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
+    const state = migrationState(kind)
+    if (state.srcConnId !== connection.id && state.dstConnId !== connection.id) continue
+    resetSourceObjects(kind)
+    if (state.srcConnId === connection.id) {
+      if (kind === 'data') void loadSrcDatabases(connection.id)
+      else if (kind === 'views') void vmLoadSrcDatabases(connection.id)
+      else void omLoadSrcDatabases(connection.id)
+    }
+    if (state.dstConnId === connection.id) void loadTargetSchemas(kind, connection.id)
+    // A destination-only change also invalidates source object selections.
+    if (state.srcConnId !== connection.id) {
+      if (kind === 'views') void vmLoadViews()
+      if (kind === 'objects') void omLoadTables()
+    }
+  }
 }
 
 
@@ -1798,6 +1895,7 @@ async function ensurePGCheck(kind: PGCheckKind) {
   // Flush configuration watchers before considering a previous successful check.
   // The backend still builds and validates a fresh plan before executing migration.
   await nextTick()
+  if (databaseSelectionBlocked(kind)) return
   if (pgChecks[kind]?.ready && pgCheckRequests.get(kind) === JSON.stringify(pgRequest(kind))) return pgChecks[kind]
   return runPGCheck(kind)
 }
@@ -1812,12 +1910,14 @@ function clearPGCheck(kind: PGCheckKind, clearExclusions = false) {
 }
 async function runPGCheck(kind: PGCheckKind) {
   clearPGCheck(kind)
+  if (databaseSelectionBlocked(kind)) return
   const request = pgRequest(kind)
   const requestKey = JSON.stringify(request)
+  const contextKey = databaseContextKey(kind)
   const controller = new AbortController(); pgAbort.set(kind, controller); pgBusy[kind] = true
   try {
     const result = await preflightDataMigration(request, controller.signal)
-    if (controller.signal.aborted || requestKey !== JSON.stringify(pgRequest(kind))) return
+    if (controller.signal.aborted || databaseSelectionBlocked(kind) || contextKey !== databaseContextKey(kind) || requestKey !== JSON.stringify(pgRequest(kind))) return
     pgChecks[kind] = result.data
     pgCheckRequests.set(kind, requestKey)
     return result.data
@@ -1836,6 +1936,10 @@ function restorePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
   pgExclusions[kind] = pgExclusions[kind].filter(o => objectKey(o) !== objectKey(object)); pgChecks[kind] = null
 }
 for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
+  watch([() => databaseContextKey(kind), () => databaseSelectionBlocked(kind)], () => {
+    clearPGCheck(kind, true)
+    if (kind === 'data') dataMigrationConfirmVisible.value = false
+  }, { flush: 'sync' })
   watch(() => JSON.stringify(pgRequest(kind)), () => {
     clearPGCheck(kind)
   })

@@ -322,6 +322,10 @@ func UpdateTicketInfo(c *gin.Context) {
 // upsertTicketConn 按「owner + 连接名」复用：命中则更新全部连接字段并返回其 ID，
 // 未命中则新建。连接名由调用方按工单确定性生成，避免同一工单多次发起堆积重复连接。
 func upsertTicketConn(ownerID uint, name, dbType, host string, port int, database, username, password string) (uint, error) {
+	// Ticket connection reuse is another saved-connection write entrypoint.
+	// Keep it ordered with CDC's final snapshot check and task registration.
+	incrementalStartMu.Lock()
+	defer incrementalStartMu.Unlock()
 	fields := map[string]any{
 		"db_type":  dbType,
 		"host":     host,

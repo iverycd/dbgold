@@ -41,6 +41,16 @@ export const testConnection = (id: number) =>
 export const listConnectionDatabases = (id: number) =>
   api.get<string[]>(`/connections/${id}/databases`)
 
+// Catalogs are actual databases; /databases retains its source Schema semantics.
+export const listConnectionCatalogs = (id: number) =>
+  api.get<string[]>(`/connections/${id}/catalogs`)
+
+export const updateConnectionDatabase = (id: number, database: string, expectedDatabase: string) =>
+  api.patch<Connection>(`/connections/${id}/database`, {
+    database,
+    expected_database: expectedDatabase,
+  })
+
 export const listConnectionSchemas = (id: number) =>
   api.get<string[]>(`/connections/${id}/schemas`)
 

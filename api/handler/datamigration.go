@@ -634,12 +634,10 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	dsn := buildDSN(conn)
 	if srcDatabase != "" {
 		switch conn.DBType {
-		case "mysql":
-			dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4",
-				conn.Username, conn.Password, conn.Host, conn.Port, srcDatabase)
-		case "sqlserver":
-			dsn = fmt.Sprintf("server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
-				conn.Host, conn.Port, srcDatabase, conn.Username, conn.Password)
+		case "mysql", "sqlserver":
+			selected := *conn
+			selected.Database = srcDatabase
+			dsn = buildDSN(&selected)
 		}
 	}
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "sqlserver" {

@@ -1,3 +1,4 @@
+import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -18,9 +19,11 @@ function page(preflight, starts, errors, options = {}) {
   return load(`${descriptor.scriptSetup.content}
     export { connections, dataMigrate, viewMigrate, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
     switch (id) {
-      case 'vue': return { ...Vue, onMounted() {}, onUnmounted() {} }
+      case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
       case '@arco-design/web-vue': return { Message: { error: message => errors ? errors.push(message) : assert.fail(message), success() {}, warning: message => options.warnings?.push(message) }, Modal: {} }
+      case '@/utils/connectionDatabase': return connectionDatabaseUtils
+      case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return helpers
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}

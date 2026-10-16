@@ -20,7 +20,6 @@
               placeholder="选择源连接"
               allow-search
               style="width: 100%"
-              @change="loadDatabases"
             >
               <a-option v-for="c in mysqlConnections" :key="c.id" :value="c.id">
                 {{ c.name }} · {{ c.host }}:{{ c.port }}
@@ -32,11 +31,7 @@
             </div>
           </div>
         </a-form-item>
-        <a-form-item label="源数据库">
-          <a-select v-model="form.src_database" allow-search>
-            <a-option v-for="d in databases" :key="d" :value="d">{{ d }}</a-option>
-          </a-select>
-        </a-form-item>
+        <DatabaseNameEditor :connection="selectedSrc" />
       </a-card></div>
       <div class="migration-connection-arrow"><icon-arrow-right /></div>
       <div class="migration-connection-side"><a-card class="conn-card" :body-style="{ padding: '24px' }">
@@ -56,7 +51,6 @@
               placeholder="选择目标连接"
               allow-search
               style="width: 100%"
-              @change="loadSchemas"
             >
               <a-option v-for="c in targetConnections" :key="c.id" :value="c.id">
                 {{ c.name }} · {{ c.host }}:{{ c.port }}
@@ -64,11 +58,11 @@
             </a-select>
             <div v-if="selectedDst" class="conn-meta">
               <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
-              <span class="conn-meta-item"><span class="conn-meta-label">数据库</span>{{ selectedDst.database }}</span>
               <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
             </div>
           </div>
         </a-form-item>
+        <DatabaseNameEditor :connection="selectedDst" />
         <a-form-item label="目标 Schema">
           <a-select v-model="form.target_schema" allow-search>
             <a-option v-for="s in schemas" :key="s" :value="s">{{ s }}</a-option>
@@ -154,9 +148,9 @@
     <a-alert type="warning" style="margin-bottom: 16px">
       “全量快照后持续同步”只在任务首次初始化时删除并重建所选目标表；全量完成后会立即把 checkpoint 写入目标库，恢复任务只会从 checkpoint 继续，不会再次删表。全量未完成的中断任务禁止直接恢复。
     </a-alert>
-    <MigrationActionBar :status="checking ? '正在检查同步条件' : starting ? '正在创建增量任务' : preflightResult ? (preflightResult.ok ? '预检通过，可以启动增量任务' : '预检未通过，请处理问题') : '请先完成配置并运行预检'" :busy="checking || starting">
-      <a-button :loading="checking" :disabled="!ready" @click="preflight">运行预检</a-button>
-      <a-button type="primary" :loading="starting" :disabled="!preflightResult?.ok" @click="start">启动增量任务</a-button>
+    <MigrationActionBar :status="databaseBlocked ? '数据库名称尚未保存，请先验证并保存' : checking ? '正在检查同步条件' : starting ? '正在创建增量任务' : preflightResult ? (preflightResult.ok ? '预检通过，可以启动增量任务' : '预检未通过，请处理问题') : '请先完成配置并运行预检'" :busy="checking || starting">
+      <a-button :loading="checking" :disabled="!ready || checking || starting" @click="preflight">运行预检</a-button>
+      <a-button type="primary" :loading="starting" :disabled="!ready || checking || starting || !preflightResult?.ok" @click="start">启动增量任务</a-button>
     </MigrationActionBar>
 
     <a-modal v-model:visible="missingTableModalVisible" title="目标表不存在" :mask-closable="false" :footer="false">
@@ -171,8 +165,8 @@
       </a-checkbox-group>
       <div class="missing-table-actions">
         <a-button @click="missingTableModalVisible = false">暂不处理</a-button>
-        <a-button :loading="checking" @click="retryAfterRepair">我已修复，重新预检</a-button>
-        <a-button type="primary" status="danger" :loading="checking" :disabled="selectedMissingTables.length === 0" @click="excludeMissingAndRetry">
+        <a-button :loading="checking" :disabled="!ready || checking || starting" @click="retryAfterRepair">我已修复，重新预检</a-button>
+        <a-button type="primary" status="danger" :loading="checking" :disabled="!ready || checking || starting || selectedMissingTables.length === 0" @click="excludeMissingAndRetry">
           排除所选并重新预检
         </a-button>
       </div>
@@ -182,9 +176,11 @@
 
 <script setup lang="ts">
 import MigrationActionBar from '@/components/MigrationActionBar.vue'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
+import { useConnectionDatabaseEditors } from '@/composables/connectionDatabaseEditors'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { listConnections, listConnectionDatabases, listConnectionSchemas, type Connection } from '@/api/connections'
+import { listConnectionSchemas, type Connection } from '@/api/connections'
 import {
   preflightIncremental,
   startIncremental,
@@ -197,8 +193,9 @@ type IncrementalForm = Omit<IncrementalRequest, 'src_conn_id' | 'dst_conn_id'> &
   dst_conn_id?: number
 }
 
-const connections = ref<Connection[]>([])
-const databases = ref<string[]>([])
+const props = defineProps<{ connections: Connection[] }>()
+const connections = computed(() => props.connections)
+const databaseEditors = useConnectionDatabaseEditors()
 const schemas = ref<string[]>([])
 const srcEnvFilter = ref<string | undefined>(undefined)
 const dstEnvFilter = ref<string | undefined>(undefined)
@@ -237,7 +234,8 @@ const targetConnections = computed(() => connections.value.filter(c =>
 ))
 const selectedSrc = computed(() => connections.value.find(c => c.id === form.src_conn_id))
 const selectedDst = computed(() => connections.value.find(c => c.id === form.dst_conn_id))
-const ready = computed(() => !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
+const databaseBlocked = computed(() => databaseEditors.isBlocked(form.src_conn_id) || databaseEditors.isBlocked(form.dst_conn_id))
+const ready = computed(() => !databaseBlocked.value && !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
 const retentionText = computed(() => {
   const seconds = preflightResult.value?.binlog_retention_seconds
   if (seconds == null) return '未知'
@@ -258,7 +256,13 @@ const preflightFullRowTables = computed(() => (preflightResult.value?.tables || 
 const missingTableModalVisible = ref(false)
 const selectedMissingTables = ref<string[]>([])
 
+let preflightVersion = 0
+let schemaVersion = 0
+let disposed = false
+
 function resetPreflightState() {
+  preflightVersion++
+  checking.value = false
   preflightResult.value = null
   missingTableModalVisible.value = false
   selectedMissingTables.value = []
@@ -271,16 +275,52 @@ watch(() => [
 ], () => {
   form.excluded_tables = []
   resetPreflightState()
-})
-watch(() => form.excluded_tables, resetPreflightState, { deep: true })
-
-async function loadDatabases() {
-  form.src_database = ''
-  if (form.src_conn_id) databases.value = (await listConnectionDatabases(form.src_conn_id)).data || []
+}, { flush: 'sync' })
+watch(() => form.excluded_tables, resetPreflightState, { deep: true, flush: 'sync' })
+watch(databaseBlocked, blocked => {
+  if (blocked) {
+    form.excluded_tables = []
+    resetPreflightState()
+  }
+}, { flush: 'sync' })
+function connectionIdentity(connection?: Connection): string {
+  return JSON.stringify(connection && [
+    connection.id, connection.db_type, connection.host, connection.port,
+    connection.username, connection.database,
+  ]) || ''
 }
+watch([
+  () => connectionIdentity(selectedSrc.value),
+  () => connectionIdentity(selectedDst.value),
+], () => {
+  form.table_filter = ''
+  form.migrate_mode = 'all'
+}, { flush: 'sync' })
+watch(selectedSrc, connection => {
+  form.src_database = connection?.database || ''
+  form.excluded_tables = []
+  resetPreflightState()
+}, { immediate: true, deep: true, flush: 'sync' })
+watch(selectedDst, () => {
+  form.excluded_tables = []
+  resetPreflightState()
+  void loadSchemas()
+}, { immediate: true, deep: true, flush: 'sync' })
+
 async function loadSchemas() {
+  const version = ++schemaVersion
+  const connection = selectedDst.value
   form.target_schema = ''
-  if (form.dst_conn_id) schemas.value = (await listConnectionSchemas(form.dst_conn_id)).data || []
+  schemas.value = []
+  if (!connection) return
+  try {
+    const response = await listConnectionSchemas(connection.id)
+    if (disposed || version !== schemaVersion) return
+    schemas.value = response.data || []
+  } catch (e: any) {
+    if (disposed || version !== schemaVersion) return
+    Message.error(e?.response?.data?.error || '加载目标 Schema 失败')
+  }
 }
 function buildRequest(): IncrementalRequest | null {
   if (!form.src_conn_id || !form.dst_conn_id) return null
@@ -291,11 +331,16 @@ function buildRequest(): IncrementalRequest | null {
   }
 }
 async function preflight() {
+  if (!ready.value || checking.value || starting.value) return
   const request = buildRequest()
   if (!request) return
+  const version = ++preflightVersion
+  const release = databaseEditors.acquireLock([request.src_conn_id, request.dst_conn_id])
   checking.value = true
   try {
-    preflightResult.value = (await preflightIncremental(request)).data
+    const response = await preflightIncremental(request)
+    if (disposed || version !== preflightVersion || databaseBlocked.value) return
+    preflightResult.value = response.data
     if (preflightResult.value.missing_target_tables?.length) {
       selectedMissingTables.value = []
       missingTableModalVisible.value = true
@@ -305,33 +350,43 @@ async function preflight() {
     if (preflightResult.value.ok) Message.success('预检通过')
     else Message.error('预检未通过')
   } catch (e: any) {
+    if (disposed || version !== preflightVersion || databaseBlocked.value) return
     preflightResult.value = e?.response?.data?.preflight || null
     Message.error(e?.response?.data?.error || '预检失败')
   } finally {
-    checking.value = false
+    release()
+    if (version === preflightVersion) checking.value = false
   }
 }
 async function retryAfterRepair() {
+  if (!ready.value || checking.value || starting.value) return
   form.excluded_tables = []
   missingTableModalVisible.value = false
   await preflight()
 }
 async function excludeMissingAndRetry() {
+  if (!ready.value || checking.value || starting.value) return
   form.excluded_tables = Array.from(new Set([...(form.excluded_tables || []), ...selectedMissingTables.value]))
   missingTableModalVisible.value = false
   await preflight()
 }
 async function start() {
+  if (!ready.value || checking.value || starting.value || !preflightResult.value?.ok) return
   const request = buildRequest()
   if (!request) return
+  const version = preflightVersion
+  const release = databaseEditors.acquireLock([request.src_conn_id, request.dst_conn_id])
   starting.value = true
   try {
     await startIncremental(request)
-    preflightResult.value = null
+    if (disposed) return
+    if (version === preflightVersion) resetPreflightState()
     Message.success('增量任务已启动，请到任务中心的增量迁移中查看及操作')
   } catch (e: any) {
+    if (disposed) return
     const errorMessage = e?.response?.data?.error || '启动失败'
     if (e?.response?.status === 409) {
+      if (version === preflightVersion) resetPreflightState()
       Modal.error({
         title: '无法启动增量任务',
         content: errorMessage,
@@ -343,16 +398,15 @@ async function start() {
       Message.error(errorMessage)
     }
   } finally {
+    release()
     starting.value = false
   }
 }
 
-onMounted(async () => {
-  try {
-    connections.value = (await listConnections()).data
-  } catch {
-    Message.error('加载连接列表失败')
-  }
+onUnmounted(() => {
+  disposed = true
+  schemaVersion++
+  resetPreflightState()
 })
 </script>
 
