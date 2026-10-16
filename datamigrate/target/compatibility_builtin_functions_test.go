@@ -87,7 +87,8 @@ func TestBuiltinPinyinAssetKnownReadings(t *testing.T) {
 }
 
 func TestBuiltinFunctionDDLContracts(t *testing.T) {
-	for _, name := range []string{"auto_increase_itemid", "count_rows", "fun_getpy"} {
+	for _, spec := range builtinCompatibilitySpecs {
+		name := spec.name
 		t.Run(name, func(t *testing.T) {
 			ddl := builtinFunctionDDL("app", "pg_catalog", name)
 			require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "app"."`+name+`"(`))
@@ -127,7 +128,8 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 func TestBuiltinFunctionDDLQuotesCapturedSchemaAndCatalog(t *testing.T) {
 	const schema = `target'"\$$$dbgold$`
 	const catalog = `native'"\$$$dbgold_1$`
-	for _, name := range []string{"auto_increase_itemid", "count_rows", "fun_getpy"} {
+	for _, spec := range builtinCompatibilitySpecs {
+		name := spec.name
 		ddl := builtinFunctionDDL(schema, catalog, name)
 		require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "target'""\$$$dbgold$"."`+name+`"(`))
 		require.Contains(t, ddl, `"native'""\$$$dbgold_1$".`)
@@ -137,4 +139,32 @@ func TestBuiltinFunctionDDLQuotesCapturedSchemaAndCatalog(t *testing.T) {
 	require.Contains(t, auto, `n.nspname=$dbgold_1$target'"\$$$dbgold$$dbgold_1$`)
 	// The outer quote must avoid both delimiters present in nested literals.
 	require.Contains(t, auto, "SECURITY INVOKER AS $dbgold_2$DECLARE")
+}
+
+func TestBusinessCompatibilitySignatures(t *testing.T) {
+	expected := []struct {
+		name       string
+		inputs     []string
+		returnType string
+		volatility string
+	}{
+		{"convertguid", []string{"character varying", "character varying"}, "varchar", "IMMUTABLE"},
+		{"convertguidlist", []string{"character varying", "character varying"}, "varchar", "VOLATILE"},
+		{"getcategoryinfopubcount", []string{"character varying", "integer", "timestamp without time zone", "timestamp without time zone"}, "integer", "VOLATILE"},
+		{"getscore", []string{"character varying"}, "integer", "VOLATILE"},
+		{"getcategoryscore", []string{"character varying", "date", "date"}, "integer", "VOLATILE"},
+		{"getchildoulist", []string{"character varying"}, "text", "VOLATILE"},
+	}
+	require.Len(t, builtinCompatibilitySpecs, 3+len(expected))
+	for i, sample := range expected {
+		t.Run(sample.name, func(t *testing.T) {
+			spec := builtinCompatibilitySpecs[i+3]
+			require.Equal(t, sample.name, spec.name)
+			require.Equal(t, sample.inputs, spec.inputs)
+			require.Zero(t, spec.minDefaults)
+			require.True(t, strings.HasPrefix(spec.signature, sample.name+"("))
+			ddl := builtinFunctionDDL("business", "pg_catalog", sample.name)
+			require.Contains(t, ddl, "RETURNS "+sample.returnType+" LANGUAGE plpgsql "+sample.volatility+" SECURITY INVOKER")
+		})
+	}
 }

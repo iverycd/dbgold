@@ -31,7 +31,7 @@ func builtinFunctionDDL(schema, catalog, name string) string {
 		body := strings.NewReplacer("{{CAT}}", cat, "{{MAPPING}}", builtinPinyinInitials, "{{LICENSE}}", builtinUnicodeLicense).Replace(pinyinInitialsBody)
 		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "(p_name varchar) RETURNS varchar LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
 	default:
-		return ""
+		return businessFunctionDDL(schema, catalog, name)
 	}
 }
 

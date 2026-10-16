@@ -29,11 +29,17 @@ func (w *compatibilityTestWriter) DBType() string {
 }
 func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(context.Context) (*target.CompatibilityFunctionsReport, error) {
 	w.calls = append(w.calls, "prepare")
-	r := &target.CompatibilityFunctionsReport{Total: 4, Success: 4, Created: 4, Items: []target.CompatibilityFunctionResult{
+	r := &target.CompatibilityFunctionsReport{Total: 10, Success: 10, Created: 10, Items: []target.CompatibilityFunctionResult{
 		{Name: "get_uuid", Signature: "get_uuid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"},
 		{Name: "auto_increase_itemid", Signature: "auto_increase_itemid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION auto_increase_itemid"},
 		{Name: "count_rows", Signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION count_rows"},
 		{Name: "fun_getpy", Signature: "fun_getpy(p_name varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION fun_getpy"},
+		{Name: "convertguid", Signature: "convertguid(p_newguid varchar, p_instr varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION convertguid"},
+		{Name: "convertguidlist", Signature: "convertguidlist(p_newguid varchar, p_instr varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION convertguidlist"},
+		{Name: "getcategoryinfopubcount", Signature: "getcategoryinfopubcount(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getcategoryinfopubcount"},
+		{Name: "getscore", Signature: "getscore(p_infoid varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getscore"},
+		{Name: "getcategoryscore", Signature: "getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getcategoryscore"},
+		{Name: "getchildoulist", Signature: "getchildoulist(p_rootid varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getchildoulist"},
 	}}
 	for i := range r.Items {
 		if r.Items[i].Name != w.failedFunction {
@@ -94,11 +100,11 @@ func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 			require.False(t, report.HasFailures())
 			require.NotNil(t, report.CompatibilityFunctions)
 			require.Equal(t, "prepare", w.calls[0])
-			require.Equal(t, 4, report.CompatibilityFunctions.Total)
-			require.Equal(t, 4, report.CompatibilityFunctions.Success)
-			require.Equal(t, 4, report.CompatibilityFunctions.Created)
+			require.Equal(t, 10, report.CompatibilityFunctions.Total)
+			require.Equal(t, 10, report.CompatibilityFunctions.Success)
+			require.Equal(t, 10, report.CompatibilityFunctions.Created)
 			require.Zero(t, report.CompatibilityFunctions.Reused)
-			require.Len(t, report.CompatibilityFunctions.Items, 4)
+			require.Len(t, report.CompatibilityFunctions.Items, 10)
 			require.Equal(t, "count_rows(table_name varchar, owner varchar DEFAULT NULL)", report.CompatibilityFunctions.Items[2].Signature)
 			require.Zero(t, report.Views.Total)
 		})
@@ -106,14 +112,20 @@ func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 }
 func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T) {
 	for _, capture := range []bool{false, true} {
-		for _, function := range []string{"get_uuid", "auto_increase_itemid", "count_rows", "fun_getpy"} {
+		for _, sample := range []struct{ name, call string }{
+			{"get_uuid", "get_uuid()"},
+			{"auto_increase_itemid", "auto_increase_itemid()"},
+			{"count_rows", "count_rows('t')"},
+			{"fun_getpy", "fun_getpy('中国')"},
+			{"convertguid", "ConvertGuid('new-guid', 'old-guid')"},
+			{"convertguidlist", "CONVERTGUIDLIST('new-guid', 'old-guid;tail')"},
+			{"getcategoryinfopubcount", "GETCATEGORYINFOPUBCOUNT('category', 1, timestamp '2026-01-01', timestamp '2026-02-01')"},
+			{"getscore", "GetScore('info-id')"},
+			{"getcategoryscore", "GetCategoryScore('user-id', date '2026-01-01', date '2026-02-01')"},
+			{"getchildoulist", "getChildOuList('root-id')"},
+		} {
+			function, call := sample.name, sample.call
 			t.Run(fmt.Sprintf("%t/%s", capture, function), func(t *testing.T) {
-				call := function + "()"
-				if function == "count_rows" {
-					call = "count_rows('t')"
-				} else if function == "fun_getpy" {
-					call = "fun_getpy('中国')"
-				}
 				r := &compatibilityViewReader{mockReader: mockReader{
 					tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
 				}, views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT " + call}, {ViewName: "independent", Definition: "SELECT 1"}}}
@@ -122,9 +134,9 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 				m.cfg.CaptureRepair = capture
 				report := m.Run(context.Background())
 				require.True(t, report.HasFailures())
-				require.Equal(t, 4, report.CompatibilityFunctions.Total)
-				require.Equal(t, 3, report.CompatibilityFunctions.Success)
-				require.Equal(t, 3, report.CompatibilityFunctions.Created)
+				require.Equal(t, 10, report.CompatibilityFunctions.Total)
+				require.Equal(t, 9, report.CompatibilityFunctions.Success)
+				require.Equal(t, 9, report.CompatibilityFunctions.Created)
 				require.Equal(t, 1, report.CompatibilityFunctions.Failed)
 				require.Equal(t, []string{"prepare", "table", "data", "view", "view"}, w.calls)
 				require.Equal(t, 1, report.Tables.Total)
@@ -168,7 +180,7 @@ func TestCompatibilityInitializedBeforeStandaloneAndFullViews(t *testing.T) {
 		}
 		require.Equal(t, []string{"prepare", "view"}, w.calls)
 		require.NotNil(t, m.CompatibilityFunctions())
-		require.Equal(t, 4, m.CompatibilityFunctions().Success)
+		require.Equal(t, 10, m.CompatibilityFunctions().Success)
 	}
 }
 func TestCompatibilityNonPGAndOldReportsStayUnchanged(t *testing.T) {
@@ -212,6 +224,6 @@ func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	require.Equal(t, "independent", results[1].Name)
 	require.Empty(t, results[1].Error)
 	require.Equal(t, 1, m.CompatibilityFunctions().Failed)
-	require.Equal(t, 3, m.CompatibilityFunctions().Success)
+	require.Equal(t, 9, m.CompatibilityFunctions().Success)
 	require.Equal(t, []string{"prepare", "view", "view"}, w.calls)
 }

@@ -21,6 +21,12 @@ var builtinCompatibilitySpecs = []compatibilityFunctionSpec{
 	{name: "auto_increase_itemid", signature: "auto_increase_itemid()"},
 	{name: "count_rows", signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", inputs: []string{"character varying", "character varying"}, minDefaults: 1},
 	{name: "fun_getpy", signature: "fun_getpy(p_name varchar)", inputs: []string{"character varying"}},
+	{name: "convertguid", signature: "convertguid(p_newguid varchar, p_instr varchar)", inputs: []string{"character varying", "character varying"}},
+	{name: "convertguidlist", signature: "convertguidlist(p_newguid varchar, p_instr varchar)", inputs: []string{"character varying", "character varying"}},
+	{name: "getcategoryinfopubcount", signature: "getcategoryinfopubcount(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)", inputs: []string{"character varying", "integer", "timestamp without time zone", "timestamp without time zone"}},
+	{name: "getscore", signature: "getscore(p_infoid varchar)", inputs: []string{"character varying"}},
+	{name: "getcategoryscore", signature: "getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)", inputs: []string{"character varying", "date", "date"}},
+	{name: "getchildoulist", signature: "getchildoulist(p_rootid varchar)", inputs: []string{"character varying"}},
 }
 
 func (s compatibilityFunctionSpec) inputPredicate() string {

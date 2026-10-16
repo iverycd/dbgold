@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/source"
@@ -17,13 +18,7 @@ func expectBuiltinMissingForInitialization(m sqlmock.Sqlmock, schema string, spe
 	m.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.proretset,p.provariadic,p.prorettype FROM`).
 		WithArgs(schema, spec.name).WillReturnRows(sqlmock.NewRows([]string{"oid", "defaults", "set", "variadic", "return"}))
 	expectUUIDSavepoint(m)
-	args := ""
-	for i := range spec.inputs {
-		if i > 0 {
-			args += ","
-		}
-		args += "character varying"
-	}
+	args := strings.Join(spec.inputs, ",")
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT $1::regprocedure::oid`)).WithArgs(qualifiedFunction(schema, spec.name) + "(" + args + ")").
 		WillReturnError(&pq.Error{Code: "42883", Message: "function does not exist"})
 	expectUUIDProbe(m, true)
@@ -47,7 +42,7 @@ func expectBuiltinCreatedForInitialization(m sqlmock.Sqlmock, schema string, spe
 	}
 }
 
-func TestFourCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
+func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 	for _, product := range []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
 		t.Run(product, func(t *testing.T) {
 			w, mock := repairPGMock(t)
@@ -71,10 +66,10 @@ func TestFourCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 			}
 			report, err := EnsureCompatibilityFunctions(context.Background(), actual)
 			require.NoError(t, err)
-			require.Equal(t, 4, report.Total)
-			require.Equal(t, 4, report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Success)
 			require.Equal(t, 1, report.Reused)
-			require.Equal(t, 3, report.Created)
+			require.Equal(t, len(builtinCompatibilitySpecs), report.Created)
 			require.Zero(t, report.Failed)
 			for i, spec := range builtinCompatibilitySpecs {
 				require.Equal(t, spec.signature, report.Items[i+1].Signature)
@@ -107,8 +102,8 @@ func TestCompatibilityFunctionFailuresDoNotRollbackOtherFunctions(t *testing.T) 
 			}
 			report, err := EnsureCompatibilityFunctions(context.Background(), w)
 			require.Error(t, err)
-			require.Equal(t, 4, report.Total)
-			require.Equal(t, 3, report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
+			require.Equal(t, len(builtinCompatibilitySpecs), report.Success)
 			require.Equal(t, 1, report.Failed)
 			require.Equal(t, "failed", report.Items[failed+1].Status)
 			for i, item := range report.Items {

@@ -213,6 +213,56 @@ test('four compatibility functions preserve parameter signatures and partial fai
   assert.doesNotMatch(text, /app.count_rows\(\)：|app.fun_getpy\(\)：|失败项详情|失败阶段：/)
 })
 
+test('ten compatibility functions render and export business signatures with partial failures', async () => {
+  const signatures = [
+    ['get_uuid', 'get_uuid()'],
+    ['auto_increase_itemid', 'auto_increase_itemid()'],
+    ['count_rows', 'count_rows(table_name varchar, owner varchar DEFAULT NULL)'],
+    ['fun_getpy', 'fun_getpy(p_name varchar)'],
+    ['convertguid', 'convertguid(p_newguid varchar, p_instr varchar)'],
+    ['convertguidlist', 'convertguidlist(p_newguid varchar, p_instr varchar)'],
+    ['getcategoryinfopubcount', 'getcategoryinfopubcount(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)'],
+    ['getscore', 'getscore(p_infoid varchar)'],
+    ['getcategoryscore', 'getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)'],
+    ['getchildoulist', 'getchildoulist(p_rootid varchar)'],
+  ]
+  const items = signatures.map(([name, signature]) => ({
+    name, signature, schema: 'app',
+    status: name === 'getchildoulist' ? 'failed' : ['get_uuid', 'getscore'].includes(name) ? 'reused' : 'created',
+    ddl: name === 'getscore' ? 'EXISTING BUSINESS SCORE FUNCTION' : `CREATE FUNCTION app.${signature}`,
+    error: name === 'getchildoulist' ? 'permission denied for schema app' : '',
+  }))
+  const r = report(empty())
+  r.compatibility_functions = { total: 10, success: 9, failed: 1, created: 7, reused: 2, items }
+  const row = reportCategories(r).find(row => row.isCompatibility)
+  assert.equal(row.totalLabel, '10')
+  assert.equal(row.success, 9)
+  assert.equal(row.failed, 1)
+  assert.equal(row.created, 7)
+  assert.equal(row.reused, 2)
+  assert.equal(row.items.length, 10)
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /兼容函数\s+总计 10\s+成功 9\s+失败 1/)
+  assert.ok(text.includes('新建 7，复用 2'))
+  for (const item of items) {
+    const status = { created: '新建', reused: '复用', failed: '失败' }[item.status]
+    assert.ok(text.includes(`app.${item.signature}：${status}`), item.name)
+    assert.ok(text.includes(item.ddl), item.name)
+  }
+  assert.ok(text.includes('permission denied for schema app'))
+  assert.ok(text.includes('EXISTING BUSINESS SCORE FUNCTION'))
+  assert.doesNotMatch(text, /失败项详情|失败阶段：/)
+
+  const panel = createCompatibilityPanel()
+  const app = createSSRApp({ render: () => h(panel, { report: r.compatibility_functions }) })
+  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+  const html = await renderToString(app)
+  for (const [, signature] of signatures) assert.ok(html.includes(`app.${signature}`), signature)
+  assert.ok(html.includes('permission denied for schema app'))
+  assert.ok(html.includes('EXISTING BUSINESS SCORE FUNCTION'))
+})
+
 test('compatibility panel renders argument signatures and keeps legacy name fallback', async () => {
   const panel = createCompatibilityPanel()
   const app = createSSRApp({ render: () => h(panel, { report: {
