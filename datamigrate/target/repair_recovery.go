@@ -71,6 +71,12 @@ func checkRecoveryRisks(ctx context.Context, w Writer, table string, truncating 
 				return err
 			}
 		}
+		if dw, ok := w.(*DaMengWriter); ok && dw.srcType == "oracle" {
+			managed, err = dw.OnlyManagedOracleDamengTriggers(ctx, table)
+			if err != nil {
+				return err
+			}
+		}
 		if !managed {
 			return fmt.Errorf("目标表 %s.%s 存在启用的自定义触发器，不能自动补迁或清空", schema, table)
 		}
@@ -193,6 +199,11 @@ func PrepareRecovery(ctx context.Context, w Writer, table string, columns []sour
 	actual, err := InspectRecovery(ctx, w, table)
 	if err != nil {
 		return err
+	}
+	if dw, ok := w.(*DaMengWriter); ok && dw.srcType == "oracle" {
+		if err := dw.ValidateOracleDamengLoadTriggers(ctx, &source.TableDDLInfo{TableName: table, Columns: columns}); err != nil {
+			return err
+		}
 	}
 	byName := map[string]source.ColumnInfo{}
 	for _, c := range actual {

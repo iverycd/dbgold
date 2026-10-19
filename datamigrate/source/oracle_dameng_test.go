@@ -1,0 +1,226 @@
+package source
+
+import (
+	"context"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/stretchr/testify/require"
+)
+
+func oracleDMTestReader(t *testing.T, version int) (*OracleDamengReader, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, mock.ExpectationsWereMet()); db.Close() })
+	return WrapOracleForDameng(&OracleReader{db: db, owner: "APP", version: version}), mock
+}
+
+func TestOracleDamengUnknownVersionUses11g(t *testing.T) {
+	r, _ := oracleDMTestReader(t, 0)
+	require.Equal(t, 11, r.version)
+}
+
+func TestOracleDamengColumnMetadataPreservesSource(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 19)
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE", "CHAR_LENGTH", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "DATA_DEFAULT", "CHAR_USED", "COLUMN_ID", "DATA_TYPE_OWNER", "VIRTUAL_COLUMN"}).
+		AddRow("MixedText", "VARCHAR2", 30, 120, 0, 0, "Y", "'KeepCase'", "C", 1, nil, "NO").
+		AddRow("RawData", "RAW", 0, 32, 0, 0, "Y", nil, "B", 2, nil, "NO").
+		AddRow("CreatedAt", "TIMESTAMP(9) WITH TIME ZONE", 0, 13, 0, 9, "Y", nil, "B", 3, nil, "NO").
+		AddRow("MixedId", "NUMBER", 0, 22, 20, 0, "N", `"APP"."ISEQ$$_42".nextval`, "B", 4, nil, "NO")
+	mock.ExpectQuery("SELECT COLUMN_NAME, DATA_TYPE").WithArgs("APP", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
+	mock.ExpectQuery("SELECT i.COLUMN_NAME, i.GENERATION_TYPE").WithArgs("APP", "MixedTable").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "GENERATION_TYPE", "DEFAULT_ON_NULL"}).AddRow("MixedId", "BY DEFAULT", "YES")).RowsWillBeClosed()
+	info, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
+	require.NoError(t, err)
+	require.Equal(t, "MixedText", info.Columns[0].Name)
+	require.Equal(t, int64(30), info.Columns[0].Length)
+	require.Equal(t, int64(120), info.Columns[0].DataLength)
+	require.Equal(t, "C", info.Columns[0].CharUsed)
+	require.Equal(t, "'KeepCase'", *info.Columns[0].Default)
+	require.Equal(t, int64(32), info.Columns[1].Length)
+	require.Equal(t, int64(9), info.Columns[2].DateTimePrecision)
+	require.Equal(t, "BY DEFAULT ON NULL", info.Columns[3].Identity)
+	require.Nil(t, info.Columns[3].Default)
+	_, err = r.GetTableDDLInfo(context.Background(), "MixedTable")
+	require.NoError(t, err) // projected pages reuse the immutable metadata.
+}
+
+func TestOracleDamengPagingPreservesBytesAndStableTypes(t *testing.T) {
+	for _, version := range []int{11, 19} {
+		t.Run(string(rune('A'+version)), func(t *testing.T) {
+			r, mock := oracleDMTestReader(t, version)
+			r.metadata[`Mixed"Table`] = &TableDDLInfo{TableName: `Mixed"Table`, Columns: []ColumnInfo{
+				{Name: "Text", DataType: "VARCHAR2"}, {Name: "CreatedAt", DataType: "DATE"},
+				{Name: "ZonedAt", DataType: "TIMESTAMP(9) WITH LOCAL TIME ZONE"},
+				{Name: "Payload", DataType: "BLOB"}, {Name: "DBGOLD_PAGE_ROWNUM", DataType: "NUMBER"},
+			}}
+			query := `SELECT .*TO_CHAR\("CreatedAt", 'SYYYY-MM-DD HH24:MI:SS'.*AT TIME ZONE '\+00:00'.*FROM "APP"\."Mixed""Table" ORDER BY "Text"`
+			if version >= 12 {
+				query += ` OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY`
+			} else {
+				query += `.*ROWNUM <= 2.*DBG_PAGE\."DBGOLD_PAGE_ROWNUM_" > 0`
+			}
+			mock.ExpectQuery(query).WillReturnRows(sqlmock.NewRows([]string{"Text", "CreatedAt", "ZonedAt", "Payload", "DBGOLD_PAGE_ROWNUM"}).AddRow([]byte("a\x00b"), "2024-02-29 23:59:58", "2024-02-29 12:00:00.123456789 +00:00", []byte{}, "9007199254740993"))
+			cols, types, rows, err := r.ReadPage(context.Background(), `Mixed"Table`, []string{"Text"}, 0, 2)
+			require.NoError(t, err)
+			require.Len(t, cols, 5)
+			require.Equal(t, []string{"VARCHAR2", "DATE", "TIMESTAMP(9) WITH LOCAL TIME ZONE", "BLOB", "NUMBER"}, types)
+			require.Equal(t, []byte("a\x00b"), rows[0][0])
+			require.NotNil(t, rows[0][3])
+			require.Equal(t, "9007199254740993", rows[0][4])
+		})
+	}
+}
+
+func TestOracleDamengSimpleTriggerGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		body, when, column, seq string
+		onNull, valid           bool
+	}{
+		{`BEGIN SELECT "SeqMixed".NEXTVAL INTO :NEW."MixedId" FROM DUAL; END;`, "", "MixedId", "SeqMixed", false, true},
+		{`BEGIN IF :NEW.Id IS NULL THEN :NEW.Id := APP.SeqId.NEXTVAL; END IF; END;`, "", "ID", "SEQID", true, true},
+		{`BEGIN /* harmless */ :NEW.Id := SeqId.NEXTVAL; END;`, "(NEW.Id IS NULL)", "ID", "SEQID", true, true},
+		{`BEGIN SELECT SeqId.NEXTVAL INTO:NEW.Id FROM DUAL; END;`, "", "ID", "SEQID", false, true},
+		{`BEGIN :NEW.Id := SeqId.NEXTVAL; DELETE FROM Audit; END;`, "", "", "", false, false},
+		{`BEGIN IF :NEW.Other IS NULL THEN :NEW.Id := SeqId.NEXTVAL; END IF; END;`, "", "", "", false, false},
+		{`BEGIN :NEW.Id := SeqId.NEXTVAL; END;`, "NEW.Id > 0", "", "", false, false},
+		{`BEGIN :NEW.Id := SeqId.NEXTVAL; EXCEPTION WHEN OTHERS THEN NULL; END;`, "", "", "", false, false},
+	} {
+		binding, owner, seq, err := parseOracleDMTrigger(tc.body, tc.when, "APP")
+		if !tc.valid {
+			require.Error(t, err, tc.body)
+			continue
+		}
+		require.NoError(t, err)
+		require.Equal(t, tc.column, binding.ColumnName)
+		require.Equal(t, tc.seq, seq)
+		require.Equal(t, "APP", owner)
+		require.Equal(t, tc.onNull, binding.OnlyWhenNull)
+	}
+}
+
+func TestOracleDamengSequencesDeduplicateAndScope(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	mock.ExpectQuery("SELECT TABLE_NAME,COLUMN_NAME,DATA_DEFAULT").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "column", "default"}).AddRow("Mixed", "Text", "'NEXTVAL'"))
+	mock.ExpectQuery("SELECT TABLE_NAME,TRIGGER_NAME,TRIGGER_TYPE").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "trigger", "kind", "event", "body", "when"}).
+		AddRow(nil, "SchemaTrigger", "AFTER EVENT", "LOGON", `BEGIN someSeq.NEXTVAL; END;`, nil).
+		AddRow("Mixed", "MixedTrigger", "BEFORE EACH ROW", "INSERT", `BEGIN IF :NEW."MixedId" IS NULL THEN :NEW."MixedId" := "MixedSeq".NEXTVAL; END IF; END;`, nil).
+		AddRow("Other", "OtherTrigger", "BEFORE EACH ROW", "INSERT", `BEGIN :NEW."OtherId" := "MixedSeq".NEXTVAL; END;`, nil))
+	mock.ExpectQuery(`SELECT TO_CHAR\(LAST_NUMBER`).WithArgs("APP", "MixedSeq").WillReturnRows(sqlmock.NewRows([]string{"next", "step", "min", "max", "cache", "cycle", "ordered"}).AddRow("101", "5", "1", "9999999999999999999999999999", "20", "N", "N"))
+	values, err := r.GetSequences(context.Background())
+	require.NoError(t, err)
+	require.Len(t, values, 1)
+	require.Len(t, values[0].Native.Bindings, 2)
+	selected := FilterNativeSequences(values, map[string]bool{"Mixed": true})
+	require.Len(t, selected, 1)
+	require.Len(t, selected[0].Native.Bindings, 1)
+	require.Equal(t, "MixedSeq", selected[0].Native.Name)
+	require.Equal(t, "MixedId", selected[0].Native.Bindings[0].ColumnName)
+	require.Len(t, values[0].Native.Bindings, 2)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT TO_CHAR(MAX("MixedId"),'TM9','NLS_NUMERIC_CHARACTERS=''.,''') FROM "APP"."Mixed"`)).WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow("108"))
+	prepared, err := r.PrepareNativeSequence(context.Background(), selected[0])
+	require.NoError(t, err)
+	require.Equal(t, "111", prepared.StartValueText)
+	require.Equal(t, "101", values[0].StartValueText)
+}
+
+func TestOracleDamengIdentityModesAreTableScoped(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 19)
+	mock.ExpectQuery("SELECT i.TABLE_NAME,i.COLUMN_NAME,i.GENERATION_TYPE").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "col", "generation", "seq", "onNull"}).
+		AddRow("Good", "Id", "BY DEFAULT", "ISEQ$$_1", "YES").AddRow("Unselected", "Id", "ALWAYS", "ISEQ$$_2", "NO"))
+	mock.ExpectQuery("SELECT TABLE_NAME,COLUMN_NAME,DATA_DEFAULT").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "col", "default"}).AddRow("Good", "Id", `"APP"."ISEQ$$_1".nextval`).AddRow("Defaults", "Id", "SomeSeq.NEXTVAL"))
+	mock.ExpectQuery("SELECT TABLE_NAME,TRIGGER_NAME,TRIGGER_TYPE").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "trigger", "kind", "event", "body", "when"}))
+	mock.ExpectQuery(`SELECT TO_CHAR\(LAST_NUMBER`).WithArgs("APP", "ISEQ$$_1").WillReturnRows(sqlmock.NewRows([]string{"next", "step", "min", "max", "cache", "cycle", "order"}).AddRow("42", "1", "1", "9999999999999999999999999999", "20", "N", "N"))
+	values, err := r.GetSequences(context.Background())
+	require.NoError(t, err)
+	require.Len(t, values, 3)
+	require.NotEmpty(t, values[1].Unsupported)
+	require.NotEmpty(t, values[2].Unsupported)
+	selected := FilterNativeSequences(values, map[string]bool{"Good": true})
+	require.Len(t, selected, 1)
+	require.Empty(t, selected[0].Unsupported)
+	require.Equal(t, "identity", selected[0].Native.Bindings[0].Kind)
+}
+
+func TestOracleDamengSequenceBoundsExactAndDescending(t *testing.T) {
+	for _, tc := range []struct{ start, step, bound, want string }{
+		{"90071992547409931000", "3", "90071992547409931002", "90071992547409931003"},
+		{"10", "-5", "-1", "-5"},
+	} {
+		r, mock := oracleDMTestReader(t, 11)
+		agg := "MAX"
+		if strings.HasPrefix(tc.step, "-") {
+			agg = "MIN"
+		}
+		mock.ExpectQuery("SELECT TO_CHAR\\(" + agg).WillReturnRows(sqlmock.NewRows([]string{"bound"}).AddRow(tc.bound))
+		s := SequenceInfo{StartValueText: tc.start, Native: &NativeSequenceInfo{Name: "S", IncrementBy: tc.step, MinValue: "-9999999999999999999999999999", MaxValue: "9999999999999999999999999999", Bindings: []SequenceBinding{{TableName: "T", ColumnName: "C"}}}}
+		result, err := r.PrepareNativeSequence(context.Background(), s)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, result.StartValueText)
+	}
+}
+
+func TestOracleDamengSpecialIndexesAndForeignSchema(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	mock.ExpectQuery("SELECT i.TABLE_NAME, i.INDEX_NAME").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"table", "index", "column", "unique", "desc", "kind", "status"}).
+		AddRow("Mixed", "Ordinary", "MixedColumn", "NONUNIQUE", "DESC", "NORMAL", "VALID").
+		AddRow("Mixed", "Expression", "SYS_NC00001$", "NONUNIQUE", "ASC", "FUNCTION-BASED NORMAL", "VALID"))
+	indexes, err := r.GetIndexes(context.Background())
+	require.NoError(t, err)
+	require.Len(t, indexes, 2)
+	require.Equal(t, "MixedColumn", indexes[0].Columns[0])
+	require.Equal(t, []bool{true}, indexes[0].Descending)
+	require.Empty(t, indexes[0].Unsupported)
+	require.NotEmpty(t, indexes[1].Unsupported)
+	mock.ExpectQuery("SELECT c.CONSTRAINT_NAME,c.TABLE_NAME").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"name", "table", "column", "refTable", "refColumn", "delete", "owner", "status", "validated", "deferrable", "deferred"}).
+		AddRow("MixedFK", "Mixed", "ParentId", "Parent", "Id", "CASCADE", "OtherOwner", "ENABLED", "VALIDATED", "NOT DEFERRABLE", "IMMEDIATE"))
+	fks, err := r.GetForeignKeys(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "OtherOwner", fks[0].RefSchema)
+	require.Equal(t, "ParentId", fks[0].Columns[0])
+	require.NotEmpty(t, fks[0].Unsupported)
+}
+
+func TestOracleDamengCycleAndBoundsRejectBeforeReadingData(t *testing.T) {
+	r, _ := oracleDMTestReader(t, 11)
+	_, err := r.PrepareNativeSequence(context.Background(), SequenceInfo{StartValueText: "1", Native: &NativeSequenceInfo{IncrementBy: "1", Cycle: true}})
+	require.ErrorContains(t, err, "循环")
+}
+
+func TestOracleDamengViewsBypassPostgresRewriting(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	raw := `SELECT NVL("MixedColumn",'KeepCase') AS "Label", ROWID AS "RowId" FROM "APP"."MixedTable" WHERE "Tag"='UPPER'; -- KeepComment`
+	for range 2 {
+		mock.ExpectQuery("SELECT VIEW_NAME,TEXT FROM ALL_VIEWS").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"name", "text"}).AddRow("MixedView", raw)).RowsWillBeClosed()
+		mock.ExpectQuery("SELECT COLUMN_NAME,DATA_TYPE,NVL").WithArgs("APP", "MixedView").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "scale"}).AddRow("Label", "VARCHAR2", 0).AddRow("RowId", "ROWID", 0)).RowsWillBeClosed()
+	}
+	views, err := r.GetViews(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "MixedView", views[0].ViewName)
+	require.Equal(t, raw, views[0].Definition)
+	views, err = r.GetViewsForTarget(context.Background(), "dameng")
+	require.NoError(t, err)
+	require.Equal(t, raw, views[0].Definition)
+}
+
+func TestOracleDamengViewColumnHeadersReadAfterClosingViewRows(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	r.db.SetMaxOpenConns(1)
+	raw := `SELECT "Id", 'KeepCase' AS "ProjectionAlias" FROM "APP"."MixedTable"`
+	mock.ExpectQuery("SELECT VIEW_NAME,TEXT FROM ALL_VIEWS").WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"name", "text"}).AddRow("MixedView", raw)).RowsWillBeClosed()
+	mock.ExpectQuery("SELECT COLUMN_NAME,DATA_TYPE,NVL").WithArgs("APP", "MixedView").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "scale"}).AddRow("custom_col", "NUMBER", 0).AddRow("OtherName", "TIMESTAMP(9) WITH TIME ZONE", 9)).RowsWillBeClosed()
+	views, err := r.GetViews(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, raw, views[0].Definition)
+	require.Equal(t, []ColumnInfo{{Name: "custom_col", DataType: "NUMBER"}, {Name: "OtherName", DataType: "TIMESTAMP(9) WITH TIME ZONE", Scale: 9, DateTimePrecision: 9}}, views[0].Columns)
+}
+
+func TestOracleDamengViewMetadataHonorsCancellation(t *testing.T) {
+	r, _ := oracleDMTestReader(t, 11)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := r.GetViews(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}

@@ -18,6 +18,8 @@ type ColumnInfo struct {
 	Name              string
 	DataType          string // 原始数据库类型（如 "varchar"、"int"）
 	Length            int64
+	DataLength        int64  // Original byte capacity, independent of character length.
+	CharUsed          string // Oracle character length semantics: B or C.
 	Precision         int64
 	Scale             int64
 	IsNullable        bool
@@ -42,7 +44,8 @@ type TableDDLInfo struct {
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
 type SequenceInfo struct {
-	Unsupported  string // Metadata that cannot be represented by the selected target.
+	Native       *NativeSequenceInfo `json:"Native,omitempty"`
+	Unsupported  string              // Metadata that cannot be represented by the selected target.
 	IdentityInfo *IdentityInfo
 	TableName    string
 	ColumnName   string
@@ -50,6 +53,22 @@ type SequenceInfo struct {
 	// StartValueText preserves MySQL unsigned AUTO_INCREMENT values beyond int64.
 	// Existing targets continue using StartValue; Oracle uses the exact text.
 	StartValueText string
+}
+
+// NativeSequenceInfo retains a named Oracle sequence and its table-scoped uses.
+// Decimal text preserves sequence values before target-specific range checks.
+type NativeSequenceInfo struct {
+	Name, IncrementBy, MinValue, MaxValue, CacheSize string
+	Cycle, Ordered                                   bool
+	Bindings                                         []SequenceBinding
+}
+
+type SequenceBinding struct {
+	// SourceColumnName is retained by the migrator when a target column is
+	// renamed, so a shared sequence can be regenerated for any bound table.
+	SourceColumnName                         string `json:",omitempty"`
+	TableName, ColumnName, Kind, TriggerName string
+	OnlyWhenNull                             bool
 }
 
 // IndexInfo 表示一个索引或唯一约束

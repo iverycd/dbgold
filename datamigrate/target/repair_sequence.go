@@ -25,6 +25,23 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 	}
 	seen := map[string]bool{}
 	for _, s := range sequences {
+		if s.Native != nil && a.family == "dameng" {
+			n := *s.Native
+			n.Bindings = nil
+			for _, b := range s.Native.Bindings {
+				if b.TableName == table {
+					n.Bindings = append(n.Bindings, b)
+				}
+			}
+			if len(n.Bindings) == 0 {
+				continue
+			}
+			s.Native = &n
+			if e = w.(*DaMengWriter).CalibrateOracleDameng(ctx, s); e != nil {
+				return e
+			}
+			continue
+		}
 		if s.TableName != table || s.ColumnName == "" || seen[s.ColumnName] {
 			continue
 		}

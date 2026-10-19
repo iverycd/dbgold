@@ -476,7 +476,7 @@ func UpdateMigrationRepairBinding(c *gin.Context) {
 					return err
 				}
 				name := obj.SourceName
-				if j.DstDBType == "oracle" || j.DstDBType == "oscar" || j.DstDBType == "dameng" && j.SrcDBType == "sqlserver" {
+				if j.DstDBType == "oracle" || j.DstDBType == "oscar" || j.DstDBType == "dameng" && (j.SrcDBType == "sqlserver" || j.SrcDBType == "oracle") {
 					name = strings.ToUpper(name)
 				} else if cfg.LowerCaseNames {
 					name = strings.ToLower(name)

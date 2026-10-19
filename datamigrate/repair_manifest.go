@@ -233,7 +233,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return kind == "views"
 		}
 		if m.cfg.Content == "data_only" {
-			return false
+			return m.isOracleDameng() && kind == "sequences"
 		}
 		return !m.cfg.objectMode() || slices.Contains(m.cfg.Objects, kind)
 	}
@@ -291,19 +291,26 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	if want("sequences") {
 		finishStage = startRepairPreparationStage(m.log, "收集序列")
 		if values, e := m.reader.GetSequences(ctx); e == nil {
-			for _, v := range values {
-				if !selected[v.TableName] {
-					continue
-				}
+			for _, v := range m.selectedSequences(values, selected) {
 				src := v.TableName
-				v.TableName = m.objName(src)
-				v.ColumnName = m.targetColumn(src, v.ColumnName)
+				v = m.prepareSourceSequence(ctx, v)
+				v = m.targetSequence(v)
 				name := dialect.SequenceName(m.writer.Dialect(), v)
 				owner := ""
 				if m.cfg.ChangeOwner {
 					owner = m.cfg.TargetSchema
 				}
-				add(repair.Object{Kind: "sequence", Name: name, Table: v.TableName, SourceTable: src, TargetName: name, Sequence: &v}, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner))
+				var ss []dialect.Statement
+				if v.Unsupported == "" && m.cfg.Content != "data_only" {
+					ss = m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner)
+				}
+				var dependencies []string
+				if v.Native != nil {
+					for _, b := range v.Native.Bindings {
+						dependencies = append(dependencies, repairID("table", b.TableName, b.TableName))
+					}
+				}
+				add(repair.Object{Kind: "sequence", Name: name, Table: v.TableName, SourceTable: src, TargetName: name, Sequence: &v, Error: v.Unsupported, Dependencies: dependencies}, ss)
 			}
 		} else {
 			m.log.Warnf("收集序列失败: %v", e)
@@ -313,7 +320,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL()) {
+	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracleDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL()) {
 		finishStage = startRepairPreparationStage(m.log, "收集外键")
 		if values, e := m.reader.GetForeignKeys(ctx); e == nil {
 			for _, v := range values {
@@ -579,6 +586,9 @@ func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) error {
 }
 func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, owner string) error {
 	n := dialect.SequenceName(m.writer.Dialect(), v)
+	if v.Unsupported != "" {
+		return m.captureRepairCall(ctx, repair.Object{Kind: "sequence", Name: n, Table: v.TableName, TargetName: n, Sequence: &v}, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
+	}
 	return m.captureRepairCall(ctx, repair.Object{Kind: "sequence", Name: n, Table: v.TableName, TargetName: n, Sequence: &v}, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner), func(c context.Context) error { return m.writer.CreateSequence(c, v, owner) })
 }
 func (m *Migrator) repairFK(ctx context.Context, v source.FKInfo) error {

@@ -414,6 +414,13 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 					completed[item.ID] = item.Status == "succeeded"
 					if completed[item.ID] && item.Kind == "sequence" && item.Sequence != nil {
 						sequenceColumns[item.Sequence.ColumnName] = true
+						if item.Sequence.Native != nil {
+							for _, b := range item.Sequence.Native.Bindings {
+								if b.TableName == fresh.TargetTable {
+									sequenceColumns[b.ColumnName] = true
+								}
+							}
+						}
 					}
 				}
 			}

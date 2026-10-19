@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/coldefault"
+	"dbgold/datamigrate/oracledameng"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/tsqldameng"
 	"dbgold/datamigrate/typemap"
@@ -68,6 +69,11 @@ func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableD
 func (d *DaMengDialect) createTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name, columnName NameFunc) ([]Statement, error) {
 	var cols []string
 	for _, col := range info.Columns {
+		if srcType == "oracle" {
+			if err := typemap.ValidateOracleDamengColumn(col); err != nil {
+				return nil, err
+			}
+		}
 		if srcType == "sqlserver" {
 			if err := typemap.ValidateSQLServerDamengColumn(col); err != nil {
 				return nil, err
@@ -86,8 +92,14 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 		if !col.IsNullable {
 			colDef += " NOT NULL"
 		}
-		if col.Default != nil && col.Extra != "auto_increment" {
-			if srcType == "sqlserver" {
+		if col.Default != nil && col.Extra != "auto_increment" && !(srcType == "oracle" && col.Identity != "") {
+			if srcType == "oracle" {
+				clause, err := oracledameng.Default(*col.Default)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+				}
+				colDef += clause
+			} else if srcType == "sqlserver" {
 				clause, err := tsqldameng.Default(*col.Default)
 				if err != nil {
 					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)

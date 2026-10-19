@@ -76,6 +76,24 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if reader.DBType() == "oracle" && writer.DBType() == "dameng" {
+		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed = "dameng", false, false, false
+		if r, ok := reader.(*source.OracleReader); ok {
+			reader = source.WrapOracleForDameng(r)
+		}
+		if cfg.Mode == "" {
+			cfg.Mode = "all"
+		}
+		if cfg.PageSize <= 0 {
+			cfg.PageSize = 20000
+		}
+		if cfg.MaxParallel <= 0 {
+			cfg.MaxParallel = 10
+		}
+		if s, ok := writer.(interface{ EffectiveSchema() string }); ok {
+			cfg.TargetSchema = s.EffectiveSchema()
+		}
+	}
 	if reader.DBType() == "sqlserver" && writer.DBType() == "dameng" {
 		cfg.TargetDBType = "dameng"
 		cfg.LowerCaseNames = false
@@ -142,7 +160,7 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 // objName only normalizes target object names; source lookups and schema/owner
 // names must never pass through it. Oscar always uses uppercase identifiers.
 func (m *Migrator) objName(s string) string {
-	if m.isOscar() || m.isOracle() || m.isSQLServerDameng() {
+	if m.isOscar() || m.isOracle() || m.isSQLServerDameng() || m.isOracleDameng() {
 		return strings.ToUpper(s)
 	}
 	if m.cfg.LowerCaseNames {
@@ -260,6 +278,10 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
+	if m.isOracleDameng() && (len(tablesFailed) > 0 || !m.preflightOracleDameng(ctx, tables, &report)) {
+		report.Tables.Total = max(len(tables), report.Tables.Total)
+		return report
+	}
 	if m.isSQLServerDameng() && (len(tablesFailed) > 0 || !m.preflightSQLServerDameng(ctx, tables, &report)) {
 		report.Tables.Total = len(tables)
 		return report
@@ -376,7 +398,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		wg.Wait()
 	}
 
-	if m.isSQLServerDameng() && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
+	if (m.isSQLServerDameng() || m.isOracleDameng()) && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
 		m.log.Errorf("表结构或数据迁移失败，停止附属对象创建")
 		return report
 	}
@@ -389,6 +411,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			m.cfg.Objects = []string{"sequences"}
 			m.createPostDDL(ctx, &report, tables, allTables)
 			m.cfg.Objects = originalObjects
+		}
+		if m.isOracleDameng() {
+			m.calibrateOracleDameng(ctx, &report, tables)
 		}
 	} else {
 		m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
@@ -496,7 +521,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
-			if m.isOracle() || m.isSQLServer() {
+			if m.isOracle() || m.isSQLServer() || m.isOracleDameng() {
 				return false, fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
 			}
 			return false, err.Error()
@@ -515,7 +540,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)
-			if m.isOracle() || m.isSQLServer() {
+			if m.isOracle() || m.isSQLServer() || m.isOracleDameng() {
 				return false, message
 			}
 			if !hasError {
@@ -731,20 +756,13 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			m.log.Errorf("获取序列信息失败: %v", err)
 			recordMetadataFailure(&report.Sequences, err)
 		} else {
-			filtered := make([]source.SequenceInfo, 0, len(seqs))
-			for _, seq := range seqs {
-				if tableSet[seq.TableName] {
-					filtered = append(filtered, seq)
-				}
-			}
+			filtered := m.selectedSequences(seqs, tableSet)
 			report.Sequences.Total = len(filtered)
 			for _, seq := range filtered {
 				if ctx.Err() != nil {
 					return
 				}
-				seqCopy := seq
-				seqCopy.TableName = m.objName(seq.TableName)
-				seqCopy.ColumnName = m.targetColumn(seq.TableName, seq.ColumnName)
+				seqCopy := m.targetSequence(m.prepareSourceSequence(ctx, seq))
 				seqObj := dialect.SequenceName(m.writer.Dialect(), seqCopy)
 				sequenceOwner := ""
 				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
@@ -858,7 +876,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// 外键:
 	// - 非对象模式:沿用原逻辑,include 模式跳过(引用表可能不在迁移范围内)
 	// - 对象模式:用户明确要求迁外键(want),引用表视为已存在,不受 include 限制
-	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng())
+	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng() || m.isOracleDameng())
 	if migrateFK {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
@@ -867,6 +885,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		} else {
 			filtered := make([]source.FKInfo, 0, len(fks))
 			for _, fk := range fks {
+				if m.isOracleDameng() && !tableSet[fk.TableName] {
+					continue
+				}
 				if excludedSet[fk.TableName] || excludedSet[fk.RefTable] {
 					continue
 				}
@@ -876,6 +897,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, fk := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if m.isOracleDameng() && fk.Unsupported != "" {
+					report.Constraints.Failed++
+					report.Constraints.Items = append(report.Constraints.Items, objectResultForError(fk.ConstraintName, "", fmt.Errorf("%s", fk.Unsupported)))
+					continue
 				}
 				if m.writer.DBType() == "dameng" {
 					if !tableSet[fk.TableName] {
@@ -933,6 +959,17 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			recordMetadataFailure(&report.Views, err)
 		} else {
 			report.Views.Total = len(views)
+			if m.isOracleDameng() {
+				for _, result := range m.migrateOracleDamengViews(ctx, views, nil) {
+					if result.Error != "" {
+						report.Views.Failed++
+						report.Views.Items = append(report.Views.Items, result)
+					} else {
+						report.Views.Success++
+					}
+				}
+				views = nil
+			}
 			if m.hasDamengRenames() {
 				for _, result := range m.migrateDamengMappedViews(ctx, views, nil) {
 					if result.Error != "" {
@@ -1078,6 +1115,9 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	m.compatibilityFunctions = nil
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.isOracleDameng() {
+		return m.migrateOracleDamengViewsOnly(ctx, viewNames)
 	}
 	if err := m.prepareCompatibilityFunctions(ctx); err != nil && ctx.Err() != nil {
 		return []ObjectResult{}

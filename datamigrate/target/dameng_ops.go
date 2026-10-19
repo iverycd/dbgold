@@ -64,6 +64,9 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 		if w.srcType == "mysql" && i < len(colTypes) {
 			placeholders[i] = valueconv.MySQLDamengPlaceholder(colTypes[i])
 		}
+		if w.srcType == "oracle" && i < len(colTypes) {
+			placeholders[i] = valueconv.OracleDamengPlaceholder(colTypes[i])
+		}
 	}
 	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
 		w.qualifiedTable(table), strings.Join(quotedCols, ", "), strings.Join(placeholders, ", "))
@@ -78,6 +81,18 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 			return fmt.Errorf("表 %s 行列数不匹配", table)
 		}
 		conv := w.convertRow(row, colTypes)
+		if w.srcType == "oracle" {
+			if len(colTypes) != len(cols) {
+				return fmt.Errorf("表 %s 缺少源列类型", table)
+			}
+			conv = make([]interface{}, len(row))
+			for i, v := range row {
+				conv[i], err = valueconv.OracleDameng(v, colTypes[i])
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", table, cols[i], err)
+				}
+			}
+		}
 		if w.srcType == "mysql" {
 			if len(colTypes) != len(cols) {
 				return fmt.Errorf("表 %s 缺少源列类型", table)
@@ -167,6 +182,9 @@ func (w *DaMengWriter) tableHasIdentity(ctx context.Context, table string) (bool
 
 // CreateSequence reports every identity continuation failure to the job.
 func (w *DaMengWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	if seq.Native != nil {
+		return w.createOracleDamengSequence(ctx, seq, owner)
+	}
 	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
 }
 

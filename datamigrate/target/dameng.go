@@ -79,7 +79,7 @@ func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statemen
 			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt.SQL)), "DROP") {
 				return false
 			}
-			if w.srcType != "sqlserver" {
+			if w.srcType != "sqlserver" && w.srcType != "oracle" {
 				return true
 			}
 			var dmErr *dm.DmError

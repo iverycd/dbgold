@@ -28,6 +28,7 @@ type SupportedPair struct {
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
+	{Source: "oracle", Target: "dameng"},
 	{Source: "sqlserver", Target: "dameng"},
 	{Source: "mysql", Target: "sqlserver"},
 	{Source: "mysql", Target: "oracle"},
@@ -658,6 +659,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	case "dameng":
 		return source.NewDaMeng(dsn, db, pool)
 	case "oracle":
+		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
+			return source.NewOracleForDameng(dsn, db, pool)
+		}
 		return source.NewOracle(dsn, db, pool)
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，

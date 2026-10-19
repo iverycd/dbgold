@@ -1,15 +1,136 @@
 package dialect
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/tsqldameng"
 )
+
+func (d *DaMengDialect) SequenceName(seq source.SequenceInfo) string {
+	if seq.Native != nil && seq.Native.Name != "" {
+		return strings.ToUpper(seq.Native.Name)
+	}
+	return "seq_" + seq.TableName + "_" + seq.ColumnName
+}
+
+func OracleDamengTriggerName(seq source.SequenceInfo, b source.SequenceBinding) string {
+	if b.TriggerName != "" {
+		return strings.ToUpper(b.TriggerName)
+	}
+	name := "DBGOLD_TRG_" + b.TableName + "_" + b.ColumnName
+	if len(name) > 128 {
+		sum := sha256.Sum256([]byte(name))
+		name = fmt.Sprintf("DBGOLD_TRG_%x", sum[:16])
+	}
+	return strings.ToUpper(name)
+}
+
+// ValidateOracleDamengSequence must run before rendering or executing native DDL.
+func ValidateOracleDamengSequence(seq source.SequenceInfo) error {
+	if seq.Unsupported != "" {
+		return fmt.Errorf("%s", seq.Unsupported)
+	}
+	if seq.Native == nil {
+		return fmt.Errorf("缺少 Oracle 命名序列元数据")
+	}
+	n := seq.Native
+	if n.Cycle {
+		return fmt.Errorf("序列 %s 为循环序列，无法安全推导迁移后的续号", n.Name)
+	}
+	if err := tsqldameng.ValidName(n.Name); err != nil {
+		return err
+	}
+	parse := func(s, label string) (*big.Int, error) {
+		v, ok := new(big.Int).SetString(s, 10)
+		if !ok || !v.IsInt64() {
+			return nil, fmt.Errorf("序列 %s 的%s超出达梦 int64 范围: %s", n.Name, label, s)
+		}
+		return v, nil
+	}
+	start := seq.StartValueText
+	if start == "" {
+		start = fmt.Sprint(seq.StartValue)
+	}
+	a, err := parse(start, "起始值")
+	if err != nil {
+		return err
+	}
+	step, err := parse(n.IncrementBy, "步长")
+	if err != nil {
+		return err
+	}
+	lo, err := parse(n.MinValue, "最小值")
+	if err != nil {
+		return err
+	}
+	hi, err := parse(n.MaxValue, "最大值")
+	if err != nil {
+		return err
+	}
+	if step.Sign() == 0 || step.String() == "-9223372036854775808" || lo.Cmp(hi) >= 0 || a.Cmp(lo) < 0 || a.Cmp(hi) > 0 || new(big.Int).Abs(step).Cmp(new(big.Int).Sub(hi, lo)) > 0 {
+		return fmt.Errorf("序列 %s 起值、步长或边界无效", n.Name)
+	}
+	cache, ok := new(big.Int).SetString(n.CacheSize, 10)
+	if !ok || cache.Sign() < 0 || !cache.IsInt64() || cache.Int64() > 2147483647 || cache.Int64() == 1 {
+		return fmt.Errorf("序列 %s 缓存值无效", n.Name)
+	}
+	seen := map[string]bool{}
+	for _, b := range n.Bindings {
+		if b.Kind != "trigger" && !(b.Kind == "identity" && b.OnlyWhenNull) {
+			return fmt.Errorf("序列 %s 绑定 %s.%s 的生成模式不受支持", n.Name, b.TableName, b.ColumnName)
+		}
+		for _, name := range []string{b.TableName, b.ColumnName, OracleDamengTriggerName(seq, b)} {
+			if err := tsqldameng.ValidName(name); err != nil {
+				return err
+			}
+		}
+		key := OracleDamengTriggerName(seq, b)
+		if seen[key] {
+			return fmt.Errorf("序列 %s 包含重复触发器 %s", n.Name, key)
+		}
+		seen[key] = true
+	}
+	return nil
+}
 
 // SequenceStatements reattaches IDENTITY using DM8's documented ADD COLUMN
 // identity clause. ALTER COLUMN ... RESTART WITH is not DM8 syntax.
 func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
+	if seq.Native != nil {
+		if ValidateOracleDamengSequence(seq) != nil {
+			return nil
+		}
+		n := seq.Native
+		start := seq.StartValueText
+		if start == "" {
+			start = fmt.Sprint(seq.StartValue)
+		}
+		cycle, order, cache := "NOCYCLE", "NOORDER", "NOCACHE"
+		if n.Cycle {
+			cycle = "CYCLE"
+		}
+		if n.Ordered {
+			order = "ORDER"
+		}
+		if n.CacheSize != "0" {
+			cache = "CACHE " + n.CacheSize
+		}
+		qualified := d.QualifyTable(schema, n.Name)
+		statements := []Statement{{SQL: fmt.Sprintf("CREATE SEQUENCE %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s %s %s %s", qualified, start, n.IncrementBy, n.MinValue, n.MaxValue, cycle, cache, order)}}
+		for _, b := range n.Bindings {
+			assignment := "  SELECT " + qualified + ".NEXTVAL INTO :NEW." + d.QuoteIdent(b.ColumnName) + " FROM DUAL;\n"
+			if b.OnlyWhenNull {
+				assignment = "  IF :NEW." + d.QuoteIdent(b.ColumnName) + " IS NULL THEN\n  " + assignment + "  END IF;\n"
+			}
+			marker := strings.ReplaceAll("DBGOLD_ORACLE_DAMENG:"+strings.ToUpper(n.Name), "*/", "* /")
+			statements = append(statements, Statement{SQL: "CREATE TRIGGER " + d.QualifyTable(schema, OracleDamengTriggerName(seq, b)) + " BEFORE INSERT ON " + d.QualifyTable(schema, b.TableName) + " FOR EACH ROW\nBEGIN\n  /* " + marker + " */\n" + assignment + "END;"})
+		}
+		return statements
+	}
 	step := int64(1)
 	if seq.IdentityInfo != nil {
 		step = seq.IdentityInfo.Increment
@@ -85,7 +206,15 @@ func (d *DaMengDialect) ForeignKeyStatements(schema string, fk source.FKInfo) []
 // ViewStatements 达梦视图 DDL。注意:MySQL 视图定义为 MySQL 方言,
 // 在达梦下可能因函数/语法差异执行失败,失败由上层记入 report(已知限制)。
 func (d *DaMengDialect) ViewStatements(schema string, view source.ViewInfo) []Statement {
-	sql := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s", d.QualifyTable(schema, view.ViewName), view.Definition)
+	columns := ""
+	if len(view.Columns) > 0 {
+		names := make([]string, len(view.Columns))
+		for i, c := range view.Columns {
+			names[i] = d.QuoteIdent(c.Name)
+		}
+		columns = " (" + strings.Join(names, ", ") + ")"
+	}
+	sql := fmt.Sprintf("CREATE OR REPLACE VIEW %s%s AS %s", d.QualifyTable(schema, view.ViewName), columns, view.Definition)
 	return []Statement{{SQL: sql}}
 }
 

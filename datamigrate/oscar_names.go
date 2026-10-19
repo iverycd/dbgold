@@ -16,11 +16,11 @@ func (m *Migrator) isOscar() bool {
 }
 
 func (m *Migrator) readViews(ctx context.Context) ([]source.ViewInfo, error) {
-	if m.isOscar() {
+	if m.isOscar() || m.isOracleDameng() {
 		if reader, ok := m.reader.(interface {
 			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
 		}); ok {
-			return reader.GetViewsForTarget(ctx, "oscar")
+			return reader.GetViewsForTarget(ctx, m.writer.DBType())
 		}
 	}
 	return m.reader.GetViews(ctx)

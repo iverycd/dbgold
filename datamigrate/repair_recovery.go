@@ -100,6 +100,34 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
+	if r.DBType() == "oracle" && w.DBType() == "dameng" {
+		mapped := slices.Clone(p.SourceColumns)
+		for i := range mapped {
+			mapped[i].Name = p.ColumnMapping[mapped[i].Name]
+		}
+		targetInfo := &source.TableDDLInfo{TableName: p.TargetTable, Columns: mapped}
+		if checker, ok := w.(interface {
+			ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
+		}); ok {
+			if err = checker.ValidateOracleDamengExisting(ctx, targetInfo, dialect.TypeOpt{CharInLength: cfg.CharInLength, UseNvarchar2: cfg.UseNvarchar2}); err != nil {
+				return p, fmt.Errorf("补迁目标类型兼容检查: %w", err)
+			}
+		}
+		if checker, ok := w.(interface {
+			ValidateOracleDamengCapabilities(context.Context, []*source.TableDDLInfo) error
+		}); ok {
+			if err = checker.ValidateOracleDamengCapabilities(ctx, []*source.TableDDLInfo{targetInfo}); err != nil {
+				return p, err
+			}
+		}
+		if checker, ok := w.(interface {
+			ValidateOracleDamengLoadTriggers(context.Context, *source.TableDDLInfo) error
+		}); ok {
+			if err = checker.ValidateOracleDamengLoadTriggers(ctx, targetInfo); err != nil {
+				return p, err
+			}
+		}
+	}
 	p.SourceRows, err = r.CountRows(ctx, p.SourceTable)
 	if err != nil {
 		return p, fmt.Errorf("读取源表行数: %w", err)
@@ -124,7 +152,7 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	return p, nil
 }
 func recoveryName(cfg Config, dst, src, s string) string {
-	if dst == "oracle" || dst == "oscar" || dst == "dameng" && src == "sqlserver" {
+	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) {
 		return strings.ToUpper(s)
 	}
 	if cfg.LowerCaseNames {
@@ -376,7 +404,7 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	for _, seq := range sequences {
 		deferred := false
 		for _, related := range p.Related {
-			if related.Kind == "sequence" && related.Status != "succeeded" && related.Sequence != nil && related.Sequence.TableName == p.TargetTable && related.Sequence.ColumnName == seq.ColumnName {
+			if related.Kind == "sequence" && related.Status != "succeeded" && related.Sequence != nil && nativeSequenceDependsOn(*related.Sequence, p.TargetTable) && nativeSequenceKey(*related.Sequence) == nativeSequenceKey(seq) {
 				deferred = true
 			}
 		}
@@ -394,8 +422,43 @@ func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cf
 	if err != nil {
 		return nil, err
 	}
+	if r.DBType() == "oracle" && w.DBType() == "dameng" {
+		values = source.FilterNativeSequences(values, map[string]bool{p.SourceTable: true})
+	}
 	out := []source.SequenceInfo{}
 	for _, v := range values {
+		if v.Native != nil && r.DBType() == "oracle" && w.DBType() == "dameng" {
+			if preparer, ok := r.(interface {
+				PrepareNativeSequence(context.Context, source.SequenceInfo) (source.SequenceInfo, error)
+			}); ok && v.Unsupported == "" {
+				var e error
+				v, e = preparer.PrepareNativeSequence(ctx, v)
+				if e != nil {
+					return nil, e
+				}
+			}
+			n := *v.Native
+			n.Bindings = nil
+			for _, b := range v.Native.Bindings {
+				if b.TableName != p.SourceTable {
+					continue
+				}
+				name := p.ColumnMapping[b.ColumnName]
+				if name == "" {
+					return nil, fmt.Errorf("序列绑定列 %s 无目标映射", b.ColumnName)
+				}
+				b.SourceColumnName = b.ColumnName
+				b.TableName, b.ColumnName, b.TriggerName = p.TargetTable, name, strings.ToUpper(b.TriggerName)
+				n.Bindings = append(n.Bindings, b)
+			}
+			if len(n.Bindings) > 0 {
+				n.Name = strings.ToUpper(n.Name)
+				v.Native = &n
+				v.TableName, v.ColumnName = p.TargetTable, n.Bindings[0].ColumnName
+				out = append(out, v)
+			}
+			continue
+		}
 		if v.TableName != p.SourceTable {
 			continue
 		}
@@ -422,6 +485,49 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	if o.Sequence != nil && o.Sequence.Native != nil && nativeSequenceDependsOn(*o.Sequence, table.Table) {
+		v, changed := *o.Sequence, false
+		n := *v.Native
+		n.Bindings = slices.Clone(n.Bindings)
+		for i, b := range n.Bindings {
+			if b.TableName != table.Table {
+				continue
+			}
+			sourceColumn := b.SourceColumnName
+			if sourceColumn == "" {
+				for sourceName, targetName := range table.ColumnMapping {
+					if targetName == b.ColumnName {
+						sourceColumn = sourceName
+					}
+				}
+			}
+			if name := mapping[sourceColumn]; name != "" && name != b.ColumnName {
+				n.Bindings[i].ColumnName, n.Bindings[i].SourceColumnName = name, sourceColumn
+				if v.TableName == table.Table && v.ColumnName == b.ColumnName {
+					v.ColumnName = name
+				}
+				changed = true
+			}
+		}
+		if !changed {
+			return o
+		}
+		v.Native, o.RequiresReview = &n, true
+		o.Sequence = &v
+		ss := w.Dialect().SequenceStatements(o.Schema, v, "")
+		o.SuggestedDDL = dialect.JoinSQL(ss)
+		custom := false
+		for _, u := range o.Units {
+			custom = custom || strings.TrimSpace(u.SQL) != strings.TrimSpace(u.OriginalSQL)
+		}
+		if !custom {
+			o.Units = unitsFor(ss)
+		}
+		if o.Table == table.Table {
+			o.ColumnMapping = copyRepairColumnMapping(mapping)
+		}
+		return o
+	}
 	old := o.ColumnMapping
 	referenceOnly := o.ForeignKey != nil && o.Table != table.Table && o.ForeignKey.RefTable == table.Table
 	if referenceOnly {
@@ -486,7 +592,19 @@ func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Obje
 		ss = w.Dialect().ForeignKeyStatements(o.Schema, v)
 	case o.Sequence != nil:
 		v := *o.Sequence
-		v.ColumnName = rename(v.ColumnName)
+		if v.TableName == table.Table {
+			v.ColumnName = rename(v.ColumnName)
+		}
+		if v.Native != nil {
+			n := *v.Native
+			n.Bindings = slices.Clone(n.Bindings)
+			for i, b := range n.Bindings {
+				if b.TableName == table.Table {
+					n.Bindings[i].ColumnName = rename(b.ColumnName)
+				}
+			}
+			v.Native = &n
+		}
 		o.Sequence = &v
 		owner := ""
 		if cfg.ChangeOwner {
