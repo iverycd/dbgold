@@ -13,13 +13,19 @@
       </div>
       <div v-if="item.generator">底层函数：{{ item.generator }}</div>
       <a-alert v-if="item.error" type="error">{{ item.error }}</a-alert>
-      <pre v-if="item.ddl">{{ item.ddl }}</pre>
+      <details v-if="item.ddl" class="sql-details">
+        <summary>查看 DDL</summary>
+        <pre>{{ item.ddl }}</pre>
+      </details>
       <p v-else>{{ item.definition_warning || '尚未生成函数 DDL' }}</p>
     </article>
     <article v-for="extension in report.extensions || []" :key="extension.name">
       <strong>扩展 {{ extension.schema }}.{{ extension.name }}</strong>：{{ extensionStatus[extension.status] }}
       <a-button v-if="extension.sql" size="mini" type="text" @click="copyDDL(extension.sql)">复制 SQL</a-button>
-      <pre v-if="extension.sql">{{ extension.sql }}</pre>
+      <details v-if="extension.sql" class="sql-details">
+        <summary>查看 SQL</summary>
+        <pre>{{ extension.sql }}</pre>
+      </details>
       <a-alert v-if="extension.error" type="error">{{ extension.error }}</a-alert>
     </article>
   </section>
@@ -43,5 +49,7 @@ async function copyDDL(ddl: string) {
 h4 { margin: 0 0 12px; }
 article { padding: 12px 0; border-bottom: 1px solid var(--color-border-2); }
 .function-heading { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.sql-details { margin-top: 8px; }
+.sql-details summary { cursor: pointer; color: var(--color-text-2); }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--color-fill-2); max-height: 320px; overflow: auto; }
 </style>
