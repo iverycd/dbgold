@@ -55,17 +55,19 @@ func TestCompatibilityProcedureMainSQLIntegration(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					schema := newBusinessIntegrationSchema(t, ctx, db)
-					// Initialization must not read workflow data or invoke either
+					// Initialization must not read workflow data or invoke any
 					// procedure: none of their business tables exist yet.
 					report, err := ensurePGProcedureCompatibility(ctx, db, schema, product.name)
 					require.NoError(t, err)
-					require.Equal(t, 2, report.Created)
-					require.Len(t, report.Items, 2)
+					require.Equal(t, len(compatibilityProcedureSpecs), report.Created)
+					require.Len(t, report.Items, len(compatibilityProcedureSpecs))
 					report, err = ensurePGProcedureCompatibility(ctx, db, schema, product.name)
 					require.NoError(t, err)
-					require.Equal(t, 2, report.Reused)
-					for _, item := range report.Items {
-						require.Contains(t, strings.ToLower(item.DDL), "commit")
+					require.Equal(t, len(compatibilityProcedureSpecs), report.Reused)
+					for i, spec := range compatibilityProcedureSpecs {
+						if spec.writableCTE {
+							require.Contains(t, strings.ToLower(report.Items[i].DDL), "commit")
+						}
 					}
 					f := newArchiveFixture(t, ctx, db, schema)
 					f.product = product.name

@@ -16,16 +16,44 @@ const compatibilityProcedureName = "changedatatohistory"
 const compatibilityProcedureSignature = "changedatatohistory(p_processversioninstanceguid varchar)"
 const compatibilityMainProcedureName = "changedatatomain"
 const compatibilityMainProcedureSignature = "changedatatomain(p_processversioninstanceguid varchar)"
-const compatibilityProcedureInputPredicate = "p.pronargs=1 AND p.proargtypes[0]='character varying'::regtype AND p.prokind='p'"
+const compatibilityCreatePVIProcedureName = "createpvi"
+const compatibilityCreatePVIProcedureSignature = "createpvi(p_processguid varchar, p_processversioninstanceguid varchar, p_userguid varchar, p_username varchar, p_workitemguid varchar, p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)"
 
 type compatibilityProcedureSpec struct {
 	name, signature string
+	inputs          []string
+	modes           string
+	minDefaults     int
+	maxDefaults     int
+	writableCTE     bool
 	ddl             func(schema, catalog string, native bool) string
 }
 
 var compatibilityProcedureSpecs = []compatibilityProcedureSpec{
-	{compatibilityProcedureName, compatibilityProcedureSignature, changeDataToHistoryDDL},
-	{compatibilityMainProcedureName, compatibilityMainProcedureSignature, changeDataToMainDDL},
+	{name: compatibilityProcedureName, signature: compatibilityProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToHistoryDDL},
+	{name: compatibilityMainProcedureName, signature: compatibilityMainProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToMainDDL},
+	{name: compatibilityCreatePVIProcedureName, signature: compatibilityCreatePVIProcedureSignature,
+		inputs: []string{"character varying", "character varying", "character varying", "character varying", "character varying", "character varying", "character varying"},
+		modes:  "i,i,i,i,i,i,b", minDefaults: 1, maxDefaults: 1, ddl: createPVIDDL},
+}
+
+func (s compatibilityProcedureSpec) inputPredicate() string {
+	predicate := fmt.Sprintf("p.pronargs=%d", len(s.inputs))
+	for i, typ := range s.inputs {
+		predicate += fmt.Sprintf(" AND p.proargtypes[%d]='%s'::regtype", i, typ)
+	}
+	return predicate + " AND p.prokind='p'"
+}
+
+func (s compatibilityProcedureSpec) identityArguments() string {
+	return strings.Join(s.inputs, ",")
+}
+
+func (s compatibilityProcedureSpec) compatibleMetadata(defaults int, variadic int64, modes string) bool {
+	if modes == "" {
+		modes = strings.TrimSuffix(strings.Repeat("i,", len(s.inputs)), ",")
+	}
+	return variadic == 0 && modes == s.modes && defaults >= s.minDefaults && defaults <= s.maxDefaults
 }
 
 var compatibilityProcedureProbeSequence atomic.Uint64
@@ -100,7 +128,7 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		return report, fmt.Errorf("%s 初始化失败: 目标系统目录缺少 prokind，无法安全区分存储过程与函数", item.Name)
 	}
 	selectMetadata := `SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE(` + source.QuotePGIdent(catalog) + `.array_to_string(p.proargmodes,','),'') FROM ` + catalog + `.pg_proc p JOIN ` + catalog + `.pg_namespace n ON n.oid=p.pronamespace WHERE `
-	query = selectMetadata + `n.nspname=$1 AND p.proname=$2 AND ` + compatibilityProcedureInputPredicate
+	query = selectMetadata + `n.nspname=$1 AND p.proname=$2 AND ` + spec.inputPredicate()
 	var oid, variadic int64
 	var defaults int
 	var modes string
@@ -110,15 +138,15 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		// uppercase catalog entry. Validate the resulting OID and schema again;
 		// regprocedure itself does not distinguish functions from procedures.
 		err = compatibilityProbe(ctx, tx, func() error {
-			return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid`, qualifiedFunction(schema, item.Name)+"(character varying)").Scan(&oid)
+			return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid`, qualifiedFunction(schema, item.Name)+"("+spec.identityArguments()+")").Scan(&oid)
 		})
 		if compatibilitySQLState(err) == "42883" {
 			err, oid = nil, 0
 		} else if err == nil {
-			query = selectMetadata + `p.oid=$1 AND n.nspname=$2 AND ` + compatibilityProcedureInputPredicate
+			query = selectMetadata + `p.oid=$1 AND n.nspname=$2 AND ` + spec.inputPredicate()
 			err = tx.QueryRowContext(ctx, query, oid, schema).Scan(&oid, &defaults, &variadic, &modes)
 			if errors.Is(err, sql.ErrNoRows) {
-				return report, fmt.Errorf("已有 %s.%s 不是兼容的单 varchar 输入存储过程，已保留原定义", schema, item.Signature)
+				return report, fmt.Errorf("已有 %s.%s 不是兼容的存储过程签名，已保留原定义", schema, item.Signature)
 			}
 		}
 	}
@@ -126,7 +154,7 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		return report, fmt.Errorf("检查 %s.%s 失败: %w", schema, item.Signature, err)
 	}
 	var conflicting bool
-	query = `SELECT EXISTS (SELECT 1 FROM ` + catalog + `.pg_proc p JOIN ` + catalog + `.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=COALESCE((SELECT proname FROM ` + catalog + `.pg_proc WHERE oid=$3::oid),$2) AND p.oid<>$3::oid AND NOT (` + compatibilityProcedureInputPredicate + `) AND ` + compatibilityProcedureConflictingCallsPredicate(catalog) + `)`
+	query = `SELECT EXISTS (SELECT 1 FROM ` + catalog + `.pg_proc p JOIN ` + catalog + `.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=COALESCE((SELECT proname FROM ` + catalog + `.pg_proc WHERE oid=$3::oid),$2) AND p.oid<>$3::oid AND NOT (` + spec.inputPredicate() + `) AND ` + compatibilityProcedureConflictingCallsPredicate(catalog, spec) + `)`
 	if err = tx.QueryRowContext(ctx, query, schema, item.Name, oid).Scan(&conflicting); err != nil {
 		return report, fmt.Errorf("检查 %s.%s 的重载失败: %w", schema, item.Signature, err)
 	}
@@ -134,8 +162,8 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		return report, fmt.Errorf("已有 %s.%s 重载使标准 varchar 或字符串字面量调用不能唯一指向目标过程，已保留原定义", schema, item.Name)
 	}
 	if oid != 0 {
-		if variadic != 0 || (modes != "" && modes != "i") || defaults < 0 || defaults > 1 {
-			return report, fmt.Errorf("已有 %s.%s 的参数结构不兼容（OUT/INOUT/VARIADIC），已保留原定义", schema, item.Signature)
+		if !spec.compatibleMetadata(defaults, variadic, modes) {
+			return report, fmt.Errorf("已有 %s.%s 的参数模式或默认参数结构不兼容，已保留原定义", schema, item.Signature)
 		}
 		item.Status = "reused"
 		definitionErr := compatibilityProbe(ctx, tx, func() error {
@@ -149,8 +177,10 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		}
 		return report, nil
 	}
-	if err = probeCompatibilityProcedureWritableCTE(ctx, tx, catalog); err != nil {
-		return report, fmt.Errorf("%s 初始化失败: 无法验证 DELETE RETURNING 数据修改 CTE 能力: %w", item.Name, err)
+	if spec.writableCTE {
+		if err = probeCompatibilityProcedureWritableCTE(ctx, tx, catalog); err != nil {
+			return report, fmt.Errorf("%s 初始化失败: 无法验证 DELETE RETURNING 数据修改 CTE 能力: %w", item.Name, err)
+		}
 	}
 	preferNative := product == "gaussdb" || product == "vastbase" || product == "gbase" || product == "seabox"
 	var preferredErr error
@@ -182,20 +212,25 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 	return report, nil
 }
 
-// CALL schema.changedatatohistory('guid') supplies an unknown literal. Unlike
-// a varchar-typed call, that call can prefer a text overload or be ambiguous
-// between other string-category types. Catalog-only detection covers both
-// documented forms without executing or planning any existing routine body.
-func compatibilityProcedureConflictingCallsPredicate(catalog string) string {
-	spec := compatibilityFunctionSpec{inputs: []string{"character varying"}}
+// Check both explicitly typed and unknown-string calls at every documented
+// arity. Procedures count OUT positions as CALL arguments, while functions use
+// input arguments only. Discovery never calls or plans a business routine.
+func compatibilityProcedureConflictingCallsPredicate(catalog string, spec compatibilityProcedureSpec) string {
 	cat := source.QuotePGIdent(catalog)
-	// CALL includes OUT arguments; ordinary function candidates do not.
 	argc := "CASE WHEN p.prokind='p' THEN COALESCE(" + cat + ".array_length(p.proallargtypes,1),p.pronargs) ELSE p.pronargs END"
-	first := "CASE WHEN p.prokind='p' THEN COALESCE(p.proallargtypes[1],p.proargtypes[0]) ELSE p.proargtypes[0] END"
-	variadicAdjustment := "CASE WHEN p.provariadic<>0 THEN 1 ELSE 0 END"
-	literal := "((" + argc + ")>=1 OR p.provariadic<>0) AND (" + argc + ")-p.pronargdefaults-" + variadicAdjustment + "<=1" +
-		" AND EXISTS (SELECT 1 FROM " + catalog + ".pg_type argument_type WHERE argument_type.oid=CASE WHEN p.provariadic<>0 AND (" + argc + ")<=1 THEN p.provariadic ELSE " + first + " END AND argument_type.typcategory='S')"
-	return "(" + spec.conflictingCallsPredicate() + " OR (" + literal + "))"
+	var calls []string
+	for arity := len(spec.inputs) - spec.minDefaults; arity <= len(spec.inputs); arity++ {
+		callable := fmt.Sprintf("((%s)>=%d OR p.provariadic<>0) AND (%s)-p.pronargdefaults-CASE WHEN p.provariadic<>0 THEN 1 ELSE 0 END<=%d", argc, arity, argc, arity)
+		var typed, literal []string
+		for i := 0; i < arity; i++ {
+			argument := fmt.Sprintf("CASE WHEN p.prokind='p' THEN COALESCE(p.proallargtypes[%d],p.proargtypes[%d]) ELSE p.proargtypes[%d] END", i+1, i, i)
+			argument = fmt.Sprintf("CASE WHEN p.provariadic<>0 AND %d>=(%s)-1 THEN p.provariadic ELSE %s END", i, argc, argument)
+			typed = append(typed, "("+argument+")='"+spec.inputs[i]+"'::regtype")
+			literal = append(literal, "EXISTS (SELECT 1 FROM "+catalog+".pg_type argument_type WHERE argument_type.oid=("+argument+") AND argument_type.typcategory='S')")
+		}
+		calls = append(calls, "("+callable+" AND (("+strings.Join(typed, " AND ")+") OR ("+strings.Join(literal, " AND ")+")))")
+	}
+	return "(" + strings.Join(calls, " OR ") + ")"
 }
 
 // The procedure defers business-table SQL until invocation, so CREATE alone

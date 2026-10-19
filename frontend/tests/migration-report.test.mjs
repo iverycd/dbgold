@@ -429,3 +429,41 @@ for (const statuses of [['created', 'reused'], ['reused', 'failed'], ['failed', 
     assert.equal(r.compatibility_functions.items.length, 12)
   })
 }
+
+test('thirteen compatibility items group all three procedures with mixed statuses and output signatures', async () => {
+  const functions = Array.from({ length: 10 }, (_, index) => ({
+    name: `function_${index}`, schema: 'app', status: 'created', ddl: `FUNCTION_BODY_${index};`, error: '',
+  }))
+  const procedures = [
+    { kind: 'procedure', name: 'changedatatohistory', signature: 'changedatatohistory(p_processversioninstanceguid varchar)', schema: 'app', status: 'created', ddl: 'HISTORY_PROCEDURE_BODY;', error: '' },
+    { kind: 'procedure', name: 'changedatatomain', signature: 'changedatatomain(p_processversioninstanceguid varchar)', schema: 'app', status: 'reused', ddl: 'MAIN_PROCEDURE_BODY;', error: '' },
+    { kind: 'procedure', name: 'createpvi', signature: 'createpvi(p_processguid varchar, p_processversioninstanceguid varchar, p_userguid varchar, p_username varchar, p_workitemguid varchar, p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)', schema: 'app', status: 'failed', ddl: 'CREATE_PVI_PROCEDURE_BODY;', error: 'createpvi permission denied' },
+  ]
+  const r = report(empty())
+  r.compatibility_functions = { total: 13, success: 12, failed: 1, created: 11, reused: 1, items: [...functions, ...procedures] }
+  const [functionRow, procedureRow] = reportCategories(r).filter(row => row.isCompatibility)
+  assert.equal(functionRow.total, 10)
+  assert.equal(procedureRow.total, 3)
+  assert.equal(procedureRow.success, 2)
+  for (const key of ['created', 'reused', 'failed']) assert.equal(procedureRow[key], 1)
+  for (const key of ['total', 'success', 'failed', 'created', 'reused']) assert.equal(functionRow[key] + procedureRow[key], r.compatibility_functions[key])
+  const text = formatReportCategories(r).join('\n')
+  const [functionDetails, procedureDetails] = text.split('=== 兼容函数明细 ===')[1].split('=== 兼容存储过程明细 ===')
+  for (const procedure of procedures) {
+    assert.ok(procedureDetails.includes(procedure.signature))
+    assert.equal(procedureDetails.split(procedure.ddl).length - 1, 1)
+    assert.ok(!functionDetails.includes(procedure.name))
+  }
+  assert.doesNotMatch(procedureDetails, /FUNCTION_BODY/)
+  const app = createSSRApp({ render: () => h(createCompatibilityPanel(), { report: procedureRow.compatibilityReport, kind: 'procedure' }) })
+  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+  const html = await renderToString(app)
+  assert.equal(html.split('class="function-heading"').length - 1, 3)
+  for (const procedure of procedures) {
+    assert.ok(html.includes(procedure.signature))
+    assert.equal(html.split(procedure.ddl).length - 1, 1)
+  }
+  assert.ok(html.includes('createpvi permission denied'))
+  assert.doesNotMatch(html, /FUNCTION_BODY/)
+})

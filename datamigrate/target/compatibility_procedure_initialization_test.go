@@ -32,7 +32,7 @@ func expectProcedureMissingForInitialization(m sqlmock.Sqlmock, schema string, s
 		WithArgs(schema, spec.name).WillReturnRows(procedureMetadataRows())
 	expectUUIDSavepoint(m)
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT $1::regprocedure::oid`)).
-		WithArgs(qualifiedFunction(schema, spec.name) + "(character varying)").
+		WithArgs(qualifiedFunction(schema, spec.name) + "(" + spec.identityArguments() + ")").
 		WillReturnError(&pq.Error{Code: "42883", Message: "procedure does not exist"})
 	expectUUIDProbe(m, true)
 	expectBuiltinNoConflictsForInitialization(m, schema, spec.name, 0)
@@ -44,7 +44,9 @@ func expectProcedureCreatedForInitialization(m sqlmock.Sqlmock, schema, product 
 		spec = specs[0]
 	}
 	expectProcedureMissingForInitialization(m, schema, spec)
-	expectProcedureWritableCTEForInitialization(m, nil)
+	if spec.writableCTE {
+		expectProcedureWritableCTEForInitialization(m, nil)
+	}
 	expectUUIDSavepoint(m)
 	native := product == "gaussdb" || product == "vastbase" || product == "gbase" || product == "seabox"
 	create := m.ExpectExec(regexp.QuoteMeta(spec.ddl(schema, "pg_catalog", native)))
@@ -79,7 +81,7 @@ func expectProcedureReusedForInitialization(m sqlmock.Sqlmock, schema string, sp
 	}
 	expectProcedureHeaderForInitialization(m, schema)
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE("pg_catalog".array_to_string`)).
-		WithArgs(schema, spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, 0, 0, ""))
+		WithArgs(schema, spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, spec.minDefaults, 0, spec.modes))
 	expectBuiltinNoConflictsForInitialization(m, schema, spec.name, 88)
 	expectUUIDSavepoint(m)
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "pg_catalog".pg_get_functiondef($1::oid)`)).
@@ -118,7 +120,9 @@ func TestProcedureHeaderFallbackOnlyOnSyntaxError(t *testing.T) {
 				t.Run(sample.product, func(t *testing.T) {
 					w, mock := repairPGMock(t)
 					expectProcedureMissingForInitialization(mock, "app", spec)
-					expectProcedureWritableCTEForInitialization(mock, nil)
+					if spec.writableCTE {
+						expectProcedureWritableCTEForInitialization(mock, nil)
+					}
 					expectUUIDSavepoint(mock)
 					mock.ExpectExec(regexp.QuoteMeta(spec.ddl("app", "pg_catalog", sample.native))).
 						WillReturnError(&pq.Error{Code: "42601", Message: "unsupported procedure header"})
@@ -152,6 +156,9 @@ func TestProcedureHeaderFallbackOnlyOnSyntaxError(t *testing.T) {
 
 func TestProcedureWritableCTEUnsupportedDoesNotCreateOrCallProcedure(t *testing.T) {
 	for _, spec := range compatibilityProcedureSpecs {
+		if !spec.writableCTE {
+			continue
+		}
 		t.Run(spec.name, func(t *testing.T) {
 			w, mock := repairPGMock(t)
 			expectProcedureMissingForInitialization(mock, "app", spec)
@@ -195,7 +202,7 @@ func TestProcedureFunctionCollisionIsPreserved(t *testing.T) {
 				WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows())
 			expectUUIDSavepoint(mock)
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT $1::regprocedure::oid`)).
-				WithArgs(qualifiedFunction("app", spec.name) + "(character varying)").
+				WithArgs(qualifiedFunction("app", spec.name) + "(" + spec.identityArguments() + ")").
 				WillReturnRows(sqlmock.NewRows([]string{"oid"}).AddRow(123))
 			expectUUIDProbe(mock, false)
 			mock.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE.*p.prokind='p'`).
@@ -263,7 +270,7 @@ func TestProcedureReadsActualDefinitionShapesAndWarnsWithoutFabrication(t *testi
 					w, mock := repairPGMock(t)
 					expectProcedureHeaderForInitialization(mock, "app")
 					mock.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE`).
-						WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, 1, 0, "i"))
+						WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, spec.minDefaults, 0, spec.modes))
 					expectBuiltinNoConflictsForInitialization(mock, "app", spec.name, 88)
 					expectUUIDSavepoint(mock)
 					query := mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "pg_catalog".pg_get_functiondef($1::oid)`)).WithArgs(int64(88))
@@ -312,7 +319,9 @@ func expectProcedureBothHeadersRejected(m sqlmock.Sqlmock, terminalCode string, 
 		spec = specs[0]
 	}
 	expectProcedureMissingForInitialization(m, "app", spec)
-	expectProcedureWritableCTEForInitialization(m, nil)
+	if spec.writableCTE {
+		expectProcedureWritableCTEForInitialization(m, nil)
+	}
 	expectUUIDSavepoint(m)
 	m.ExpectExec(regexp.QuoteMeta(spec.ddl("app", "pg_catalog", false))).
 		WillReturnError(&pq.Error{Code: "42601", Message: "preferred header rejected"})
@@ -374,7 +383,7 @@ func TestProcedureCatalogHelpersUseResolvedCatalog(t *testing.T) {
 			// Both helper calls must bind to the discovered system catalog even with
 			// the target schema first in search_path. No user-defined helper is called.
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE("sys_catalog".array_to_string`)).
-				WithArgs(schema, spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, 0, 0, "i"))
+				WithArgs(schema, spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, spec.minDefaults, 0, spec.modes))
 			expectBuiltinNoConflictsForInitialization(mock, schema, spec.name, 88)
 			expectUUIDSavepoint(mock)
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "sys_catalog".pg_get_functiondef($1::oid)`)).
@@ -386,6 +395,74 @@ func TestProcedureCatalogHelpersUseResolvedCatalog(t *testing.T) {
 			require.Equal(t, 1, report.Reused)
 			require.Equal(t, "ORIGINAL VENDOR PROCEDURE", report.Items[0].DDL)
 			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestCreatePVIRequiresExactDefaultInoutMetadata(t *testing.T) {
+	spec := compatibilityProcedureSpecs[2]
+	for _, sample := range []struct {
+		name, modes string
+		defaults    int
+		variadic    int64
+	}{
+		{name: "missing_default", modes: "i,i,i,i,i,i,b"},
+		{name: "too_many_defaults", modes: "i,i,i,i,i,i,b", defaults: 2},
+		{name: "all_in_implicit", defaults: 1},
+		{name: "all_in_explicit", modes: "i,i,i,i,i,i,i", defaults: 1},
+		{name: "misplaced_inout", modes: "b,i,i,i,i,i,i", defaults: 1},
+		{name: "extra_out", modes: "i,i,i,i,i,i,o,b", defaults: 1},
+		{name: "variadic", modes: "i,i,i,i,i,i,v", defaults: 1, variadic: 1043},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			w, mock := repairPGMock(t)
+			expectProcedureHeaderForInitialization(mock, "app")
+			mock.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE`).
+				WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, sample.defaults, sample.variadic, sample.modes))
+			expectBuiltinNoConflictsForInitialization(mock, "app", spec.name, 88)
+			mock.ExpectRollback()
+			report, err := ensurePGProcedureSpecCompatibility(context.Background(), w.db, "app", "postgres", spec)
+			require.ErrorContains(t, err, "已保留原定义")
+			require.Equal(t, 1, report.Failed)
+			require.Empty(t, report.Items[0].DDL)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestCreatePVIInitializationDoesNotProbeWritableCTE(t *testing.T) {
+	w, mock := repairPGMock(t)
+	spec := compatibilityProcedureSpecs[2]
+	require.False(t, spec.writableCTE)
+	expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
+	report, err := ensurePGProcedureSpecCompatibility(context.Background(), w.db, "app", "postgres", spec)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.Created)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMoveProceduresRetainImplicitInModesAndExistingDefaults(t *testing.T) {
+	for _, spec := range compatibilityProcedureSpecs[:2] {
+		t.Run(spec.name, func(t *testing.T) {
+			for _, modes := range []string{"", "i"} {
+				for defaults := 0; defaults <= 1; defaults++ {
+					w, mock := repairPGMock(t)
+					expectProcedureHeaderForInitialization(mock, "app")
+					mock.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE`).
+						WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, defaults, 0, modes))
+					expectBuiltinNoConflictsForInitialization(mock, "app", spec.name, 88)
+					expectUUIDSavepoint(mock)
+					mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "pg_catalog".pg_get_functiondef($1::oid)`)).
+						WithArgs(int64(88)).WillReturnRows(sqlmock.NewRows([]string{"definition"}).AddRow("EXISTING MOVE PROCEDURE"))
+					expectUUIDProbe(mock, false)
+					mock.ExpectRollback()
+					report, err := ensurePGProcedureSpecCompatibility(context.Background(), w.db, "app", "postgres", spec)
+					require.NoError(t, err)
+					require.Equal(t, 1, report.Reused)
+					require.Equal(t, "EXISTING MOVE PROCEDURE", report.Items[0].DDL)
+					require.NoError(t, mock.ExpectationsWereMet())
+				}
+			}
 		})
 	}
 }
