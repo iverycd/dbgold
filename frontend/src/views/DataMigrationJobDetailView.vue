@@ -135,7 +135,7 @@
                   </a-table-column>
                 </template>
                 <template #expand-row="{ record }">
-                  <CompatibilityFunctionsPanel v-if="record.isCompatibility && report.compatibility_functions" :report="report.compatibility_functions" />
+                  <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
                 </template>
               </a-table>
             </div>
@@ -287,6 +287,7 @@ const migratedCategories = computed(() => categoryRows.value.filter(row => !row.
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))
 const objectSuccessCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.success, 0))
 const failedObjectCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.failed, 0))
+const failedBusinessObjectCount = computed(() => migratedCategories.value.filter(row => !row.isCompatibility).reduce((sum, row) => sum + row.failed, 0))
 const failedItems = computed<FailedItem[]>(() => migratedCategories.value.filter(row => !row.isCompatibility).flatMap(row => row.items.map((item, index) => ({ ...item, key: `${row.key}-${item.name}-${index}`, category: row.key, categoryLabel: row.label }))))
 const failedCategoryOptions = computed(() => migratedCategories.value.filter(row => !row.isCompatibility && row.items.length).map(row => ({ key: row.key, label: row.label })))
 const filteredFailedItems = computed(() => {
@@ -326,8 +327,10 @@ const summaryText = computed(() => job.value?.summary || (job.value?.status === 
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
   if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
-  if (report.value?.compatibility_functions?.failed) items.push({ key: 'compatibility', level: 'danger', title: '兼容函数初始化失败', description: '在迁移概览展开兼容函数，查看底层函数探测、扩展准备和错误明细。', tab: 'overview', action: '查看兼容函数' })
-  if (failedObjectCount.value > (report.value?.compatibility_functions?.failed || 0)) items.push({ key: 'objects', level: 'danger', title: `${failedObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
+  for (const row of categoryRows.value.filter(row => row.isCompatibility && row.failed > 0)) {
+    items.push({ key: row.key, level: 'danger', title: `${row.label}初始化失败`, description: `在迁移概览展开${row.label}，查看初始化结果、DDL 和错误明细。`, tab: 'overview', action: `查看${row.label}` })
+  }
+  if (failedBusinessObjectCount.value > 0) items.push({ key: 'objects', level: 'danger', title: `${failedBusinessObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
   if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items

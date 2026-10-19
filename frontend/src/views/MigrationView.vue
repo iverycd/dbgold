@@ -560,7 +560,7 @@
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views" :disabled="viewMigrate.running || databaseSelectionBlocked('views')"
             @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
-          <CompatibilityFunctionsPanel v-if="viewMigrate.compatibilityFunctions" :report="viewMigrate.compatibilityFunctions" />
+          <CompatibilityFunctionsPanel v-for="group in vmCompatibilityGroups" :key="group.key" :report="group.report" :kind="group.kind" />
           <!-- 结果 -->
           <div v-if="viewMigrate.results.length > 0" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>迁移结果</h3></div>
@@ -909,6 +909,7 @@ import { copyText } from '@/utils/clipboard'
 import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
+import { compatibilityReportGroups } from '@/utils/migrationReport'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
@@ -1336,6 +1337,7 @@ const vmFilteredRows = computed(() => {
 
 const vmSuccessCount = computed(() => viewMigrate.results.filter((r) => !r.error).length)
 const vmFailCount = computed(() => viewMigrate.results.filter((r) => r.error).length)
+const vmCompatibilityGroups = computed(() => compatibilityReportGroups(viewMigrate.compatibilityFunctions))
 
 const vmCanMigrate = computed(() =>
   viewMigrate.srcConnId !== undefined &&
@@ -1433,7 +1435,10 @@ async function handleMigrateViews() {
     viewMigrate.results = res.data.results ?? []
     viewMigrate.compatibilityFunctions = res.data.compatibility_functions ?? undefined
     const fail = viewMigrate.results.filter((r) => r.error).length
-    if (viewMigrate.compatibilityFunctions?.failed) Message.warning(`兼容函数初始化失败；视图迁移成功 ${viewMigrate.results.length - fail} 个，失败 ${fail} 个，请查看明细`)
+    if (viewMigrate.compatibilityFunctions?.failed) {
+      const failedKinds = vmCompatibilityGroups.value.filter(group => group.report.failed > 0).map(group => group.label).join('、')
+      Message.warning(`${failedKinds}初始化失败；视图迁移成功 ${viewMigrate.results.length - fail} 个，失败 ${fail} 个，请查看明细`)
+    }
     else if (fail > 0) Message.warning(`迁移完成，${fail} 个视图失败`)
     else Message.success(`成功迁移 ${viewMigrate.results.length} 个视图`)
   } catch (e: any) {

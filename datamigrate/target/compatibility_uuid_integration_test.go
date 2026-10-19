@@ -127,16 +127,16 @@ func TestCompatibilityKingbaseNativeIntegration(t *testing.T) {
 			defer cancel()
 			report, err := EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
 			require.Zero(t, report.Failed)
-			require.Len(t, report.Items, 1+len(builtinCompatibilitySpecs))
+			require.Len(t, report.Items, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs))
 			require.Equal(t, "get_uuid", report.Items[0].Name)
 			if phase == "reuse" {
-				require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Reused)
+				require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 				require.Zero(t, report.Created)
 			} else {
-				require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Created)
+				require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
 				require.Zero(t, report.Reused)
 			}
 			var first, second string

@@ -1,4 +1,5 @@
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -61,6 +62,7 @@ function loadMigrationView(payloads) {
       case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
+      case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/clipboard': return { copyText: () => assert.fail('Unexpected clipboard call') }
       case '@/api/schema': return { downloadRoutines: () => assert.fail('Unexpected routine export') }
       case '@/api/connections': return { listConnectionSchemas: async () => ({ data: ['schema_a', 'schema_b'] }) }

@@ -1,4 +1,5 @@
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -47,6 +48,7 @@ function page(requests, queue) {
       case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return helper
+      case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}
       case '@/api/connections': return { listConnectionViews: (...args) => list('views', ...args) }

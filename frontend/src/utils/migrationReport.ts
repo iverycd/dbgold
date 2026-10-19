@@ -1,4 +1,4 @@
-import type { CategoryReport, MigrationReport, ObjectResult } from '@/api/migration'
+import type { CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult } from '@/api/migration'
 
 const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
 
@@ -72,20 +72,59 @@ export function categoryPresentation(category: CategoryReport) {
   }
 }
 
+export function compatibilityReportGroups(report?: CompatibilityFunctionsReport) {
+  if (!report) return []
+  const items = report.items ?? []
+  const procedureItems = items.filter(item => item.kind === 'procedure')
+  const created = procedureItems.filter(item => item.status === 'created').length
+  const reused = procedureItems.filter(item => item.status === 'reused').length
+  const procedures: CompatibilityFunctionsReport = {
+    total: procedureItems.length, success: created + reused,
+    failed: procedureItems.filter(item => item.status === 'failed').length,
+    created, reused, items: procedureItems,
+  }
+  // Historical reports may have aggregate counts without complete item details.
+  // Subtract only explicitly recorded procedures to retain those function counts.
+  const functions: CompatibilityFunctionsReport = {
+    total: report.total - procedures.total,
+    success: report.success - procedures.success,
+    failed: report.failed - procedures.failed,
+    created: report.created - procedures.created,
+    reused: report.reused - procedures.reused,
+    items: items.filter(item => item.kind !== 'procedure'),
+    extensions: report.extensions,
+  }
+  const groups = [{ key: 'compatibility_functions', label: '兼容函数', kind: 'function' as const, report: functions }]
+  return procedureItems.length
+    ? [...groups, { key: 'compatibility_procedures', label: '兼容存储过程', kind: 'procedure' as const, report: procedures }]
+    : groups
+}
+
 export function reportCategories(report: MigrationReport) {
   const categories = [
     ['tables', '表'], ['data', '数据写入'], ['primaryKeys', '主键'], ['views', '视图'],
     ['indexes', '索引'], ['constraints', '外键'], ['sequences', '序列'],
-    ['comments', '注释'], ['triggers', '触发器'], ['compatibility_functions', '兼容函数'],
+    ['comments', '注释'], ['triggers', '触发器'],
   ] as const
-  return categories.map(([key, label]) => {
-    const category = report[key] ?? { total: 0, success: 0, failed: 0, items: [] }
+  const sources = [
+    ...categories.map(([key, label]) => ({
+      key, label, category: report[key] ?? { total: 0, success: 0, failed: 0, items: [] },
+      compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
+      compatibilityKind: undefined as 'function' | 'procedure' | undefined,
+    })),
+    ...compatibilityReportGroups(report.compatibility_functions).map(group => ({
+      key: group.key, label: group.label, category: group.report,
+      compatibilityReport: group.report, compatibilityKind: group.kind,
+    })),
+  ]
+  return sources.map(({ key, label, category, compatibilityReport, compatibilityKind }) => {
     const isTrigger = key === 'triggers'
-    const isCompatibility = key === 'compatibility_functions'
+    const isCompatibility = !!compatibilityReport
     return {
       ...category, ...categoryPresentation(category), key, label, isTrigger, isCompatibility,
-      created: isCompatibility ? report.compatibility_functions?.created ?? 0 : 0,
-      reused: isCompatibility ? report.compatibility_functions?.reused ?? 0 : 0,
+      compatibilityReport, compatibilityKind,
+      created: compatibilityReport?.created ?? 0,
+      reused: compatibilityReport?.reused ?? 0,
       success: isTrigger ? 0 : category.success,
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
@@ -97,7 +136,7 @@ export function reportCategories(report: MigrationReport) {
         key: JSON.stringify([key, item.table ?? '', item.name, item.stage ?? '', index]),
       })),
     }
-  }).filter(row => row.key !== 'compatibility_functions' || !!report.compatibility_functions)
+  })
 }
 
 export function formatReportCategories(report: MigrationReport): string[] {
@@ -105,21 +144,22 @@ export function formatReportCategories(report: MigrationReport): string[] {
   const lines = ['=== 迁移概览 ===']
   for (const row of categories) {
     if (row.isTrigger) {
-      lines.push(`${row.label.padEnd(6)}总计 ${row.total === -1 ? '获取失败' : row.totalLabel}  （未迁移）`)
+      lines.push(`${row.label.padEnd(6)} 总计 ${row.total === -1 ? '获取失败' : row.totalLabel}  （未迁移）`)
     } else {
-      lines.push(`${row.label.padEnd(6)}总计 ${row.totalLabel}  成功 ${row.success}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
+      lines.push(`${row.label.padEnd(6)} 总计 ${row.totalLabel}  成功 ${row.success}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
     }
   }
-  const compatibility = report.compatibility_functions
-  if (compatibility) {
-    lines.push('', '=== 兼容函数明细 ===', `新建 ${compatibility.created}，复用 ${compatibility.reused}`)
+  for (const group of compatibilityReportGroups(report.compatibility_functions)) {
+    const compatibility = group.report
+    const routineLabel = group.kind === 'procedure' ? '存储过程' : '函数'
+    lines.push('', `=== ${group.label}明细 ===`, `新建 ${compatibility.created}，复用 ${compatibility.reused}`)
     for (const item of compatibility.items) {
       const status = ({ created: '新建', reused: '复用', failed: '失败' })[item.status] || item.status
       lines.push(`  ${item.schema}.${item.signature || item.name}：${status}`)
       if (item.generator) lines.push(`    底层函数：${item.generator}`)
       if (item.error) lines.push(`    失败原因：${item.error}`)
-      if (item.ddl) lines.push('    函数 DDL：', ...item.ddl.split('\n').map(line => `      ${line}`))
-      else lines.push(`    ${item.definition_warning || '尚未生成函数 DDL'}`)
+      if (item.ddl) lines.push(`    ${routineLabel} DDL：`, ...item.ddl.split('\n').map(line => `      ${line}`))
+      else lines.push(`    ${item.definition_warning || `尚未生成${routineLabel} DDL`}`)
     }
     for (const extension of compatibility.extensions ?? []) {
       lines.push(`  扩展 ${extension.schema}.${extension.name}：${({ installed: '已安装', reused: '已复用', failed: '失败', rolled_back: '已回滚', unknown: '结果待核验' })[extension.status]}`)

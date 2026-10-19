@@ -106,6 +106,30 @@ function memoryRenderer() {
   return { renderer, root: element('root') }
 }
 
+test('report expands function and procedure slices once and copies their own DDL', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const r = report({ name: 'unused', ddl: '', error: '' })
+    r.tables = { total: 0, success: 0, failed: 0, items: [] }
+    r.compatibility_functions = { total: 11, success: 10, failed: 1, created: 8, reused: 2, items: [
+      { name: 'get_uuid', schema: 'app', status: 'reused', ddl: 'FUNCTION_DDL_ONLY', error: '' },
+      { kind: 'procedure', name: 'changedatatohistory', schema: 'app', status: 'failed', ddl: 'PROCEDURE_DDL_ONLY', error: 'procedure unavailable' },
+    ], extensions: [{ name: 'uuid-ossp', schema: 'app', status: 'reused' }] }
+    h.p.report.value = r
+    h.p.loading.value = false
+    const html = await renderToString(h.app)
+    assert.match(html, /<h4>兼容函数<\/h4>/)
+    assert.match(html, /<h4>兼容存储过程<\/h4>/)
+    for (const text of ['FUNCTION_DDL_ONLY', 'PROCEDURE_DDL_ONLY', 'uuid-ossp']) assert.equal(html.split(text).length - 1, 1, text)
+    const copyButtons = h.clicks.filter(button => button.label === '复制 DDL')
+    assert.equal(copyButtons.length, 2)
+    for (const button of copyButtons) await button.handler()
+    assert.deepEqual(h.copied, ['FUNCTION_DDL_ONLY', 'PROCEDURE_DDL_ONLY'])
+    assert.equal(h.p.failedCount.value, 1)
+  } finally { scope.stop() }
+})
+
 test('mounted Arco tabs retain repair execution state and export history before opening repair', async () => {
   const scope = Vue.effectScope()
   let app

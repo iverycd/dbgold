@@ -12,7 +12,8 @@ import (
 )
 
 // CompatibilityFunctionsReport is an immutable snapshot of target preparation.
-// Success includes both newly created functions and existing functions reused.
+// Success includes newly created and reused functions or procedures. Keep the
+// existing report name and wire key for older report consumers.
 type CompatibilityFunctionsReport struct {
 	Total      int                            `json:"total"`
 	Success    int                            `json:"success"`
@@ -25,6 +26,7 @@ type CompatibilityFunctionsReport struct {
 
 type CompatibilityFunctionResult struct {
 	Name              string `json:"name"`
+	Kind              string `json:"kind,omitempty"`
 	Signature         string `json:"signature,omitempty"`
 	Schema            string `json:"schema"`
 	Status            string `json:"status"` // created | reused | failed
@@ -114,8 +116,8 @@ func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product stri
 	if uuidErr != nil {
 		failures = append(failures, uuidErr)
 	}
-	// Resolve a default schema once so all functions belong to the same target,
-	// even though each function owns an independent transaction.
+	// Resolve a default schema once so all routines belong to the same target,
+	// even though each routine owns an independent transaction.
 	if schema == "" && len(report.Items) > 0 {
 		schema = report.Items[0].Schema
 	}
@@ -129,8 +131,13 @@ func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product stri
 			failures = append(failures, err)
 		}
 	}
-	// Per-function reports have already accounted for their own rollback. An
-	// unrelated failure must not relabel committed functions or UUID extensions.
+	procedureReport, procedureErr := ensurePGProcedureCompatibility(ctx, db, schema, product)
+	report.Items = append(report.Items, procedureReport.Items...)
+	if procedureErr != nil {
+		failures = append(failures, procedureErr)
+	}
+	// Per-routine reports have already accounted for their own rollback. An
+	// unrelated failure must not relabel committed routines or UUID extensions.
 	report.finish(nil)
 	return report, errors.Join(failures...)
 }

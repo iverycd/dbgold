@@ -1,11 +1,11 @@
 <template>
   <section class="compatibility-functions">
-    <h4>兼容函数</h4>
+    <h4>{{ kind === 'procedure' ? '兼容存储过程' : '兼容函数' }}</h4>
     <a-space wrap>
       <span>总数 {{ report.total }}</span><span>成功 {{ report.success }}</span>
       <span>失败 {{ report.failed }}</span><span>新建 {{ report.created }}</span><span>复用 {{ report.reused }}</span>
     </a-space>
-    <article v-for="item in report.items" :key="`${item.schema}.${item.name}`">
+    <article v-for="item in report.items" :key="`${item.schema}.${item.signature || item.name}`">
       <div class="function-heading">
         <strong>{{ item.schema }}.{{ item.signature || `${item.name}()` }}</strong>
         <a-tag :color="item.status === 'failed' ? 'red' : item.status === 'reused' ? 'blue' : 'green'">{{ functionStatus[item.status] }}</a-tag>
@@ -17,7 +17,7 @@
         <summary>查看 DDL</summary>
         <pre>{{ item.ddl }}</pre>
       </details>
-      <p v-else>{{ item.definition_warning || '尚未生成函数 DDL' }}</p>
+      <p v-else>{{ item.definition_warning || (kind === 'procedure' ? '尚未生成存储过程 DDL' : '尚未生成函数 DDL') }}</p>
     </article>
     <article v-for="extension in report.extensions || []" :key="extension.name">
       <strong>扩展 {{ extension.schema }}.{{ extension.name }}</strong>：{{ extensionStatus[extension.status] }}
@@ -35,7 +35,7 @@
 import { Message } from '@arco-design/web-vue'
 import type { CompatibilityFunctionsReport } from '@/api/migration'
 import { copyText } from '@/utils/clipboard'
-defineProps<{ report: CompatibilityFunctionsReport }>()
+defineProps<{ report: CompatibilityFunctionsReport; kind?: 'function' | 'procedure' }>()
 const functionStatus = { created: '新建', reused: '复用', failed: '失败' }
 const extensionStatus = { installed: '已安装', reused: '已复用', failed: '失败', rolled_back: '已回滚', unknown: '结果待核验' }
 async function copyDDL(ddl: string) {

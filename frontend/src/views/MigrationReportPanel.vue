@@ -69,7 +69,7 @@
             </template>
 
             <template #expand-row="{ record }">
-              <CompatibilityFunctionsPanel v-if="record.isCompatibility && report.compatibility_functions" :report="report.compatibility_functions" />
+              <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
               <div v-else class="failure-list">
                 <div
                   v-for="item in record.items"

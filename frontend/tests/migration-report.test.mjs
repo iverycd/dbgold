@@ -5,7 +5,7 @@ import { renderToString } from '@vue/server-renderer'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 
-const { failureStage, describeFailure, categoryPresentation, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
+const { failureStage, describeFailure, categoryPresentation, compatibilityReportGroups, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
 const failure = overrides => ({ name: 'idx_orders', ddl: '', error: 'index error', ...overrides })
 function report(indexes) {
@@ -295,3 +295,137 @@ test('old and non-PG reports do not acquire compatibility function rows', () => 
   assert.equal(reportCategories(report(empty())).some(row => row.isCompatibility), false)
   assert.doesNotMatch(formatReportCategories(report(empty())).join('\n'), /兼容函数/)
 })
+
+for (const status of ['created', 'reused', 'failed']) {
+  test(`ten functions and one ${status} procedure have separate counts, details and exports`, async () => {
+    const functions = Array.from({ length: 10 }, (_, index) => ({
+      name: `function_${index}`, kind: index === 0 ? 'function' : undefined,
+      schema: 'app', status: index < 8 ? 'created' : 'reused', error: '', ddl: `FUNCTION_DEFINITION_${index};`,
+    }))
+    const procedure = { kind: 'procedure', name: 'changedatatohistory', signature: 'changedatatohistory(p_id varchar)', schema: 'app', status, ddl: 'PROCEDURE_DEFINITION;', error: status === 'failed' ? 'procedure unavailable' : '' }
+    const r = report(empty())
+    r.compatibility_functions = {
+      total: 11, success: status === 'failed' ? 10 : 11, failed: status === 'failed' ? 1 : 0,
+      created: 8 + Number(status === 'created'), reused: 2 + Number(status === 'reused'), items: [...functions, procedure],
+      extensions: [{ name: 'uuid-ossp', schema: 'app', status: 'reused', sql: 'EXTENSION_DEFINITION;' }],
+    }
+    const rows = reportCategories(r).filter(row => row.isCompatibility)
+    assert.equal(rows.length, 2)
+    assert.equal(rows[0].key, 'compatibility_functions')
+    assert.equal(rows[1].key, 'compatibility_procedures')
+    assert.equal(rows[0].total, 10)
+    assert.equal(rows[0].success, 10)
+    assert.equal(rows[0].failed, 0)
+    assert.equal(rows[0].created, 8)
+    assert.equal(rows[0].reused, 2)
+    assert.equal(rows[1].total, 1)
+    assert.equal(rows[1].success, Number(status !== 'failed'))
+    assert.equal(rows[1].failed, Number(status === 'failed'))
+    assert.equal(rows[1].created, Number(status === 'created'))
+    assert.equal(rows[1].reused, Number(status === 'reused'))
+    for (const key of ['total', 'success', 'failed', 'created', 'reused']) {
+      assert.equal(rows.reduce((sum, row) => sum + row[key], 0), r.compatibility_functions[key], key)
+    }
+    assert.equal(rows[0].compatibilityReport.items.length, 10)
+    assert.equal(rows[1].compatibilityReport.items.length, 1)
+    assert.equal(rows[0].compatibilityReport.extensions.length, 1)
+    assert.equal(rows[1].compatibilityReport.extensions, undefined)
+
+    const text = formatReportCategories(r).join('\n')
+    const [functionDetails, procedureDetails] = text.split('=== 兼容函数明细 ===')[1].split('=== 兼容存储过程明细 ===')
+    assert.match(functionDetails, /函数 DDL：/)
+    assert.match(procedureDetails, /存储过程 DDL：/)
+    assert.doesNotMatch(functionDetails, /changedatatohistory|PROCEDURE_DEFINITION/)
+    assert.doesNotMatch(procedureDetails, /FUNCTION_DEFINITION|uuid-ossp/)
+    assert.equal(text.split('PROCEDURE_DEFINITION;').length - 1, 1)
+    assert.equal(text.split('EXTENSION_DEFINITION;').length - 1, 1)
+    assert.doesNotMatch(text, /失败项详情|失败阶段：/)
+
+    for (const row of rows) {
+      const app = createSSRApp({ render: () => h(createCompatibilityPanel(), { report: row.compatibilityReport, kind: row.compatibilityKind }) })
+      const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+      for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+      const html = await renderToString(app)
+      assert.ok(html.includes(`<h4>${row.label}</h4>`))
+      assert.match(html, /<details class="sql-details"><summary>查看 DDL<\/summary>/)
+      if (row.compatibilityKind === 'procedure') {
+        assert.ok(html.includes(procedure.signature))
+        assert.doesNotMatch(html, /FUNCTION_DEFINITION|uuid-ossp/)
+      } else {
+        assert.doesNotMatch(html, /changedatatohistory|PROCEDURE_DEFINITION/)
+        assert.match(html, /uuid-ossp/)
+      }
+    }
+  })
+}
+
+test('incomplete historical compatibility details retain aggregate counts when procedures are separated', () => {
+  const legacy = { total: 10, success: 8, failed: 2, created: 7, reused: 1 }
+  const oldGroups = compatibilityReportGroups(legacy)
+  assert.equal(oldGroups.length, 1)
+  for (const key of ['total', 'success', 'failed', 'created', 'reused']) assert.equal(oldGroups[0].report[key], legacy[key])
+  assert.equal(oldGroups[0].report.items.length, 0)
+  const procedure = { kind: 'procedure', name: 'changedatatohistory', schema: 'app', status: 'failed', error: 'unsupported', ddl: '' }
+  const r = report(empty())
+  r.compatibility_functions = { ...legacy, total: 11, failed: 3, items: [procedure] }
+  const [functions, procedures] = reportCategories(r).filter(row => row.isCompatibility)
+  for (const key of ['total', 'success', 'failed', 'created', 'reused']) assert.equal(functions[key], legacy[key])
+  assert.equal(functions.items.length, 0)
+  assert.equal(procedures.failed, 1)
+  const exported = formatReportCategories(r).join('\n')
+  assert.match(exported, /兼容函数\s+总计 10\s+成功 8\s+失败 2/)
+  assert.match(exported, /兼容存储过程\s+总计 1\s+成功 0\s+失败 1/)
+  assert.match(exported, /尚未生成存储过程 DDL/)
+  assert.equal(r.compatibility_functions.items.length, 1, 'grouping does not mutate the saved report')
+})
+
+for (const statuses of [['created', 'reused'], ['reused', 'failed'], ['failed', 'created']]) {
+  test(`ten functions and two ${statuses.join('/')} procedures retain separate counts and DDL`, async () => {
+    const functions = Array.from({ length: 10 }, (_, index) => ({
+      name: `function_${index}`, schema: 'app', status: index < 8 ? 'created' : 'reused',
+      ddl: `FUNCTION_DEFINITION_${index};`, error: '',
+    }))
+    const procedures = ['changedatatohistory', 'changedatatomain'].map((name, index) => ({
+      kind: 'procedure', name, signature: `${name}(p_processversioninstanceguid varchar)`, schema: 'app',
+      status: statuses[index], ddl: `CREATE PROCEDURE app.${name};`,
+      error: statuses[index] === 'failed' ? `${name} unavailable` : '',
+    }))
+    const count = status => procedures.filter(item => item.status === status).length
+    const r = report(empty())
+    r.compatibility_functions = {
+      total: 12, success: 12 - count('failed'), failed: count('failed'),
+      created: 8 + count('created'), reused: 2 + count('reused'), items: [...functions, ...procedures],
+    }
+    const rows = reportCategories(r).filter(row => row.isCompatibility)
+    assert.deepEqual(Array.from(rows, row => [row.key, row.total]), [['compatibility_functions', 10], ['compatibility_procedures', 2]])
+    const [functionRow, procedureRow] = rows
+    assert.equal(procedureRow.success, 2 - count('failed'))
+    for (const status of ['failed', 'created', 'reused']) assert.equal(procedureRow[status], count(status))
+    assert.deepEqual(Array.from(procedureRow.compatibilityReport.items, item => item.name), procedures.map(item => item.name))
+    for (const key of ['total', 'success', 'failed', 'created', 'reused']) {
+      assert.equal(rows.reduce((sum, row) => sum + row[key], 0), r.compatibility_functions[key], key)
+    }
+    const text = formatReportCategories(r).join('\n')
+    const [functionDetails, procedureDetails] = text.split('=== 兼容函数明细 ===')[1].split('=== 兼容存储过程明细 ===')
+    for (const procedure of procedures) {
+      assert.equal(procedureDetails.split(procedure.ddl).length - 1, 1)
+      assert.ok(procedureDetails.includes(procedure.signature))
+      assert.ok(!functionDetails.includes(procedure.name))
+    }
+    assert.doesNotMatch(procedureDetails, /FUNCTION_DEFINITION/)
+    const panel = createCompatibilityPanel()
+    const app = createSSRApp({ render: () => h(panel, { report: procedureRow.compatibilityReport, kind: procedureRow.compatibilityKind }) })
+    const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+    for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+    const html = await renderToString(app)
+    assert.equal(html.split('class="function-heading"').length - 1, 2)
+    for (const procedure of procedures) {
+      assert.ok(html.includes(procedure.signature))
+      assert.equal(html.split(procedure.ddl).length - 1, 1)
+      if (procedure.error) assert.ok(html.includes(procedure.error))
+    }
+    assert.doesNotMatch(html, /FUNCTION_DEFINITION/)
+    assert.equal(functionRow.compatibilityReport.items.length, 10)
+    assert.equal(r.compatibility_functions.items.length, 12)
+  })
+}

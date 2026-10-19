@@ -82,6 +82,51 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
 }
 
 for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
+  test(`${view} separates compatibility procedures without inflating totals or ordinary failures`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const exports = view === 'DataMigrationJobDetailView'
+        ? 'job, categoryRows, failedItems, failedCategoryOptions, objectTotalCount, objectSuccessCount, failedObjectCount, risks'
+        : 'tableRows, failedCount'
+      const h = scope.run(() => execute(`views/${view}`, `report, exportReport, ${exports}`, { jobID: 'job-repairs' }))
+      const r = { rowCounts: [], compatibility_functions: {
+        total: 11, success: 10, failed: 1, created: 8, reused: 2,
+        items: [{ kind: 'procedure', name: 'changedatatohistory', schema: 'app', status: 'failed', ddl: 'SAVED PROCEDURE DDL', error: 'procedure unavailable' }],
+      } }
+      for (const key of ['tables', 'data', 'primaryKeys', 'views', 'indexes', 'constraints', 'sequences', 'comments', 'triggers']) r[key] = { total: 0, success: 0, failed: 0, items: [] }
+      h.values.report.value = r
+      if (h.values.job) h.values.job.value = { job_id: 'job-repairs' }
+      const rows = h.values.categoryRows?.value ?? h.values.tableRows.value
+      assert.equal(rows.filter(row => row.isCompatibility).length, 2)
+      assert.equal(rows.reduce((sum, row) => sum + row.total, 0), 11)
+      assert.equal(rows.find(row => row.key === 'compatibility_functions').failed, 0)
+      assert.equal(rows.find(row => row.key === 'compatibility_procedures').failed, 1)
+      assert.match(h.descriptor.template.content, /:report="record.compatibilityReport" :kind="record.compatibilityKind"/)
+      if (h.values.failedItems) {
+        assert.equal(h.values.objectTotalCount.value, 11)
+        assert.equal(h.values.objectSuccessCount.value, 10)
+        assert.equal(h.values.failedObjectCount.value, 1)
+        assert.equal(h.values.failedItems.value.length, 0)
+        assert.equal(h.values.failedCategoryOptions.value.length, 0)
+        assert.equal(h.values.risks.value.length, 1)
+        assert.equal(h.values.risks.value[0].title, '兼容存储过程初始化失败')
+        h.values.report.value.indexes = { total: 1, success: 0, failed: 1, items: [{ name: 'bad_index', ddl: '', error: 'index error' }] }
+        assert.equal(h.values.failedObjectCount.value, 2)
+        assert.equal(h.values.failedItems.value.length, 1)
+        assert.equal(h.values.risks.value.find(item => item.key === 'objects').title, '1 个对象迁移失败')
+      } else {
+        assert.equal(h.values.failedCount.value, 1)
+      }
+      h.values.exportReport()
+      const text = await h.downloads[0].text()
+      assert.match(text, /兼容函数\s+总计 10\s+成功 10\s+失败 0/)
+      assert.match(text, /兼容存储过程\s+总计 1\s+成功 0\s+失败 1/)
+      assert.equal(text.split('SAVED PROCEDURE DDL').length - 1, 1)
+    } finally { scope.stop() }
+  })
+}
+
+for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
   test(`${view} exports saved compatibility function results without changing business counts`, async () => {
     const scope = Vue.effectScope()
     try {

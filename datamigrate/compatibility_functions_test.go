@@ -29,7 +29,7 @@ func (w *compatibilityTestWriter) DBType() string {
 }
 func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(context.Context) (*target.CompatibilityFunctionsReport, error) {
 	w.calls = append(w.calls, "prepare")
-	r := &target.CompatibilityFunctionsReport{Total: 10, Success: 10, Created: 10, Items: []target.CompatibilityFunctionResult{
+	r := &target.CompatibilityFunctionsReport{Total: 12, Success: 12, Created: 12, Items: []target.CompatibilityFunctionResult{
 		{Name: "get_uuid", Signature: "get_uuid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"},
 		{Name: "auto_increase_itemid", Signature: "auto_increase_itemid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION auto_increase_itemid"},
 		{Name: "count_rows", Signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION count_rows"},
@@ -40,6 +40,8 @@ func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(context.Context) 
 		{Name: "getscore", Signature: "getscore(p_infoid varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getscore"},
 		{Name: "getcategoryscore", Signature: "getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getcategoryscore"},
 		{Name: "getchildoulist", Signature: "getchildoulist(p_rootid varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getchildoulist"},
+		{Name: "changedatatohistory", Kind: "procedure", Signature: "changedatatohistory(p_processversioninstanceguid varchar)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE changedatatohistory"},
+		{Name: "changedatatomain", Kind: "procedure", Signature: "changedatatomain(p_processversioninstanceguid varchar)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE changedatatomain"},
 	}}
 	for i := range r.Items {
 		if r.Items[i].Name != w.failedFunction {
@@ -100,12 +102,16 @@ func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 			require.False(t, report.HasFailures())
 			require.NotNil(t, report.CompatibilityFunctions)
 			require.Equal(t, "prepare", w.calls[0])
-			require.Equal(t, 10, report.CompatibilityFunctions.Total)
-			require.Equal(t, 10, report.CompatibilityFunctions.Success)
-			require.Equal(t, 10, report.CompatibilityFunctions.Created)
+			require.Equal(t, 12, report.CompatibilityFunctions.Total)
+			require.Equal(t, 12, report.CompatibilityFunctions.Success)
+			require.Equal(t, 12, report.CompatibilityFunctions.Created)
 			require.Zero(t, report.CompatibilityFunctions.Reused)
-			require.Len(t, report.CompatibilityFunctions.Items, 10)
+			require.Len(t, report.CompatibilityFunctions.Items, 12)
 			require.Equal(t, "count_rows(table_name varchar, owner varchar DEFAULT NULL)", report.CompatibilityFunctions.Items[2].Signature)
+			require.Equal(t, "procedure", report.CompatibilityFunctions.Items[10].Kind)
+			require.Equal(t, "changedatatohistory(p_processversioninstanceguid varchar)", report.CompatibilityFunctions.Items[10].Signature)
+			require.Equal(t, "procedure", report.CompatibilityFunctions.Items[11].Kind)
+			require.Equal(t, "changedatatomain(p_processversioninstanceguid varchar)", report.CompatibilityFunctions.Items[11].Signature)
 			require.Zero(t, report.Views.Total)
 		})
 	}
@@ -134,9 +140,9 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 				m.cfg.CaptureRepair = capture
 				report := m.Run(context.Background())
 				require.True(t, report.HasFailures())
-				require.Equal(t, 10, report.CompatibilityFunctions.Total)
-				require.Equal(t, 9, report.CompatibilityFunctions.Success)
-				require.Equal(t, 9, report.CompatibilityFunctions.Created)
+				require.Equal(t, 12, report.CompatibilityFunctions.Total)
+				require.Equal(t, 11, report.CompatibilityFunctions.Success)
+				require.Equal(t, 11, report.CompatibilityFunctions.Created)
 				require.Equal(t, 1, report.CompatibilityFunctions.Failed)
 				require.Equal(t, []string{"prepare", "table", "data", "view", "view"}, w.calls)
 				require.Equal(t, 1, report.Tables.Total)
@@ -180,7 +186,7 @@ func TestCompatibilityInitializedBeforeStandaloneAndFullViews(t *testing.T) {
 		}
 		require.Equal(t, []string{"prepare", "view"}, w.calls)
 		require.NotNil(t, m.CompatibilityFunctions())
-		require.Equal(t, 10, m.CompatibilityFunctions().Success)
+		require.Equal(t, 12, m.CompatibilityFunctions().Success)
 	}
 }
 func TestCompatibilityNonPGAndOldReportsStayUnchanged(t *testing.T) {
@@ -224,6 +230,34 @@ func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	require.Equal(t, "independent", results[1].Name)
 	require.Empty(t, results[1].Error)
 	require.Equal(t, 1, m.CompatibilityFunctions().Failed)
-	require.Equal(t, 9, m.CompatibilityFunctions().Success)
+	require.Equal(t, 11, m.CompatibilityFunctions().Success)
 	require.Equal(t, []string{"prepare", "view", "view"}, w.calls)
+}
+
+func TestCompatibilityProcedureFailureContinuesMigration(t *testing.T) {
+	for _, procedure := range []string{"changedatatohistory", "changedatatomain"} {
+		t.Run(procedure, func(t *testing.T) {
+			reader := &compatibilityViewReader{mockReader: mockReader{
+				tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
+			}, views: []source.ViewInfo{{ViewName: "independent", Definition: "SELECT 1"}}}
+			w := &compatibilityTestWriter{failedFunction: procedure}
+			m, _ := newTestMigrator(reader, w)
+			report := m.Run(context.Background())
+			require.True(t, report.HasFailures())
+			require.Equal(t, 12, report.CompatibilityFunctions.Total)
+			require.Equal(t, 11, report.CompatibilityFunctions.Success)
+			require.Equal(t, 1, report.CompatibilityFunctions.Failed)
+			require.Equal(t, 1, report.Tables.Success)
+			require.Equal(t, 1, report.Data.Success)
+			require.Equal(t, 1, report.Views.Success)
+			for _, item := range report.CompatibilityFunctions.Items[10:] {
+				if item.Name == procedure {
+					require.Equal(t, "failed", item.Status)
+				} else {
+					require.Equal(t, "created", item.Status)
+				}
+			}
+			require.Equal(t, []string{"prepare", "table", "data", "view"}, w.calls)
+		})
+	}
 }

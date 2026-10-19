@@ -71,6 +71,9 @@ func expectBuiltinFunctionsReused(m sqlmock.Sqlmock, schema string) {
 		expectUUIDProbe(m, false)
 		m.ExpectRollback()
 	}
+	for _, spec := range compatibilityProcedureSpecs {
+		expectProcedureReusedForInitialization(m, schema, spec)
+	}
 }
 func expectUUIDMissing(m sqlmock.Sqlmock, schema string) {
 	expectUUIDHeader(m, schema)
@@ -378,7 +381,7 @@ func TestCompatibilityViewRepairPreparationFailureStillExecutesViewSQL(t *testin
 	for _, dependent := range []bool{false, true} {
 		t.Run(fmt.Sprint(dependent), func(t *testing.T) {
 			w, m := repairPGMock(t)
-			for i := 0; i < 1+len(builtinCompatibilitySpecs); i++ {
+			for i := 0; i < 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs); i++ {
 				m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
 			}
 			m.ExpectBegin()
@@ -435,10 +438,10 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 			w := &PostgresWriter{db: db, schema: schema, dbType: "postgres", dia: dialect.NewPostgres("postgres")}
 			r, err := EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), r.Total)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), r.Created)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Created)
 			require.Zero(t, r.Reused)
-			require.Len(t, r.Items, 1+len(builtinCompatibilitySpecs))
+			require.Len(t, r.Items, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs))
 			require.Equal(t, "get_uuid", r.Items[0].Name)
 			var count int
 			require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname IN ('get_uuid','GET_UUID')`, schema).Scan(&count))
@@ -461,8 +464,8 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 			require.NotEqual(t, a, b)
 			r, err = EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), r.Total)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), r.Reused)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Reused)
 			require.Zero(t, r.Created)
 			require.True(t, strings.Contains(r.Items[0].DDL, "CREATE"))
 		})

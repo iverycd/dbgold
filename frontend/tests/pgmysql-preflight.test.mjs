@@ -1,4 +1,5 @@
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -17,7 +18,7 @@ function page(preflight, starts, errors, options = {}) {
   const helpers = load(readFileSync(new URL('../src/utils/migrationOptions.ts', import.meta.url), 'utf8'), () => {})
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
   return load(`${descriptor.scriptSetup.content}
-    export { connections, dataMigrate, viewMigrate, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
+    export { connections, dataMigrate, viewMigrate, vmCompatibilityGroups, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
     switch (id) {
       case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
@@ -25,6 +26,7 @@ function page(preflight, starts, errors, options = {}) {
       case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return helpers
+      case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}
       case '@/api/connections': return {}
@@ -400,4 +402,30 @@ test('view migration retains actual successes and failures when compatibility pr
   assert.match(warnings[0], /视图迁移成功 1 个，失败 1 个/)
   assert.doesNotMatch(warnings[0], /未执行/)
  } finally { scope.stop() }
+})
+
+test('view migration shows procedure failures separately while preserving view results', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const warnings = [], errors = [], starts = []
+    const compatibility = { total: 11, success: 10, failed: 1, created: 8, reused: 2, items: [
+      { kind: 'procedure', name: 'changedatatohistory', schema: 'app', status: 'failed', ddl: '', error: 'unsupported procedure' },
+    ] }
+    const p = scope.run(() => page(async () => assert.fail('no PG/MySQL preflight'), starts, errors, {
+      warnings,
+      migrateViews: async request => { starts.push(request); return { data: { results: [{ name: 'plain', error: '', ddl: 'CREATE VIEW plain AS SELECT 1' }], compatibility_functions: compatibility } } },
+    }))
+    p.connections.value = [{ id: 1, db_type: 'mysql' }, { id: 2, db_type: 'postgres' }]
+    Object.assign(p.viewMigrate, { srcConnId: 1, dstConnId: 2, dstSchema: 'app' })
+    await Vue.nextTick()
+    p.viewMigrate.selected = ['plain']
+    await p.handleMigrateViews()
+    assert.equal(errors.length, 0)
+    assert.equal(p.viewMigrate.results.length, 1)
+    assert.equal(p.vmCompatibilityGroups.value.length, 2)
+    assert.equal(p.vmCompatibilityGroups.value[0].report.failed, 0)
+    assert.equal(p.vmCompatibilityGroups.value[1].report.failed, 1)
+    assert.match(warnings[0], /^兼容存储过程初始化失败；视图迁移成功 1 个，失败 0 个/)
+    assert.doesNotMatch(warnings[0], /兼容函数初始化失败/)
+  } finally { scope.stop() }
 })

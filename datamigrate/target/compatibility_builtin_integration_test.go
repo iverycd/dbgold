@@ -46,9 +46,9 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 			w := builtinIntegrationWriter(db, schema, product.name)
 			report, err := EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err, "initialize before code_items exists")
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Created)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
 			require.Zero(t, report.Failed)
 			for _, item := range report.Items {
 				require.NotEmpty(t, item.DDL)
@@ -60,7 +60,7 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 			t.Run("invoker_permissions", func(t *testing.T) { checkCountRowsInvokerSQL(t, ctx, db, schema) })
 			report, err = EnsureCompatibilityFunctions(ctx, w)
 			require.NoError(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Reused)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 			require.Zero(t, report.Created)
 			t.Run("preserve_incompatible_function", func(t *testing.T) {
 				name := qualifiedFunction(schema, "count_rows")
@@ -73,8 +73,8 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 				require.NoError(t, db.QueryRowContext(ctx, query, name+"(varchar,varchar)").Scan(&before))
 				report, err := EnsureCompatibilityFunctions(ctx, w)
 				require.Error(t, err)
-				require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-				require.Equal(t, len(builtinCompatibilitySpecs), report.Reused)
+				require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+				require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 				require.Equal(t, 1, report.Failed)
 				require.NoError(t, db.QueryRowContext(ctx, query, name+"(varchar,varchar)").Scan(&after))
 				require.Equal(t, before, after)
@@ -283,11 +283,11 @@ func TestCompatibilityBuiltinsConcurrentSQLIntegration(t *testing.T) {
 	created := 0
 	for outcome := range outcomes {
 		require.NoError(t, outcome.err)
-		require.Equal(t, 1+len(builtinCompatibilitySpecs), outcome.report.Total)
-		require.Equal(t, 1+len(builtinCompatibilitySpecs), outcome.report.Success)
+		require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), outcome.report.Total)
+		require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), outcome.report.Success)
 		created += outcome.report.Created
 	}
-	require.Equal(t, 1+len(builtinCompatibilitySpecs), created, "each function must only be created once")
+	require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), created, "each routine must only be created once")
 }
 
 func TestCompatibilityBuiltinsDefaultSchemaAndIsolationSQLIntegration(t *testing.T) {
@@ -316,9 +316,9 @@ func TestCompatibilityBuiltinsDefaultSchemaAndIsolationSQLIntegration(t *testing
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT pg_get_functiondef($1::regprocedure::oid)", count+"(varchar,varchar)").Scan(&before))
 	report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"))
 	require.ErrorContains(t, err, "count_rows")
-	require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
+	require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 	require.Equal(t, 1, report.Reused)
-	require.Equal(t, len(builtinCompatibilitySpecs)-1, report.Created)
+	require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs)-1, report.Created)
 	require.Equal(t, 1, report.Failed)
 	for _, item := range report.Items {
 		require.Equal(t, schema, item.Schema)
@@ -337,7 +337,7 @@ func TestCompatibilityBuiltinsDefaultSchemaAndIsolationSQLIntegration(t *testing
 	require.NoError(t, err)
 	report, err = EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"))
 	require.ErrorContains(t, err, "count_rows")
-	require.Equal(t, len(builtinCompatibilitySpecs), report.Reused)
+	require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 	require.Zero(t, report.Created)
 	require.Equal(t, 1, report.Failed)
 }
@@ -372,8 +372,8 @@ func TestCompatibilityBuiltinsRoutineKindSQLIntegration(t *testing.T) {
 			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regprocedure::oid", name+"(varchar)").Scan(&before))
 			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"))
 			require.Error(t, err, "aggregate/window object cannot satisfy a scalar compatibility function")
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, len(builtinCompatibilitySpecs), report.Created)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
 			require.Equal(t, 1, report.Failed)
 			require.Equal(t, "failed", report.Items[3].Status)
 			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regprocedure::oid", name+"(varchar)").Scan(&after))
@@ -404,8 +404,8 @@ func TestCompatibilityCountRowsOverloadSQLIntegration(t *testing.T) {
 			}
 			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"))
 			require.Error(t, err, "one-argument call would be ambiguous despite a matching two-argument signature")
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, len(builtinCompatibilitySpecs), report.Created)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
 			require.Equal(t, 1, report.Failed)
 			require.Equal(t, "failed", report.Items[2].Status)
 			var count int

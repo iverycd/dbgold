@@ -64,16 +64,25 @@ func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 			for _, spec := range builtinCompatibilitySpecs {
 				expectBuiltinCreatedForInitialization(mock, "app", spec, nil)
 			}
+			for _, spec := range compatibilityProcedureSpecs {
+				expectProcedureCreatedForInitialization(mock, "app", product, nil, spec)
+			}
 			report, err := EnsureCompatibilityFunctions(context.Background(), actual)
 			require.NoError(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
 			require.Equal(t, 1, report.Reused)
-			require.Equal(t, len(builtinCompatibilitySpecs), report.Created)
+			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
 			require.Zero(t, report.Failed)
 			for i, spec := range builtinCompatibilitySpecs {
 				require.Equal(t, spec.signature, report.Items[i+1].Signature)
 				require.Contains(t, report.Items[i+1].DDL, qualifiedFunction("app", spec.name))
+			}
+			for i, spec := range compatibilityProcedureSpecs {
+				procedure := report.Items[1+len(builtinCompatibilitySpecs)+i]
+				require.Equal(t, spec.name, procedure.Name)
+				require.Equal(t, "procedure", procedure.Kind)
+				require.Equal(t, spec.signature, procedure.Signature)
 			}
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
@@ -81,9 +90,11 @@ func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 }
 
 func TestCompatibilityFunctionFailuresDoNotRollbackOtherFunctions(t *testing.T) {
-	for failed := -1; failed < len(builtinCompatibilitySpecs); failed++ {
+	for failed := -1; failed < len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs); failed++ {
 		name := "get_uuid"
-		if failed >= 0 {
+		if failed >= len(builtinCompatibilitySpecs) {
+			name = compatibilityProcedureSpecs[failed-len(builtinCompatibilitySpecs)].name
+		} else if failed >= 0 {
 			name = builtinCompatibilitySpecs[failed].name
 		}
 		t.Run(name, func(t *testing.T) {
@@ -100,10 +111,17 @@ func TestCompatibilityFunctionFailuresDoNotRollbackOtherFunctions(t *testing.T) 
 				}
 				expectBuiltinCreatedForInitialization(mock, "app", spec, createErr)
 			}
+			for i, spec := range compatibilityProcedureSpecs {
+				var procedureErr error
+				if failed == len(builtinCompatibilitySpecs)+i {
+					procedureErr = &pq.Error{Code: "42501", Message: "permission denied"}
+				}
+				expectProcedureCreatedForInitialization(mock, "app", "postgres", procedureErr, spec)
+			}
 			report, err := EnsureCompatibilityFunctions(context.Background(), w)
 			require.Error(t, err)
-			require.Equal(t, 1+len(builtinCompatibilitySpecs), report.Total)
-			require.Equal(t, len(builtinCompatibilitySpecs), report.Success)
+			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
+			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
 			require.Equal(t, 1, report.Failed)
 			require.Equal(t, "failed", report.Items[failed+1].Status)
 			for i, item := range report.Items {
@@ -175,6 +193,9 @@ func TestCompatibilityPinsDefaultSchemaForIndependentTransactions(t *testing.T) 
 	mock.ExpectRollback()
 	for _, spec := range builtinCompatibilitySpecs {
 		expectBuiltinCreatedForInitialization(mock, "app", spec, nil)
+	}
+	for _, spec := range compatibilityProcedureSpecs {
+		expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
 	}
 	report, err := EnsureCompatibilityFunctions(context.Background(), w)
 	require.NoError(t, err)

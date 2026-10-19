@@ -11,7 +11,7 @@ const code = compile(descriptor.template.content, { mode: 'function', prefixIden
 const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
 export function createCompatibilityPanel(copied = []) {
   return {
-    props: ['report'], render,
+    props: ['report', 'kind'], render,
     setup(props) {
       const context = { exports: {}, defineProps: () => props, require: id => {
         if (id === '@/utils/clipboard') return { copyText: async text => copied.push(text) }

@@ -1196,12 +1196,16 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer)
 	m.compatibilityFunctions = report
 	if err != nil {
-		m.log.Errorf("兼容函数初始化失败，继续迁移，依赖失败函数的对象以实际执行结果为准: %v", err)
+		m.log.Errorf("兼容项初始化失败，继续迁移，依赖失败函数或存储过程的对象以实际执行结果为准: %v", err)
 		return err
 	}
 	if report != nil {
 		for _, item := range report.Items {
-			m.log.DDLf("兼容函数 %s.%s: %s", item.Schema, item.Name, item.Status)
+			kind := "兼容函数"
+			if item.Kind == "procedure" {
+				kind = "兼容存储过程"
+			}
+			m.log.DDLf("%s %s.%s: %s", kind, item.Schema, item.Name, item.Status)
 		}
 	}
 	return nil
