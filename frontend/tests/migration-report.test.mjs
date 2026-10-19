@@ -8,6 +8,22 @@ import { migrationReportUtils } from './helpers/migration-report.mjs'
 const { failureStage, describeFailure, categoryPresentation, compatibilityReportGroups, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
 const failure = overrides => ({ name: 'idx_orders', ddl: '', error: 'index error', ...overrides })
+const compatibilityFunctionSignatures = [
+  ['get_uuid', 'get_uuid()'],
+  ['auto_increase_itemid', 'auto_increase_itemid()'],
+  ['count_rows', 'count_rows(table_name varchar, owner varchar DEFAULT NULL)'],
+  ['fun_getpy', 'fun_getpy(p_name varchar)'],
+  ['convertguid', 'convertguid(p_newguid varchar, p_instr varchar)'],
+  ['convertguidlist', 'convertguidlist(p_newguid varchar, p_instr varchar)'],
+  ['getcategoryinfopubcount', 'getcategoryinfopubcount(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)'],
+  ['getscore', 'getscore(p_infoid varchar)'],
+  ['getcategoryscore', 'getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)'],
+  ['getchildoulist', 'getchildoulist(p_rootid varchar)'],
+  ['inter_arry', 'inter_arry(p_seta varchar, p_setb varchar)'],
+  ['sec_to_dhm', 'sec_to_dhm(p_sec bigint)'],
+  ['selectallusercount', 'selectallusercount()'],
+  ['stuff', 'stuff(p_old varchar, p_start integer, p_length integer, p_replace varchar)'],
+]
 function report(indexes) {
   const result = { rowCounts: [] }
   for (const key of ['tables', 'data', 'primaryKeys', 'views', 'indexes', 'constraints', 'sequences', 'comments', 'triggers']) result[key] = empty()
@@ -213,19 +229,8 @@ test('four compatibility functions preserve parameter signatures and partial fai
   assert.doesNotMatch(text, /app.count_rows\(\)：|app.fun_getpy\(\)：|失败项详情|失败阶段：/)
 })
 
-test('ten compatibility functions render and export business signatures with partial failures', async () => {
-  const signatures = [
-    ['get_uuid', 'get_uuid()'],
-    ['auto_increase_itemid', 'auto_increase_itemid()'],
-    ['count_rows', 'count_rows(table_name varchar, owner varchar DEFAULT NULL)'],
-    ['fun_getpy', 'fun_getpy(p_name varchar)'],
-    ['convertguid', 'convertguid(p_newguid varchar, p_instr varchar)'],
-    ['convertguidlist', 'convertguidlist(p_newguid varchar, p_instr varchar)'],
-    ['getcategoryinfopubcount', 'getcategoryinfopubcount(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)'],
-    ['getscore', 'getscore(p_infoid varchar)'],
-    ['getcategoryscore', 'getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)'],
-    ['getchildoulist', 'getchildoulist(p_rootid varchar)'],
-  ]
+test('fourteen compatibility functions render and export business signatures with partial failures', async () => {
+  const signatures = compatibilityFunctionSignatures
   const items = signatures.map(([name, signature]) => ({
     name, signature, schema: 'app',
     status: name === 'getchildoulist' ? 'failed' : ['get_uuid', 'getscore'].includes(name) ? 'reused' : 'created',
@@ -233,17 +238,19 @@ test('ten compatibility functions render and export business signatures with par
     error: name === 'getchildoulist' ? 'permission denied for schema app' : '',
   }))
   const r = report(empty())
-  r.compatibility_functions = { total: 10, success: 9, failed: 1, created: 7, reused: 2, items }
+  const total = items.length
+  assert.equal(total, 14)
+  r.compatibility_functions = { total, success: total - 1, failed: 1, created: total - 3, reused: 2, items }
   const row = reportCategories(r).find(row => row.isCompatibility)
-  assert.equal(row.totalLabel, '10')
-  assert.equal(row.success, 9)
+  assert.equal(row.totalLabel, String(total))
+  assert.equal(row.success, total - 1)
   assert.equal(row.failed, 1)
-  assert.equal(row.created, 7)
+  assert.equal(row.created, total - 3)
   assert.equal(row.reused, 2)
-  assert.equal(row.items.length, 10)
+  assert.equal(row.items.length, total)
   const text = formatReportCategories(r).join('\n')
-  assert.match(text, /兼容函数\s+总计 10\s+成功 9\s+失败 1/)
-  assert.ok(text.includes('新建 7，复用 2'))
+  assert.match(text, new RegExp(`兼容函数\\s+总计 ${total}\\s+成功 ${total - 1}\\s+失败 1`))
+  assert.ok(text.includes(`新建 ${total - 3}，复用 2`))
   for (const item of items) {
     const status = { created: '新建', reused: '复用', failed: '失败' }[item.status]
     assert.ok(text.includes(`app.${item.signature}：${status}`), item.name)
@@ -430,9 +437,9 @@ for (const statuses of [['created', 'reused'], ['reused', 'failed'], ['failed', 
   })
 }
 
-test('thirteen compatibility items group all three procedures with mixed statuses and output signatures', async () => {
-  const functions = Array.from({ length: 10 }, (_, index) => ({
-    name: `function_${index}`, schema: 'app', status: 'created', ddl: `FUNCTION_BODY_${index};`, error: '',
+test('seventeen compatibility items group all three procedures with mixed statuses and output signatures', async () => {
+  const functions = compatibilityFunctionSignatures.map(([name, signature], index) => ({
+    name, signature, schema: 'app', status: 'created', ddl: `FUNCTION_BODY_${index};`, error: '',
   }))
   const procedures = [
     { kind: 'procedure', name: 'changedatatohistory', signature: 'changedatatohistory(p_processversioninstanceguid varchar)', schema: 'app', status: 'created', ddl: 'HISTORY_PROCEDURE_BODY;', error: '' },
@@ -440,15 +447,21 @@ test('thirteen compatibility items group all three procedures with mixed statuse
     { kind: 'procedure', name: 'createpvi', signature: 'createpvi(p_processguid varchar, p_processversioninstanceguid varchar, p_userguid varchar, p_username varchar, p_workitemguid varchar, p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)', schema: 'app', status: 'failed', ddl: 'CREATE_PVI_PROCEDURE_BODY;', error: 'createpvi permission denied' },
   ]
   const r = report(empty())
-  r.compatibility_functions = { total: 13, success: 12, failed: 1, created: 11, reused: 1, items: [...functions, ...procedures] }
+  const items = [...functions, ...procedures]
+  assert.equal(items.length, 17)
+  r.compatibility_functions = { total: items.length, success: items.length - 1, failed: 1, created: functions.length + 1, reused: 1, items }
   const [functionRow, procedureRow] = reportCategories(r).filter(row => row.isCompatibility)
-  assert.equal(functionRow.total, 10)
-  assert.equal(procedureRow.total, 3)
+  assert.equal(functionRow.total, functions.length)
+  assert.equal(procedureRow.total, procedures.length)
   assert.equal(procedureRow.success, 2)
   for (const key of ['created', 'reused', 'failed']) assert.equal(procedureRow[key], 1)
   for (const key of ['total', 'success', 'failed', 'created', 'reused']) assert.equal(functionRow[key] + procedureRow[key], r.compatibility_functions[key])
   const text = formatReportCategories(r).join('\n')
   const [functionDetails, procedureDetails] = text.split('=== 兼容函数明细 ===')[1].split('=== 兼容存储过程明细 ===')
+  for (const item of functions) {
+    assert.ok(functionDetails.includes(item.signature))
+    assert.ok(!procedureDetails.includes(item.signature))
+  }
   for (const procedure of procedures) {
     assert.ok(procedureDetails.includes(procedure.signature))
     assert.equal(procedureDetails.split(procedure.ddl).length - 1, 1)

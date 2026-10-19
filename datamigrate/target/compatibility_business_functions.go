@@ -31,6 +31,18 @@ func businessFunctionDDL(schema, catalog, name string) string {
 	case "getchildoulist":
 		signature, result, body = "(p_rootid varchar)", "text", childOUListBody
 		lookup = businessRelationLookup(name, "frame_ou", "ouguid", "parentouguid")
+	case "inter_arry":
+		signature, result, body = "(p_seta varchar, p_setb varchar)", "integer", interArrayBody
+		volatility = "IMMUTABLE"
+	case "sec_to_dhm":
+		signature, result, body = "(p_sec bigint)", "varchar", secondsToDHMBody
+		volatility = "IMMUTABLE"
+	case "selectallusercount":
+		signature, result, body = "()", "varchar", selectAllUserCountBody
+		lookup = businessRelationLookup(name, "frame_user")
+	case "stuff":
+		signature, result, body = "(p_old varchar, p_start integer, p_length integer, p_replace varchar)", "varchar", stuffBody
+		volatility = "IMMUTABLE"
 	default:
 		return ""
 	}
@@ -63,7 +75,10 @@ const businessRelationDeclarations = `
 // looked up case-insensitively, then quoted; caller search_path never chooses a
 // business object. Views are valid dependencies, including View_InfoMain.
 func businessRelationLookup(function, relation string, columns ...string) string {
-	columnList := "'" + strings.Join(columns, "','") + "'"
+	columnList := ""
+	if len(columns) > 0 {
+		columnList = "'" + strings.Join(columns, "','") + "'"
+	}
 	return strings.NewReplacer("{{FUNCTION}}", function, "{{RELATION}}", relation, "{{COLUMNS}}", columnList).Replace(`
  SELECT {{CAT}}.count(*), {{CAT}}.min(c.oid::bigint)::oid, {{CAT}}.min(c.relname::text)
  INTO match_count, relation_oid, relation_name
@@ -76,7 +91,7 @@ func businessRelationLookup(function, relation string, columns ...string) string
   RAISE EXCEPTION '{{FUNCTION}}: {{RELATION}} name is ambiguous in the target schema';
  END IF;
  relation_sql := {{CAT}}.quote_ident({{SCHEMA}})||'.'||{{CAT}}.quote_ident(relation_name);
- FOREACH required_column IN ARRAY ARRAY[{{COLUMNS}}] LOOP
+ FOREACH required_column IN ARRAY ARRAY[{{COLUMNS}}]::text[] LOOP
   SELECT {{CAT}}.count(*), {{CAT}}.min(a.attname::text) INTO match_count, actual_column
   FROM {{CAT}}.pg_attribute a
   WHERE a.attrelid=relation_oid AND a.attnum>0 AND NOT a.attisdropped
@@ -124,6 +139,100 @@ BEGIN
   suffix_value := {{CAT}}.substr(p_newguid,start_index,take_length);
  END IF;
  RETURN prefix_value||suffix_value;
+END;`
+
+// Preserve the original byte-based cursor and early-return order, including
+// ASCII multi-item lists returning zero. MySQL rounds decimal values assigned
+// to INT; (delta+1)/2 rounds this nonnegative UTF8 byte difference the same way.
+// Compare bytes so FIND_IN_SET's selected case-sensitive contract does not
+// depend on the target database's collation.
+const interArrayBody = `DECLARE
+ matches integer := 0;
+ len_a integer;
+ idx integer := 0;
+ previous_length integer := 0;
+ current_length integer;
+ parts_a text[];
+ parts_b text[];
+ prefix_value text;
+ current_value text;
+ compact_a text;
+BEGIN
+ IF p_seta IS NULL OR p_setb IS NULL THEN
+  RETURN 0;
+ END IF;
+ compact_a := {{CAT}}.replace(p_seta,',','');
+ len_a := {{CAT}}.char_length(p_seta)-{{CAT}}.char_length(compact_a)+1;
+ parts_a := {{CAT}}.string_to_array(p_seta,',');
+ parts_b := {{CAT}}.string_to_array(p_setb,',');
+ WHILE idx<len_a LOOP
+  idx := idx+1;
+  prefix_value := {{CAT}}.array_to_string(parts_a[1:idx],',');
+  current_length := ({{CAT}}.octet_length({{CAT}}.convert_to(prefix_value,'UTF8'))-{{CAT}}.char_length(prefix_value)+1)/2;
+  IF idx=1 THEN
+   current_value := prefix_value;
+  ELSIF current_length>previous_length THEN
+   current_value := {{CAT}}.substr(compact_a,previous_length+1,current_length-previous_length);
+  ELSE
+   current_value := '';
+  END IF;
+  IF {{CAT}}.char_length(current_value)>0 AND EXISTS (
+   SELECT 1 FROM {{CAT}}.unnest(parts_b) AS item(value)
+   WHERE {{CAT}}.convert_to(item.value,'UTF8')={{CAT}}.convert_to(current_value,'UTF8')
+  ) THEN
+   matches := matches+1;
+  END IF;
+  IF {{CAT}}.char_length(current_value)>0 AND matches=len_a THEN
+   RETURN 1;
+  END IF;
+  IF current_length<=previous_length THEN
+   RETURN 0;
+  END IF;
+  previous_length := current_length;
+ END LOOP;
+ RETURN 0;
+END;`
+
+// Truncate before formatting; numeric arithmetic avoids floating-point loss
+// and preserves the signed remainder even for the minimum bigint value.
+const secondsToDHMBody = `BEGIN
+ IF p_sec IS NULL THEN
+  RETURN NULL;
+ END IF;
+ RETURN {{CAT}}.div(p_sec::numeric,86400)::text||'d '
+  ||{{CAT}}.div((p_sec%86400)::numeric,3600)::text||'h '
+  ||{{CAT}}.div((p_sec%3600)::numeric,60)::text||'m ';
+END;`
+
+const selectAllUserCountBody = `DECLARE
+{{RELATION_DECLARATIONS}}
+ result_value integer;
+BEGIN
+{{LOOKUP}}
+ EXECUTE 'SELECT '||{{CAT_LITERAL}}||'.count(*) FROM '||relation_sql INTO result_value;
+ RETURN 'mysql count :'||result_value::text;
+END;`
+
+// This application routine globally replaces the selected substring. It is
+// intentionally not SQL Server's positional STUFF operation. Normalize MySQL
+// substring bounds before using PostgreSQL's different substring behavior.
+const stuffBody = `DECLARE
+ start_index bigint := p_start;
+ input_length integer;
+ selected_value text;
+BEGIN
+ IF p_old IS NULL OR p_start IS NULL OR p_length IS NULL OR p_replace IS NULL THEN
+  RETURN NULL;
+ END IF;
+ input_length := {{CAT}}.char_length(p_old);
+ IF start_index<0 THEN
+  start_index := input_length::bigint+start_index+1;
+ END IF;
+ IF start_index<=0 OR start_index>input_length OR p_length<=0 THEN
+  RETURN p_old;
+ END IF;
+ selected_value := {{CAT}}.substr(p_old,start_index::integer,p_length);
+ RETURN {{CAT}}.replace(p_old,selected_value,p_replace);
 END;`
 
 const convertGUIDListBody = `DECLARE

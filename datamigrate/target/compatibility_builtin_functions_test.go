@@ -154,6 +154,10 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 		{"getscore", []string{"character varying"}, "integer", "VOLATILE"},
 		{"getcategoryscore", []string{"character varying", "date", "date"}, "integer", "VOLATILE"},
 		{"getchildoulist", []string{"character varying"}, "text", "VOLATILE"},
+		{"inter_arry", []string{"character varying", "character varying"}, "integer", "IMMUTABLE"},
+		{"sec_to_dhm", []string{"bigint"}, "varchar", "IMMUTABLE"},
+		{"selectallusercount", nil, "varchar", "VOLATILE"},
+		{"stuff", []string{"character varying", "integer", "integer", "character varying"}, "varchar", "IMMUTABLE"},
 	}
 	require.Len(t, builtinCompatibilitySpecs, 3+len(expected))
 	for i, sample := range expected {

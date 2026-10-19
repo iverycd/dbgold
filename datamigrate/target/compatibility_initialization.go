@@ -27,6 +27,10 @@ var builtinCompatibilitySpecs = []compatibilityFunctionSpec{
 	{name: "getscore", signature: "getscore(p_infoid varchar)", inputs: []string{"character varying"}},
 	{name: "getcategoryscore", signature: "getcategoryscore(p_userguid varchar, p_fromdate date, p_todate date)", inputs: []string{"character varying", "date", "date"}},
 	{name: "getchildoulist", signature: "getchildoulist(p_rootid varchar)", inputs: []string{"character varying"}},
+	{name: "inter_arry", signature: "inter_arry(p_seta varchar, p_setb varchar)", inputs: []string{"character varying", "character varying"}},
+	{name: "sec_to_dhm", signature: "sec_to_dhm(p_sec bigint)", inputs: []string{"bigint"}},
+	{name: "selectallusercount", signature: "selectallusercount()"},
+	{name: "stuff", signature: "stuff(p_old varchar, p_start integer, p_length integer, p_replace varchar)", inputs: []string{"character varying", "integer", "integer", "character varying"}},
 }
 
 func (s compatibilityFunctionSpec) inputPredicate() string {

@@ -45,6 +45,10 @@ func TestCompatibilityBusinessSQLIntegration(t *testing.T) {
 				{"score", checkBusinessScoreSQL},
 				{"category_score", checkBusinessCategoryScoreSQL},
 				{"child_ou_list", checkBusinessChildOUListSQL},
+				{"inter_array", checkBusinessInterArraySQL},
+				{"seconds_dhm", checkBusinessSecondsDHMSQL},
+				{"all_user_count", checkBusinessAllUserCountSQL},
+				{"stuff", checkBusinessStuffSQL},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					schema := newBusinessIntegrationSchema(t, ctx, db)
@@ -316,6 +320,212 @@ func checkBusinessChildOUListSQL(t *testing.T, ctx context.Context, db *sql.DB, 
 	require.Greater(t, len(value), 102400)
 	require.Len(t, strings.Split(value, ","), children+1)
 	require.True(t, strings.HasSuffix(value, args[children-1].(string)))
+}
+
+func checkBusinessInterArraySQL(t *testing.T, ctx context.Context, db *sql.DB, schema string) {
+	query := "SELECT " + qualifiedFunction(schema, "inter_arry") + "($1::varchar,$2::varchar)"
+	for _, tc := range []struct {
+		name       string
+		setA, setB any
+		want       int
+	}{
+		{"single_ascii_match_before_length_check", "a", "a", 1},
+		{"ascii_list_preserves_early_return", "a,b", "a,b", 0},
+		{"chinese_list", "甲,乙", "乙,甲", 1},
+		{"missing_item", "甲,乙", "甲,丙", 0},
+		{"whole_item_match", "甲", "甲乙", 0},
+		{"duplicates_are_counted", "甲,甲", "甲", 1},
+		{"two_byte_rounding", "é,甲", "é,甲", 1},
+		{"four_byte_preserves_original_indexing", "😀,甲", "😀,甲", 0},
+		{"single_four_byte_character", "😀", "😀", 1},
+		{"mixed_ascii_before_chinese", "a,甲", "a,甲", 0},
+		{"mixed_ascii_after_chinese", "甲,a", "甲,a", 0},
+		{"case_sensitive", "A", "a", 0},
+		{"accent_sensitive", "é", "e", 0},
+		{"whitespace_is_significant", "甲", " 甲", 0},
+		{"trailing_whitespace_is_significant", "甲", "甲 ", 0},
+		{"empty_source", "", "甲", 0},
+		{"empty_target", "甲", "", 0},
+		{"both_empty", "", "", 0},
+		{"leading_empty_source_item", ",甲", "甲", 0},
+		{"middle_empty_source_item", "甲,,乙", "甲,乙", 0},
+		{"trailing_empty_source_item", "甲,", "甲", 0},
+		{"empty_target_items", "甲,乙", ",甲,,乙,", 1},
+		{"null_source", nil, "甲", 0},
+		{"null_target", "甲", nil, 0},
+		{"both_null", nil, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var value int
+			require.NoError(t, db.QueryRowContext(ctx, query, tc.setA, tc.setB).Scan(&value))
+			require.Equal(t, tc.want, value)
+		})
+	}
+	withBusinessCatalogPath(t, ctx, db, func(tx *sql.Tx) {
+		var value int
+		require.NoError(t, tx.QueryRowContext(ctx, query, "é,甲", "é,甲").Scan(&value))
+		require.Equal(t, 1, value)
+	})
+}
+
+func checkBusinessSecondsDHMSQL(t *testing.T, ctx context.Context, db *sql.DB, schema string) {
+	query := "SELECT " + qualifiedFunction(schema, "sec_to_dhm") + "($1::bigint)"
+	for _, tc := range []struct {
+		name string
+		sec  any
+		want string
+		null bool
+	}{
+		{"zero", int64(0), "0d 0h 0m ", false},
+		{"seconds_discarded", int64(59), "0d 0h 0m ", false},
+		{"minute_boundary", int64(60), "0d 0h 1m ", false},
+		{"before_hour", int64(3599), "0d 0h 59m ", false},
+		{"hour_boundary", int64(3600), "0d 1h 0m ", false},
+		{"before_day", int64(86399), "0d 23h 59m ", false},
+		{"day_boundary", int64(86400), "1d 0h 0m ", false},
+		{"days_hours_minutes", int64(90061), "1d 1h 1m ", false},
+		{"negative_seconds_truncate_toward_zero", int64(-59), "0d 0h 0m ", false},
+		{"negative_minute", int64(-60), "0d 0h -1m ", false},
+		{"negative_days_hours_minutes", int64(-90061), "-1d -1h -1m ", false},
+		{"large_value_before_day_boundary", int64(9223372036854719999), "106751991167299d 23h 59m ", false},
+		{"large_negative_value_before_day_boundary", int64(-9223372036854719999), "-106751991167299d -23h -59m ", false},
+		{"maximum_bigint", int64(9223372036854775807), "106751991167300d 15h 30m ", false},
+		{"minimum_bigint", int64(-9223372036854775808), "-106751991167300d -15h -30m ", false},
+		{"null", nil, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var value sql.NullString
+			require.NoError(t, db.QueryRowContext(ctx, query, tc.sec).Scan(&value))
+			require.Equal(t, !tc.null, value.Valid)
+			require.Equal(t, tc.want, value.String, "the final space is part of the source result")
+		})
+	}
+	withBusinessCatalogPath(t, ctx, db, func(tx *sql.Tx) {
+		var value string
+		require.NoError(t, tx.QueryRowContext(ctx, query, int64(90061)).Scan(&value))
+		require.Equal(t, "1d 1h 1m ", value)
+	})
+}
+
+func checkBusinessStuffSQL(t *testing.T, ctx context.Context, db *sql.DB, schema string) {
+	query := "SELECT " + qualifiedFunction(schema, "stuff") + "($1::varchar,$2::integer,$3::integer,$4::varchar)"
+	for _, tc := range []struct {
+		name               string
+		old, start, length any
+		replacement        any
+		want               string
+		null               bool
+	}{
+		{"global_replacement", "abcabc", 2, 2, "X", "aXaX", false},
+		{"negative_start", "abcabc", -3, 2, "X", "XcXc", false},
+		{"negative_start_at_first_character", "abcabc", -6, 2, "X", "XcXc", false},
+		{"negative_start_before_string", "abc", -4, 2, "X", "abc", false},
+		{"minimum_start", "abc", -2147483648, 2, "X", "abc", false},
+		{"zero_start", "abc", 0, 2, "X", "abc", false},
+		{"start_after_string", "abc", 4, 2, "X", "abc", false},
+		{"maximum_start", "abc", 2147483647, 2, "X", "abc", false},
+		{"zero_length", "abc", 2, 0, "X", "abc", false},
+		{"negative_length", "abc", 2, -1, "X", "abc", false},
+		{"minimum_length", "abc", 2, -2147483648, "X", "abc", false},
+		{"length_beyond_string", "abc", 2, 2147483647, "X", "aX", false},
+		{"empty_replacement", "abcabc", 2, 2, "", "aa", false},
+		{"replacement_contains_match", "abab", 1, 2, "abab", "abababab", false},
+		{"case_sensitive", "AaA", 1, 1, "x", "xax", false},
+		{"multibyte_positions", "甲乙甲乙", 2, 1, "x", "甲x甲x", false},
+		{"four_byte_positions", "😀甲😀甲", -1, 1, "x", "😀x😀x", false},
+		{"empty_source", "", 1, 1, "X", "", false},
+		{"null_source", nil, 1, 1, "X", "", true},
+		{"null_start", "abc", nil, 1, "X", "", true},
+		{"null_length", "abc", 1, nil, "X", "", true},
+		{"null_replacement", "abc", 1, 1, nil, "", true},
+		{"null_replacement_with_empty_match", "abc", 0, 0, nil, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var value sql.NullString
+			require.NoError(t, db.QueryRowContext(ctx, query, tc.old, tc.start, tc.length, tc.replacement).Scan(&value))
+			require.Equal(t, !tc.null, value.Valid)
+			require.Equal(t, tc.want, value.String)
+		})
+	}
+	withBusinessCatalogPath(t, ctx, db, func(tx *sql.Tx) {
+		var value string
+		require.NoError(t, tx.QueryRowContext(ctx, query, "abcabc", 2, 2, "X").Scan(&value))
+		require.Equal(t, "aXaX", value)
+	})
+}
+
+func checkBusinessAllUserCountSQL(t *testing.T, ctx context.Context, db *sql.DB, schema string) {
+	function := qualifiedFunction(schema, "selectallusercount")
+	query := "SELECT " + function + "()"
+	var value string
+	err := db.QueryRowContext(ctx, query).Scan(&value)
+	require.Error(t, err, "missing frame_user must fail only when called")
+	require.Contains(t, strings.ToLower(err.Error()), "frame_user")
+	table := qualifiedFunction(schema, "FrAmE_UsEr")
+	businessExec(t, ctx, db, "CREATE TABLE "+table+"(id integer)")
+	require.NoError(t, db.QueryRowContext(ctx, query).Scan(&value))
+	require.Equal(t, "mysql count :0", value)
+	businessExec(t, ctx, db, "INSERT INTO "+table+" VALUES (1),(2),(NULL)")
+	require.NoError(t, db.QueryRowContext(ctx, query).Scan(&value))
+	require.Equal(t, "mysql count :3", value, "COUNT(*) includes rows whose columns are NULL")
+	withBusinessCatalogPath(t, ctx, db, func(tx *sql.Tx) {
+		require.NoError(t, tx.QueryRowContext(ctx, query).Scan(&value))
+		require.Equal(t, "mysql count :3", value)
+	})
+	decoySchema := newBusinessIntegrationSchema(t, ctx, db)
+	businessExec(t, ctx, db, "CREATE TABLE "+qualifiedFunction(decoySchema, "frame_user")+"(id integer)")
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, "SET LOCAL search_path TO "+source.QuotePGIdent(decoySchema)+",pg_catalog")
+	require.NoError(t, err)
+	require.NoError(t, tx.QueryRowContext(ctx, query).Scan(&value))
+	require.Equal(t, "mysql count :3", value, "caller search_path must not select the decoy frame_user")
+	require.NoError(t, tx.Rollback())
+	ambiguousTable := qualifiedFunction(schema, "frame_user")
+	businessExec(t, ctx, db, "CREATE TABLE "+ambiguousTable+"(id integer)")
+	err = db.QueryRowContext(ctx, query).Scan(&value)
+	require.Error(t, err, "case-equivalent frame_user names must not be selected arbitrarily")
+	require.Contains(t, strings.ToLower(err.Error()), "ambiguous")
+	businessExec(t, ctx, db, "DROP TABLE "+ambiguousTable)
+	require.NoError(t, db.QueryRowContext(ctx, query).Scan(&value))
+	require.Equal(t, "mysql count :3", value)
+	t.Run("caller_permissions", func(t *testing.T) {
+		role := fmt.Sprintf("dbgold_user_counter_%d", time.Now().UnixNano())
+		quotedRole := source.QuotePGIdent(role)
+		_, err := db.ExecContext(ctx, "CREATE ROLE "+quotedRole)
+		if compatibilitySQLState(err) == "42501" {
+			t.Skip("test user lacks permission to create a temporary role")
+		}
+		require.NoError(t, err)
+		defer func() {
+			_, err := db.ExecContext(context.Background(), "DROP OWNED BY "+quotedRole)
+			require.NoError(t, err)
+			_, err = db.ExecContext(context.Background(), "DROP ROLE "+quotedRole)
+			require.NoError(t, err)
+		}()
+		businessExec(t, ctx, db, "REVOKE ALL ON TABLE "+table+" FROM PUBLIC")
+		businessExec(t, ctx, db, "GRANT USAGE ON SCHEMA "+source.QuotePGIdent(schema)+" TO "+quotedRole)
+		businessExec(t, ctx, db, "GRANT EXECUTE ON FUNCTION "+function+"() TO "+quotedRole)
+		tx, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, "SET LOCAL ROLE "+quotedRole)
+		require.NoError(t, err)
+		err = tx.QueryRowContext(ctx, query).Scan(&value)
+		require.Error(t, err, "caller without table SELECT must not inherit initializer permissions")
+		require.Equal(t, "42501", compatibilitySQLState(err))
+		require.NoError(t, tx.Rollback())
+		businessExec(t, ctx, db, "GRANT SELECT ON TABLE "+table+" TO "+quotedRole)
+		tx, err = db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, "SET LOCAL ROLE "+quotedRole)
+		require.NoError(t, err)
+		require.NoError(t, tx.QueryRowContext(ctx, query).Scan(&value))
+		require.Equal(t, "mysql count :3", value)
+		require.NoError(t, tx.Rollback())
+	})
 }
 
 func withBusinessCatalogPath(t *testing.T, ctx context.Context, db *sql.DB, check func(*sql.Tx)) {
