@@ -5,7 +5,6 @@
       <a-auto-complete
         :model-value="editor.draft"
         :data="editor.catalogs"
-        :filter-option="false"
         :disabled="locked || editor.saving"
         allow-clear
         placeholder="选择或输入已有数据库名称"
