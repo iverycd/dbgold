@@ -229,3 +229,39 @@ dbgold healthcheck --url http://127.0.0.1:18089/api/health/ready
 | `LOG_DIR` | 平台相关绝对路径 | 应用日志目录 |
 
 本方案为单机单实例部署。升级必须使用维护窗口，不支持多副本或无停机切换。
+
+## Nginx配置
+
+```yaml
+    server {
+        listen 81;
+        server_name  _;
+        client_max_body_size 0;
+        
+        location / {
+            try_files $uri $uri/ /index.html;
+            root /opt/dbgold/dist;
+            index index.html index.htm;
+        }
+        location /api/ {
+            # Disable buffering for SSE
+            #proxy_buffering off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            # 推荐增加这一行，它会记录完整的代理链路 IP 列表 同时后端的.env需要增加TRUSTED_PROXIES=127.0.0.1,::1
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; 
+            #proxy_set_header REMOTE-HOST $remote_addr;
+            proxy_pass http://127.0.0.1:8082/api/;
+        }
+
+        
+
+        error_page 404 /404.html;
+        location = /404.html {
+        }
+
+        error_page 500 502 503 504 /50x.html;
+        location = /50x.html {
+        }
+    }
+```
