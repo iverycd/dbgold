@@ -71,8 +71,21 @@
             <template #expand-row="{ record }">
               <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
               <div v-else class="failure-list">
+                <div v-if="record.items.length > 10" class="failure-pagination">
+                  <a-pagination
+                    :current="getFailurePagination(record.key).current"
+                    :page-size="getFailurePagination(record.key).pageSize"
+                    :total="record.items.length"
+                    :page-size-options="[10, 20, 50]"
+                    show-total
+                    show-page-size
+                    size="small"
+                    @change="setFailurePage(record.key, $event)"
+                    @page-size-change="setFailurePageSize(record.key, $event)"
+                  />
+                </div>
                 <div
-                  v-for="item in record.items"
+                  v-for="item in pagedFailureItems(record)"
                   :key="item.key"
                   class="failure-item"
                 >
@@ -244,6 +257,21 @@ const fetchError = ref('')
 const noReport = ref(false)
 const preflightSection = ref<HTMLElement | null>(null)
 const preflightActiveKeys = ref<string[]>([])
+const failurePagination = ref<Record<string, { current: number; pageSize: number }>>({})
+
+function getFailurePagination(key: string) {
+  return failurePagination.value[key] ?? { current: 1, pageSize: 10 }
+}
+function setFailurePage(key: string, current: number) {
+  failurePagination.value[key] = { ...getFailurePagination(key), current }
+}
+function setFailurePageSize(key: string, pageSize: number) {
+  failurePagination.value[key] = { current: 1, pageSize }
+}
+function pagedFailureItems(record: ReturnType<typeof reportCategories>[number]) {
+  const { current, pageSize } = getFailurePagination(record.key)
+  return record.items.slice((current - 1) * pageSize, current * pageSize)
+}
 
 function updateRepairSummary(summary: RepairSummary) {
   if (summary.jobID === props.jobID) repairSummary.value = summary
@@ -289,6 +317,7 @@ async function loadReport() {
   activeTab.value = 'overview'
   repairSummary.value = { jobID, state: 'loading', repaired: 0, attention: 0 }
   preflightActiveKeys.value = []
+  failurePagination.value = {}
   try {
     const res = await getDataMigrationReport(jobID)
     if (request !== reportRequest) return
@@ -377,6 +406,11 @@ onUnmounted(() => { reportRequest++ })
   padding: 8px 16px;
   background: #f7f8fa;
 }
+.failure-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
 .failure-item {
   padding: 8px 0;
   border-bottom: 1px solid #e5e6eb;
@@ -439,5 +473,8 @@ onUnmounted(() => { reportRequest++ })
 .migration-report-panel :deep(.report-row-no-details .arco-table-expand-btn) { display: none; }
 .migration-report-panel :deep(.arco-tabs-tab-active), .migration-report-panel :deep(.arco-tabs-tab:hover) { color: #15803d; }
 .migration-report-panel :deep(.arco-tabs-nav-ink) { background: #16a34a; }
-@container (max-width: 767px) { .report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 767px) {
+  .report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .failure-pagination { justify-content: flex-start; overflow-x: auto; }
+}
 </style>

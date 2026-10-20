@@ -13,7 +13,7 @@ import Arco from '@arco-design/web-vue'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
-const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel };`, {
+const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const renderCode = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
@@ -51,6 +51,7 @@ function harness() {
     },
   })
   app.component('a-tab-pane', Arco.TabPane)
+  app.component('a-pagination', Arco.Pagination)
   app.component('CompatibilityFunctionsPanel', createCompatibilityPanel(copied))
   app.component('a-space', passthrough)
   app.component('MigrationRepairPanel', { props: ['jobID'], setup: props => {
@@ -87,6 +88,15 @@ function report(item, category = 'tables') {
   return result
 }
 
+function paginatedReport(count) {
+  const items = Array.from({ length: count }, (_, index) => ({
+    name: `Orders_${index}`, ddl: `CREATE TABLE Orders_${index} (id INT)`, error: `failure_${index}`,
+  }))
+  const result = report(items[0])
+  result.tables = { total: count, success: 0, failed: count, items }
+  return result
+}
+
 function memoryRenderer() {
   const element = tag => ({ tag, children: [], style: {}, offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0 })
   const renderer = Vue.createRenderer({
@@ -105,6 +115,108 @@ function memoryRenderer() {
   })
   return { renderer, root: element('root') }
 }
+
+function componentInstances(vnode, name) {
+  if (!vnode) return []
+  const instance = vnode.component
+  if (instance) return [
+    ...(instance.type.name === name ? [instance] : []),
+    ...componentInstances(instance.subTree, name),
+  ]
+  return Array.isArray(vnode.children) ? vnode.children.flatMap(child => componentInstances(child, name)) : []
+}
+
+test('failure detail rendering limits each page and shows pagination only above ten items', async () => {
+  const scope = Vue.effectScope()
+  try {
+    for (const count of [0, 10, 11, 350]) {
+      const h = scope.run(harness)
+      h.p.report.value = paginatedReport(count)
+      const html = await renderToString(h.app)
+      assert.equal((html.match(/class="failure-item"/g) || []).length, Math.min(count, 10))
+      assert.equal((html.match(/class="arco-pagination /g) || []).length, count > 10 ? 1 : 0)
+      if (count > 10) {
+        assert.match(html, /arco-pagination-total/)
+        assert.match(html, /arco-pagination-options/)
+        assert.doesNotMatch(html, /class="failure-name">Orders_10</)
+      }
+    }
+    const h = scope.run(harness)
+    h.p.report.value = paginatedReport(11)
+    h.p.setFailurePageSize('tables', 50)
+    const html = await renderToString(h.app)
+    assert.equal((html.match(/class="failure-item"/g) || []).length, 11)
+    assert.match(html, /arco-pagination-options/, 'page size remains adjustable when all objects fit the larger page')
+    assert.match(html, /50 条\/页/)
+  } finally { scope.stop() }
+})
+
+test('real Arco pagination navigates later failures, copies and repairs the visible object, and exports every page', async () => {
+  const scope = Vue.effectScope()
+  let app
+  try {
+    const h = scope.run(harness), focused = []
+    h.p.report.value = paginatedReport(350)
+    const host = memoryRenderer()
+    app = host.renderer.createApp(h.app._component)
+    for (const [name, component] of Object.entries(h.app._context.components)) {
+      if (name !== 'a-pagination' && name !== 'MigrationRepairPanel') app.component(name, component)
+    }
+    app.component('MigrationRepairPanel', {
+      props: ['jobID'],
+      setup(_, { expose }) {
+        expose({ focusObject: target => focused.push(target), exportHistory: async () => [] })
+        return () => Vue.h('div', '修复操作面板')
+      },
+    })
+    // The real select dropdown needs a DOM teleport target. SSR above covers it;
+    // keep the real pager and pagination event handling in this memory renderer.
+    app.component('a-pagination', {
+      name: 'FailurePagination',
+      props: Arco.Pagination.props,
+      emits: ['change', 'pageSizeChange'],
+      setup: (props, { emit }) => () => Vue.h(Arco.Pagination, {
+        ...props, showPageSize: false,
+        onChange: current => emit('change', current),
+        onPageSizeChange: pageSize => emit('pageSizeChange', pageSize),
+      }),
+    })
+    app.mount(host.root); await Vue.nextTick()
+    const instances = name => componentInstances(app._instance.subTree, name)
+    const pagination = () => instances('Pagination')[0]
+    assert.equal(pagination().props.total, 350)
+    assert.equal(pagination().props.showTotal, true)
+    assert.equal(instances('FailurePagination')[0].props.showPageSize, true)
+    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [10, 20, 50])
+    h.clicks.length = 0
+    instances('Pager').find(instance => instance.props.pageNumber === 35).subTree.props.onClick({})
+    await Vue.nextTick()
+    assert.equal(pagination().props.current, 35)
+    assert.equal(h.p.getFailurePagination('tables').current, 35)
+    const repairButtons = h.clicks.filter(button => button.label === '去修复')
+    const copyButtons = h.clicks.filter(button => button.label === '复制 DDL')
+    const expectedNames = Array.from({ length: 10 }, (_, index) => `Orders_${340 + index}`)
+    assert.equal(repairButtons.length, 10)
+    assert.equal(copyButtons.length, 10)
+    for (const button of copyButtons) await button.handler()
+    assert.deepEqual(h.copied.slice().sort(), expectedNames.map(name => `CREATE TABLE ${name} (id INT)`).sort())
+    for (const button of repairButtons) await button.handler()
+    assert.deepEqual(focused.map(target => target.name).sort(), expectedNames.slice().sort())
+    assert.ok(focused.every(target => target.kind === 'tables'))
+    await h.p.exportReport()
+    const exported = await h.downloads[0].text()
+    for (let index = 0; index < 350; index++) assert.ok(exported.includes(`CREATE TABLE Orders_${index} (id INT)`), `export contains object ${index}`)
+    assert.equal((exported.match(/CREATE TABLE Orders_\d+ \(id INT\)/g) || []).length, 350)
+    h.p.activeTab.value = 'overview'; await Vue.nextTick()
+    pagination().emit('pageSizeChange', 50)
+    await Vue.nextTick()
+    assert.equal(pagination().props.current, 1, 'page size changes reset the controlled page')
+    assert.equal(pagination().props.pageSize, 50)
+    assert.equal(instances('FailurePagination')[0].props.showPageSize, true, 'page size controls remain available')
+    assert.equal(h.p.pagedFailureItems(h.p.tableRows.value[0]).length, 50)
+    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [10, 20, 50])
+  } finally { app?.unmount(); scope.stop() }
+})
 
 test('report expands function and procedure slices once and copies their own DDL', async () => {
   const scope = Vue.effectScope()
