@@ -3,8 +3,10 @@ package target
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"testing"
+	"time"
 
 	"dbgold/datamigrate/dialect"
 	"github.com/DATA-DOG/go-sqlmock"
@@ -74,4 +76,72 @@ func TestOracleDMViewSentinelsCoverTheFiniteSupportedSubset(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	require.ErrorIs(t, w.ValidateOracleDamengView(ctx, `SELECT a FROM T`), context.Canceled)
+}
+
+func TestOracleDMViewRownumSentinelChecksGroupedUnionWithoutBusinessData(t *testing.T) {
+	query, args, err := oracleDMViewSentinel("ROWNUM", false)
+	require.NoError(t, err)
+	require.Empty(t, args)
+	require.Contains(t, query, "COUNT(*)=2 AND MIN(RN)=1 AND MAX(RN)=2 AND COUNT(DISTINCT RN)=2 AND SUM(VC)=3")
+	require.Contains(t, query, "SELECT ROWNUM AS RN, VC FROM (SELECT K, COUNT(*) AS VC")
+	require.Contains(t, query, "SELECT 10 AS K FROM DUAL UNION ALL SELECT 10 AS K FROM DUAL UNION ALL SELECT 20 AS K FROM DUAL")
+	require.Contains(t, query, "GROUP BY K")
+	queryWithDate, _, err := oracleDMViewSentinel("ROWNUM", true)
+	require.NoError(t, err)
+	require.Equal(t, query, queryWithDate)
+}
+
+func TestOracleDMViewRownumCapabilityIsProbedOnce(t *testing.T) {
+	w, mock := mockDM(t)
+	query, _, err := oracleDMViewSentinel("ROWNUM", false)
+	require.NoError(t, err)
+	mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillReturnRows(sqlmock.NewRows([]string{"ok"}).AddRow(1))
+	for range 2 {
+		require.NoError(t, w.ValidateOracleDamengView(context.Background(), `SELECT ROWNUM AS Row_ID, VisitCount FROM (SELECT COUNT(*) AS VisitCount FROM T GROUP BY ModuleCode)`))
+	}
+	// Lexically similar literals, quoted/qualified columns and output aliases do
+	// not perform any probe, even on a fresh writer without a populated cache.
+	w, _ = mockDM(t)
+	require.NoError(t, w.ValidateOracleDamengView(context.Background(), `SELECT 'ROWNUM' AS s, "ROWNUM" AS q, t.ROWNUM AS c, t.id AS ROWNUM FROM T t /* ROWNUM */`))
+}
+
+func TestOracleDMViewRownumFailureIsCachedAndDoesNotBlockOtherViews(t *testing.T) {
+	for _, probeErr := range []error{nil, errors.New("ROWNUM unavailable")} {
+		t.Run(fmt.Sprintf("error=%v", probeErr), func(t *testing.T) {
+			w, mock := mockDM(t)
+			query, _, err := oracleDMViewSentinel("ROWNUM", false)
+			require.NoError(t, err)
+			expect := mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$")
+			if probeErr == nil {
+				expect.WillReturnRows(sqlmock.NewRows([]string{"ok"}).AddRow(0))
+			} else {
+				expect.WillReturnError(probeErr)
+			}
+			for range 2 {
+				err = w.ValidateOracleDamengView(context.Background(), `SELECT ROWNUM AS rn FROM T`)
+				require.ErrorContains(t, err, "ROWNUM")
+				require.ErrorContains(t, err, "未执行该视图 DDL")
+			}
+			require.NoError(t, w.ValidateOracleDamengView(context.Background(), `SELECT id FROM T`))
+			trimQuery, _, err := oracleDMViewSentinel("TRIM", false)
+			require.NoError(t, err)
+			mock.ExpectQuery("^" + regexp.QuoteMeta(trimQuery) + "$").WillReturnRows(sqlmock.NewRows([]string{"ok"}).AddRow(1))
+			require.NoError(t, w.ValidateOracleDamengView(context.Background(), `SELECT TRIM(name) AS name FROM T`))
+		})
+	}
+}
+
+func TestOracleDMViewRownumCanceledProbeCanBeRetried(t *testing.T) {
+	w, mock := mockDM(t)
+	query, _, err := oracleDMViewSentinel("ROWNUM", false)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillDelayFor(time.Second).WillReturnRows(sqlmock.NewRows([]string{"ok"}).AddRow(1))
+	require.ErrorIs(t, w.ValidateOracleDamengView(ctx, `SELECT ROWNUM AS rn FROM T`), context.DeadlineExceeded)
+	require.NotContains(t, w.oracleDM.features, "view:ROWNUM")
+	mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillReturnRows(sqlmock.NewRows([]string{"ok"}).AddRow(1))
+	for range 2 {
+		require.NoError(t, w.ValidateOracleDamengView(context.Background(), `SELECT ROWNUM AS rn FROM T`))
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/target"
 )
 
 // RepairManifest is an additive report extension. Original category results stay immutable.
@@ -590,7 +591,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		item := &r.objects[idx]
 		unit := -1
 		for i, u := range item.Units {
-			if u.SQL == e.SQL && ((e.Status == "running" && !observed[i]) || (e.Status != "running" && u.Status == "running")) {
+			if u.SQL == e.SQL && ((e.Status == "reused" && u.Status == "pending") || (e.Status == "running" && !observed[i]) || (e.Status != "running" && u.Status == "running")) {
 				unit = i
 				if e.Status == "running" {
 					observed[i] = true
@@ -602,6 +603,31 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 				}
 			}
 		}
+		// A newly created sequence may need a higher START WITH after reading
+		// target data. Replace its pending display unit before the observed SQL
+		// runs, rather than recording two successful CREATE statements.
+		if unit < 0 && e.Status == "running" && m.isOracleDameng() && item.Kind == "sequence" && item.Sequence != nil && item.Sequence.Native != nil {
+			prefix := "CREATE SEQUENCE " + m.writer.Dialect().QualifyTable(item.Schema, item.Sequence.Native.Name) + " START WITH "
+			if strings.HasPrefix(e.SQL, prefix) {
+				for i, u := range item.Units {
+					if u.Status == "pending" && !observed[i] && strings.HasPrefix(u.SQL, prefix) {
+						unit = i
+						item.Units[i].SQL, item.Units[i].OriginalSQL = e.SQL, e.SQL
+						if start, _, ok := strings.Cut(strings.TrimPrefix(e.SQL, prefix), " INCREMENT BY "); ok {
+							sequence := *item.Sequence
+							sequence.StartValueText = start
+							item.Sequence = &sequence
+						}
+						var sql []string
+						for _, step := range item.Units {
+							sql = append(sql, step.SQL)
+						}
+						item.DDL = strings.Join(sql, ";\n")
+						break
+					}
+				}
+			}
+		}
 		if unit < 0 {
 			unit = len(item.Units)
 			item.Units = append(item.Units, repair.Unit{ID: fmt.Sprintf("step-%d", unit+1), SQL: e.SQL, OriginalSQL: e.SQL, Destructive: destructiveRepairUnit(e.SQL)})
@@ -610,8 +636,15 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 			observed[unit] = true
 		}
 		item.Units[unit].Status = e.Status
+		if e.Status == "reused" {
+			item.Units[unit].Status = "succeeded"
+			if m.log != nil {
+				statement, _, _ := strings.Cut(e.SQL, "\n")
+				m.log.Infof("已核验并复用目标序列对象：%s", statement)
+			}
+		}
 		item.Units[unit].Error = e.Error
-		item.Units[unit].Selected = e.Status != "succeeded" && !item.Units[unit].Destructive
+		item.Units[unit].Selected = item.Units[unit].Status != "succeeded" && !item.Units[unit].Destructive
 		return m.flushRepairObjectLocked(*item)
 	})
 	err := fn(ctx)
@@ -635,7 +668,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		if err == nil && u.Status == "pending" {
 			u.Status = "succeeded"
 		}
-		if err != nil && u.Status == "pending" && len(observed) == 0 {
+		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) {
 			u.Status = "unknown"
 		}
 		u.Selected = u.Status != "succeeded" && !u.Destructive
@@ -704,6 +737,9 @@ func (m *Migrator) captureSequenceCall(ctx context.Context, v source.SequenceInf
 			continue
 		}
 		metadata := v
+		if item.Sequence != nil {
+			metadata = *item.Sequence
+		}
 		native := *v.Native
 		native.Bindings = original.Native.Bindings
 		metadata.Native = &native

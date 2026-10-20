@@ -48,6 +48,144 @@ UNION ALL SELECT p.NAME label, SUM(p.AMOUNT) total FROM PARENT p GROUP BY p.NAME
 	require.Contains(t, got.SQL, "UNION ALL SELECT")
 }
 
+func TestConvertViewParenthesizedJoinWithoutAliases(t *testing.T) {
+	raw := `select parent.rowid, parent.name, child.parent_id
+from (parent inner join child on((child.parent_id = parent.id)))`
+	got, err := ConvertView(raw, "SRC", "DST", viewTestCatalog())
+	require.NoError(t, err)
+	require.Equal(t, []string{"CHILD", "PARENT"}, got.Dependencies)
+	require.Equal(t, []MappedColumn{{"ROWID", "ROW_ID_2"}, {"NAME", "NAME"}, {"PARENT_ID", "PARENT_ID"}}, got.Columns)
+	require.Equal(t, `select "PARENT"."ROW_ID_2", "PARENT"."NAME", "CHILD"."PARENT_ID"
+from ("DST"."PARENT" inner join "DST"."CHILD" on(("CHILD"."PARENT_ID" = "PARENT"."ID")))`, got.SQL)
+}
+
+func TestConvertViewNestedJoinGroups(t *testing.T) {
+	catalog := viewTestCatalog()
+	catalog["GRANDCHILD"] = []MappedColumn{{"ID", "ID"}, {"CHILD_ID", "CHILD_ID"}}
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{
+			name: "nested outer joins retain grouping and direction",
+			raw: `SELECT p.ID parent_id, c.ID child_id, g.ID grandchild_id
+FROM ((PARENT p LEFT OUTER JOIN (CHILD c RIGHT JOIN GRANDCHILD g ON (c.ID=g.CHILD_ID)) ON ((p.ID=c.PARENT_ID))) FULL OUTER JOIN CHILD c2 ON c2.PARENT_ID=p.ID)`,
+			want: []string{
+				`FROM (("DST"."PARENT" "P" LEFT OUTER JOIN ("DST"."CHILD" "C" RIGHT JOIN "DST"."GRANDCHILD" "G" ON ("C"."ID"="G"."CHILD_ID")) ON (("P"."ID"="C"."PARENT_ID"))) FULL OUTER JOIN "DST"."CHILD" "C2" ON "C2"."PARENT_ID"="P"."ID")`,
+			},
+		},
+		{
+			name: "group mixed with outer join and comma",
+			raw: `SELECT p.ID parent_id, c.ID child_id, g.ID grandchild_id
+FROM (PARENT p INNER JOIN CHILD c ON p.ID=c.PARENT_ID) LEFT JOIN GRANDCHILD g ON (g.CHILD_ID=c.ID), CHILD c2 WHERE c2.ID=c.ID`,
+			want: []string{
+				`FROM ("DST"."PARENT" "P" INNER JOIN "DST"."CHILD" "C" ON "P"."ID"="C"."PARENT_ID") LEFT JOIN "DST"."GRANDCHILD" "G" ON ("G"."CHILD_ID"="C"."ID"), "DST"."CHILD" "C2" WHERE "C2"."ID"="C"."ID"`,
+			},
+		},
+		{
+			name: "comma relations inside nested groups",
+			raw: `SELECT p.ID parent_id, c.ID child_id, g.ID grandchild_id
+FROM ((PARENT p, CHILD c)) JOIN (GRANDCHILD g) ON (g.CHILD_ID=c.ID) WHERE p.ID=c.PARENT_ID`,
+			want: []string{
+				`FROM (("DST"."PARENT" "P", "DST"."CHILD" "C")) JOIN ("DST"."GRANDCHILD" "G") ON ("G"."CHILD_ID"="C"."ID") WHERE "P"."ID"="C"."PARENT_ID"`,
+			},
+		},
+		{
+			name: "ON function arguments and IN lists are expressions",
+			raw: `SELECT p.ID parent_id, c.ID child_id, g.ID grandchild_id
+FROM (PARENT p JOIN CHILD c ON ((NVL(c.PARENT_ID, 0)=p.ID) AND p.ID IN (1,2,3))) JOIN GRANDCHILD g ON ((g.CHILD_ID=c.ID) AND NVL(g.ID, 0)>0)`,
+			want: []string{
+				`ON ((NVL("C"."PARENT_ID", 0)="P"."ID") AND "P"."ID" IN (1,2,3))) JOIN "DST"."GRANDCHILD" "G"`,
+				`ON (("G"."CHILD_ID"="C"."ID") AND NVL("G"."ID", 0)>0)`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ConvertView(tc.raw, "SRC", "DST", catalog)
+			require.NoError(t, err)
+			require.Equal(t, []string{"CHILD", "GRANDCHILD", "PARENT"}, got.Dependencies)
+			require.Equal(t, []MappedColumn{{"PARENT_ID", "PARENT_ID"}, {"CHILD_ID", "CHILD_ID"}, {"GRANDCHILD_ID", "GRANDCHILD_ID"}}, got.Columns)
+			for _, want := range tc.want {
+				require.Contains(t, got.SQL, want)
+			}
+		})
+	}
+}
+
+func TestConvertViewJoinGroupsPreserveQuotedIdentifiersCommentsAndWildcard(t *testing.T) {
+	raw := `SELECT "m".* FROM ("SRC" /* owner */ . "Mixed" "m" /* relation */
+LEFT JOIN ("SRC"."CHILD" "c") -- joined group
+ON ((NVL("c"."PARENT_ID",0)=1)))`
+	got, err := ConvertView(raw, "SRC", "DST", viewTestCatalog())
+	require.NoError(t, err)
+	require.Equal(t, []string{"CHILD", "Mixed"}, got.Dependencies)
+	require.Equal(t, viewTestCatalog()["Mixed"], got.Columns)
+	require.Contains(t, got.SQL, `SELECT "M"."CAMELCASE", "M"."A""B" FROM (`)
+	require.Contains(t, got.SQL, `"DST"."MIXED"`)
+	require.Contains(t, got.SQL, `LEFT JOIN ("DST"."CHILD" "C")`)
+	require.Contains(t, got.SQL, `ON ((NVL("C"."PARENT_ID",0)=1)))`)
+	for _, comment := range []string{"/* owner */", "/* relation */", "-- joined group\n"} {
+		require.Equal(t, 1, strings.Count(got.SQL, comment))
+	}
+}
+
+func TestConvertViewJoinGroupsDiscoverAllDependenciesBeforeBinding(t *testing.T) {
+	raw := `SELECT p.ID parent_id, a.ID a_id, b.ID b_id, c.ID c_id
+FROM ((PARENT p LEFT JOIN MISSING_A a ON p.ID=a.ID) JOIN (MISSING_B b, CHILD c) ON b.ID=c.ID), MISSING_C d
+UNION ALL SELECT x.ID parent_id, x.ID a_id, x.ID b_id, x.ID c_id FROM (LAST_DEP x)`
+	want := []string{"CHILD", "LAST_DEP", "MISSING_A", "MISSING_B", "MISSING_C", "PARENT"}
+	got, err := ConvertView(raw, "SRC", "DST", nil)
+	require.NoError(t, err)
+	require.Equal(t, want, got.Dependencies)
+	got, err = ConvertView(raw, "SRC", "DST", viewTestCatalog())
+	require.ErrorContains(t, err, "列映射")
+	require.Equal(t, want, got.Dependencies)
+}
+
+func TestConvertViewJoinGroupsDiscoverDependenciesBeforeAliasConflict(t *testing.T) {
+	catalog := viewTestCatalog()
+	catalog["GRANDCHILD"] = []MappedColumn{{"ID", "ID"}, {"CHILD_ID", "CHILD_ID"}}
+	raw := `SELECT x.ID FROM (PARENT x JOIN CHILD x ON x.ID=x.PARENT_ID), (GRANDCHILD g)`
+	for _, catalog := range []map[string][]MappedColumn{nil, catalog} {
+		got, err := ConvertView(raw, "SRC", "DST", catalog)
+		require.ErrorContains(t, err, "别名")
+		require.Equal(t, []string{"CHILD", "GRANDCHILD", "PARENT"}, got.Dependencies)
+	}
+}
+
+func TestConvertViewJoinGroupsFailClosed(t *testing.T) {
+	cases := []string{
+		`SELECT p.ID FROM (PARENT p JOIN CHILD c ON p.ID=c.PARENT_ID) grouped`,
+		`SELECT p.ID FROM (PARENT p JOIN CHILD c ON p.ID=c.PARENT_ID) AS grouped`,
+		`SELECT p.ID FROM ((PARENT p) grouped JOIN CHILD c ON p.ID=c.PARENT_ID)`,
+		`SELECT p.ID FROM (PARENT p NATURAL JOIN CHILD c)`,
+		`SELECT p.ID FROM (PARENT p JOIN (CHILD c NATURAL JOIN PARENT p2) ON p.ID=c.PARENT_ID)`,
+		`SELECT p.ID FROM (PARENT p JOIN CHILD c USING (ID))`,
+		`SELECT p.ID FROM (PARENT p JOIN (CHILD c JOIN PARENT p2 USING (ID)) ON p.ID=c.PARENT_ID)`,
+		`SELECT p.ID FROM (PARENT p JOIN OTHER.CHILD c ON p.ID=c.PARENT_ID)`,
+		`SELECT p.ID FROM (PARENT p JOIN CHILD p ON p.ID=p.PARENT_ID)`,
+		`SELECT p.ID FROM (PARENT p), ((CHILD p))`,
+		`SELECT p.ID FROM ()`,
+		`SELECT p.ID FROM ((()))`,
+		`SELECT p.ID FROM (PARENT p JOIN ())`,
+		`SELECT p.ID FROM ((PARENT p), ())`,
+		`SELECT p.ID FROM (PARENT p JOIN)`,
+		`SELECT p.ID FROM (PARENT p,)`,
+		`SELECT p.ID FROM (PARENT p JOIN CHILD c ON p.ID=c.PARENT_ID),`,
+		`SELECT p.ID FROM ((PARENT p JOIN CHILD c ON p.ID=c.PARENT_ID) JOIN)`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			for _, catalog := range []map[string][]MappedColumn{nil, viewTestCatalog()} {
+				_, err := ConvertView(raw, "SRC", "DST", catalog)
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
 func TestConvertViewWildcardAndQuotedIdentifiers(t *testing.T) {
 	got, err := ConvertView(`SELECT p.* FROM PARENT p`, "SRC", "DST", viewTestCatalog())
 	require.NoError(t, err)
@@ -87,7 +225,6 @@ func TestConvertViewFailsClosed(t *testing.T) {
 		`SELECT ID FROM PARENT@other`,
 		`SELECT ID FROM PARENT; DROP TABLE PARENT`,
 		`WITH a AS (SELECT ID FROM PARENT) SELECT ID FROM a`,
-		`SELECT ID FROM (SELECT ID FROM PARENT)`,
 		`SELECT (SELECT ID FROM PARENT) value FROM DUAL`,
 		`SELECT ID FROM PARENT CONNECT BY PRIOR ID=ID`,
 		`SELECT p.ID FROM PARENT p, CHILD c WHERE p.ID=c.ID(+)`,

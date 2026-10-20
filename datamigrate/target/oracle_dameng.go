@@ -175,21 +175,5 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 }
 
 func (w *DaMengWriter) createOracleDamengSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
-	if err := dialect.ValidateOracleDamengSequence(seq); err != nil {
-		return err
-	}
-	names := []string{seq.Native.Name}
-	for _, b := range seq.Native.Bindings {
-		names = append(names, dialect.OracleDamengTriggerName(seq, b))
-	}
-	for _, name := range names {
-		var count int
-		if err := w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=?`, w.schema, strings.ToUpper(name)).Scan(&count); err != nil {
-			return err
-		}
-		if count != 0 {
-			return fmt.Errorf("达梦对象 %s.%s 已存在，禁止覆盖命名序列或触发器", w.schema, name)
-		}
-	}
-	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
+	return w.ensureOracleDamengSequence(ctx, seq)
 }

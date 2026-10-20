@@ -46,6 +46,7 @@ type TableDDLInfo struct {
 type SequenceInfo struct {
 	Native       *NativeSequenceInfo `json:"Native,omitempty"`
 	Unsupported  string              // Metadata that cannot be represented by the selected target.
+	FailureStage string              `json:"FailureStage,omitempty"` // Optional provenance for object-level failures.
 	IdentityInfo *IdentityInfo
 	TableName    string
 	ColumnName   string
@@ -64,6 +65,9 @@ type NativeSequenceInfo struct {
 }
 
 type SequenceBinding struct {
+	// TriggerBody is the untouched source definition for diagnostics only.
+	// It must never be executed as target SQL.
+	TriggerBody string `json:",omitempty"`
 	// SourceColumnName is retained by the migrator when a target column is
 	// renamed, so a shared sequence can be regenerated for any bound table.
 	SourceColumnName                         string `json:",omitempty"`

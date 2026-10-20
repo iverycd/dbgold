@@ -3,7 +3,9 @@ package dialect
 import (
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"math/big"
+	"slices"
 	"strings"
 
 	"dbgold/datamigrate/source"
@@ -27,6 +29,27 @@ func OracleDamengTriggerName(seq source.SequenceInfo, b source.SequenceBinding) 
 		name = fmt.Sprintf("DBGOLD_TRG_%x", sum[:16])
 	}
 	return strings.ToUpper(name)
+}
+
+// NormalizeOracleDamengSequence intersects noncycling source limits with
+// Dameng's signed 64-bit range. Actual starts and increments remain unchanged.
+// The returned native metadata and bindings never alias the source metadata.
+func NormalizeOracleDamengSequence(seq source.SequenceInfo) (source.SequenceInfo, error) {
+	if seq.Native != nil {
+		n := *seq.Native
+		n.Bindings = slices.Clone(n.Bindings)
+		seq.Native = &n
+		if !n.Cycle {
+			minimum, maximum := big.NewInt(math.MinInt64), big.NewInt(math.MaxInt64)
+			if lo, ok := new(big.Int).SetString(n.MinValue, 10); ok && lo.Cmp(minimum) < 0 {
+				n.MinValue = minimum.String()
+			}
+			if hi, ok := new(big.Int).SetString(n.MaxValue, 10); ok && hi.Cmp(maximum) > 0 {
+				n.MaxValue = maximum.String()
+			}
+		}
+	}
+	return seq, ValidateOracleDamengSequence(seq)
 }
 
 // ValidateOracleDamengSequence must run before rendering or executing native DDL.
@@ -101,7 +124,9 @@ func ValidateOracleDamengSequence(seq source.SequenceInfo) error {
 // identity clause. ALTER COLUMN ... RESTART WITH is not DM8 syntax.
 func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
 	if seq.Native != nil {
-		if ValidateOracleDamengSequence(seq) != nil {
+		var err error
+		seq, err = NormalizeOracleDamengSequence(seq)
+		if err != nil {
 			return nil
 		}
 		n := seq.Native

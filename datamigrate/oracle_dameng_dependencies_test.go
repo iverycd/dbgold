@@ -179,7 +179,7 @@ func TestOracleDamengFailedTableBlocksOnlyDependentObjectsAndKeepsSharedRepairBi
 
 func TestOracleDamengCalibrationSkipsOnlyFailedBindings(t *testing.T) {
 	r, w, m := oracleDMDependencyFixture(t)
-	r.sequences = []source.SequenceInfo{{TableName: "Bad", ColumnName: "Id", Native: &source.NativeSequenceInfo{Name: "Shared", Bindings: []source.SequenceBinding{{TableName: "Bad", ColumnName: "Id"}, {TableName: "Mixed", ColumnName: "RowId"}}}}}
+	r.sequences = []source.SequenceInfo{{TableName: "Bad", ColumnName: "Id", StartValueText: "1", Native: &source.NativeSequenceInfo{Name: "Shared", IncrementBy: "1", MinValue: "1", MaxValue: "1000", CacheSize: "0", Bindings: []source.SequenceBinding{{TableName: "Bad", ColumnName: "Id", Kind: "trigger"}, {TableName: "Mixed", ColumnName: "RowId", Kind: "trigger"}}}}}
 	m.dmBlocked = map[string]bool{"Bad": true}
 	report := newMigrationReport()
 	m.calibrateOracleDameng(context.Background(), &report, []string{"Bad", "Mixed"})

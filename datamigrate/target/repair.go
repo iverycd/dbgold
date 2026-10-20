@@ -155,6 +155,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if obj.Schema == "" || obj.Schema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
+	if dm, ok := w.(*DaMengWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.Native != nil && !repairDefinitionEdited(obj) {
+		return dm.executeOracleDamengSequenceRepair(ctx, obj, out, onStep)
+	}
 	selected := []int{}
 	for i, u := range out {
 		if u.Status == "succeeded" {

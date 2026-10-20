@@ -172,6 +172,7 @@
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.requires_review" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
+        <a-alert v-if="sequencePlanMessage" type="info">{{ sequencePlanMessage }}</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
         <a-collapse><a-collapse-item v-if="editing.object.source_ddl" key="source" header="源端定义（只读，仅供手工适配参考）"><pre class="sql-preview">{{ editing.object.source_ddl }}</pre></a-collapse-item><a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" header="建议 DDL（需显式采用或整理到对应执行单元）"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item><a-collapse-item key="original" header="原始目标 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || (canEditRepairDDL(editing.object) ? '未生成目标 DDL，请根据源端定义手动编写。' : '该记录没有可执行的对象 DDL。') }}</pre></a-collapse-item></a-collapse>
@@ -183,7 +184,7 @@
           <a-alert v-if="mappingError(mappingForm.values)" type="error">{{ mappingError(mappingForm.values) }}</a-alert>
         </a-form>
         <div v-if="canEditRepairDDL(editing.object)" class="editor-toolbar">
-          <a-space wrap><a-button v-if="editing.object.units?.some(unit => unit.original_sql)" size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" :disabled="busy || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
+          <a-space wrap><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="editing.object.units?.some(unit => unit.original_sql)" size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" :disabled="busy || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 打开执行确认</span>
         </div>
         <div v-for="(unit, index) in canEditRepairDDL(editing.object) ? draftUnits : []" :key="unit.id" class="unit-editor">
@@ -274,7 +275,7 @@ import { computed, defineAsyncComponent, nextTick, onUnmounted, reactive, ref, w
 import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
-import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
+import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, refreshSequenceRepairPlan, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
 import { attemptRunning, canEditRepairDDL, cloneRepairUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
@@ -304,6 +305,9 @@ const editing = ref<RepairRecord | null>(null)
 const draftUnits = ref<RepairUnit[]>([])
 const mappingForm = reactive({ values: {} as Record<string, string>, source: '', target: '' })
 const reviewed = ref(false)
+const refreshingSequencePlan = ref(false)
+const sequencePlanPending = ref(false)
+const sequencePlanMessage = ref('')
 const executeConfirmVisible = ref(false)
 const executionSnapshot = ref<RepairUnit[]>([])
 const executeVersion = ref(0)
@@ -344,7 +348,15 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let pollSerial = 0
 let disposed = false
 
-const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value)
+const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value)
+const nativeOracleDamengSequence = computed(() => job.value?.src_db_type === 'oracle' && job.value?.dst_db_type === 'dameng' && editing.value?.object.kind === 'sequence' && !!editing.value.object.sequence?.Native?.Name)
+const canRefreshSequencePlan = computed(() => {
+  const object = editing.value?.object
+  if (!nativeOracleDamengSequence.value || !object || busy.value || saving.value || !binding.value?.configured || object.sequence?.Unsupported && object.sequence?.FailureStage !== 'preflight' || object.sequence?.FailureStage === 'metadata') return false
+  if (['unknown', 'running', 'unverified', 'needs_verification'].includes(object.status) || object.units.some(unit => ['unknown', 'running', 'unverified', 'needs_verification'].includes(unit.status) || unit.sql !== unit.original_sql)) return false
+  const units = draftUnits.value.filter(unit => unit.sql.trim())
+  return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && unit.sql === object.units[index].sql)
+})
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
 const displayRecords = computed(() => groupRepairRecords(records.value))
@@ -560,6 +572,7 @@ function openEditor(record: RepairRecord) {
   if (batchRunning.value || batchPreparing.value || batchPreviewVisible.value) return
   editorSerial++
   editing.value = record
+  sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
   draftUnits.value = cloneRepairUnits(record.object.units)
   if (canEditRepairDDL(record.object) && !draftUnits.value.length && !hasRepairDDL(record.object) && !unitCommitted(record.object.status) && record.object.status !== 'unknown') addUnit()
   mappingForm.values = { ...(record.object.column_mapping || {}) }
@@ -573,6 +586,7 @@ function openEditor(record: RepairRecord) {
 }
 function closeEditor() {
   editorSerial++; executeConfirmVisible.value = false; editing.value = null; draftUnits.value = []
+  sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
   if (returnToRecovery.value) { returnToRecovery.value = false; recoveryVisible.value = true; void loadPreview() }
 }
 function addColumnMapping() {
@@ -600,15 +614,31 @@ async function saveDraft(): Promise<boolean> {
   const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
   saving.value = true
   try {
-    const saved = (await saveRepairDraft(id, objectID, { version: editing.value.version, units: draftUnits.value, column_mapping: { ...mappingForm.values }, reviewed: reviewed.value })).data
+    const saved = (await saveRepairDraft(id, objectID, { version: editing.value.version, units: draftUnits.value, column_mapping: { ...mappingForm.values }, reviewed: reviewed.value, ...(sequencePlanPending.value ? { sequence_plan: true } : {}) })).data
     if (!current(scope, id) || serial !== editorSerial) return false
     replaceRecord(saved); editing.value = saved
     if (draftRevision !== revision) { Message.info('已保存提交时的草稿，当前新修改仍保留，请再次保存'); return false }
     draftUnits.value = cloneRepairUnits(saved.object.units)
+    sequencePlanPending.value = false; sequencePlanMessage.value = ''
     mappingForm.values = { ...(saved.object.column_mapping || {}) }
     Message.success('草稿已保存'); return true
   } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e); return false }
   finally { if (current(scope, id)) saving.value = false }
+}
+async function refreshSequencePlan() {
+  if (!canRefreshSequencePlan.value || !editing.value) return
+  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
+  refreshingSequencePlan.value = true
+  try {
+    const candidate = (await refreshSequenceRepairPlan(id, objectID, { version: editing.value.version })).data
+    if (!current(scope, id) || serial !== editorSerial) return
+    if (revision !== draftRevision) { Message.info('草稿已变化，未覆盖当前修改，请重新核对后生成计划'); return }
+    editing.value = { object: candidate.object, version: candidate.version }
+    draftUnits.value = cloneRepairUnits(candidate.object.units)
+    reviewed.value = false; executeConfirmVisible.value = false
+    sequencePlanPending.value = true; sequencePlanMessage.value = candidate.message
+  } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e) }
+  finally { if (current(scope, id) && serial === editorSerial) refreshingSequencePlan.value = false }
 }
 async function prepareExecute() {
   if (!canExecute.value || !editing.value) return
@@ -729,7 +759,9 @@ watch(errorDetailRecord, value => { if (!value) closeErrorDetails() })
 watch(loading, value => { if (!value) void applyPendingFocus() })
 watch([filter, keyword], () => { page.value = 1; clearBatchSelection() }, { flush: 'sync' })
 watch(() => visibleRecords.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length / 10))) })
-watch([draftUnits, () => mappingForm.values], () => { draftRevision++; executeConfirmVisible.value = false }, { deep: true, flush: 'sync' })
+watch([draftUnits, () => mappingForm.values], () => {
+  draftRevision++; executeConfirmVisible.value = false
+}, { deep: true, flush: 'sync' })
 watch(() => props.jobID, () => {
   disposeBatch(); stopAttemptPolling()
   epoch++; refreshSerial++; previewSerial++; editorSerial++; historySerial++
@@ -740,6 +772,7 @@ watch(() => props.jobID, () => {
   closeErrorDetails()
   editorVisible.value = false; executeConfirmVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
   loading.value = false; saving.value = false; submitting.value = false; cancelling.value = false; previewing.value = false; loadingHistory.value = false
+  sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
   mappingForm.values = {}; mappingForm.source = ''; mappingForm.target = ''
   returnToRecovery.value = false; editing.value = null; recoveryObject.value = null; draftUnits.value = []; recoveryPlan.value = null
   void refresh()

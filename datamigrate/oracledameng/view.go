@@ -54,6 +54,10 @@ type viewRelation struct {
 	alias           viewToken
 	columns         []MappedColumn
 	known, dual     bool
+	table           viewToken
+	start, end      int
+	aliasIndex      int
+	query           *viewQuery
 }
 
 type viewConverter struct {
@@ -64,14 +68,14 @@ type viewConverter struct {
 	edits          []viewEdit
 	deps           []string
 	seenDeps       map[string]bool
-	firstErr       error
 	options        Options
 }
 
 // ConvertView selectively maps a standard Oracle SELECT body to its target
 // schema. It preserves literals and comments verbatim and never converts Oracle
-// expressions to a different dialect. CTEs, subqueries, database links, cross-owner
-// references, user routines and Oracle-specific query extensions fail closed.
+// expressions to a different dialect. Non-correlated FROM subqueries have their
+// own column scope. Other subqueries, CTEs, database links, cross-owner references,
+// user routines and Oracle-specific query extensions fail closed.
 //
 // A nil catalog performs relation discovery and identifier normalization only;
 // wildcard/output binding is deferred. With a non-nil catalog every relation and
@@ -95,8 +99,7 @@ func ConvertViewWithOptions(raw, sourceSchema, targetSchema string, catalog map[
 	if len(ts) == 0 || !ts[0].is("SELECT") {
 		return ViewResult{}, fmt.Errorf("视图仅支持 Oracle SELECT 查询体")
 	}
-	depth, start := 0, 0
-	branches := [][2]int{}
+	depth := 0
 	for i, t := range ts {
 		switch t.text {
 		case "(":
@@ -113,18 +116,6 @@ func ConvertViewWithOptions(raw, sourceSchema, targetSchema string, catalog map[
 			switch strings.ToUpper(t.name) {
 			case "CONNECT", "START", "MODEL", "PIVOT", "UNPIVOT", "MATCH_RECOGNIZE", "SAMPLE", "VERSIONS", "FLASHBACK", "INTO", "FOR", "FETCH", "OFFSET", "MINUS", "INTERSECT", "LATERAL", "APPLY":
 				return ViewResult{}, fmt.Errorf("暂不支持 Oracle 视图语法 %s", t.text)
-			case "SELECT":
-				if depth != 0 {
-					return ViewResult{}, fmt.Errorf("视图暂不支持子查询")
-				}
-			case "UNION":
-				if depth == 0 {
-					branches = append(branches, [2]int{start, i})
-					start = i + 1
-					if start < len(ts) && (ts[start].is("ALL") || ts[start].is("DISTINCT")) {
-						start++
-					}
-				}
 			}
 		}
 		if i+2 < len(ts) && t.text == "(" && ts[i+1].text == "+" && ts[i+2].text == ")" {
@@ -134,23 +125,17 @@ func ConvertViewWithOptions(raw, sourceSchema, targetSchema string, catalog map[
 	if depth != 0 {
 		return ViewResult{}, fmt.Errorf("视图括号不匹配")
 	}
-	branches = append(branches, [2]int{start, len(ts)})
-	var columns []MappedColumn
-	for i, b := range branches {
-		cols, e := c.branch(b[0], b[1])
-		if e != nil && c.firstErr == nil {
-			c.firstErr = e
-		}
-		if i == 0 {
-			columns = cols
-		} else if catalog != nil && e == nil && len(cols) != len(columns) && c.firstErr == nil {
-			c.firstErr = fmt.Errorf("UNION 各分支输出列数不一致")
-		}
-	}
+	// Parse every FROM scope before consulting the column catalog, so binding
+	// failures in one child cannot hide dependencies in its siblings.
+	query, err := c.parseQuery(0, len(ts), 0)
 	sort.Strings(c.deps)
-	result := ViewResult{Dependencies: c.deps, Columns: columns}
-	if c.firstErr != nil {
-		return result, c.firstErr
+	result := ViewResult{Dependencies: c.deps}
+	if err != nil {
+		return result, err
+	}
+	result.Columns, err = c.bindQuery(query)
+	if err != nil {
+		return result, err
 	}
 	result.SQL, err = c.render()
 	return result, err
@@ -184,26 +169,11 @@ func (c *viewConverter) render() (string, error) {
 	return strings.TrimSpace(b.String()), nil
 }
 
-func (c *viewConverter) branch(start, end int) ([]MappedColumn, error) {
+func (c *viewConverter) branch(branch *viewBranch) ([]MappedColumn, error) {
 	ts := c.ts
-	if start >= end || !ts[start].is("SELECT") {
-		return nil, fmt.Errorf("UNION 分支必须是 SELECT")
-	}
-	from, depth := -1, 0
-	for i := start + 1; i < end; i++ {
-		if ts[i].text == "(" {
-			depth++
-		} else if ts[i].text == ")" {
-			depth--
-		} else if depth == 0 && ts[i].is("FROM") {
-			from = i
-			break
-		}
-	}
-	if from < 0 {
-		return nil, fmt.Errorf("Oracle 视图 SELECT 缺少 FROM")
-	}
-	relations, relationTokens, fromEnd, err := c.relations(from+1, end)
+	start, end, from, fromEnd := branch.start, branch.end, branch.from, branch.fromEnd
+	relationTokens := branch.declarations
+	relations, err := c.bindRelations(branch.relations)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +205,13 @@ func (c *viewConverter) branch(start, end int) ([]MappedColumn, error) {
 			aliases[col.Target] = col
 			c.edit(alias, alias+1, viewQuote(col.Target))
 			output = append(output, col)
+		}
+		if exprEnd == a+1 && ts[a].is("ROWNUM") {
+			if branch.nesting != 0 || alias < 0 {
+				return nil, fmt.Errorf("ROWNUM 仅支持最外层 SELECT 中带输出别名的直接投影")
+			}
+			c.edit(a, exprEnd, "ROWNUM")
+			continue
 		}
 		wildcard, isWildcard, e := c.wildcard(a, exprEnd, relations)
 		if e != nil {
@@ -304,110 +281,6 @@ func (c *viewConverter) branch(start, end int) ([]MappedColumn, error) {
 		return nil, err
 	}
 	return output, nil
-}
-
-func (c *viewConverter) relations(start, end int) ([]viewRelation, map[int]bool, int, error) {
-	ts := c.ts
-	relations := []viewRelation{}
-	declarations := map[int]bool{}
-	wantRelation, inUsing, depth := true, false, 0
-	fromEnd := end
-	for i := start; i < end; {
-		t := ts[i]
-		if depth == 0 && (t.is("WHERE") || t.is("GROUP") || t.is("HAVING") || t.is("ORDER")) {
-			fromEnd = i
-			break
-		}
-		if wantRelation {
-			if !t.ident() || viewKeyword(t) {
-				return relations, declarations, fromEnd, fmt.Errorf("视图 FROM 仅支持普通表或视图引用")
-			}
-			first, table, relationEnd := t, t, i+1
-			if relationEnd < end && ts[relationEnd].text == "." {
-				if relationEnd+1 >= end || !ts[relationEnd+1].ident() || !first.matches(c.source) {
-					return relations, declarations, fromEnd, fmt.Errorf("视图不支持跨 owner 引用 %s", first.text)
-				}
-				table = ts[relationEnd+1]
-				relationEnd += 2
-			}
-			if relationEnd < end && (ts[relationEnd].text == "." || ts[relationEnd].text == "(") {
-				return relations, declarations, fromEnd, fmt.Errorf("视图不支持多级对象或表函数")
-			}
-			name, cols, known, e := c.lookupRelation(table)
-			if e != nil {
-				return relations, declarations, fromEnd, e
-			}
-			r := viewRelation{name: name, qualifier: name, columns: cols, known: known, dual: name == "DUAL" && !known && relationEnd == i+1}
-			if r.dual {
-				r.columns = []MappedColumn{{Source: "DUMMY", Target: "DUMMY"}}
-			}
-			// Discovery cannot distinguish SYS.DUAL from an owner-local table
-			// named DUAL. Report the potential dependency; the caller resolves
-			// it against ListTables before binding with a non-nil catalog.
-			if (!r.dual || c.catalog == nil) && !c.seenDeps[name] {
-				c.deps = append(c.deps, name)
-				c.seenDeps[name] = true
-			}
-			qualified := viewQuote(name)
-			if c.target != "" && !r.dual {
-				qualified = viewQuote(c.target) + "." + qualified
-			}
-			c.edit(i, relationEnd, qualified)
-			for j := i; j < relationEnd; j++ {
-				declarations[j] = true
-			}
-			i = relationEnd
-			if i < end && ts[i].is("AS") {
-				return relations, declarations, fromEnd, fmt.Errorf("Oracle 表别名不支持 AS")
-			}
-			if i < end && ts[i].ident() && !viewKeyword(ts[i]) {
-				r.alias, r.qualifier = ts[i], ts[i].name
-				c.edit(i, i+1, viewQuote(r.qualifier))
-				declarations[i] = true
-				i++
-			}
-			for _, prev := range relations {
-				if strings.EqualFold(prev.qualifier, r.qualifier) {
-					return relations, declarations, fromEnd, fmt.Errorf("视图关系别名大写命名冲突: %s", r.qualifier)
-				}
-			}
-			relations = append(relations, r)
-			wantRelation = false
-			continue
-		}
-		if depth == 0 && (t.text == "," || t.is("JOIN")) {
-			wantRelation = true
-		}
-		if t.is("USING") {
-			// USING can change the output of SELECT *. Reject it rather than
-			// silently expanding two copies of a coalesced join column.
-			inUsing = true
-		}
-		if t.is("NATURAL") {
-			return relations, declarations, fromEnd, fmt.Errorf("视图暂不支持 NATURAL JOIN，请显式使用 ON")
-		}
-		if t.text == "(" {
-			depth++
-		} else if t.text == ")" {
-			depth--
-		}
-		i++
-	}
-	if wantRelation || len(relations) == 0 {
-		return relations, declarations, fromEnd, fmt.Errorf("视图缺少 FROM/JOIN 对象")
-	}
-	if inUsing {
-		return relations, declarations, fromEnd, fmt.Errorf("视图暂不支持 JOIN USING，请显式使用 ON")
-	}
-	// Discover all dependencies before reporting an unloaded catalog entry.
-	if c.catalog != nil {
-		for _, r := range relations {
-			if !r.known && !r.dual {
-				return relations, declarations, fromEnd, fmt.Errorf("缺少视图依赖对象 %s 的列映射", r.name)
-			}
-		}
-	}
-	return relations, declarations, fromEnd, nil
 }
 
 func (c *viewConverter) lookupRelation(t viewToken) (string, []MappedColumn, bool, error) {
@@ -500,7 +373,11 @@ func (c *viewConverter) wildcard(start, end int, relations []viewRelation) ([]Ma
 		}
 		for _, col := range r.columns {
 			columns = append(columns, col)
-			projections = append(projections, viewQuote(r.qualifier)+"."+viewQuote(col.Target))
+			projection := viewQuote(col.Target)
+			if r.qualifier != "" {
+				projection = viewQuote(r.qualifier) + "." + projection
+			}
+			projections = append(projections, projection)
 		}
 	}
 	if len(columns) == 0 {
@@ -593,6 +470,9 @@ func (c *viewConverter) expression(start, end int, relations []viewRelation, ali
 		}
 		if !t.ident() {
 			continue
+		}
+		if t.is("SELECT") {
+			return fmt.Errorf("视图仅支持 FROM 中的非关联 SELECT 子查询")
 		}
 		if (t.is("DATE") || t.is("TIMESTAMP")) && i+1 < end && ts[i+1].kind == 's' {
 			literal, err := renderOracleLiteral(ts[i+1].text)
@@ -698,12 +578,12 @@ func (c *viewConverter) expression(start, end int, relations []viewRelation, ali
 		if viewKeyword(t) {
 			continue
 		}
-		if t.kind == 'i' && (t.is("ROWID") || t.is("ROWNUM") || t.is("ORA_ROWSCN")) {
-			return fmt.Errorf("视图暂不支持 Oracle 伪列 %s", t.text)
-		}
 		if alias, exists := aliases[strings.ToUpper(t.name)]; exists && t.matches(alias.Source) {
 			c.edit(i, i+1, viewQuote(alias.Target))
 			continue
+		}
+		if t.kind == 'i' && (t.is("ROWID") || t.is("ROWNUM") || t.is("ORA_ROWSCN")) {
+			return fmt.Errorf("视图暂不支持 Oracle 伪列 %s", t.text)
 		}
 		col, err := lookupViewColumn(t, relations, c.catalog == nil)
 		if err != nil {

@@ -11,6 +11,9 @@ func ViewSemanticsFeatures(raw string) ([]string, error) {
 		return nil, err
 	}
 	features := map[string]bool{}
+	if viewUsesRownum(ts) {
+		features["ROWNUM"] = true
+	}
 	for i, token := range ts {
 		if token.text == "/" {
 			features["integer_division"] = true
@@ -46,4 +49,48 @@ func ViewSemanticsFeatures(raw string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+// Only projection expressions can contain the supported ROWNUM pseudo-column.
+// Inspect each query block separately so an identically named output alias,
+// quoted identifier or qualified physical column cannot request this probe.
+func viewUsesRownum(ts []viewToken) bool {
+	for start, token := range ts {
+		if !token.is("SELECT") {
+			continue
+		}
+		from, depth := -1, 0
+		for i := start + 1; i < len(ts); i++ {
+			switch ts[i].text {
+			case "(":
+				depth++
+			case ")":
+				depth--
+			}
+			if depth < 0 {
+				break
+			}
+			if depth == 0 && ts[i].is("FROM") {
+				from = i
+				break
+			}
+		}
+		if from < 0 {
+			continue
+		}
+		projectionStart := start + 1
+		if projectionStart < from && (ts[projectionStart].is("DISTINCT") || ts[projectionStart].is("ALL")) {
+			projectionStart++
+		}
+		for _, span := range splitViewTokens(ts, projectionStart, from, ",") {
+			_, exprEnd := projectionAlias(ts, span[0], span[1])
+			for i := span[0]; i < exprEnd; i++ {
+				if !ts[i].is("ROWNUM") || i > span[0] && ts[i-1].text == "." || i+1 < exprEnd && (ts[i+1].text == "." || ts[i+1].text == "(") {
+					continue
+				}
+				return true
+			}
+		}
+	}
+	return false
 }

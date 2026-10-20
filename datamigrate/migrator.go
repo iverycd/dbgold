@@ -66,6 +66,7 @@ type Migrator struct {
 	dmBlocked              map[string]bool
 	dmUsable               map[string]bool
 	dmSourceSchema         string
+	dmSequenceBoundsLogged map[string]bool
 	reader                 source.Reader
 	writer                 target.Writer
 	job                    *Job
@@ -223,6 +224,7 @@ func (m *Migrator) logPreparationComplete(ctx context.Context) {
 
 func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	m.compatibilityFunctions = nil
+	m.dmSequenceBoundsLogged = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	if !m.cfg.CaptureRepair {
@@ -917,11 +919,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 					report.Sequences.Failed++
-					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
-						Name:  seqObj,
-						DDL:   ddl,
-						Error: err.Error(),
-					})
+					report.Sequences.Items = append(report.Sequences.Items, m.sequenceFailure(seq, seqCopy, ddl, err))
 				} else {
 					m.log.Indexf("创建序列 %s ... OK", seqObj)
 					report.Sequences.Success++

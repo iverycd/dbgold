@@ -3,6 +3,7 @@ package datamigrate
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/dialect"
@@ -232,6 +233,146 @@ func TestOracleDamengViewHeadersAndDependencies(t *testing.T) {
 	require.Contains(t, out[0].DDL, `("HEADERID", "HEADERTXT")`)
 	require.Contains(t, w.views[1].Definition, `"HEADERID"`)
 	require.Equal(t, "HeaderId", r.views[0].Columns[0].Name, "source metadata must not be changed")
+}
+
+func TestOracleDamengGroupedJoinViewDependenciesAndDDL(t *testing.T) {
+	r, w, m := oracleDMFixture("both")
+	base := r.views[0]
+	base.Columns = []source.ColumnInfo{{Name: "HeaderId"}, {Name: "HeaderTxt"}}
+	joined := source.ViewInfo{
+		ViewName:   "JoinedView",
+		Definition: `SELECT m."RowId", v."HeaderTxt" FROM (("SRC"."Mixed" m INNER JOIN "SRC"."V" v ON (((m."RowId" = v."HeaderId")))))`,
+		Columns:    []source.ColumnInfo{{Name: "RowId"}, {Name: "JoinedTxt"}},
+	}
+	// Put the dependent view first so discovery inside the group must drive
+	// execution order rather than the source metadata order.
+	r.views = []source.ViewInfo{joined, base}
+	out := m.MigrateViews(context.Background(), []string{"JoinedView", "V"})
+	require.Len(t, out, 2)
+	for _, v := range out {
+		require.Empty(t, v.Error, v)
+	}
+	require.Len(t, w.views, 2)
+	require.Equal(t, "V", w.views[0].ViewName)
+	require.Equal(t, "JOINEDVIEW", w.views[1].ViewName)
+	require.Equal(t, "JOINEDVIEW", out[1].Name)
+	require.Equal(t, `CREATE OR REPLACE VIEW "APP"."JOINEDVIEW" ("ROW_ID", "JOINEDTXT") AS SELECT "M"."ROW_ID", "V"."HEADERTXT" FROM (("APP"."MIXED" "M" INNER JOIN "APP"."V" "V" ON ((("M"."ROW_ID" = "V"."HEADERID")))))`, out[1].DDL)
+	require.Equal(t, "RowId", r.views[0].Columns[0].Name, "source metadata must not be changed")
+	require.Empty(t, w.created, "view-only migration must not create dependency tables")
+	require.Empty(t, w.copied, "view-only migration must not copy dependency table data")
+}
+
+func TestOracleDamengGroupedJoinViewMissingDependency(t *testing.T) {
+	r, w, m := oracleDMFixture("both")
+	r.views = []source.ViewInfo{{
+		ViewName:   "JoinedView",
+		Definition: `SELECT m."RowId" FROM ("SRC"."Mixed" m INNER JOIN ("SRC"."MissingView" v) ON (m."RowId" = v."RowId"))`,
+	}}
+	out := m.MigrateViews(context.Background(), []string{"JoinedView"})
+	require.Len(t, out, 1)
+	require.Equal(t, "dependency", out[0].Stage)
+	require.Contains(t, out[0].Error, "MissingView")
+	require.Empty(t, w.views)
+	require.Empty(t, w.created)
+	require.Empty(t, w.copied)
+}
+
+const oracleDMModuleVisitLogSQL = `SELECT Rownum AS Row_ID,
+       VisitCount, ModuleCode, BaseOuGuid, ModuleGuid, ModuleName
+  FROM (SELECT COUNT(*) AS VisitCount,
+               ModuleCode, BaseOuGuid, ModuleGuid, ModuleName
+          FROM (SELECT ModuleCode, BaseOuGuid, ModuleGuid, ModuleName
+                  FROM Frame_VisitLog
+                 WHERE BaseOuGuid IS NOT NULL
+                UNION ALL
+                SELECT ModuleCode, BaseOuGuid, ModuleGuid, ModuleName
+                  FROM Frame_VisitLog_Histroy
+                 WHERE BaseOuGuid IS NOT NULL)
+         GROUP BY ModuleCode, ModuleGuid, BaseOuGuid, ModuleName)`
+
+func oracleDMModuleVisitLogFixture() (*oracleDMReader, *oracleDMWriter, *Migrator) {
+	r, w, m := oracleDMFixture("both")
+	r.tables = []string{"FRAME_VISITLOG", "FRAME_VISITLOG_HISTROY"}
+	r.ddl = map[string]*source.TableDDLInfo{}
+	for _, table := range r.tables {
+		r.ddl[table] = &source.TableDDLInfo{TableName: table, Columns: []source.ColumnInfo{
+			{Name: "MODULECODE", DataType: "VARCHAR2", Length: 100, DataLength: 400, CharUsed: "C", IsNullable: true},
+			{Name: "BASEOUGUID", DataType: "VARCHAR2", Length: 100, DataLength: 400, CharUsed: "C", IsNullable: true},
+			{Name: "MODULEGUID", DataType: "VARCHAR2", Length: 100, DataLength: 400, CharUsed: "C", IsNullable: true},
+			{Name: "MODULENAME", DataType: "VARCHAR2", Length: 100, DataLength: 400, CharUsed: "C", IsNullable: true},
+		}}
+	}
+	r.views = []source.ViewInfo{{
+		ViewName:   "VIEW_MODULEVISITLOG",
+		Definition: oracleDMModuleVisitLogSQL,
+		Columns: []source.ColumnInfo{
+			{Name: "ROW_ID"}, {Name: "VISITCOUNT"}, {Name: "MODULECODE"},
+			{Name: "BASEOUGUID"}, {Name: "MODULEGUID"}, {Name: "MODULENAME"},
+		},
+	}}
+	return r, w, m
+}
+
+func TestOracleDamengNestedViewUnionAggregationAndRownum(t *testing.T) {
+	r, w, m := oracleDMModuleVisitLogFixture()
+	originalColumns := append([]source.ColumnInfo(nil), r.views[0].Columns...)
+	originalTableColumns := append([]source.ColumnInfo(nil), r.ddl["FRAME_VISITLOG"].Columns...)
+	results := m.MigrateViews(context.Background(), []string{"VIEW_MODULEVISITLOG"})
+	require.Len(t, results, 1)
+	require.Empty(t, results[0].Error, results[0])
+	require.Len(t, w.views, 1)
+	require.Equal(t, "VIEW_MODULEVISITLOG", w.views[0].ViewName)
+	require.Equal(t, originalColumns, w.views[0].Columns)
+	require.Equal(t, `CREATE OR REPLACE VIEW "APP"."VIEW_MODULEVISITLOG" ("ROW_ID", "VISITCOUNT", "MODULECODE", "BASEOUGUID", "MODULEGUID", "MODULENAME") AS `+w.views[0].Definition, results[0].DDL)
+	require.Contains(t, w.views[0].Definition, `ROWNUM AS "ROW_ID"`)
+	require.Contains(t, w.views[0].Definition, `COUNT(*) AS "VISITCOUNT"`)
+	require.Contains(t, w.views[0].Definition, `FROM "APP"."FRAME_VISITLOG"`)
+	require.Contains(t, w.views[0].Definition, `FROM "APP"."FRAME_VISITLOG_HISTROY"`)
+	require.Contains(t, w.views[0].Definition, `UNION ALL`)
+	require.Contains(t, w.views[0].Definition, `GROUP BY "MODULECODE", "MODULEGUID", "BASEOUGUID", "MODULENAME"`)
+	require.Equal(t, 2, w.existingChecks, "both nested UNION dependencies must be validated")
+	require.Equal(t, oracleDMModuleVisitLogSQL, r.views[0].Definition, "source SQL must not be changed")
+	require.Equal(t, originalColumns, r.views[0].Columns, "source view metadata must not be changed")
+	require.Equal(t, originalTableColumns, r.ddl["FRAME_VISITLOG"].Columns, "source table metadata must not be changed")
+	require.Empty(t, w.created, "view-only migration must not create dependency tables")
+	require.Empty(t, w.copied, "view-only migration must not copy dependency table data")
+}
+
+func TestOracleDamengNestedViewDependencyOrderAndSelection(t *testing.T) {
+	for _, selectDependency := range []bool{false, true} {
+		t.Run(fmt.Sprintf("select_dependency=%t", selectDependency), func(t *testing.T) {
+			r, w, m := oracleDMModuleVisitLogFixture()
+			r.views[0].Definition = strings.ReplaceAll(oracleDMModuleVisitLogSQL, "Frame_VisitLog_Histroy", "VIEW_VISIT_HISTORY")
+			// The parent is first in metadata, so discovering the dependency inside
+			// nested FROM/UNION blocks must determine validation/execution order.
+			r.views = append(r.views, source.ViewInfo{
+				ViewName:   "VIEW_VISIT_HISTORY",
+				Definition: `SELECT ModuleCode, BaseOuGuid, ModuleGuid, ModuleName FROM Frame_VisitLog_Histroy`,
+				Columns:    append([]source.ColumnInfo(nil), r.ddl["FRAME_VISITLOG_HISTROY"].Columns...),
+			})
+			names := []string{"VIEW_MODULEVISITLOG"}
+			if selectDependency {
+				names = append(names, "VIEW_VISIT_HISTORY")
+			}
+			results := m.MigrateViews(context.Background(), names)
+			require.Len(t, results, len(names))
+			for _, result := range results {
+				require.Empty(t, result.Error, result)
+				require.True(t, strings.HasPrefix(result.DDL, `CREATE OR REPLACE VIEW "APP".`), result.DDL)
+			}
+			require.Len(t, w.views, len(names), "unselected dependencies must only be validated")
+			if selectDependency {
+				require.Equal(t, "VIEW_VISIT_HISTORY", w.views[0].ViewName)
+				require.Equal(t, "VIEW_VISIT_HISTORY", results[0].Name)
+			}
+			parent := w.views[len(w.views)-1]
+			require.Equal(t, "VIEW_MODULEVISITLOG", parent.ViewName)
+			require.Contains(t, parent.Definition, `FROM "APP"."VIEW_VISIT_HISTORY"`)
+			require.Len(t, parent.Columns, 6)
+			require.Empty(t, w.created)
+			require.Empty(t, w.copied)
+		})
+	}
 }
 
 func TestOracleDamengViewCompatibilityAndNamespace(t *testing.T) {

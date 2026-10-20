@@ -2,6 +2,7 @@ package target
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"dbgold/datamigrate/oracledameng"
@@ -23,6 +24,9 @@ func (w *DaMengWriter) ValidateOracleDamengView(ctx context.Context, definition 
 	}
 	w.oracleDMMu.Lock()
 	defer w.oracleDMMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if w.oracleDM.features == nil {
 		w.oracleDM.features = map[string]error{}
 	}
@@ -48,6 +52,14 @@ func (w *DaMengWriter) ValidateOracleDamengView(ctx context.Context, definition 
 		if err != nil {
 			err = fmt.Errorf("视图表达式 %s 的 Oracle 语义未通过只读验证，未执行该视图 DDL: %w", feature, err)
 		}
+		// A canceled request says nothing about target capability. In particular,
+		// do not let cancellation prevent a later view or retry from probing it.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		w.oracleDM.features[key] = err
 		if err != nil {
 			return err
@@ -60,6 +72,10 @@ func oracleDMViewSentinel(feature string, useDate bool) (string, []any, error) {
 	var predicate string
 	var args []any
 	switch feature {
+	case "ROWNUM":
+		// Match the supported view shape without reading business data: duplicate
+		// UNION ALL constants, aggregate two groups, then assign outer row numbers.
+		return `SELECT CASE WHEN COUNT(*)=2 AND MIN(RN)=1 AND MAX(RN)=2 AND COUNT(DISTINCT RN)=2 AND SUM(VC)=3 THEN 1 ELSE 0 END FROM (SELECT ROWNUM AS RN, VC FROM (SELECT K, COUNT(*) AS VC FROM (SELECT 10 AS K FROM DUAL UNION ALL SELECT 10 AS K FROM DUAL UNION ALL SELECT 20 AS K FROM DUAL) GROUP BY K))`, nil, nil
 	case "operator_concat":
 		predicate = `(CAST(NULL AS VARCHAR(10)) || 'x')='x' AND ('x' || CAST(NULL AS VARCHAR(10)))='x' AND (CAST(NULL AS VARCHAR(10)) || CAST(NULL AS VARCHAR(10))) IS NULL`
 	case "CONCAT":

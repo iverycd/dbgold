@@ -122,3 +122,40 @@ func TestOracleDamengViewOnlyChecksExistingDependencyTypes(t *testing.T) {
 	require.Equal(t, 1, w.existingChecks)
 	require.Empty(t, w.views)
 }
+
+type oracleDMRownumViewWriter struct {
+	*oracleDMWriter
+	validated []string
+}
+
+func (w *oracleDMRownumViewWriter) ValidateOracleDamengView(_ context.Context, sql string) error {
+	w.validated = append(w.validated, sql)
+	if strings.Contains(strings.ToUpper(sql), "ROWNUM") {
+		return fmt.Errorf("目标库 ROWNUM 能力探测失败")
+	}
+	return nil
+}
+
+func TestOracleDamengRownumViewCapabilityFailureDoesNotBlockOtherViews(t *testing.T) {
+	r, w, m := oracleDMModuleVisitLogFixture()
+	r.views = append(r.views, source.ViewInfo{
+		ViewName:   "VIEW_VISIT_CODES",
+		Definition: `SELECT ModuleCode FROM Frame_VisitLog`,
+		Columns:    []source.ColumnInfo{{Name: "MODULECODE"}},
+	})
+	validated := &oracleDMRownumViewWriter{oracleDMWriter: w}
+	m.writer = validated
+	results := m.MigrateViews(context.Background(), []string{"VIEW_MODULEVISITLOG", "VIEW_VISIT_CODES"})
+	require.Len(t, results, 2)
+	require.Equal(t, "VIEW_MODULEVISITLOG", results[0].Name)
+	require.Contains(t, results[0].Error, "ROWNUM 能力探测失败")
+	require.Equal(t, "VIEW_VISIT_CODES", results[1].Name)
+	require.Empty(t, results[1].Error)
+	require.Len(t, validated.validated, 2)
+	require.Equal(t, oracleDMModuleVisitLogSQL, validated.validated[0])
+	require.Len(t, w.views, 1)
+	require.Equal(t, "VIEW_VISIT_CODES", w.views[0].ViewName)
+	require.Contains(t, results[1].DDL, `CREATE OR REPLACE VIEW "APP"."VIEW_VISIT_CODES" ("MODULECODE") AS `)
+	require.Empty(t, w.created)
+	require.Empty(t, w.copied)
+}

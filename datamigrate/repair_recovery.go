@@ -458,6 +458,12 @@ func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cf
 				n.Name = strings.ToUpper(n.Name)
 				v.Native = &n
 				v.TableName, v.ColumnName = p.TargetTable, n.Bindings[0].ColumnName
+				// Pending sequence repairs are deferred after this inventory is
+				// collected. Keep invalid metadata for that decision; the writer
+				// validates any sequence that is actually selected for calibration.
+				if normalized, e := dialect.NormalizeOracleDamengSequence(v); e == nil {
+					v = normalized
+				}
 				out = append(out, v)
 			}
 			continue

@@ -581,7 +581,7 @@ func validateRepairUnits(units []repair.Unit) error {
 }
 func SaveMigrationRepairDraft(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<20)
-	_, _, row, o, ok := loadRepairObject(c, true)
+	j, binding, row, o, ok := loadRepairObject(c, true)
 	if !ok {
 		return
 	}
@@ -594,6 +594,7 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		Units         []repair.Unit     `json:"units"`
 		ColumnMapping map[string]string `json:"column_mapping"`
 		Reviewed      bool              `json:"reviewed"`
+		SequencePlan  bool              `json:"sequence_plan"`
 	}
 	if e := c.ShouldBindJSON(&req); e != nil {
 		repairError(c, e)
@@ -602,6 +603,22 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	if req.Version != row.Version {
 		repairError(c, store.ErrRepairConflict)
 		return
+	}
+	if req.SequencePlan {
+		if !req.Reviewed {
+			repairError(c, fmt.Errorf("请先核对序列计划并确认完整执行单元"))
+			return
+		}
+		candidate, _, err := migrationSequencePlan(c, j, binding, o, row.Version)
+		if err != nil {
+			repairError(c, err)
+			return
+		}
+		if err := validateSequencePlanDraft(candidate, req.Units); err != nil {
+			repairError(c, err)
+			return
+		}
+		o = candidate
 	}
 	if o.Status == "unknown" {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))

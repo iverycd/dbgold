@@ -123,7 +123,7 @@ func TestOracleDamengSimpleTriggerGrammar(t *testing.T) {
 		{`BEGIN :NEW.Id := SeqId.NEXTVAL; END;`, "NEW.Id > 0", "", "", false, false},
 		{`BEGIN :NEW.Id := SeqId.NEXTVAL; EXCEPTION WHEN OTHERS THEN NULL; END;`, "", "", "", false, false},
 	} {
-		binding, owner, seq, err := parseOracleDMTrigger(tc.body, tc.when, "APP")
+		binding, owner, seq, err := parseOracleDMTrigger(tc.body, tc.when, "APP", "TRG")
 		if !tc.valid {
 			require.Error(t, err, tc.body)
 			continue

@@ -39,7 +39,7 @@ func oracleDMTestSequence() source.SequenceInfo {
 func TestOracleDamengNativeSequenceCollisionDoesNotMutate(t *testing.T) {
 	w, m := mockDM(t)
 	w.srcType = "oracle"
-	m.ExpectQuery("SELECT COUNT.*ALL_OBJECTS").WithArgs("APP", "SEQ_T").WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
+	expectOracleDMSequenceObject(m, "SEQ_T", "TABLE")
 	require.ErrorContains(t, w.CreateSequence(context.Background(), oracleDMTestSequence(), ""), "禁止覆盖")
 	s := oracleDMTestSequence()
 	s.Native.MaxValue = "9999999999999999999999999999"

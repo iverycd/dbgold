@@ -24,9 +24,7 @@ func oracleDMNativeSequence() source.SequenceInfo {
 	return source.SequenceInfo{TableName: "T", ColumnName: "ID", StartValueText: "1", Native: &source.NativeSequenceInfo{Name: "S", IncrementBy: "5", MinValue: "1", MaxValue: "1000", CacheSize: "0", Bindings: []source.SequenceBinding{{TableName: "T", ColumnName: "ID", TriggerName: "TRG", Kind: "trigger", OnlyWhenNull: true}}}}
 }
 func nativeTriggerRows(seq source.SequenceInfo) *sqlmock.Rows {
-	ss := dialect.NewDaMeng().SequenceStatements("APP", seq, "")
-	body := ss[1].SQL[strings.Index(ss[1].SQL, "\nBEGIN")+1:]
-	return sqlmock.NewRows([]string{"owner", "name", "kind", "event", "when", "body"}).AddRow("APP", "TRG", "BEFORE EACH ROW", "INSERT", nil, body)
+	return oracleDMSequenceTriggerRows(seq, 0)
 }
 
 func TestOracleDamengNativeCalibrationNeverRewinds(t *testing.T) {
@@ -34,8 +32,7 @@ func TestOracleDamengNativeCalibrationNeverRewinds(t *testing.T) {
 		t.Run(tc.current+"/"+tc.extreme, func(t *testing.T) {
 			w, m := oracleDMRecoveryMock(t)
 			seq := oracleDMNativeSequence()
-			m.ExpectQuery("SELECT INCREMENT_BY,MIN_VALUE,MAX_VALUE,LAST_NUMBER,CYCLE_FLAG").WithArgs("APP", "S").WillReturnRows(sqlmock.NewRows([]string{"step", "min", "max", "next", "cycle"}).AddRow("5", "1", "1000", tc.current, "N"))
-			m.ExpectQuery("SELECT OWNER,TRIGGER_NAME").WithArgs("APP", "T").WillReturnRows(nativeTriggerRows(seq))
+			expectOracleDMSequenceState(t, m, seq, tc.current, []bool{true})
 			m.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("ID") FROM "APP"."T"`)).WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(tc.extreme))
 			if tc.want != "" {
 				m.ExpectExec(regexp.QuoteMeta(`ALTER SEQUENCE "APP"."S" CURRENT VALUE ` + tc.want)).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -55,8 +52,7 @@ func TestOracleDamengNativeCalibrationNegativeStepAndOverflow(t *testing.T) {
 			seq.Native.MinValue = "-1000"
 			seq.Native.MaxValue = "-1"
 			seq.StartValueText = "-1"
-			m.ExpectQuery("SELECT INCREMENT_BY,MIN_VALUE,MAX_VALUE,LAST_NUMBER,CYCLE_FLAG").WillReturnRows(sqlmock.NewRows([]string{"step", "min", "max", "next", "cycle"}).AddRow("-5", "-1000", "-1", "-11", "N"))
-			m.ExpectQuery("SELECT OWNER,TRIGGER_NAME").WillReturnRows(nativeTriggerRows(seq))
+			expectOracleDMSequenceState(t, m, seq, "-11", []bool{true})
 			m.ExpectQuery(regexp.QuoteMeta(`SELECT MIN("ID") FROM "APP"."T"`)).WillReturnRows(sqlmock.NewRows([]string{"min"}).AddRow(bound))
 			if bound == "-42" {
 				m.ExpectExec(regexp.QuoteMeta(`ALTER SEQUENCE "APP"."S" CURRENT VALUE -46`)).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -86,10 +82,11 @@ func TestOracleDamengOnlyDataRejectsTriggerSideEffects(t *testing.T) {
 				ss := w.dia.SequenceStatements("APP", seq, "")
 				body := ss[1].SQL[strings.Index(ss[1].SQL, "\nBEGIN")+1:]
 				body = strings.Replace(body, "END;", "INSERT INTO AUDIT_LOG VALUES(1); END;", 1)
-				rows = sqlmock.NewRows([]string{"owner", "name", "kind", "event", "when", "body"}).AddRow("APP", "TRG", "BEFORE EACH ROW", "INSERT", nil, body)
+				header := strings.TrimPrefix(ss[1].SQL[:strings.Index(ss[1].SQL, "\nBEGIN")], "CREATE TRIGGER ")
+				rows = sqlmock.NewRows([]string{"owner", "name", "table_owner", "table", "kind", "event", "status", "description", "body"}).AddRow("APP", "TRG", "APP", "T", "BEFORE EACH ROW", "INSERT", "ENABLED", header, body)
 			}
 			if kind == "custom" {
-				rows = sqlmock.NewRows([]string{"owner", "name", "kind", "event", "when", "body"}).AddRow("APP", "CUSTOM", "BEFORE EACH ROW", "INSERT", nil, "BEGIN NULL; END;")
+				rows = sqlmock.NewRows([]string{"owner", "name", "table_owner", "table", "kind", "event", "status", "description", "body"}).AddRow("APP", "CUSTOM", "APP", "T", "BEFORE EACH ROW", "INSERT", "ENABLED", `"APP"."CUSTOM" BEFORE INSERT ON "APP"."T" FOR EACH ROW`, "BEGIN NULL; END;")
 			}
 			m.ExpectQuery("SELECT OWNER,TRIGGER_NAME").WithArgs("APP", "T").WillReturnRows(rows)
 			err := w.ValidateOracleDamengLoadTriggers(context.Background(), info)

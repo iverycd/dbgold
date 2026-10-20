@@ -192,6 +192,15 @@ func (m *Migrator) targetSequence(v source.SequenceInfo) source.SequenceInfo {
 			n.Bindings[i].TriggerName = m.objName(b.TriggerName)
 		}
 		v.Native = &n
+		if v.Unsupported == "" {
+			prepared, err := dialect.NormalizeOracleDamengSequence(v)
+			if err != nil {
+				v.Unsupported, v.FailureStage = err.Error(), "preflight"
+			} else {
+				m.logOracleDamengSequenceBounds(v, prepared)
+				v = prepared
+			}
+		}
 	}
 	return v
 }
@@ -205,6 +214,7 @@ func (m *Migrator) prepareSourceSequence(ctx context.Context, v source.SequenceI
 			if err != nil {
 				m.stopOracleDamengTask(ctx, err)
 				v.Unsupported = err.Error()
+				v.FailureStage = "preflight"
 			} else {
 				v = prepared
 			}
@@ -257,12 +267,12 @@ func (m *Migrator) calibrateOracleDameng(ctx context.Context, report *MigrationR
 		m.reportBlockedOracleSequence(report, seq)
 	}
 	for _, seq := range m.selectedSequences(values, selected) {
+		original := seq
 		seq = m.prepareSourceSequence(ctx, seq)
 		if ctx.Err() != nil {
 			return
 		}
 		seq = m.targetSequence(seq)
-		name := dialect.SequenceName(m.writer.Dialect(), seq)
 		report.Sequences.Total++
 		if seq.Unsupported != "" {
 			err = fmt.Errorf("%s", seq.Unsupported)
@@ -278,7 +288,7 @@ func (m *Migrator) calibrateOracleDameng(ctx context.Context, report *MigrationR
 				return
 			}
 			report.Sequences.Failed++
-			report.Sequences.Items = append(report.Sequences.Items, objectResultForError(name, "", err))
+			report.Sequences.Items = append(report.Sequences.Items, m.sequenceFailure(original, seq, "", err))
 		} else {
 			report.Sequences.Success++
 		}

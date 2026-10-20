@@ -49,6 +49,9 @@ func checkRecoveryRisks(ctx context.Context, w Writer, table string, truncating 
 		}
 		tableQ = `SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER=` + p1 + ` AND TABLE_NAME=` + p2
 		triggers = `SELECT COUNT(*) FROM ALL_TRIGGERS WHERE TABLE_OWNER=` + p1 + ` AND TABLE_NAME=` + p2 + ` AND STATUS='ENABLED'`
+		if a.family == "dameng" {
+			triggers = `SELECT COUNT(*) FROM ALL_TRIGGERS WHERE TABLE_OWNER=? AND TABLE_NAME=? AND STATUS IN ('ENABLED','Y')`
+		}
 		fks = `SELECT COUNT(*) FROM ALL_CONSTRAINTS c JOIN ALL_CONSTRAINTS p ON c.R_OWNER=p.OWNER AND c.R_CONSTRAINT_NAME=p.CONSTRAINT_NAME WHERE p.OWNER=` + p1 + ` AND p.TABLE_NAME=` + p2 + ` AND c.CONSTRAINT_TYPE='R'`
 	default:
 		return fmt.Errorf("目标 %s 暂不能完整检查触发器和外键，已阻止自动补迁或清空", w.DBType())

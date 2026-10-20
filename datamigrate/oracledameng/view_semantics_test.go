@@ -27,3 +27,40 @@ func TestViewSemanticsFeaturesFindNestedDateCastsAndFunctions(t *testing.T) {
 	_, err = ViewSemanticsFeatures(`SELECT 'unterminated FROM T`)
 	require.Error(t, err)
 }
+
+func TestViewSemanticsFeaturesRownumProjection(t *testing.T) {
+	for _, query := range []string{
+		`SELECT ROWNUM AS Row_ID, VisitCount FROM (SELECT COUNT(*) AS VisitCount FROM (SELECT ModuleCode FROM Frame_VisitLog UNION ALL SELECT ModuleCode FROM Frame_VisitLog_Histroy) GROUP BY ModuleCode)`,
+		`SELECT DISTINCT rownum AS rn FROM T`,
+		`SELECT q.rn FROM (SELECT ROWNUM AS rn FROM T) q`,
+		`SELECT ROWNUM AS rn, ROWNUM AS rn2 FROM T`,
+		`SELECT /* ROWNUM stays native */ ROWNUM AS rn FROM T`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			features, err := ViewSemanticsFeatures(query)
+			require.NoError(t, err)
+			require.Equal(t, []string{"ROWNUM"}, features)
+		})
+	}
+}
+
+func TestViewSemanticsFeaturesRownumDoesNotMatchIdentifiersOrAliases(t *testing.T) {
+	for _, query := range []string{
+		`SELECT 'ROWNUM' AS value FROM T /* SELECT ROWNUM FROM DUAL */ -- ROWNUM`,
+		`SELECT "ROWNUM", "rownum" AS rn FROM T`,
+		`SELECT t.ROWNUM, t."ROWNUM" FROM T t`,
+		`SELECT t.id AS ROWNUM FROM T t ORDER BY ROWNUM`,
+		`SELECT t.id ROWNUM FROM T t`,
+		`SELECT 'literal' ROWNUM, COUNT(*) ROWNUM2 FROM T`,
+		`SELECT rn FROM (SELECT t.id AS ROWNUM FROM T t) q`,
+		`SELECT t.id FROM ROWNUM t`,
+		`SELECT ROWNUM.id FROM T ROWNUM`,
+		`SELECT ROWNUM(a) AS value FROM T`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			features, err := ViewSemanticsFeatures(query)
+			require.NoError(t, err)
+			require.Empty(t, features)
+		})
+	}
+}

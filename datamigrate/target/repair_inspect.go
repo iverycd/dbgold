@@ -120,6 +120,19 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("failed", "目标 schema 与原对象不一致")
 	}
 	kind := repairKind(obj.Kind)
+	if dm, ok := w.(*DaMengWriter); ok && kind == "sequence" && obj.Sequence != nil && obj.Sequence.Native != nil && !repairDefinitionEdited(obj) {
+		plan, e := dm.planOracleDamengSequence(ctx, *obj.Sequence)
+		if e != nil {
+			return repair.Verification{Status: "failed", Message: e.Error()}, e
+		}
+		if !plan.sequenceExists || len(plan.missingTriggers) > 0 {
+			return verification("failed", "序列或关联触发器尚未完整创建，请刷新序列修复方案")
+		}
+		if len(plan.statements) != 0 {
+			return verification("failed", "序列定义兼容但仍需向前校准，请刷新序列修复方案")
+		}
+		return verification("succeeded", "序列及关联触发器完整兼容，当前续号已越过源水位和关联列极值")
+	}
 	if kind == "table" {
 		exists, e := inspectOrdinaryTable(ctx, a, obj.Schema, obj.TargetName)
 		if e != nil {

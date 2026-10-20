@@ -142,7 +142,8 @@ func Hash(v any) string {
 	return hex.EncodeToString(h[:])
 }
 
-// An observer sees actual execution units; display SQL is never split to infer them.
+// An observer sees SQL execution and read-only "reused" verification events;
+// display SQL is never split to infer physical execution units.
 type Event struct {
 	SQL    string
 	Status string

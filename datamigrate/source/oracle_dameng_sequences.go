@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
@@ -20,8 +21,10 @@ var oracleDMNewColumn = regexp.MustCompile(`(?is)^\s*:NEW\s*\.\s*(` + oracleDMId
 var oracleDMNullGuard = regexp.MustCompile(`(?is)^\s*:?(?:NEW)\s*\.\s*(` + oracleDMIdent + `)\s+IS\s+NULL\s*$`)
 var oracleDMSelectInto = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+INTO\s*(.+?)\s+FROM\s+DUAL\s*;\s*$`)
 var oracleDMAssignment = regexp.MustCompile(`(?is)^(.+?)\s*:=\s*(.+?)\s*;\s*$`)
-var oracleDMBody = regexp.MustCompile(`(?is)^\s*BEGIN\s+(.+)\s+END\s*;?\s*$`)
+var oracleDMDeclare = regexp.MustCompile(`(?is)^DECLARE\b\s*`)
+var oracleDMBody = regexp.MustCompile(`(?is)^\s*BEGIN\s+(.+)\s+END(?:\s+(` + oracleDMIdent + `))?\s*;?\s*$`)
 var oracleDMIf = regexp.MustCompile(`(?is)^IF\s+(.+?)\s+THEN\s+(.+)\s+END\s+IF\s*;\s*$`)
+var oracleDMInsertingAnd = regexp.MustCompile(`(?is)^INSERTING\s+AND\s+(.+)$`)
 
 func oracleDMIdentifier(s string) string {
 	s = strings.TrimSpace(s)
@@ -97,18 +100,30 @@ func oracleDamengGeneration(generation, onNull string) string {
 }
 
 // parseOracleDMTrigger accepts exactly one sequence assignment, with an
-// optional NULL guard. No source procedural body is copied to the target.
-func parseOracleDMTrigger(body, when, owner string) (SequenceBinding, string, string, error) {
-	fail := func() (SequenceBinding, string, string, error) {
-		return SequenceBinding{}, "", "", fmt.Errorf("仅支持单一 NEXTVAL 赋值及可选的 NEW 列 IS NULL 条件")
+// optional NULL guard. The caller must first validate BEFORE EACH ROW and an
+// INSERT-only event, so INSERTING is always true. No source body is copied to
+// executable target SQL.
+func parseOracleDMTrigger(body, when, owner, triggerName string) (SequenceBinding, string, string, error) {
+	fail := func(reason string) (SequenceBinding, string, string, error) {
+		return SequenceBinding{}, "", "", errors.New(reason)
 	}
 	clean, err := oracleDMWithoutComments(body)
 	if err != nil {
 		return SequenceBinding{}, "", "", err
 	}
+	hasDeclare := oracleDMDeclare.MatchString(clean)
+	if hasDeclare {
+		clean = strings.TrimSpace(oracleDMDeclare.ReplaceAllString(clean, ""))
+	}
 	m := oracleDMBody.FindStringSubmatch(clean)
 	if m == nil {
-		return fail()
+		if hasDeclare {
+			return fail("仅支持空 DECLARE，声明变量、常量、游标或 PRAGMA 的触发器需要手动适配")
+		}
+		return fail("触发器正文必须为单一 BEGIN ... END 块，不支持额外过程逻辑")
+	}
+	if m[2] != "" && oracleDMIdentifier(m[2]) != triggerName {
+		return fail(fmt.Sprintf("END 名称 %s 与源触发器名称 %s 不匹配", m[2], quoteOracleDameng(triggerName)))
 	}
 	assignment, guard := strings.TrimSpace(m[1]), ""
 	if f := oracleDMIf.FindStringSubmatch(assignment); f != nil {
@@ -120,15 +135,18 @@ func parseOracleDMTrigger(body, when, owner string) (SequenceBinding, string, st
 	} else if m := oracleDMAssignment.FindStringSubmatch(assignment); m != nil {
 		column, ref = m[1], m[2]
 	} else {
-		return fail()
+		return fail("仅支持单一 NEXTVAL 赋值或 SELECT NEXTVAL INTO :NEW.<列名> FROM DUAL")
 	}
 	c := oracleDMNewColumn.FindStringSubmatch(column)
 	seqOwner, seqName, ok := oracleDMReference(ref, owner)
-	if c == nil || !ok {
-		return fail()
+	if c == nil {
+		return fail("序列必须直接赋值给单一 :NEW.<列名>，不支持中间变量或其他语句")
+	}
+	if !ok {
+		return fail("赋值表达式必须为单一序列的 NEXTVAL，不支持其他表达式或额外语句")
 	}
 	b := SequenceBinding{ColumnName: oracleDMIdentifier(c[1]), Kind: "trigger"}
-	for _, condition := range []string{guard, when} {
+	for i, condition := range []string{guard, when} {
 		condition = strings.TrimSpace(condition)
 		if condition == "" {
 			continue
@@ -136,9 +154,17 @@ func parseOracleDMTrigger(body, when, owner string) (SequenceBinding, string, st
 		if strings.HasPrefix(condition, "(") && strings.HasSuffix(condition, ")") {
 			condition = strings.TrimSpace(condition[1 : len(condition)-1])
 		}
+		if i == 0 {
+			if inserting := oracleDMInsertingAnd.FindStringSubmatch(condition); inserting != nil {
+				condition = strings.TrimSpace(inserting[1])
+			}
+		}
 		g := oracleDMNullGuard.FindStringSubmatch(condition)
 		if g == nil || oracleDMIdentifier(g[1]) != b.ColumnName {
-			return fail()
+			if i == 0 {
+				return fail(fmt.Sprintf("IF 条件仅支持当前赋值列 :NEW.%s IS NULL，可前置 INSERTING AND", quoteOracleDameng(b.ColumnName)))
+			}
+			return fail(fmt.Sprintf("WHEN 条件仅支持当前赋值列 NEW.%s IS NULL", quoteOracleDameng(b.ColumnName)))
 		}
 		b.OnlyWhenNull = true
 	}
@@ -235,11 +261,18 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 		if e == nil && !oracleDMNextval.MatchString(clean) {
 			continue
 		}
-		binding, owner, seq, e := parseOracleDMTrigger(body.String, when.String, r.owner)
-		binding.TableName, binding.TriggerName = table.String, trigger
+		var binding SequenceBinding
+		owner, seq := r.owner, ""
+		if kind != "BEFORE EACH ROW" || strings.TrimSpace(event) != "INSERT" {
+			e = errors.New("仅支持 BEFORE EACH ROW 且触发事件只有 INSERT 的自增触发器")
+		} else {
+			binding, owner, seq, e = parseOracleDMTrigger(body.String, when.String, r.owner, trigger)
+		}
+		binding.TableName, binding.TriggerName, binding.TriggerBody = table.String, trigger, body.String
 		ref := reference{owner: owner, name: seq, binding: binding}
-		if e != nil || kind != "BEFORE EACH ROW" || strings.TrimSpace(event) != "INSERT" {
-			ref.unsupported = fmt.Sprintf("触发器 %s 不是受支持的简单 BEFORE INSERT 自增触发器", trigger)
+		if e != nil {
+			ref.unsupported = fmt.Sprintf("源触发器 %s.%s（表 %s.%s，类型=%q，事件=%q，WHEN=%q）不支持自动迁移: %v",
+				quoteOracleDameng(r.owner), quoteOracleDameng(trigger), quoteOracleDameng(r.owner), quoteOracleDameng(table.String), kind, event, when.String, e)
 		}
 		refs = append(refs, ref)
 	}
@@ -250,6 +283,11 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 	}
 	out := []SequenceInfo{}
 	position := map[string]int{}
+	type metadataFailure struct {
+		owner string
+		err   error
+	}
+	metadataFailures := map[int]metadataFailure{}
 	uses := map[string]int{}
 	for _, ref := range refs {
 		if ref.binding.ColumnName != "" {
@@ -283,14 +321,37 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 			if failure.IsTaskError(e) {
 				return nil, fmt.Errorf("读取序列 %s 元数据失败: %w", ref.name, e)
 			}
-			s.Unsupported = fmt.Sprintf("读取序列 %s 元数据失败: %v", ref.name, e)
+			s.FailureStage = "metadata"
+			metadataFailures[len(out)] = metadataFailure{owner: ref.owner, err: e}
 		} else {
 			s.Native.Cycle, s.Native.Ordered = cycle == "Y", order == "Y"
 		}
 		position[key] = len(out)
 		out = append(out, s)
 	}
+	// Build the diagnostic after deduplication so every table that uses a shared
+	// sequence is included, even when its first metadata lookup failed.
+	for pos, metadata := range metadataFailures {
+		out[pos].Unsupported = oracleDMSequenceMetadataFailure(metadata.owner, out[pos], metadata.err)
+	}
 	return out, nil
+}
+
+func oracleDMSequenceMetadataFailure(owner string, seq SequenceInfo, err error) string {
+	name := quoteOracleDameng(owner) + "." + quoteOracleDameng(seq.Native.Name)
+	refs := make([]string, 0, len(seq.Native.Bindings))
+	for _, binding := range seq.Native.Bindings {
+		ref := quoteOracleDameng(owner) + "." + quoteOracleDameng(binding.TableName) + "." + quoteOracleDameng(binding.ColumnName)
+		if binding.TriggerName != "" {
+			ref += "（触发器 " + quoteOracleDameng(owner) + "." + quoteOracleDameng(binding.TriggerName) + "）"
+		}
+		refs = append(refs, ref)
+	}
+	detail := err.Error()
+	if errors.Is(err, sql.ErrNoRows) {
+		detail = "源序列不存在或当前账号不可见；ALL_SEQUENCES 中未找到该序列，请检查源序列是否存在、迁移账户的访问权限及序列同义词（" + detail + "）"
+	}
+	return fmt.Sprintf("读取源序列 %s 元数据失败: %s；引用: %s", name, detail, strings.Join(refs, "、"))
 }
 
 // FilterNativeSequences is shared by migration execution and durable repair

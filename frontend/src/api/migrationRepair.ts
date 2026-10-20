@@ -45,12 +45,14 @@ export interface RepairObject {
   column_mapping?: Record<string, string>
   columns?: RepairColumn[]
   source_columns?: RepairColumn[]
+  sequence?: { Native?: { Name?: string }; Unsupported?: string; FailureStage?: string }
   foreign_key?: { TableName: string; Columns: string[]; RefSchema: string; RefTable: string; RefColumns: string[] }
   legacy: boolean
   requires_review: boolean
   data_status?: string
 }
 export interface RepairRecord { object: RepairObject; version: number }
+export interface SequenceRepairPlan extends RepairRecord { has_changes: boolean; message: string }
 export interface RepairBinding {
   src_conn_id: number
   dst_conn_id: number
@@ -114,7 +116,8 @@ const base = (job: string) => `/migration/data-migrate/${encodeURIComponent(job)
 const objectURL = (job: string, object: string) => `${base(job)}/repairs/${encodeURIComponent(object)}`
 export const listRepairs = (job: string) => api.get<RepairList>(`${base(job)}/repairs`)
 export const bindRepairConnections = (job: string, data: BindingRequest) => api.put(`${base(job)}/repairs/binding`, data)
-export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean }) => api.put<RepairRecord>(objectURL(job, object), data)
+export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean }) => api.put<RepairRecord>(objectURL(job, object), data)
+export const refreshSequenceRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/sequence-plan`, data)
 export const executeRepair = (job: string, object: string, data: { version: number; request_id: string; confirmed: true }) => api.post<RepairAttempt>(`${objectURL(job, object)}/execute`, data)
 export const listRepairAttempts = (job: string) => api.get<{ items: RepairAttempt[] }>(`${base(job)}/repair-attempts`)
 export const getRepairAttempt = (job: string, attempt: string) => api.get<RepairAttempt>(`${base(job)}/repair-attempts/${encodeURIComponent(attempt)}`)

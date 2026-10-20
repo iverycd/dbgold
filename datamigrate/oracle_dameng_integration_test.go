@@ -88,7 +88,7 @@ func TestOracleDamengIntegration(t *testing.T) {
 	 MONTHS_VAL INTERVAL YEAR(3) TO MONTH,
 	 BODY CLOB, NBODY NCLOB, PAYLOAD BLOB
 	)`)
-	execSource("CREATE SEQUENCE " + sq(seq) + " START WITH 100 INCREMENT BY 5 MINVALUE 1 MAXVALUE 1000000000 NOCYCLE NOCACHE")
+	execSource("CREATE SEQUENCE " + sq(seq) + " START WITH 100 INCREMENT BY 5 MINVALUE 1 NOMAXVALUE NOCYCLE NOCACHE")
 	execSource("CREATE OR REPLACE TRIGGER " + sq(trigger) + " BEFORE INSERT ON " + sq(parent) + ` FOR EACH ROW BEGIN IF :NEW.ID IS NULL THEN SELECT ` + sq(seq) + `.NEXTVAL INTO :NEW.ID FROM DUAL; END IF; END;`)
 	execSource("INSERT INTO " + sq(parent) + ` (ID,NAME,AMOUNT,AT_DATE,AT_TS,DUR,MONTHS_VAL,BODY,NBODY,PAYLOAD) VALUES
 	(1,'AbC中文',12345678901234567890.123456789012345678,
@@ -187,6 +187,9 @@ func TestOracleDamengIntegration(t *testing.T) {
 		var count int
 		require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq(parent)).Scan(&count))
 		require.Zero(t, count)
+		var sequenceMax string
+		require.NoError(t, dst.QueryRowContext(ctx, "SELECT MAX_VALUE FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER=? AND SEQUENCE_NAME=?", dstSchema, seq).Scan(&sequenceMax))
+		require.Equal(t, "9223372036854775807", sequenceMax, "Oracle 默认大上限应适配为达梦上限")
 		// The schema-only pass has already installed the FK. Populate its
 		// referenced table first rather than depending on dictionary ordering.
 		report = run(t, "data_only", parent)
