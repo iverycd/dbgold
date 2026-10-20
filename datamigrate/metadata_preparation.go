@@ -63,6 +63,9 @@ func (m *Migrator) prewarmSourceTableDDL(ctx context.Context, tables []string, p
 					return
 				}
 				info, err := m.reader.GetTableDDLInfo(ctx, selected[index])
+				if m.stopOracleDamengTask(ctx, err) {
+					return
+				}
 				results[index] = sourceTableDDLResult{info: info, err: err}
 				completed <- index
 			}

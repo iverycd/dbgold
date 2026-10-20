@@ -120,7 +120,7 @@ export interface ObjectResult {
   target_table?: string
   target_schema?: string
   table?: string
-  stage?: 'metadata' | 'preflight' | 'unsupported' | 'execute'
+  stage?: 'metadata' | 'preflight' | 'unsupported' | 'execute' | 'dependency' | 'task'
   ddl: string
   source_ddl?: string
   error: string

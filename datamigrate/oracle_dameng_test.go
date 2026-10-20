@@ -81,7 +81,7 @@ func oracleDMFixture(content string) (*oracleDMReader, *oracleDMWriter, *Migrato
 	return rr, ww, m
 }
 
-func TestOracleDamengTablePreflightBeforeAnyWrite(t *testing.T) {
+func TestOracleDamengTablePreflightOnlyBlocksAffectedTables(t *testing.T) {
 	for _, kind := range []string{"type", "default", "identity", "name", "capacity", "capability"} {
 		t.Run(kind, func(t *testing.T) {
 			r, w, m := oracleDMFixture("schema_only")
@@ -105,10 +105,20 @@ func TestOracleDamengTablePreflightBeforeAnyWrite(t *testing.T) {
 			}
 			report := m.Run(context.Background())
 			require.Positive(t, report.Tables.Failed)
-			require.Empty(t, w.created)
 			require.Empty(t, w.copied)
-			require.Empty(t, w.views)
-			require.Empty(t, w.indexes)
+			switch kind {
+			case "capacity", "capability": // The fixture rejects every table.
+				require.Empty(t, w.created)
+				require.Empty(t, w.views)
+			case "name": // Both colliding names fail; the unrelated table continues.
+				require.Len(t, w.created, 1)
+				require.Contains(t, w.created[0], `"LATER"`)
+				require.Empty(t, w.views)
+			default:
+				require.Len(t, w.created, 1)
+				require.Contains(t, w.created[0], `"MIXED"`)
+				require.Len(t, w.views, 1)
+			}
 		})
 	}
 }

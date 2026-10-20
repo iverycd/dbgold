@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"regexp"
 	"strings"
+
+	"dbgold/datamigrate/failure"
 )
 
 const oracleDMIdent = `(?:"(?:[^"]|"")+"|[\pL_][\pL\pN_$#]*)`
@@ -278,6 +280,9 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
  TO_CHAR(MAX_VALUE,'TM9','NLS_NUMERIC_CHARACTERS=''.,'''),TO_CHAR(CACHE_SIZE,'TM9','NLS_NUMERIC_CHARACTERS=''.,'''),CYCLE_FLAG,ORDER_FLAG
  FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER=:1 AND SEQUENCE_NAME=:2`, ref.owner, ref.name).Scan(&s.StartValueText, &s.Native.IncrementBy, &s.Native.MinValue, &s.Native.MaxValue, &s.Native.CacheSize, &cycle, &order)
 		if e != nil {
+			if failure.IsTaskError(e) {
+				return nil, fmt.Errorf("读取序列 %s 元数据失败: %w", ref.name, e)
+			}
 			s.Unsupported = fmt.Sprintf("读取序列 %s 元数据失败: %v", ref.name, e)
 		} else {
 			s.Native.Cycle, s.Native.Ordered = cycle == "Y", order == "Y"

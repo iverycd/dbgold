@@ -9,10 +9,19 @@ const { failureStage, describeFailure, categoryPresentation, compatibilityReport
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
 const failure = overrides => ({ name: 'idx_orders', ddl: '', error: 'index error', ...overrides })
 
-test('preflight failures explain that target business objects were not written', () => {
+test('preflight failures describe the failed object without implying a task-wide stop', () => {
   const result = describeFailure(failure({ stage: 'preflight' }), 'tables')
   assert.equal(result.stageLabel, '迁移预检失败')
-  assert.match(result.emptyDDLMessage, /尚未执行目标业务对象写入/)
+  assert.match(result.emptyDDLMessage, /尚未执行该对象的目标写入/)
+})
+
+test('dependency skips and task termination have distinct explanations', () => {
+  const skipped = describeFailure(failure({ stage: 'dependency' }))
+  assert.equal(skipped.stageLabel, '依赖对象失败，已跳过')
+  assert.match(skipped.emptyDDLMessage, /未执行该对象/)
+  const stopped = describeFailure(failure({ stage: 'task' }))
+  assert.equal(stopped.stageLabel, '任务级错误，迁移已终止')
+  assert.match(stopped.emptyDDLMessage, /此前已成功提交/)
 })
 const compatibilityFunctionSignatures = [
   ['get_uuid', 'get_uuid()'],

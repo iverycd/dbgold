@@ -123,9 +123,16 @@ func (m *Migrator) prepareDamengColumns(ctx context.Context, tables []string, re
 			err = m.validateDamengMapping(ctx, p)
 		}
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return failed
+			}
 			failed[table], m.dmBlocked[table] = true, true
 			report.Tables.Failed++
-			report.Tables.Items = append(report.Tables.Items, objectResultForError(table, "", err))
+			result := objectResultForError(table, "", err)
+			if m.isOracleDameng() {
+				result.Stage = "preflight"
+			}
+			report.Tables.Items = append(report.Tables.Items, result)
 			m.log.Errorf("达梦列名预检 [%s]: %v", table, err)
 		}
 	}

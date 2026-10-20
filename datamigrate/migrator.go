@@ -187,6 +187,22 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	if m.isOracleDameng() {
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(ctx)
+		defer cancel(nil)
+		ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
+		m.dmPlans = nil
+	}
+	report := m.runWithRepair(ctx)
+	m.recordOracleDamengTaskFailure(ctx, &report)
+	if m.cfg.CaptureRepair {
+		m.finishRepair(ctx, &report)
+	}
+	return report
+}
+
+func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	m.compatibilityFunctions = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
@@ -196,18 +212,19 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		return report
 	}
 	m.beginRepair(ctx)
+	if m.isOracleDameng() && ctx.Err() != nil {
+		return newMigrationReport()
+	}
 	if m.repairs.sinkErr != nil {
 		report := newMigrationReport()
 		report.CompatibilityFunctions = m.compatibilityFunctions
 		report.Tables.Total = 1
 		report.Tables.Failed = 1
 		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "修复记录持久化", Error: m.repairs.sinkErr.Error()})
-		m.finishRepair(ctx, &report)
 		return report
 	}
 	report := m.runPrepared(ctx)
 	report.CompatibilityFunctions = m.compatibilityFunctions
-	m.finishRepair(ctx, &report)
 	return report
 }
 
@@ -235,6 +252,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 
 	// 查询触发器总数（失败时 Total=-1，前端展示"获取失败"）
 	if count, err := m.reader.GetTriggerCount(ctx); err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return report
+		}
 		report.Triggers.Total = -1
 	} else {
 		report.Triggers.Total = count
@@ -247,6 +267,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 
 	allTables, err := m.reader.ListTables(ctx)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return report
+		}
 		m.log.Errorf("获取表列表失败: %v", err)
 		report.Tables.Total++
 		report.Tables.Failed++
@@ -278,7 +301,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
-	if m.isOracleDameng() && (len(tablesFailed) > 0 || !m.preflightOracleDameng(ctx, tables, &report)) {
+	if m.isOracleDameng() && (ctx.Err() != nil || !m.preflightOracleDameng(ctx, tables, &report, tablesFailed)) {
 		report.Tables.Total = max(len(tables), report.Tables.Total)
 		return report
 	}
@@ -331,6 +354,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			}
 			stmts, ddl, err := m.buildCreateTableDDL(ctx, table)
 			if err != nil {
+				if m.stopOracleDamengTask(ctx, err) {
+					return report
+				}
 				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				if m.dmBlocked != nil {
@@ -341,6 +367,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				continue
 			}
 			if err := m.repairTable(ctx, table, stmts); err != nil {
+				if m.stopOracleDamengTask(ctx, err) {
+					return report
+				}
 				m.log.Errorf("创建表失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				if m.dmBlocked != nil {
@@ -370,7 +399,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		sem := make(chan struct{}, m.cfg.MaxParallel)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		dataFailed := map[string]bool{}
 
+	dataLoop:
 		for _, table := range tables {
 			if tablesFailed[table] {
 				continue
@@ -379,8 +410,16 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				m.log.Warn("任务已取消")
 				break
 			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				break dataLoop
+			}
+			if ctx.Err() != nil {
+				<-sem
+				break
+			}
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(tbl string) {
 				defer wg.Done()
 				defer func() { <-sem }()
@@ -388,17 +427,26 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				mu.Lock()
 				if ok {
 					report.Data.Success++
-				} else {
+				} else if !m.isOracleDameng() || ctx.Err() == nil {
 					report.Data.Failed++
 					report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
+					if m.isOracleDameng() {
+						dataFailed[tbl] = true
+					}
 				}
 				mu.Unlock()
 			}(table)
 		}
 		wg.Wait()
+		for table := range dataFailed {
+			tablesFailed[table], m.dmBlocked[table] = true, true
+		}
 	}
 
-	if (m.isSQLServerDameng() || m.isOracleDameng()) && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
+	if ctx.Err() != nil {
+		return report
+	}
+	if m.isSQLServerDameng() && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
 		m.log.Errorf("表结构或数据迁移失败，停止附属对象创建")
 		return report
 	}
@@ -419,6 +467,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
 		m.createPostDDL(ctx, &report, tables, allTables)
 	}
+	if ctx.Err() != nil {
+		return report
+	}
 
 	// Phase 4: 行数对比（并发，仅对数据迁移成功的表）
 	if skipData {
@@ -434,16 +485,31 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		rowCounts := make([]TableRowCount, len(successTables))
 		var rcWg sync.WaitGroup
 		rcSem := make(chan struct{}, m.cfg.MaxParallel)
+	rowCountLoop:
 		for i, table := range successTables {
+			select {
+			case rcSem <- struct{}{}:
+			case <-ctx.Done():
+				break rowCountLoop
+			}
+			if ctx.Err() != nil {
+				<-rcSem
+				break
+			}
 			rcWg.Add(1)
-			rcSem <- struct{}{}
 			go func(idx int, tbl string) {
 				defer rcWg.Done()
 				defer func() { <-rcSem }()
 				dstTable := m.objName(tbl)
 				m.log.Infof("开始行数校验 [%s]", tbl)
 				srcCount, srcErr := m.reader.CountRows(ctx, tbl)
+				if m.stopOracleDamengTask(ctx, srcErr) {
+					return
+				}
 				dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
+				if m.stopOracleDamengTask(ctx, dstErr) {
+					return
+				}
 				rc := TableRowCount{Table: dstTable}
 				if srcErr == nil && dstErr == nil {
 					rc.Src = srcCount
@@ -463,7 +529,14 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			}(i, table)
 		}
 		rcWg.Wait()
-		report.RowCounts = rowCounts
+		for _, rc := range rowCounts {
+			if rc.Table != "" {
+				report.RowCounts = append(report.RowCounts, rc)
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return report
 	}
 
 	elapsed := time.Since(start).Round(time.Second)
@@ -496,6 +569,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
 	pks, err := m.reader.GetPrimaryKey(ctx, table)
 	if err != nil {
+		m.stopOracleDamengTask(ctx, err)
 		m.log.Errorf("获取主键失败 [%s]: %v", table, err)
 		return false, err.Error()
 	}
@@ -520,6 +594,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		}
 		cols, colTypes, rows, err := m.reader.ReadPage(ctx, table, pks, offset, int64(m.cfg.PageSize))
 		if err != nil {
+			m.stopOracleDamengTask(ctx, err)
 			m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pageNum, err)
 			if m.isOracle() || m.isSQLServer() || m.isOracleDameng() {
 				return false, fmt.Sprintf("表 %s 第 %d 页读取失败: %v", table, offset/int64(m.cfg.PageSize)+1, err)
@@ -538,6 +613,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 			dstCols[i] = m.targetColumn(table, c)
 		}
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
+			m.stopOracleDamengTask(ctx, err)
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)
 			if m.isOracle() || m.isSQLServer() || m.isOracleDameng() {
@@ -566,6 +642,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, pks []string) (bool, string) {
 	totalRows, err := m.reader.CountRows(ctx, table)
 	if err != nil {
+		m.stopOracleDamengTask(ctx, err)
 		m.log.Errorf("获取行数失败 [%s]: %v", table, err)
 		return false, err.Error()
 	}
@@ -581,6 +658,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	// 先读第一页以获取列名
 	cols, colTypes, firstRows, err := m.reader.ReadPage(ctx, table, pks, 0, pageSize)
 	if err != nil {
+		m.stopOracleDamengTask(ctx, err)
 		m.log.Errorf("读取数据失败 [%s] 第 1 页: %v", table, err)
 		if m.isOracle() {
 			return false, fmt.Sprintf("表 %s 第 1 页读取失败: %v", table, err)
@@ -598,6 +676,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 
 	writePage := func(pageNum int, rows [][]interface{}) {
 		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
+			m.stopOracleDamengTask(ctx, err)
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)
 			mu.Lock()
@@ -624,19 +703,29 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	}()
 
 	// 第 2 页起并发读取 + 写入
+pageLoop:
 	for page := int64(1); page < totalPages; page++ {
 		if ctx.Err() != nil {
 			break
 		}
 		offset := page * pageSize
 		pageNum := int(page) + 1
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break pageLoop
+		}
+		if ctx.Err() != nil {
+			<-sem
+			break
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(off int64, pn int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			_, _, rows, err := m.reader.ReadPage(ctx, table, pks, off, pageSize)
 			if err != nil {
+				m.stopOracleDamengTask(ctx, err)
 				m.log.Errorf("读取数据失败 [%s] 第 %d 页: %v", table, pn, err)
 				mu.Lock()
 				if !hasError {
@@ -672,17 +761,26 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, tables []string, allTables []string) {
 	// tableSet: 本次要迁移的表集合
 	tableSet := make(map[string]bool, len(tables))
+	selectedSet := make(map[string]bool, len(tables))
 	for _, t := range tables {
+		selectedSet[t] = true
 		if !m.dmBlocked[t] {
 			tableSet[t] = true
 		}
+	}
+	blocked := func(category *CategoryReport, name, table, reason string) {
+		category.Failed++
+		result := objectResultForError(name, "", fmt.Errorf("%s；未执行关联对象", reason))
+		result.Stage, result.Table = "dependency", table
+		result.TargetName, result.TargetTable, result.TargetSchema = m.objName(name), m.objName(table), m.cfg.TargetSchema
+		category.Items = append(category.Items, result)
 	}
 	// excludedSet: 被排除的表（仅 mode=exclude 时非空，用于过滤外键的 RefTable）
 	var excludedSet map[string]bool
 	if m.cfg.Mode == "exclude" {
 		excludedSet = make(map[string]bool)
 		for _, t := range allTables {
-			if !tableSet[t] {
+			if !tableSet[t] && (!m.isOracleDameng() || !selectedSet[t]) {
 				excludedSet[t] = true
 			}
 		}
@@ -706,12 +804,15 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if want("primary_keys") {
 		pks, err := m.reader.GetPrimaryKeys(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取主键信息失败: %v", err)
 			recordMetadataFailure(&report.PrimaryKeys, err)
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(pks))
 			for _, pk := range pks {
-				if tableSet[pk.TableName] {
+				if tableSet[pk.TableName] || m.isOracleDameng() && selectedSet[pk.TableName] {
 					filtered = append(filtered, pk)
 				}
 			}
@@ -719,6 +820,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, pk := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if m.isOracleDameng() && m.dmBlocked[pk.TableName] {
+					blocked(&report.PrimaryKeys, pk.IndexName, pk.TableName, "依赖表 "+pk.TableName+" 迁移失败")
+					continue
 				}
 				pkCopy := pk
 				pkCopy.TableName = m.objName(pk.TableName)
@@ -739,6 +844,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 				}
 				if err := m.repairIndex(ctx, pkCopy); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return
+					}
 					m.log.Errorf("创建主键失败 [%s]: %v", pkName, err)
 					report.PrimaryKeys.Failed++
 					report.PrimaryKeys.Items = append(report.PrimaryKeys.Items, ObjectResult{Name: pkName, DDL: ddl, Error: err.Error()})
@@ -753,16 +861,29 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if want("sequences") {
 		seqs, err := m.reader.GetSequences(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取序列信息失败: %v", err)
 			recordMetadataFailure(&report.Sequences, err)
 		} else {
-			filtered := m.selectedSequences(seqs, tableSet)
-			report.Sequences.Total = len(filtered)
+			scope := tableSet
+			if m.isOracleDameng() {
+				scope = selectedSet
+				for _, seq := range source.FilterNativeSequences(seqs, scope) {
+					m.reportBlockedOracleSequence(report, seq)
+				}
+			}
+			filtered := m.selectedSequences(seqs, scope)
+			report.Sequences.Total += len(filtered)
 			for _, seq := range filtered {
 				if ctx.Err() != nil {
 					return
 				}
 				seqCopy := m.targetSequence(m.prepareSourceSequence(ctx, seq))
+				if ctx.Err() != nil {
+					return
+				}
 				seqObj := dialect.SequenceName(m.writer.Dialect(), seqCopy)
 				sequenceOwner := ""
 				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
@@ -770,6 +891,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy, sequenceOwner))
 				if err := m.repairSequence(ctx, seqCopy, sequenceOwner); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return
+					}
 					m.log.Errorf("创建序列失败 [%s.%s]: %v", seqCopy.TableName, seqCopy.ColumnName, err)
 					report.Sequences.Failed++
 					report.Sequences.Items = append(report.Sequences.Items, ObjectResult{
@@ -793,12 +917,15 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if want("indexes") {
 		indexes, err := m.reader.GetIndexes(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取索引信息失败: %v", err)
 			recordMetadataFailure(&report.Indexes, err)
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(indexes))
 			for _, idx := range indexes {
-				if tableSet[idx.TableName] {
+				if tableSet[idx.TableName] || m.isOracleDameng() && selectedSet[idx.TableName] {
 					filtered = append(filtered, idx)
 				}
 			}
@@ -813,6 +940,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, idx := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if m.isOracleDameng() && m.dmBlocked[idx.TableName] {
+					blocked(&report.Indexes, idx.IndexName, idx.TableName, "依赖表 "+idx.TableName+" 迁移失败")
+					continue
 				}
 				idxCopy := idx
 				idxCopy.TableName = m.objName(idx.TableName)
@@ -830,6 +961,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					stage = "unsupported"
 				}
 				if err := m.repairIndex(ctx, idxCopy); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return
+					}
 					m.log.Errorf("迁移索引失败 [%s.%s]: %v", idx.TableName, idx.IndexName, err)
 					report.Indexes.Failed++
 					result := ObjectResult{
@@ -856,6 +990,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 							definition, loaded := sourceDefinitions[idx.TableName]
 							if !loaded {
 								definition.ddl, definition.err = reader.GetTableSourceDDL(ctx, idx.TableName)
+								if m.stopOracleDamengTask(ctx, definition.err) {
+									result.SourceDDL = definition.ddl
+									report.Indexes.Items = append(report.Indexes.Items, result)
+									return
+								}
 								sourceDefinitions[idx.TableName] = definition
 							}
 							result.SourceDDL = definition.ddl
@@ -880,12 +1019,15 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if migrateFK {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取外键信息失败: %v", err)
 			recordMetadataFailure(&report.Constraints, err)
 		} else {
 			filtered := make([]source.FKInfo, 0, len(fks))
 			for _, fk := range fks {
-				if m.isOracleDameng() && !tableSet[fk.TableName] {
+				if m.isOracleDameng() && !selectedSet[fk.TableName] {
 					continue
 				}
 				if excludedSet[fk.TableName] || excludedSet[fk.RefTable] {
@@ -897,6 +1039,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, fk := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if m.isOracleDameng() && (m.dmBlocked[fk.TableName] || m.dmBlocked[fk.RefTable]) {
+					failedTable := fk.TableName
+					if m.dmBlocked[fk.RefTable] {
+						failedTable = fk.RefTable
+					}
+					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖表 "+failedTable+" 迁移失败")
+					continue
 				}
 				if m.isOracleDameng() && fk.Unsupported != "" {
 					report.Constraints.Failed++
@@ -915,6 +1065,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 						err = m.ensureDamengReference(ctx, fk.RefTable)
 					}
 					if err != nil {
+						if m.stopOracleDamengTask(ctx, err) {
+							return
+						}
 						report.Constraints.Failed++
 						report.Constraints.Items = append(report.Constraints.Items, objectResultForError(fk.ConstraintName, "", err))
 						continue
@@ -936,6 +1089,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				fkCopy.RefColumns = refCols
 				ddl := dialect.JoinSQL(m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, fkCopy))
 				if err := m.repairFK(ctx, fkCopy); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return
+					}
 					m.log.Errorf("创建外键失败 [%s]: %v", fkCopy.ConstraintName, err)
 					report.Constraints.Failed++
 					report.Constraints.Items = append(report.Constraints.Items, ObjectResult{
@@ -955,6 +1111,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if !m.cfg.objectMode() && m.cfg.Mode != "include" {
 		views, err := m.readViews(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取视图信息失败: %v", err)
 			recordMetadataFailure(&report.Views, err)
 		} else {
@@ -969,6 +1128,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 				}
 				views = nil
+				if ctx.Err() != nil {
+					return
+				}
 			}
 			if m.hasDamengRenames() {
 				for _, result := range m.migrateDamengMappedViews(ctx, views, nil) {
@@ -1005,6 +1167,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if want("comments") {
 		comments, err := m.reader.GetComments(ctx)
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			m.log.Errorf("获取注释信息失败: %v", err)
 			recordMetadataFailure(&report.Comments, err)
 		} else {
@@ -1020,6 +1185,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					return
 				}
 				if !tableSet[cm.TableName] {
+					if m.isOracleDameng() && selectedSet[cm.TableName] && m.dmBlocked[cm.TableName] {
+						report.Comments.Total++
+						name := m.objName(cm.TableName)
+						if cm.ColumnName != "" {
+							name += "." + m.targetColumn(cm.TableName, cm.ColumnName)
+						}
+						blocked(&report.Comments, name, cm.TableName, "依赖表 "+cm.TableName+" 迁移失败")
+					}
 					continue
 				}
 				cmCopy := cm
@@ -1038,6 +1211,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				report.Comments.Total++
 				if err := m.repairComment(ctx, cmCopy); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return
+					}
 					m.log.Errorf("创建注释失败 [%s]: %v", name, err)
 					report.Comments.Failed++
 					report.Comments.Items = append(report.Comments.Items, ObjectResult{
@@ -1117,7 +1293,14 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
 	}
 	if m.isOracleDameng() {
-		return m.migrateOracleDamengViewsOnly(ctx, viewNames)
+		taskCtx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		taskCtx = context.WithValue(taskCtx, oracleDamengTaskKey{}, cancel)
+		results := m.migrateOracleDamengViewsOnly(taskCtx, viewNames)
+		if taskCtx.Err() != nil {
+			results = append(results, ObjectResult{Name: "任务级错误", Stage: "task", Error: fmt.Sprintf("视图迁移任务已终止: %v", context.Cause(taskCtx))})
+		}
+		return results
 	}
 	if err := m.prepareCompatibilityFunctions(ctx); err != nil && ctx.Err() != nil {
 		return []ObjectResult{}

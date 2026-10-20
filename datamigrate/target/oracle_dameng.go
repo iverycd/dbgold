@@ -71,7 +71,7 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 		}
 		if srcBase == "TIMESTAMP WITH LOCAL TIME ZONE" && actualBase == "TIMESTAMP WITH LOCAL TIME ZONE" {
 			if err := w.validateOracleDMLocalTimestamp(ctx, typemap.OracleDamengTimestampPrecision(src)); err != nil {
-				return fail(err.Error())
+				return fmt.Errorf("目标列 %s.%s: %w", info.TableName, src.Name, err)
 			}
 			base = actualBase
 		}
@@ -87,13 +87,13 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 			}
 			kind, err := w.inspectOracleDMColumnFloat(ctx, info.TableName, src.Name)
 			if err != nil {
-				return fail(err.Error())
+				return fmt.Errorf("目标列 %s.%s: %w", info.TableName, src.Name, err)
 			}
 			w.cacheOracleDMFloatColumn(info.TableName, src.Name, kind)
 			base = actualBase
 		} else if base == "XMLTYPE" || strings.HasPrefix(base, "SYSGEO2.ST_") {
 			if err := w.validateOracleDMSpecialColumn(ctx, info.TableName, src.Name, base); err != nil {
-				return fail(err.Error())
+				return fmt.Errorf("目标列 %s.%s: %w", info.TableName, src.Name, err)
 			}
 		} else if base == "BFILE" && actualBase == "VARCHAR" && c.bytes == 512 && c.scale == 6 {
 			// DM represents BFILE internally as a masked VARCHAR(512).

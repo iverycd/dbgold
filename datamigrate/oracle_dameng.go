@@ -8,7 +8,6 @@ import (
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/oracledameng"
-	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/tsqldameng"
 	"dbgold/datamigrate/typemap"
@@ -28,101 +27,97 @@ func (m *Migrator) oracleDamengSQLOptions() oracledameng.Options {
 
 // This is deliberately limited to the selected tables and observational target
 // checks. Object conversion errors continue through the normal category reports.
-func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, report *MigrationReport) bool {
-	if m.cfg.objectMode() {
-		return true
-	}
-	ready := true
+func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, report *MigrationReport, failed map[string]bool) bool {
 	issue := func(table string, err error) {
-		ready = false
+		failed[table], m.dmBlocked[table] = true, true
 		report.Tables.Failed++
 		result := objectResultForError(table, "", err)
 		result.Stage = "preflight"
 		report.Tables.Items = append(report.Tables.Items, result)
-		m.log.Errorf("Oracle → 达梦表预检 [%s]: %v", table, err)
+		m.log.Errorf("Oracle → 达梦表预检 [%s]，跳过该表及依赖对象: %v", table, err)
 	}
 	if m.cfg.TargetSchema != "" {
 		if err := tsqldameng.ValidName(m.cfg.TargetSchema); err != nil {
-			issue("目标 schema", err)
+			m.cancelOracleDamengTask(ctx, fmt.Errorf("目标 schema 无效: %w", err))
+			return false
 		}
 	}
-	infos := make([]*source.TableDDLInfo, 0, len(tables))
-	sourceInfos := make([]*source.TableDDLInfo, 0, len(tables))
+	if m.cfg.objectMode() {
+		return true
+	}
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
+	usable := 0
 	for _, table := range tables {
-		if err := ctx.Err(); err != nil {
-			issue(table, err)
+		if ctx.Err() != nil {
 			return false
+		}
+		if failed[table] {
+			continue
 		}
 		p := m.dmPlans[table]
 		if p == nil {
 			issue(table, fmt.Errorf("缺少表结构"))
 			continue
 		}
-		infos = append(infos, p.target)
-		sourceInfos = append(sourceInfos, p.source)
+		if err := m.preflightOracleDamengTable(ctx, table, p, opt); err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return false
+			}
+			issue(table, err)
+			continue
+		}
+		usable++
 	}
-	if !ready {
-		return false
+	// Strict load semantics are shared by the whole task. Failure here cannot
+	// safely be isolated to a column or table, unlike feature-specific probes.
+	if usable > 0 && m.cfg.Content != "schema_only" {
+		if err := prepareOracleDamengLoad(ctx, m.writer); err != nil {
+			m.cancelOracleDamengTask(ctx, fmt.Errorf("目标数据写入能力检查: %w", err))
+			return false
+		}
 	}
+	return true
+}
+
+func (m *Migrator) preflightOracleDamengTable(ctx context.Context, table string, p *damengTablePlan, opt dialect.TypeOpt) error {
 	if checker, ok := m.reader.(interface {
 		ValidateOracleDamengSource(context.Context, []*source.TableDDLInfo) error
 	}); ok {
-		if err := checker.ValidateOracleDamengSource(ctx, sourceInfos); err != nil {
-			issue("源端类型能力检查", err)
-			return false
+		if err := checker.ValidateOracleDamengSource(ctx, []*source.TableDDLInfo{p.source}); err != nil {
+			return err
 		}
 	}
-	if err := prepareOracleDamengWriter(ctx, m.writer, infos, opt); err != nil {
-		issue("目标能力检查", err)
-		return false
+	if err := prepareOracleDamengWriter(ctx, m.writer, []*source.TableDDLInfo{p.target}, opt); err != nil {
+		return err
 	}
-	if m.cfg.Content != "schema_only" {
-		if err := prepareOracleDamengLoad(ctx, m.writer); err != nil {
-			issue("目标数据写入能力检查", err)
-			return false
+	if m.cfg.Content != "data_only" {
+		if err := validateOracleDamengDefaults(ctx, m.writer, []*source.TableDDLInfo{p.target}, opt); err != nil {
+			return err
 		}
+		_, _, err := m.buildCreateTableDDL(ctx, table)
+		return err
 	}
-	for _, table := range tables {
-		p := m.dmPlans[table]
-		if m.cfg.Content != "data_only" {
-			if err := validateOracleDamengDefaults(ctx, m.writer, []*source.TableDDLInfo{p.target}, opt); err != nil {
-				issue(table, err)
-				continue
-			}
-			if _, _, err := m.buildCreateTableDDL(ctx, table); err != nil {
-				issue(table, err)
-			}
-			continue
-		}
-		// Data-only does not inspect defaults, indexes, or unrelated objects.
-		valid := true
-		for _, c := range p.source.Columns {
-			if err := typemap.ValidateOracleDamengColumn(c); err != nil {
-				issue(table, err)
-				valid = false
-			}
-		}
-		if valid {
-			if validator, ok := m.writer.(interface {
-				ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
-			}); ok {
-				if err := validator.ValidateOracleDamengExisting(ctx, p.target, opt); err != nil {
-					issue(table, err)
-				}
-			} else {
-				issue(table, fmt.Errorf("目标写入器不支持仅数据模式的列兼容检查"))
-			}
-			if validator, ok := m.writer.(interface {
-				ValidateOracleDamengLoadTriggers(context.Context, *source.TableDDLInfo) error
-			}); ok {
-				if err := validator.ValidateOracleDamengLoadTriggers(ctx, p.target); err != nil {
-					issue(table, err)
-				}
-			}
+	// Data-only does not inspect defaults, indexes, or unrelated objects.
+	for _, c := range p.source.Columns {
+		if err := typemap.ValidateOracleDamengColumn(c); err != nil {
+			return err
 		}
 	}
-	return ready
+	validator, ok := m.writer.(interface {
+		ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
+	})
+	if !ok {
+		return fmt.Errorf("目标写入器不支持仅数据模式的列兼容检查")
+	}
+	if err := validator.ValidateOracleDamengExisting(ctx, p.target, opt); err != nil {
+		return err
+	}
+	if checker, ok := m.writer.(interface {
+		ValidateOracleDamengLoadTriggers(context.Context, *source.TableDDLInfo) error
+	}); ok {
+		return checker.ValidateOracleDamengLoadTriggers(ctx, p.target)
+	}
+	return nil
 }
 
 // Preparation is read-only and happens before rendering DDL as well as before
@@ -169,7 +164,28 @@ func validateOracleDamengDefaults(ctx context.Context, w any, infos []*source.Ta
 // representative TableName, then emit one object per original sequence.
 func (m *Migrator) selectedSequences(values []source.SequenceInfo, selected map[string]bool) []source.SequenceInfo {
 	if m.isOracleDameng() {
-		return source.FilterNativeSequences(values, selected)
+		all := source.FilterNativeSequences(values, selected)
+		healthy := map[string]bool{}
+		for table, included := range selected {
+			if included && !m.dmBlocked[table] {
+				healthy[table] = true
+			}
+		}
+		out := source.FilterNativeSequences(all, healthy)
+		for i := range out {
+			if out[i].Native == nil {
+				continue
+			}
+			for _, original := range all {
+				if original.Native != nil && original.Native.Name == out[i].Native.Name {
+					// The representative table identifies the durable repair object;
+					// only Bindings determine which tables are read or modified.
+					out[i].TableName, out[i].ColumnName = original.TableName, original.ColumnName
+					break
+				}
+			}
+		}
+		return out
 	}
 	out := make([]source.SequenceInfo, 0, len(values))
 	for _, v := range values {
@@ -204,6 +220,7 @@ func (m *Migrator) prepareSourceSequence(ctx context.Context, v source.SequenceI
 		}); ok {
 			prepared, err := preparer.PrepareNativeSequence(ctx, v)
 			if err != nil {
+				m.stopOracleDamengTask(ctx, err)
 				v.Unsupported = err.Error()
 			} else {
 				v = prepared
@@ -213,9 +230,39 @@ func (m *Migrator) prepareSourceSequence(ctx context.Context, v source.SequenceI
 	return v
 }
 
+func (m *Migrator) reportBlockedOracleSequence(report *MigrationReport, v source.SequenceInfo) {
+	if !m.isOracleDameng() {
+		return
+	}
+	blocked := []string{}
+	if v.Native != nil {
+		for _, binding := range v.Native.Bindings {
+			if m.dmBlocked[binding.TableName] {
+				blocked = append(blocked, binding.TableName+"."+binding.ColumnName)
+			}
+		}
+	} else if m.dmBlocked[v.TableName] {
+		blocked = append(blocked, v.TableName+"."+v.ColumnName)
+	}
+	if len(blocked) == 0 {
+		return
+	}
+	target := m.targetSequence(v)
+	name := dialect.SequenceName(m.writer.Dialect(), target)
+	result := objectResultForError(name, "", fmt.Errorf("关联表迁移失败，已跳过序列绑定 %s；健康表绑定继续处理", strings.Join(blocked, ", ")))
+	result.Stage, result.Table, result.TargetTable = "dependency", v.TableName, target.TableName
+	result.TargetName, result.TargetSchema = name, m.cfg.TargetSchema
+	report.Sequences.Total++
+	report.Sequences.Failed++
+	report.Sequences.Items = append(report.Sequences.Items, result)
+}
+
 func (m *Migrator) calibrateOracleDameng(ctx context.Context, report *MigrationReport, tables []string) {
 	values, err := m.reader.GetSequences(ctx)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return
+		}
 		recordMetadataFailure(&report.Sequences, err)
 		return
 	}
@@ -223,8 +270,14 @@ func (m *Migrator) calibrateOracleDameng(ctx context.Context, report *MigrationR
 	for _, table := range tables {
 		selected[table] = true
 	}
+	for _, seq := range source.FilterNativeSequences(values, selected) {
+		m.reportBlockedOracleSequence(report, seq)
+	}
 	for _, seq := range m.selectedSequences(values, selected) {
 		seq = m.prepareSourceSequence(ctx, seq)
+		if ctx.Err() != nil {
+			return
+		}
 		seq = m.targetSequence(seq)
 		name := dialect.SequenceName(m.writer.Dialect(), seq)
 		report.Sequences.Total++
@@ -233,11 +286,14 @@ func (m *Migrator) calibrateOracleDameng(ctx context.Context, report *MigrationR
 		} else if calibrator, ok := m.writer.(interface {
 			CalibrateOracleDameng(context.Context, source.SequenceInfo) error
 		}); ok {
-			err = m.captureRepairCall(ctx, repair.Object{Kind: "sequence", Name: name, Table: seq.TableName, TargetName: name, Sequence: &seq}, nil, func(ctx context.Context) error { return calibrator.CalibrateOracleDameng(ctx, seq) })
+			err = m.captureSequenceCall(ctx, seq, nil, func(ctx context.Context) error { return calibrator.CalibrateOracleDameng(ctx, seq) })
 		} else {
 			err = fmt.Errorf("目标写入器不支持已有 Oracle 关联序列续号")
 		}
 		if err != nil {
+			if m.stopOracleDamengTask(ctx, err) {
+				return
+			}
 			report.Sequences.Failed++
 			report.Sequences.Items = append(report.Sequences.Items, objectResultForError(name, "", err))
 		} else {

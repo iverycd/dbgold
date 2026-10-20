@@ -14,6 +14,9 @@ import (
 func (m *Migrator) migrateOracleDamengViewsOnly(ctx context.Context, names []string) []ObjectResult {
 	views, err := m.readViews(ctx)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return nil
+		}
 		return []ObjectResult{{Name: "视图元数据", Error: err.Error()}}
 	}
 	selected, found := map[string]bool{}, map[string]bool{}
@@ -40,6 +43,9 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 	}
 	tables, err := m.reader.ListTables(ctx)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return nil
+		}
 		return []ObjectResult{{Name: "视图依赖表", Error: err.Error()}}
 	}
 	byName := map[string]source.ViewInfo{}
@@ -86,6 +92,12 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 			results = append(results, ObjectResult{Name: m.objName(v.ViewName), DDL: v.Definition, Error: err.Error()})
 		}
 	}
+	dependencyFailure := func(v source.ViewInfo, err error) {
+		failure(v, err)
+		if wanted(v.ViewName) {
+			results[len(results)-1].Stage = "dependency"
+		}
+	}
 	origins := map[string]int{}
 	for _, v := range views {
 		if needed[v.ViewName] {
@@ -117,8 +129,7 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				failure(v, err)
-				continue
+				return results
 			}
 			discovery, discoveryErr := oracledameng.ConvertViewWithOptions(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, nil, m.oracleDamengSQLOptions())
 			if discoveryErr != nil {
@@ -156,6 +167,10 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 					dependencyErr = fmt.Errorf("依赖对象 %s 不存在或不在可迁移范围", dep)
 					break
 				}
+				if m.dmBlocked[sourceTable] {
+					dependencyErr = fmt.Errorf("依赖表 %s 迁移失败，未执行视图", sourceTable)
+					break
+				}
 				p, e := m.planDamengTable(ctx, sourceTable)
 				if e == nil && m.dmBlocked[sourceTable] {
 					e = fmt.Errorf("依赖表 %s 迁移失败", sourceTable)
@@ -177,6 +192,9 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 					}
 				}
 				if e != nil {
+					if m.stopOracleDamengTask(ctx, e) {
+						return results
+					}
 					dependencyErr = e
 					break
 				}
@@ -185,7 +203,13 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				}
 			}
 			if dependencyErr != nil {
-				failure(v, dependencyErr)
+				if err := m.repairViewDependencies(m.objName(v.ViewName), discovery.Dependencies); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return results
+					}
+					dependencyErr = err
+				}
+				dependencyFailure(v, dependencyErr)
 				progress = true
 				continue
 			}
@@ -193,6 +217,9 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				continue
 			}
 			if err := prepareOracleDamengWriter(ctx, m.writer, []*source.TableDDLInfo{{TableName: v.ViewName, Columns: v.Columns}}, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}); err != nil {
+				if m.stopOracleDamengTask(ctx, err) {
+					return results
+				}
 				failure(v, fmt.Errorf("视图目标能力检查: %w", err))
 				progress = true
 				continue
@@ -201,6 +228,9 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				ValidateOracleDamengView(context.Context, string) error
 			}); ok {
 				if err := validator.ValidateOracleDamengView(ctx, v.Definition); err != nil {
+					if m.stopOracleDamengTask(ctx, err) {
+						return results
+					}
 					failure(v, err)
 					progress = true
 					continue
@@ -248,6 +278,9 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				}
 			}
 			if err != nil {
+				if m.stopOracleDamengTask(ctx, err) {
+					return results
+				}
 				failure(original, err)
 			} else {
 				catalog[original.ViewName] = converted.Columns
@@ -261,7 +294,7 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 		if !progress {
 			for _, v := range views {
 				if _, exists := pending[v.ViewName]; exists {
-					failure(v, fmt.Errorf("视图依赖循环"))
+					dependencyFailure(v, fmt.Errorf("视图依赖循环"))
 				}
 			}
 		}

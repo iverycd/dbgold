@@ -52,10 +52,12 @@ func TestOracleDamengIntegration(t *testing.T) {
 	prefix := fmt.Sprintf("ODM%X", time.Now().UnixNano())
 	parent, child, seq, trigger, view, index, fk, high := prefix+"P", prefix+"C", prefix+"S", prefix+"TR", prefix+"V", prefix+"IX", prefix+"FK", prefix+"TS"
 	longTable, locatorTable, xmlTable, bfileTable, spatialTable := prefix+"L", prefix+"R", prefix+"X", prefix+"BF", prefix+"G"
+	virtualTable := prefix + "BAD"
 	quote := func(n string) string { return `"` + strings.ReplaceAll(n, `"`, `""`) + `"` }
 	sq := func(n string) string { return quote(srcSchema) + "." + quote(n) }
 	dq := func(n string) string { return dialect.NewDaMeng().QualifyTable(dstSchema, n) }
 	cleanTarget := func(cleanup context.Context) {
+		_, _ = dst.ExecContext(cleanup, "DROP TABLE "+dq(virtualTable)+" CASCADE CONSTRAINTS")
 		for _, statement := range []string{"DROP VIEW " + dq(view), "DROP TABLE " + dq(child) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(parent) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(high) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(longTable) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(locatorTable) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(xmlTable) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(bfileTable) + " CASCADE CONSTRAINTS", "DROP TABLE " + dq(spatialTable) + " CASCADE CONSTRAINTS", "DROP SEQUENCE " + dq(seq)} {
 			_, _ = dst.ExecContext(cleanup, statement)
 		}
@@ -64,6 +66,7 @@ func TestOracleDamengIntegration(t *testing.T) {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
 		cleanTarget(cleanup)
+		_, _ = src.ExecContext(cleanup, "DROP TABLE "+sq(virtualTable)+" CASCADE CONSTRAINTS PURGE")
 		for _, statement := range []string{"DROP VIEW " + sq(view), "DROP TABLE " + sq(child) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(parent) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(high) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(longTable) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(locatorTable) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(xmlTable) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(bfileTable) + " CASCADE CONSTRAINTS PURGE", "DROP TABLE " + sq(spatialTable) + " CASCADE CONSTRAINTS PURGE", "DROP SEQUENCE " + sq(seq)} {
 			_, _ = src.ExecContext(cleanup, statement)
 		}
@@ -112,6 +115,7 @@ func TestOracleDamengIntegration(t *testing.T) {
 	execSource("INSERT INTO " + sq(locatorTable) + " SELECT 1,ROWID,ROWID FROM " + sq(parent) + " WHERE ID=1")
 	execSource("CREATE TABLE " + sq(xmlTable) + " (ID NUMBER(18) PRIMARY KEY, DOC XMLTYPE)")
 	execSource("INSERT INTO " + sq(xmlTable) + " VALUES (1,XMLTYPE('<root><name>AbC中文</name></root>'))")
+	execSource("CREATE TABLE " + sq(virtualTable) + " (ID NUMBER(18), VIRTUAL_ID NUMBER GENERATED ALWAYS AS (ID+1) VIRTUAL)")
 
 	run := func(t *testing.T, content, filter string) MigrationReport {
 		r, e := source.NewOracleForDameng(srcDSN, srcSchema, source.ConnPoolConfig{})
@@ -249,6 +253,18 @@ func TestOracleDamengIntegration(t *testing.T) {
 		require.NoError(t, dst.QueryRowContext(ctx, `SELECT "RID","URID" FROM `+dq(locatorTable)+` WHERE "ID"=1`).Scan(&rid, &urid))
 		require.Equal(t, []byte(rowid), rid)
 		require.Equal(t, []byte(rowid), urid)
+	})
+	cleanTarget(ctx)
+	t.Run("table_preflight_failure_does_not_stop_healthy_table", func(t *testing.T) {
+		report := run(t, "both", virtualTable+","+longTable)
+		require.Equal(t, 1, report.Tables.Failed, "%+v", report)
+		require.Equal(t, 1, report.Tables.Success, "%+v", report)
+		require.Equal(t, 1, report.Data.Success, "%+v", report)
+		var count int
+		require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER=? AND TABLE_NAME=?", dstSchema, virtualTable).Scan(&count))
+		require.Zero(t, count, "预检失败的表不得执行目标建表")
+		require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq(longTable)).Scan(&count))
+		require.Equal(t, 1, count, "健康表仍需完成数据迁移")
 	})
 	cleanTarget(ctx)
 	t.Run("xmltype_capability", func(t *testing.T) {

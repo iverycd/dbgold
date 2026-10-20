@@ -2,9 +2,12 @@ package target
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"regexp"
 	"testing"
 
@@ -98,6 +101,39 @@ func TestOracleDMDateUsesObservedFullSecondCapability(t *testing.T) {
 	}
 }
 
+func TestOracleDMDateDoesNotHideOrCacheConnectionFailure(t *testing.T) {
+	for _, phase := range []string{"mode", "date_roundtrip"} {
+		t.Run(phase, func(t *testing.T) {
+			w, m := mockDM(t)
+			failure := &net.OpError{Op: "read", Net: "tcp", Err: io.ErrUnexpectedEOF}
+			q := m.ExpectQuery("SELECT PARA_VALUE FROM V\\$DM_INI")
+			if phase == "mode" {
+				q.WillReturnError(failure)
+			} else {
+				q.WillReturnRows(sqlmock.NewRows([]string{"mode"}).AddRow("2"))
+				m.ExpectQuery(`SELECT TO_CHAR\(CAST\(TO_TIMESTAMP`).WithArgs("2024-01-02 03:04:05").WillReturnError(failure)
+			}
+			infos := []*source.TableDDLInfo{{TableName: "T", Columns: []source.ColumnInfo{{Name: "D", DataType: "DATE"}}}}
+			err := w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{})
+			require.ErrorIs(t, err, failure)
+			require.False(t, w.oracleDM.dateChecked)
+			m.ExpectQuery("SELECT PARA_VALUE FROM V\\$DM_INI").WillReturnRows(sqlmock.NewRows([]string{"mode"}).AddRow("2"))
+			m.ExpectQuery(`SELECT TO_CHAR\(CAST\(TO_TIMESTAMP`).WithArgs("2024-01-02 03:04:05").WillReturnRows(sqlmock.NewRows([]string{"date"}).AddRow("2024-01-02 03:04:05"))
+			require.NoError(t, w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{}))
+			require.True(t, w.OracleDamengUsesDate())
+		})
+	}
+}
+
+func TestOracleDMStrictLoadDoesNotCacheConnectionFailure(t *testing.T) {
+	w, m := mockDM(t)
+	m.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnError(sql.ErrConnDone)
+	require.ErrorIs(t, w.PrepareOracleDamengLoad(context.Background()), sql.ErrConnDone)
+	require.NotContains(t, w.oracleDM.features, "load:strict")
+	m.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnError(&dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"})
+	require.NoError(t, w.PrepareOracleDamengLoad(context.Background()))
+}
+
 func TestOracleDMTimestampProbesUseBindingAndCache(t *testing.T) {
 	w, m := mockDM(t)
 	const plain = "2024-01-02 03:04:05.123456700"
@@ -113,18 +149,143 @@ func TestOracleDMTimestampProbesUseBindingAndCache(t *testing.T) {
 	require.NoError(t, w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{}))
 }
 
-func TestOracleDMNationalProbeChecksMultibyteData(t *testing.T) {
-	for _, output := range []string{"汉A", "汉"} {
-		w, m := mockDM(t)
-		m.ExpectQuery(regexp.QuoteMeta("SELECT CAST(? AS NVARCHAR(2 CHAR)) FROM DUAL")).WithArgs("汉A").WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(output))
-		infos := []*source.TableDDLInfo{{TableName: "T", Columns: []source.ColumnInfo{{Name: "N", DataType: "VARCHAR2", Length: 2}}}}
-		err := w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{UseNvarchar2: true})
-		if output == "汉A" {
-			require.NoError(t, err)
-		} else {
-			require.ErrorContains(t, err, "T.N")
-		}
+func oracleDMNationalInfos(table string) []*source.TableDDLInfo {
+	return []*source.TableDDLInfo{{TableName: table, Columns: []source.ColumnInfo{{Name: "N", DataType: "VARCHAR2", Length: 36}}}}
+}
+
+func expectOracleDMStringControl(m sqlmock.Sqlmock, exact int, value any) {
+	m.ExpectQuery(regexp.QuoteMeta(oracleDMStringControlSQL)).WithArgs(oracleDMNationalSentinel).
+		WillReturnRows(sqlmock.NewRows([]string{"exact"}).AddRow(exact))
+	if exact == 1 {
+		m.ExpectQuery(regexp.QuoteMeta(oracleDMStringReadControlSQL)).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(value))
 	}
+}
+
+func expectOracleDMNational(m sqlmock.Sqlmock, kind string, literal bool, exact int) {
+	q := m.ExpectQuery(regexp.QuoteMeta(oracleDMNationalProbeSQL(kind, literal)))
+	if !literal {
+		q.WithArgs(oracleDMNationalSentinel)
+	}
+	q.WillReturnRows(sqlmock.NewRows([]string{"exact"}).AddRow(exact))
+}
+
+func capabilityScope(t *testing.T, err error) string {
+	t.Helper()
+	var scoped interface{ OracleDamengCapabilityScope() string }
+	require.ErrorAs(t, err, &scoped)
+	return scoped.OracleDamengCapabilityScope()
+}
+
+func TestOracleDMNationalProbeDoesNotDependOnNationalResultDecoding(t *testing.T) {
+	w, m := mockDM(t)
+	// Reproduce the observed client-visible result of the old probe. It alone
+	// cannot establish what bytes the server stored in the national expression.
+	const oldSQL = "SELECT CAST(? AS NVARCHAR(2 CHAR)) FROM DUAL"
+	m.ExpectQuery(regexp.QuoteMeta(oldSQL)).WithArgs(oracleDMNationalSentinel).
+		WillReturnRows(sqlmock.NewRows([]string{"national_value"}).AddRow(""))
+	var oldValue string
+	require.NoError(t, w.db.QueryRowContext(context.Background(), oldSQL, oracleDMNationalSentinel).Scan(&oldValue))
+	require.Empty(t, oldValue)
+	expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+	expectOracleDMNational(m, "NVARCHAR", false, 1)
+	require.NoError(t, w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true}))
+	// Only the server's integer verification is scanned for the national type.
+	// Controls and the successful capability are reused by later tables.
+	require.NoError(t, w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("U"), dialect.TypeOpt{UseNvarchar2: true}))
+}
+
+func TestOracleDMNationalProbeNeverSubstitutesLiteralForFailedBinding(t *testing.T) {
+	for _, literalExact := range []int{0, 1} {
+		w, m := mockDM(t)
+		expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+		expectOracleDMNational(m, "NVARCHAR", false, 0)
+		expectOracleDMNational(m, "NVARCHAR", true, literalExact)
+		err := w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true})
+		require.ErrorContains(t, err, "T.N")
+		require.Equal(t, "column", capabilityScope(t, err))
+		if literalExact == 1 {
+			require.ErrorContains(t, err, "字面量转换正常")
+			require.ErrorContains(t, err, "直接参数绑定")
+		} else {
+			require.ErrorContains(t, err, "参数化及字面量转换均未保留")
+		}
+		// A cached unsupported family retains the current table's identity.
+		err = w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("U"), dialect.TypeOpt{UseNvarchar2: true})
+		require.ErrorContains(t, err, "U.N")
+		require.Equal(t, "column", capabilityScope(t, err))
+	}
+}
+
+func TestOracleDMNationalProbeSeparatesSharedBindingAndResultFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, stage string
+		exact       int
+		value       any
+	}{
+		{name: "binding_loss", stage: "字符串绑定控制失败", exact: 0, value: "汉"},
+		{name: "empty_result", stage: "字符串结果读取控制失败", exact: 1, value: ""},
+		{name: "null_result", stage: "字符串结果读取控制失败", exact: 1, value: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, m := mockDM(t)
+			expectOracleDMStringControl(m, tc.exact, tc.value)
+			err := w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true})
+			require.ErrorContains(t, err, tc.stage)
+			require.Equal(t, "task", capabilityScope(t, err))
+			require.NotContains(t, w.oracleDM.features, "national:control")
+			// A shared control can recover; its failed observation is not cached.
+			expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+			expectOracleDMNational(m, "NVARCHAR", false, 1)
+			require.NoError(t, w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true}))
+		})
+	}
+}
+
+func TestOracleDMNationalProbePreservesExplicitCharAndDirectParameterPath(t *testing.T) {
+	w, m := mockDM(t)
+	expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+	expectOracleDMNational(m, "NCHAR", false, 1)
+	expectOracleDMNational(m, "NVARCHAR", false, 1)
+	infos := []*source.TableDDLInfo{{TableName: "T", Columns: []source.ColumnInfo{
+		{Name: "C", DataType: "NCHAR", Length: 2},
+		{Name: "V", DataType: "NVARCHAR2", Length: 2},
+	}}}
+	require.NoError(t, w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{}))
+	require.Contains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "CAST(? AS NVARCHAR(2 CHAR))")
+	require.NotContains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "CAST(CAST(?")
+	require.Contains(t, oracleDMNationalProbeSQL("NCHAR", false), "CAST(? AS NCHAR(2 CHAR))")
+}
+
+func TestOracleDMNationalProbeTransientConnectionFailureIsNotCached(t *testing.T) {
+	for _, failure := range []error{
+		io.ErrUnexpectedEOF,
+		context.DeadlineExceeded,
+		sql.ErrConnDone,
+		&net.OpError{Op: "read", Net: "tcp", Err: errors.New("closed connection")},
+		&dm.DmError{ErrCode: dm.ECGO_COMMUNITION_ERROR.ErrCode, ErrText: "communication error"},
+	} {
+		w, m := mockDM(t)
+		expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+		m.ExpectQuery(regexp.QuoteMeta(oracleDMNationalProbeSQL("NVARCHAR", false))).WithArgs(oracleDMNationalSentinel).WillReturnError(failure)
+		err := w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true})
+		require.ErrorIs(t, err, failure)
+		require.True(t, oracleDMTaskFailure(err))
+		require.NotContains(t, w.oracleDM.features, "national:NVARCHAR")
+		expectOracleDMNational(m, "NVARCHAR", false, 1)
+		require.NoError(t, w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true}))
+	}
+}
+
+func TestOracleDMNationalProbeSyntaxFailureIsColumnScoped(t *testing.T) {
+	w, m := mockDM(t)
+	expectOracleDMStringControl(m, 1, oracleDMNationalSentinel)
+	failure := &dm.DmError{ErrCode: -2007, ErrText: "syntax error"}
+	m.ExpectQuery(regexp.QuoteMeta(oracleDMNationalProbeSQL("NVARCHAR", false))).WithArgs(oracleDMNationalSentinel).WillReturnError(failure)
+	err := w.PrepareOracleDameng(context.Background(), oracleDMNationalInfos("T"), dialect.TypeOpt{UseNvarchar2: true})
+	require.ErrorIs(t, err, failure)
+	require.ErrorContains(t, err, "不代表实际列无法建表")
+	require.Equal(t, "column", capabilityScope(t, err))
 }
 
 func TestOracleDMFloatProfilesUseActualMetadata(t *testing.T) {

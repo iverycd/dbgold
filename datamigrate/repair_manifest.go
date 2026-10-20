@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -109,7 +110,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	}()
 	cancelled := func() bool {
 		if err := ctx.Err(); err != nil {
-			m.repairs.sinkErr = err
+			if !m.isOracleDameng() {
+				m.repairs.sinkErr = err
+			}
 			return true
 		}
 		return false
@@ -124,6 +127,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	finishStage := startRepairPreparationStage(m.log, "读取迁移表列表")
 	tables, err := m.reader.ListTables(ctx)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return
+		}
 		// Incremental writes cannot establish the initial inventory/binding.
 		// Retry with a fresh Run instead of executing after an incomplete plan.
 		m.repairs.sinkErr = fmt.Errorf("准备迁移修复清单失败（读取源表列表）: %w", err)
@@ -160,23 +166,33 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	progress := newRepairMetadataProgress(m.log, time.Now)
 	prewarmed, err := m.prewarmSourceTableDDL(ctx, participating, progress)
 	if err != nil {
+		if m.stopOracleDamengTask(ctx, err) {
+			return
+		}
 		m.repairs.sinkErr = err
 		return
 	}
 	if prewarmed == nil && len(participating) == 0 {
 		progress(0, 0)
 	}
-	var oraclePrepareErr error
+	oraclePrepareErrors := map[string]error{}
 	if m.isOracleDameng() && !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 {
-		infos := make([]*source.TableDDLInfo, 0, len(participating))
+		m.dmBlocked = map[string]bool{}
+		opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
 		for _, table := range participating {
-			if plan, e := m.planDamengTable(ctx, table); e == nil {
-				infos = append(infos, plan.target)
+			plan, e := m.planDamengTable(ctx, table)
+			if e == nil {
+				e = prepareOracleDamengWriter(ctx, m.writer, []*source.TableDDLInfo{plan.target}, opt)
 			}
-		}
-		oraclePrepareErr = prepareOracleDamengWriter(ctx, m.writer, infos, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
-		if oraclePrepareErr == nil && m.cfg.Content != "data_only" {
-			oraclePrepareErr = validateOracleDamengDefaults(ctx, m.writer, infos, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+			if e == nil && m.cfg.Content != "data_only" {
+				e = validateOracleDamengDefaults(ctx, m.writer, []*source.TableDDLInfo{plan.target}, opt)
+			}
+			if e != nil {
+				if m.stopOracleDamengTask(ctx, e) {
+					return
+				}
+				oraclePrepareErrors[table] = e
+			}
 		}
 	}
 	selected := map[string]bool{}
@@ -232,14 +248,23 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					o.Columns[i].TypeSchema = "SYSGEO2"
 				}
 			}
-			if oraclePrepareErr != nil {
-				e = fmt.Errorf("目标能力检查: %w", oraclePrepareErr)
+			if prepareErr := oraclePrepareErrors[t]; prepareErr != nil {
+				e = fmt.Errorf("目标能力检查: %w", prepareErr)
 			} else if !m.cfg.objectMode() && m.cfg.Content != "data_only" && len(m.cfg.ViewNames) == 0 {
 				ss, _, e = m.buildCreateTableDDL(ctx, t)
 			}
 		}
 		if e != nil {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			o.Error = e.Error()
+			if m.isOracleDameng() {
+				if m.dmBlocked == nil {
+					m.dmBlocked = map[string]bool{}
+				}
+				m.dmBlocked[t] = true
+			}
 		}
 		add(o, ss)
 	}
@@ -285,6 +310,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				addIndex(v)
 			}
 		} else {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			m.log.Warnf("收集主键失败: %v", e)
 		}
 		finishStage()
@@ -299,6 +327,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				addIndex(v)
 			}
 		} else {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			m.log.Warnf("收集索引失败: %v", e)
 		}
 		finishStage()
@@ -309,9 +340,27 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	if want("sequences") {
 		finishStage = startRepairPreparationStage(m.log, "收集序列")
 		if values, e := m.reader.GetSequences(ctx); e == nil {
-			for _, v := range m.selectedSequences(values, selected) {
+			scoped := m.selectedSequences(values, selected)
+			if m.isOracleDameng() {
+				// The inventory retains blocked bindings for later recovery. Only
+				// healthy bindings participate in source MAX/MIN observations.
+				scoped = source.FilterNativeSequences(values, selected)
+			}
+			for _, v := range scoped {
 				src := v.TableName
-				v = m.prepareSourceSequence(ctx, v)
+				active := m.selectedSequences([]source.SequenceInfo{v}, selected)
+				if len(active) > 0 {
+					prepared := m.prepareSourceSequence(ctx, active[0])
+					if ctx.Err() != nil {
+						return
+					}
+					if v.Native != nil && prepared.Native != nil {
+						native := *prepared.Native
+						native.Bindings = slices.Clone(v.Native.Bindings)
+						prepared.Native = &native
+					}
+					v = prepared
+				}
 				v = m.targetSequence(v)
 				name := dialect.SequenceName(m.writer.Dialect(), v)
 				owner := ""
@@ -319,7 +368,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					owner = m.cfg.TargetSchema
 				}
 				var ss []dialect.Statement
-				if v.Unsupported == "" && m.cfg.Content != "data_only" {
+				if len(active) > 0 && v.Unsupported == "" && m.cfg.Content != "data_only" {
 					ss = m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner)
 				}
 				var dependencies []string
@@ -331,6 +380,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				add(repair.Object{Kind: "sequence", Name: name, Table: v.TableName, SourceTable: src, TargetName: name, Sequence: &v, Error: v.Unsupported, Dependencies: dependencies}, ss)
 			}
 		} else {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			m.log.Warnf("收集序列失败: %v", e)
 		}
 		finishStage()
@@ -360,6 +412,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				add(repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: v.ConstraintName, ForeignKey: &v, Dependencies: []string{repairID("table", v.RefTable, v.RefTable)}}, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v))
 			}
 		} else {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			m.log.Warnf("收集外键失败: %v", e)
 		}
 		finishStage()
@@ -389,6 +444,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				}
 			}
 		} else {
+			if m.stopOracleDamengTask(ctx, e) {
+				return
+			}
 			m.log.Warnf("收集注释失败: %v", e)
 		}
 		finishStage()
@@ -408,6 +466,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			values, viewErr = m.reader.GetViews(ctx)
 		}
 		if viewErr != nil {
+			if m.stopOracleDamengTask(ctx, viewErr) {
+				return
+			}
 			m.log.Warnf("收集视图失败: %v", viewErr)
 		}
 		for _, v := range values {
@@ -583,7 +644,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		}
 	}
 	if e := m.flushRepairObjectLocked(*item); e != nil {
-		return e
+		return errors.Join(err, e)
 	}
 	return err
 }
@@ -603,11 +664,69 @@ func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) error {
 	return m.captureRepairCall(ctx, o, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateIndex(c, v) })
 }
 func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, owner string) error {
-	n := dialect.SequenceName(m.writer.Dialect(), v)
 	if v.Unsupported != "" {
-		return m.captureRepairCall(ctx, repair.Object{Kind: "sequence", Name: n, Table: v.TableName, TargetName: n, Sequence: &v}, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
+		return m.captureSequenceCall(ctx, v, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
 	}
-	return m.captureRepairCall(ctx, repair.Object{Kind: "sequence", Name: n, Table: v.TableName, TargetName: n, Sequence: &v}, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner), func(c context.Context) error { return m.writer.CreateSequence(c, v, owner) })
+	return m.captureSequenceCall(ctx, v, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner), func(c context.Context) error { return m.writer.CreateSequence(c, v, owner) })
+}
+
+// Execution can omit a failed table's binding of a shared sequence. Preserve
+// its original inventory and pending trigger units so recovery can add that
+// binding without replaying the already successful sequence/healthy triggers.
+func (m *Migrator) captureSequenceCall(ctx context.Context, v source.SequenceInfo, ss []dialect.Statement, fn func(context.Context) error) error {
+	name := dialect.SequenceName(m.writer.Dialect(), v)
+	o := repair.Object{Kind: "sequence", Name: name, Table: v.TableName, TargetName: name, Sequence: &v}
+	var original *source.SequenceInfo
+	var originalUnits []repair.Unit
+	if m.isOracleDameng() && v.Native != nil && m.repairs != nil {
+		m.repairs.mu.Lock()
+		for _, item := range m.repairs.objects {
+			if item.ID == repairID(o.Kind, o.Table, o.TargetName) && item.Sequence != nil && item.Sequence.Native != nil {
+				copy := *item.Sequence
+				native := *copy.Native
+				native.Bindings = slices.Clone(native.Bindings)
+				copy.Native = &native
+				original, originalUnits = &copy, slices.Clone(item.Units)
+				break
+			}
+		}
+		m.repairs.mu.Unlock()
+	}
+	err := m.captureRepairCall(ctx, o, ss, fn)
+	if original == nil || len(original.Native.Bindings) <= len(v.Native.Bindings) {
+		return err
+	}
+	m.repairs.mu.Lock()
+	defer m.repairs.mu.Unlock()
+	for i := range m.repairs.objects {
+		item := &m.repairs.objects[i]
+		if item.ID != repairID(o.Kind, o.Table, o.TargetName) {
+			continue
+		}
+		metadata := v
+		native := *v.Native
+		native.Bindings = original.Native.Bindings
+		metadata.Native = &native
+		item.Sequence = &metadata
+		for _, unit := range originalUnits {
+			found := false
+			for _, executed := range item.Units {
+				found = found || executed.SQL == unit.SQL
+			}
+			if !found {
+				unit.Status, unit.Error, unit.Selected = "blocked", "关联表迁移失败，未执行此序列绑定", true
+				item.Units = append(item.Units, unit)
+			}
+		}
+		if err == nil {
+			item.Status, item.Error, item.RequiresReview = "blocked", "部分序列绑定依赖迁移失败的表；健康表绑定已处理", true
+		}
+		if saveErr := m.flushRepairObjectLocked(*item); saveErr != nil && err == nil {
+			return saveErr
+		}
+		break
+	}
+	return err
 }
 func (m *Migrator) repairFK(ctx context.Context, v source.FKInfo) error {
 	return m.captureRepairCall(ctx, repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, TargetName: v.ConstraintName, ForeignKey: &v}, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateForeignKey(c, v) })
@@ -816,10 +935,14 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			r.objects = append(r.objects, legacy)
 		} else {
 			o := &r.objects[match]
-			o.SourceDDL = legacy.SourceDDL
-			o.DiagnosticOnly = legacy.DiagnosticOnly
+			if legacy.SourceDDL != "" {
+				o.SourceDDL = legacy.SourceDDL
+			}
+			if legacy.Status != "blocked" {
+				o.DiagnosticOnly = legacy.DiagnosticOnly
+			}
 			if o.Status == "pending" || o.Status == "blocked" {
-				o.Status = "failed"
+				o.Status = legacy.Status
 				o.Error = legacy.Error
 			}
 			if legacy.SuggestedDDL != "" {
@@ -863,6 +986,10 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 			o := repair.Object{ID: repair.Hash([]any{c.kind, i, item.Name, item.DDL, item.Error})[:32], Kind: c.kind, Name: item.Name, SourceName: item.Name, TargetName: item.Name, Schema: schema, DDL: item.DDL, SuggestedDDL: item.SuggestedDDL, Error: item.Error, Status: "failed", Legacy: true, OriginalStatus: "failed", OriginalError: item.Error, RequiresReview: true, Dependencies: []string{}, Units: []repair.Unit{}}
 			o.SourceDDL = item.SourceDDL
 			o.DiagnosticOnly = repairDiagnostic(item)
+			if item.Stage == "dependency" {
+				o.Status, o.OriginalStatus = "blocked", "blocked"
+				o.DiagnosticOnly = false
+			}
 			if item.Table != "" {
 				o.Table, o.SourceTable = item.Table, item.Table
 				o.ID = repair.Hash([]any{c.kind, i, item.Table, item.Name, item.DDL, item.Error})[:32]
