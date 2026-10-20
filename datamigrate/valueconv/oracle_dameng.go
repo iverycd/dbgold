@@ -2,7 +2,6 @@ package valueconv
 
 import (
 	"fmt"
-	"math"
 	"math/big"
 	"regexp"
 	"strconv"
@@ -33,26 +32,14 @@ func OracleDameng(v interface{}, dt string) (interface{}, error) {
 		return "", fmt.Errorf("%s 需要文本驱动值，收到 %T", dt, v)
 	}
 	switch base {
-	case "NUMBER", "NUMERIC", "DECIMAL", "DEC", "FLOAT", "REAL", "DOUBLE PRECISION", "INTEGER", "INT", "SMALLINT":
+	case "NUMBER", "NUMERIC", "DECIMAL", "DEC", "INTEGER", "INT", "SMALLINT":
 		raw, err := text()
 		if err != nil {
 			return nil, err
 		}
 		return oracleDamengDecimal(raw)
-	case "BINARY_FLOAT", "BINARY_DOUBLE":
-		switch x := v.(type) {
-		case float32:
-			if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-				return nil, fmt.Errorf("达梦暂不支持非有限浮点值")
-			}
-		case float64:
-			if math.IsNaN(x) || math.IsInf(x, 0) {
-				return nil, fmt.Errorf("达梦暂不支持非有限浮点值")
-			}
-		default:
-			return nil, fmt.Errorf("%s 驱动值类型不支持: %T", dt, v)
-		}
-		return v, nil
+	case "FLOAT", "REAL", "DOUBLE PRECISION", "BINARY_FLOAT", "BINARY_DOUBLE":
+		return OracleDamengFloat(v, dt, false, 64)
 	case "DATE", "TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE":
 		withTZ := strings.Contains(base, "TIME ZONE")
 		var raw string
@@ -155,13 +142,49 @@ func OracleDameng(v interface{}, dt string) (interface{}, error) {
 			return nil, fmt.Errorf("达梦驱动区间绑定无法精确保留小数秒 %q", raw)
 		}
 		return interval, nil
-	case "CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2", "CLOB", "NCLOB", "LONG":
-		return text()
+	case "CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "CHAR VARYING", "CHARACTER VARYING", "NCHAR", "NVARCHAR", "NVARCHAR2", "NATIONAL CHAR", "NATIONAL CHARACTER", "NATIONAL CHAR VARYING", "NATIONAL CHARACTER VARYING", "NCHAR VARYING":
+		s, err := text()
+		if err == nil && s == "" {
+			return nil, nil
+		}
+		return s, err
+	case "CLOB", "NCLOB", "LONG", "XMLTYPE", "SYS.XMLTYPE":
+		s, err := text()
+		if err != nil {
+			return nil, err
+		}
+		if base == "XMLTYPE" || base == "SYS.XMLTYPE" {
+			if err := validateOracleDMXML(s); err != nil {
+				return nil, err
+			}
+		}
+		return dm.NewClob(s), nil
 	case "RAW", "LONG RAW", "BLOB":
 		if b, ok := v.([]byte); ok {
+			if base != "RAW" {
+				return dm.NewBlob(b), nil
+			}
 			return b, nil
 		}
 		return nil, fmt.Errorf("%s 需要二进制驱动值，收到 %T", dt, v)
+	case "ROWID", "UROWID":
+		s, err := text()
+		if err != nil {
+			return nil, err
+		}
+		return oracleDMRowID(s, base == "ROWID")
+	case "BFILE":
+		return oracleDMBFile(v)
+	}
+	if oracleDMSpatialType(base) {
+		s, err := text()
+		if err != nil {
+			return nil, err
+		}
+		if err := validateOracleDMEWKT(s); err != nil {
+			return nil, err
+		}
+		return s, nil
 	}
 	return nil, fmt.Errorf("不支持 Oracle 类型 %s", dt)
 }
@@ -219,7 +242,12 @@ func OracleDamengPlaceholder(dt string) string {
 		return "TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF9')"
 	case "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE":
 		return "TO_TIMESTAMP_TZ(?, 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM')"
+	case "XMLTYPE", "SYS.XMLTYPE":
+		return "XMLTYPE(CAST(? AS CLOB))"
 	default:
+		if oracleDMSpatialType(typemap.OracleDamengBaseType(dt)) {
+			return "DMGEO2.ST_GEOMFROMEWKT(?)"
+		}
 		return "?"
 	}
 }

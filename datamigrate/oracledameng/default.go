@@ -15,25 +15,22 @@ var numericDefault = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(
 // Sequence defaults are deliberately rejected: DM8 version support differs and
 // NULL-only triggers cannot preserve Oracle's omitted-versus-explicit-NULL distinction.
 func Default(raw string) (string, error) {
+	return DefaultWithOptions(raw, Options{})
+}
+
+func DefaultWithOptions(raw string, opt Options) (string, error) {
 	s := strings.TrimSpace(raw)
 	for strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
-		depth, end, quoted := 0, -1, false
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\'' {
-				if quoted && i+1 < len(s) && s[i+1] == '\'' {
-					i++
-					continue
-				}
-				quoted = !quoted
-				continue
-			}
-			if quoted {
-				continue
-			}
-			if s[i] == '(' {
+		ts, err := tokenizeView(s)
+		if err != nil {
+			return "", err
+		}
+		depth, end := 0, -1
+		for i, token := range ts {
+			if token.text == "(" {
 				depth++
 			}
-			if s[i] == ')' {
+			if token.text == ")" {
 				depth--
 				if depth == 0 {
 					end = i
@@ -41,19 +38,32 @@ func Default(raw string) (string, error) {
 				}
 			}
 		}
-		if end != len(s)-1 {
+		if end != len(ts)-1 {
 			break
 		}
 		s = strings.TrimSpace(s[1 : len(s)-1])
 	}
 	if numericDefault.MatchString(s) {
-		if _, err := valueconv.OracleDameng(s, "NUMBER"); err != nil {
+		var err error
+		if opt.Float {
+			_, err = valueconv.OracleDamengFloat(s, "FLOAT", false, 64)
+		} else {
+			_, err = valueconv.OracleDameng(s, "NUMBER")
+		}
+		if err != nil {
 			return "", err
 		}
 		return " DEFAULT " + s, nil
 	}
 	if validLiteral(s) {
-		return " DEFAULT " + s, nil
+		literal, err := renderOracleLiteral(s)
+		if err != nil {
+			return "", err
+		}
+		return " DEFAULT " + literal, nil
+	}
+	if strings.HasPrefix(strings.ToUpper(s), "CAST(") && strings.HasSuffix(s, ")") {
+		return defaultCast(s, opt)
 	}
 	switch strings.ToUpper(s) {
 	case "NULL":
@@ -68,7 +78,18 @@ func Default(raw string) (string, error) {
 	upper := strings.ToUpper(s)
 	for _, prefix := range []string{"DATE ", "TIMESTAMP "} {
 		if strings.HasPrefix(upper, prefix) && validLiteral(strings.TrimSpace(s[len(prefix):])) {
-			return " DEFAULT " + s, nil
+			literal, err := renderOracleLiteral(strings.TrimSpace(s[len(prefix):]))
+			if err != nil {
+				return "", err
+			}
+			if literal == "NULL" {
+				return " DEFAULT NULL", nil
+			}
+			value := prefix + literal
+			if prefix == "DATE " && !opt.UseDate {
+				value = "CAST(" + value + " AS TIMESTAMP(0))"
+			}
+			return " DEFAULT " + value, nil
 		}
 	}
 	for _, fn := range []string{"TO_DATE", "TO_TIMESTAMP", "TO_TIMESTAMP_TZ"} {
@@ -77,8 +98,15 @@ func Default(raw string) (string, error) {
 		}
 		args, ok := literalArguments(s[len(fn)+1 : len(s)-1])
 		if ok && len(args) == 2 {
+			for i := range args {
+				var err error
+				args[i], err = renderOracleLiteral(args[i])
+				if err != nil {
+					return "", err
+				}
+			}
 			if fn == "TO_DATE" {
-				fn = "TO_TIMESTAMP"
+				return " DEFAULT CAST(TO_TIMESTAMP(" + strings.Join(args, ", ") + ") AS TIMESTAMP(0))", nil
 			}
 			return " DEFAULT " + fn + "(" + strings.Join(args, ", ") + ")", nil
 		}
@@ -87,49 +115,63 @@ func Default(raw string) (string, error) {
 }
 
 func validLiteral(s string) bool {
-	if len(s) > 1 && (s[0] == 'N' || s[0] == 'n') {
-		s = s[1:]
-	}
-	if len(s) < 2 || s[0] != '\'' {
-		return false
-	}
-	for i := 1; i < len(s); i++ {
-		if s[i] == '\'' {
-			if i+1 < len(s) && s[i+1] == '\'' {
-				i++
-				continue
-			}
-			return i == len(s)-1
-		}
-	}
-	return false
+	_, _, err := decodeOracleLiteral(s)
+	return err == nil
 }
 
 func literalArguments(s string) ([]string, bool) {
-	var result []string
-	start := 0
-	quoted := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\'' {
-			if quoted && i+1 < len(s) && s[i+1] == '\'' {
-				i++
-				continue
-			}
-			quoted = !quoted
-		}
-		if !quoted && s[i] == ',' {
-			result = append(result, strings.TrimSpace(s[start:i]))
-			start = i + 1
-		}
-	}
-	result = append(result, strings.TrimSpace(s[start:]))
-	if quoted {
+	ts, err := tokenizeView(s)
+	if err != nil || len(ts) == 0 || ts[len(ts)-1].text == "," {
 		return nil, false
 	}
-	for _, a := range result {
-		if !validLiteral(a) {
+	var result []string
+	for _, span := range splitViewTokens(ts, 0, len(ts), ",") {
+		if span[1]-span[0] != 1 || ts[span[0]].kind != 's' {
 			return nil, false
 		}
+		result = append(result, ts[span[0]].text)
 	}
 	return result, true
+}
+
+func defaultCast(s string, opt Options) (string, error) {
+	ts, err := tokenizeView(s)
+	if err != nil {
+		return "", err
+	}
+	if len(ts) < 6 || !ts[0].is("CAST") || ts[1].text != "(" || viewClosingParen(ts, 1, len(ts)) != len(ts)-1 {
+		return "", fmt.Errorf("不支持 Oracle CAST 默认表达式")
+	}
+	as, depth := -1, 0
+	for i := 2; i < len(ts)-1; i++ {
+		if ts[i].text == "(" {
+			depth++
+		} else if ts[i].text == ")" {
+			depth--
+		} else if depth == 0 && ts[i].is("AS") {
+			if as >= 0 {
+				return "", fmt.Errorf("不支持 Oracle CAST 默认表达式")
+			}
+			as = i
+		}
+	}
+	if as <= 2 || as+1 >= len(ts)-1 {
+		return "", fmt.Errorf("不支持 Oracle CAST 默认表达式")
+	}
+	parts := make([]string, 0, len(ts)-as-2)
+	for _, token := range ts[as+1 : len(ts)-1] {
+		parts = append(parts, token.text)
+	}
+	if strings.EqualFold(strings.Join(parts, " "), "DATE") {
+		return "", fmt.Errorf("CAST AS DATE 默认值的时区、格式或小数秒截断语义无法确认，请使用显式 TO_DATE 格式")
+	}
+	mapped, err := oracleDMCastType(strings.Join(parts, " "), opt)
+	if err != nil {
+		return "", err
+	}
+	inner, err := DefaultWithOptions(s[ts[2].start:ts[as-1].end], opt)
+	if err != nil {
+		return "", err
+	}
+	return " DEFAULT CAST(" + strings.TrimPrefix(inner, " DEFAULT ") + " AS " + mapped + ")", nil
 }

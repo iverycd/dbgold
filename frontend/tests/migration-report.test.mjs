@@ -8,6 +8,12 @@ import { migrationReportUtils } from './helpers/migration-report.mjs'
 const { failureStage, describeFailure, categoryPresentation, compatibilityReportGroups, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
 const failure = overrides => ({ name: 'idx_orders', ddl: '', error: 'index error', ...overrides })
+
+test('preflight failures explain that target business objects were not written', () => {
+  const result = describeFailure(failure({ stage: 'preflight' }), 'tables')
+  assert.equal(result.stageLabel, '迁移预检失败')
+  assert.match(result.emptyDDLMessage, /尚未执行目标业务对象写入/)
+})
 const compatibilityFunctionSignatures = [
   ['get_uuid', 'get_uuid()'],
   ['auto_increase_itemid', 'auto_increase_itemid()'],

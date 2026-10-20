@@ -20,7 +20,14 @@ import (
 //   - 不支持 DROP TABLE IF EXISTS:建表 DDL 含独立 DROP 语句,由 Writer 容错执行。
 //   - 索引/外键不支持 IF NOT EXISTS;外键不支持 ON UPDATE 子句。
 //   - 对象 owner 即所在 schema,无 ALTER ... OWNER TO。
-type DaMengDialect struct{}
+type DaMengDialect struct {
+	// Only Oracle migrations use DATE after the target's read-only roundtrip
+	// proved Oracle-compatible DATE semantics. Other sources stay unchanged.
+	oracleDate bool
+}
+
+func (d *DaMengDialect) SetOracleDamengDate(enabled bool) { d.oracleDate = enabled }
+func (d *DaMengDialect) OracleDamengUsesDate() bool       { return d.oracleDate }
 
 // NewDaMeng 创建达梦方言。
 func NewDaMeng() *DaMengDialect { return &DaMengDialect{} }
@@ -48,6 +55,9 @@ func (d *DaMengDialect) QualifyTable(schema, table string) string {
 }
 
 func (d *DaMengDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOpt) string {
+	if srcType == "oracle" && typemap.OracleDamengBaseType(col.DataType) == "DATE" && d.oracleDate {
+		return "DATE"
+	}
 	if m, ok := typemap.Get(srcType, "dameng"); ok {
 		return m(col, opt.CharInLength, opt.UseNvarchar2)
 	}
@@ -94,7 +104,12 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 		}
 		if col.Default != nil && col.Extra != "auto_increment" && !(srcType == "oracle" && col.Identity != "") {
 			if srcType == "oracle" {
-				clause, err := oracledameng.Default(*col.Default)
+				options := oracledameng.Options{UseDate: d.oracleDate, CharInLength: opt.CharInLength, UseNvarchar2: opt.UseNvarchar2}
+				switch typemap.OracleDamengBaseType(col.DataType) {
+				case "FLOAT", "REAL", "DOUBLE PRECISION", "BINARY_FLOAT", "BINARY_DOUBLE":
+					options.Float = true
+				}
+				clause, err := oracledameng.DefaultWithOptions(*col.Default, options)
 				if err != nil {
 					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
 				}

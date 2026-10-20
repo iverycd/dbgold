@@ -219,7 +219,7 @@
                   <div><dt>表内并行</dt><dd>{{ job.intra_table_parallel || '—' }}</dd></div>
                   <div><dt>名称转小写</dt><dd>{{ yesNo(job.lower_case_names) }}</dd></div>
                   <div><dt>字符按长度映射</dt><dd>{{ yesNo(job.char_in_length) }}</dd></div>
-                  <div><dt>使用 NVARCHAR2</dt><dd>{{ yesNo(job.use_nvarchar2) }}</dd></div>
+                  <div><dt>{{ job.src_db_type === 'oracle' && job.dst_db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 NVARCHAR2' }}</dt><dd>{{ yesNo(job.use_nvarchar2) }}</dd></div>
                   <div><dt>修改对象 Owner</dt><dd>{{ yesNo(job.change_owner) }}</dd></div>
                 </dl>
               </section>

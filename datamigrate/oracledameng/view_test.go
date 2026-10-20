@@ -26,7 +26,7 @@ ORDER BY display_name;`
 	require.NoError(t, err)
 	require.Equal(t, []string{"PARENT"}, got.Dependencies)
 	require.Equal(t, []MappedColumn{{"ID", "ID"}, {"ROWID", "ROW_ID_2"}, {"DISPLAY_NAME", "DISPLAY_NAME"}, {"DECISION", "DECISION"}, {"NOW_TEXT", "NOW_TEXT"}}, got.Columns)
-	for _, unchanged := range []string{"/* preserve 'AbC' */", "q'[MiXeD 'quoted' SRC.PARENT]'", "-- preserve Src.Parent and SRC.PARENT@link", "N'汉字AbC'", "NVL(", "TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS')"} {
+	for _, unchanged := range []string{"/* preserve 'AbC' */", "'MiXeD ''quoted'' SRC.PARENT'", "-- preserve Src.Parent and SRC.PARENT@link", "N'汉字AbC'", "NVL(", "TO_CHAR(SYSDATE,'YYYY-MM-DD HH24:MI:SS')"} {
 		require.Contains(t, got.SQL, unchanged)
 	}
 	require.Contains(t, got.SQL, `"P"."ROW_ID_2"`)
@@ -116,11 +116,11 @@ func TestConvertViewFailsClosed(t *testing.T) {
 }
 
 func TestConvertViewOracleLiterals(t *testing.T) {
-	for _, literal := range []string{`'a''b'`, `q'[a'b @link]'`, `Q'{a "quote" b}'`, `q'(a'b)'`, `q'<a>b>'`, `q'!a'b!'`, `nq'[汉字'x]'`, `N'汉字''x'`} {
+	for literal, rendered := range map[string]string{`'a''b'`: `'a''b'`, `q'[a'b @link]'`: `'a''b @link'`, `Q'{a "quote" b}'`: `'a "quote" b'`, `q'(a'b)'`: `'a''b'`, `q'<a>b>'`: `'a>b'`, `q'!a'b!'`: `'a''b'`, `nq'[汉字'x]'`: `N'汉字''x'`, `N'汉字''x'`: `N'汉字''x'`} {
 		t.Run(literal, func(t *testing.T) {
 			got, err := ConvertView("SELECT "+literal+" AS value FROM DUAL", "SRC", "DST", viewTestCatalog())
 			require.NoError(t, err)
-			require.Contains(t, got.SQL, literal)
+			require.Contains(t, got.SQL, rendered)
 			require.Empty(t, got.Dependencies)
 		})
 	}
@@ -141,7 +141,58 @@ func TestConvertViewNoUnexpectedChangesToOracleFunctions(t *testing.T) {
 	raw := `SELECT CAST(AMOUNT AS NUMBER(20,2)) val, EXTRACT(YEAR FROM DATE '2024-01-01') year_value, SYSDATE now_value, TRIM(BOTH 'x' FROM NAME) trimmed FROM PARENT WHERE NAME LIKE 'AbC%'`
 	got, err := ConvertView(raw, "SRC", "DST", viewTestCatalog())
 	require.NoError(t, err)
-	require.True(t, strings.Contains(got.SQL, "CAST(") && strings.Contains(got.SQL, "EXTRACT(YEAR FROM DATE '2024-01-01')") && strings.Contains(got.SQL, "SYSDATE"))
+	require.True(t, strings.Contains(got.SQL, "CAST(") && strings.Contains(got.SQL, "EXTRACT(YEAR FROM CAST(DATE '2024-01-01' AS TIMESTAMP(0)))") && strings.Contains(got.SQL, "SYSDATE"))
+}
+
+func TestConvertViewMapsCastsToApprovedTargetTypes(t *testing.T) {
+	for _, tc := range []struct{ source, target string }{
+		{"VARCHAR2(10 CHAR)", "VARCHAR2(10 CHAR)"}, {"CHAR(10 BYTE)", "CHAR(10)"},
+		{"NCHAR(10)", "NCHAR(10 CHAR)"}, {"NVARCHAR2(10)", "NVARCHAR(10 CHAR)"},
+		{"NATIONAL CHARACTER VARYING(10)", "NVARCHAR(10 CHAR)"},
+		{"NUMBER(20,2)", "NUMBER(20,2)"}, {"INT", "NUMBER(38,0)"},
+		{"FLOAT(126)", "FLOAT(126)"}, {"REAL", "FLOAT(63)"}, {"DOUBLE PRECISION", "FLOAT(126)"},
+		{"BINARY_FLOAT", "FLOAT"}, {"BINARY_DOUBLE", "DOUBLE"},
+		{"DATE", "TIMESTAMP(0)"}, {"TIMESTAMP(9)", "TIMESTAMP(9)"},
+		{"TIMESTAMP(9) WITH LOCAL TIME ZONE", "TIMESTAMP(9) WITH TIME ZONE"},
+		{"RAW(32)", "VARBINARY(32)"}, {"INTERVAL DAY(2) TO SECOND(6)", "INTERVAL DAY(2) TO SECOND(6)"},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			got, err := ConvertView("SELECT CAST(AMOUNT AS "+tc.source+") AS value FROM PARENT", "SRC", "DST", viewTestCatalog())
+			require.NoError(t, err)
+			require.Contains(t, got.SQL, `CAST("AMOUNT" AS `+tc.target)
+		})
+	}
+	for _, typ := range []string{"XMLTYPE", "BFILE", "SDO_GEOMETRY", "SDE.ST_GEOMETRY", "UNSUPPORTED_TYPE", "NUMBER(4,5)", "NUMBER(0)", "FLOAT(127)", "INTERVAL DAY(2) TO SECOND(9)"} {
+		_, err := ConvertView("SELECT CAST(AMOUNT AS "+typ+") AS value FROM PARENT", "SRC", "DST", viewTestCatalog())
+		require.Error(t, err, typ)
+	}
+}
+
+func TestConvertViewOptionsAndDateFunctionsPreserveSeconds(t *testing.T) {
+	raw := `SELECT CAST(NAME AS CHAR(10)) c, CAST(TO_DATE(NAME,'YYYY-MM-DD HH24:MI:SS') AS DATE) d FROM PARENT`
+	got, err := ConvertViewWithOptions(raw, "SRC", "DST", viewTestCatalog(), Options{UseNvarchar2: true, UseDate: true})
+	require.NoError(t, err)
+	require.Contains(t, got.SQL, `CAST("NAME" AS NVARCHAR(10 CHAR)`)
+	require.Contains(t, got.SQL, `CAST(CAST(TO_TIMESTAMP("NAME",'YYYY-MM-DD HH24:MI:SS') AS TIMESTAMP(0)) AS DATE)`)
+	got, err = ConvertViewWithOptions(`SELECT CAST(NAME AS VARCHAR2(10)) c FROM PARENT`, "SRC", "DST", viewTestCatalog(), Options{CharInLength: true})
+	require.NoError(t, err)
+	require.Contains(t, got.SQL, `AS VARCHAR2(10 CHAR)`)
+	for _, raw := range []string{`SELECT TO_DATE(NAME) d FROM PARENT`, `SELECT TO_DATE(NAME,'YYYY', 'NLS=ENGLISH') d FROM PARENT`, `SELECT TO_DATE(NAME,'YYYY',) d FROM PARENT`} {
+		_, err := ConvertView(raw, "SRC", "DST", viewTestCatalog())
+		require.ErrorContains(t, err, "两个参数")
+	}
+}
+
+func TestConvertViewEmptyStringsAndBackslashFailClosed(t *testing.T) {
+	got, err := ConvertView(`SELECT '' a, N'' b, q'[]' c, Nq'[]' d FROM PARENT WHERE NAME=''`, "SRC", "DST", viewTestCatalog())
+	require.NoError(t, err)
+	require.Contains(t, got.SQL, `SELECT NULL "A", NULL "B", NULL "C", NULL "D"`)
+	require.Contains(t, got.SQL, `WHERE "NAME"=NULL`)
+	for _, literal := range []string{`'C:\folder'`, `n'C:\folder'`, `q'[C:\folder]'`} {
+		got, err := ConvertView("SELECT "+literal+" AS value FROM PARENT", "SRC", "DST", viewTestCatalog())
+		require.ErrorContains(t, err, "反斜杠")
+		require.Equal(t, []string{"PARENT"}, got.Dependencies)
+	}
 }
 
 func TestConvertViewDualShadowing(t *testing.T) {

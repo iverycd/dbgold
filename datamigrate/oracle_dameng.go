@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/oracledameng"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/tsqldameng"
@@ -15,6 +16,14 @@ import (
 
 func (m *Migrator) isOracleDameng() bool {
 	return m.reader.DBType() == "oracle" && m.writer.DBType() == "dameng"
+}
+
+func (m *Migrator) oracleDamengSQLOptions() oracledameng.Options {
+	opt := oracledameng.Options{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
+	if d, ok := m.writer.Dialect().(*dialect.DaMengDialect); ok {
+		opt.UseDate = d.OracleDamengUsesDate()
+	}
+	return opt
 }
 
 // This is deliberately limited to the selected tables and observational target
@@ -27,7 +36,9 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 	issue := func(table string, err error) {
 		ready = false
 		report.Tables.Failed++
-		report.Tables.Items = append(report.Tables.Items, objectResultForError(table, "", err))
+		result := objectResultForError(table, "", err)
+		result.Stage = "preflight"
+		report.Tables.Items = append(report.Tables.Items, result)
 		m.log.Errorf("Oracle → 达梦表预检 [%s]: %v", table, err)
 	}
 	if m.cfg.TargetSchema != "" {
@@ -36,6 +47,7 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 		}
 	}
 	infos := make([]*source.TableDDLInfo, 0, len(tables))
+	sourceInfos := make([]*source.TableDDLInfo, 0, len(tables))
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
 	for _, table := range tables {
 		if err := ctx.Err(); err != nil {
@@ -48,7 +60,36 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 			continue
 		}
 		infos = append(infos, p.target)
+		sourceInfos = append(sourceInfos, p.source)
+	}
+	if !ready {
+		return false
+	}
+	if checker, ok := m.reader.(interface {
+		ValidateOracleDamengSource(context.Context, []*source.TableDDLInfo) error
+	}); ok {
+		if err := checker.ValidateOracleDamengSource(ctx, sourceInfos); err != nil {
+			issue("源端类型能力检查", err)
+			return false
+		}
+	}
+	if err := prepareOracleDamengWriter(ctx, m.writer, infos, opt); err != nil {
+		issue("目标能力检查", err)
+		return false
+	}
+	if m.cfg.Content != "schema_only" {
+		if err := prepareOracleDamengLoad(ctx, m.writer); err != nil {
+			issue("目标数据写入能力检查", err)
+			return false
+		}
+	}
+	for _, table := range tables {
+		p := m.dmPlans[table]
 		if m.cfg.Content != "data_only" {
+			if err := validateOracleDamengDefaults(ctx, m.writer, []*source.TableDDLInfo{p.target}, opt); err != nil {
+				issue(table, err)
+				continue
+			}
 			if _, _, err := m.buildCreateTableDDL(ctx, table); err != nil {
 				issue(table, err)
 			}
@@ -81,14 +122,47 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 			}
 		}
 	}
-	if checker, ok := m.writer.(interface {
+	return ready
+}
+
+// Preparation is read-only and happens before rendering DDL as well as before
+// execution, so reports and repair units share the same capability-based types.
+func prepareOracleDamengWriter(ctx context.Context, w interface{ Dialect() dialect.Dialect }, infos []*source.TableDDLInfo, opt dialect.TypeOpt) error {
+	if checker, ok := w.(interface {
+		PrepareOracleDameng(context.Context, []*source.TableDDLInfo, dialect.TypeOpt) error
+	}); ok {
+		if err := checker.PrepareOracleDameng(ctx, infos, opt); err != nil {
+			return err
+		}
+	} else if checker, ok := w.(interface {
 		ValidateOracleDamengCapabilities(context.Context, []*source.TableDDLInfo) error
 	}); ok {
 		if err := checker.ValidateOracleDamengCapabilities(ctx, infos); err != nil {
-			issue("目标时间精度", err)
+			return err
 		}
 	}
-	return ready
+	if profile, ok := w.(interface{ OracleDamengUsesDate() bool }); ok {
+		if d, ok := w.Dialect().(*dialect.DaMengDialect); ok {
+			d.SetOracleDamengDate(profile.OracleDamengUsesDate())
+		}
+	}
+	return nil
+}
+
+func prepareOracleDamengLoad(ctx context.Context, w any) error {
+	if checker, ok := w.(interface{ PrepareOracleDamengLoad(context.Context) error }); ok {
+		return checker.PrepareOracleDamengLoad(ctx)
+	}
+	return nil
+}
+
+func validateOracleDamengDefaults(ctx context.Context, w any, infos []*source.TableDDLInfo, opt dialect.TypeOpt) error {
+	if checker, ok := w.(interface {
+		ValidateOracleDamengDefaults(context.Context, []*source.TableDDLInfo, dialect.TypeOpt) error
+	}); ok {
+		return checker.ValidateOracleDamengDefaults(ctx, infos, opt)
+	}
+	return nil
 }
 
 // A native sequence can serve multiple tables. Scope its bindings, not its

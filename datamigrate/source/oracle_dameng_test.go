@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,7 +39,8 @@ func TestOracleDamengColumnMetadataPreservesSource(t *testing.T) {
 		AddRow("MixedText", "VARCHAR2", 30, 120, 0, 0, "Y", "'KeepCase'", "C", 1, nil, "NO").
 		AddRow("RawData", "RAW", 0, 32, 0, 0, "Y", nil, "B", 2, nil, "NO").
 		AddRow("CreatedAt", "TIMESTAMP(9) WITH TIME ZONE", 0, 13, 0, 9, "Y", nil, "B", 3, nil, "NO").
-		AddRow("MixedId", "NUMBER", 0, 22, 20, 0, "N", `"APP"."ISEQ$$_42".nextval`, "B", 4, nil, "NO")
+		AddRow("MixedId", "NUMBER", 0, 22, 20, 0, "N", `"APP"."ISEQ$$_42".nextval`, "B", 4, nil, "NO").
+		AddRow("Xml", "XMLTYPE", 0, 2000, 0, 0, "Y", nil, "B", 5, "SYS", "NO")
 	mock.ExpectQuery("^"+regexp.QuoteMeta(oracleDMExpectedColumnSQL)+"$").WithArgs("APP", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
 	mock.ExpectQuery("SELECT i.COLUMN_NAME, i.GENERATION_TYPE").WithArgs("APP", "MixedTable").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "GENERATION_TYPE", "DEFAULT_ON_NULL"}).AddRow("MixedId", "BY DEFAULT", "YES")).RowsWillBeClosed()
 	info, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
@@ -52,6 +54,10 @@ func TestOracleDamengColumnMetadataPreservesSource(t *testing.T) {
 	require.Equal(t, int64(9), info.Columns[2].DateTimePrecision)
 	require.Equal(t, "BY DEFAULT ON NULL", info.Columns[3].Identity)
 	require.Nil(t, info.Columns[3].Default)
+	require.Equal(t, "XMLTYPE", info.Columns[4].DataType)
+	require.Equal(t, "SYS", info.Columns[4].TypeSchema)
+	require.Equal(t, "user_defined", info.Columns[4].TypeKind)
+	require.Equal(t, "SYS.XMLTYPE", OracleDamengSourceType(info.Columns[4]))
 	_, err = r.GetTableDDLInfo(context.Background(), "MixedTable")
 	require.NoError(t, err) // projected pages reuse the immutable metadata.
 }
@@ -85,7 +91,7 @@ func TestOracleDamengPagingPreservesBytesAndStableTypes(t *testing.T) {
 				{Name: "ZonedAt", DataType: "TIMESTAMP(9) WITH LOCAL TIME ZONE"},
 				{Name: "Payload", DataType: "BLOB"}, {Name: "DBGOLD_PAGE_ROWNUM", DataType: "NUMBER"},
 			}}
-			query := `SELECT .*TO_CHAR\("CreatedAt", 'SYYYY-MM-DD HH24:MI:SS'.*AT TIME ZONE '\+00:00'.*FROM "APP"\."Mixed""Table" ORDER BY "Text"`
+			query := `SELECT .*TO_CHAR\("CreatedAt", 'SYYYY-MM-DD HH24:MI:SS'.*AT TIME ZONE '\+00:00'.*FROM "APP"\."Mixed""Table" DBG_SOURCE ORDER BY "Text"`
 			if version >= 12 {
 				query += ` OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY`
 			} else {
@@ -252,4 +258,81 @@ func TestOracleDamengViewMetadataHonorsCancellation(t *testing.T) {
 	cancel()
 	_, err := r.GetViews(ctx)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestOracleDamengSpecialSourceProjections(t *testing.T) {
+	for _, tc := range []struct {
+		column ColumnInfo
+		want   string
+	}{
+		{ColumnInfo{Name: "RowId", DataType: "ROWID"}, `ROWIDTOCHAR("RowId") AS "RowId"`},
+		{ColumnInfo{Name: "Universal", DataType: "UROWID"}, `CAST("Universal" AS VARCHAR2(4000 BYTE)) AS "Universal"`},
+		{ColumnInfo{Name: "Xml", DataType: "XMLTYPE", TypeSchema: "SYS"}, `XMLSERIALIZE(CONTENT "Xml" AS CLOB) AS "Xml"`},
+		{ColumnInfo{Name: "External", DataType: "BFILE"}, `"External" AS "External"`},
+		{ColumnInfo{Name: "Exact", DataType: "REAL"}, `TO_CHAR("Exact", 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') AS "Exact"`},
+		{ColumnInfo{Name: "Geo", DataType: "SDO_GEOMETRY", TypeSchema: "MDSYS"}, `CASE WHEN "Geo" IS NULL THEN NULL ELSE 'SRID=' || NVL(TO_CHAR(DBG_SOURCE."Geo".SDO_SRID, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''), 'NULL') || ';' || MDSYS.SDO_UTIL.TO_WKTGEOMETRY("Geo") END AS "Geo"`},
+		{ColumnInfo{Name: `Mixed"Geo`, DataType: "ST_GEOMETRY", TypeSchema: "SDE"}, `CASE WHEN "Mixed""Geo" IS NULL THEN NULL ELSE 'SRID=' || NVL(TO_CHAR(SDE.ST_SRID("Mixed""Geo"), 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''), 'NULL') || ';' || SDE.ST_ASTEXT("Mixed""Geo") END AS "Mixed""Geo"`},
+		{ColumnInfo{Name: "Point", DataType: "ST_POINT", TypeSchema: "SYSGEO"}, `CASE WHEN "Point" IS NULL THEN NULL ELSE 'SRID=' || NVL(TO_CHAR(SYSGEO.ST_SRID("Point"), 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''), 'NULL') || ';' || SYSGEO.ST_ASTEXT("Point") END AS "Point"`},
+	} {
+		t.Run(tc.column.Name, func(t *testing.T) {
+			require.Equal(t, tc.want, oracleDamengProjection(tc.column))
+		})
+	}
+}
+
+func TestOracleDamengSpecialPagingRetainsOwnerAndSerializedValues(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 19)
+	info := &TableDDLInfo{TableName: "Objects", Columns: []ColumnInfo{
+		{Name: "RowId", DataType: "ROWID"},
+		{Name: "Universal", DataType: "UROWID"},
+		{Name: "Xml", DataType: "XMLTYPE", TypeSchema: "SYS", TypeKind: "user_defined"},
+		{Name: "Geo", DataType: "SDO_GEOMETRY", TypeSchema: "MDSYS", TypeKind: "user_defined"},
+	}}
+	r.metadata[info.TableName] = info
+	query := `SELECT ROWIDTOCHAR("RowId") AS "RowId", CAST("Universal" AS VARCHAR2(4000 BYTE)) AS "Universal", XMLSERIALIZE(CONTENT "Xml" AS CLOB) AS "Xml", CASE WHEN "Geo" IS NULL THEN NULL ELSE 'SRID=' || NVL(TO_CHAR(DBG_SOURCE."Geo".SDO_SRID, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''), 'NULL') || ';' || MDSYS.SDO_UTIL.TO_WKTGEOMETRY("Geo") END AS "Geo" FROM "APP"."Objects" DBG_SOURCE ORDER BY "RowId" OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY`
+	mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillReturnRows(sqlmock.NewRows([]string{"RowId", "Universal", "Xml", "Geo"}).
+		AddRow("AAAFfIAAFAAAABSAAb", "*BAAAtAkCwQIBeP4", "<Tag>KeepCase</Tag>", "SRID=4326;POINT (1 2)").
+		AddRow(nil, nil, nil, nil)).RowsWillBeClosed()
+	cols, types, rows, err := r.ReadPage(context.Background(), "Objects", []string{"RowId"}, 0, 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"RowId", "Universal", "Xml", "Geo"}, cols)
+	require.Equal(t, []string{"ROWID", "UROWID", "SYS.XMLTYPE", "MDSYS.SDO_GEOMETRY"}, types)
+	require.Equal(t, "<Tag>KeepCase</Tag>", rows[0][2])
+	require.Equal(t, "SRID=4326;POINT (1 2)", rows[0][3])
+	require.Equal(t, []interface{}{nil, nil, nil, nil}, rows[1])
+}
+
+func TestOracleDamengSourceSerializerProbeReadsNoRows(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	info := &TableDDLInfo{TableName: `Mixed"Objects`, Columns: []ColumnInfo{
+		{Name: "Text", DataType: "VARCHAR2"},
+		{Name: "Xml", DataType: "XMLTYPE", TypeSchema: "SYS", TypeKind: "user_defined"},
+		{Name: "Geo", DataType: "ST_GEOMETRY", TypeSchema: "SDE", TypeKind: "user_defined"},
+	}}
+	for _, c := range info.Columns[1:] {
+		query := "SELECT " + oracleDamengProjection(c) + ` FROM "APP"."Mixed""Objects" DBG_SOURCE WHERE 1=0`
+		mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillReturnRows(sqlmock.NewRows([]string{c.Name})).RowsWillBeClosed()
+	}
+	require.NoError(t, r.ValidateOracleDamengSource(context.Background(), []*TableDDLInfo{nil, info}))
+	// Ordinary source types need no serializer capability query or special grants.
+	require.NoError(t, r.ValidateOracleDamengSource(context.Background(), []*TableDDLInfo{{TableName: "Ordinary", Columns: info.Columns[:1]}}))
+}
+
+func TestOracleDamengSourceSerializerProbeExplainsMissingCapability(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	c := ColumnInfo{Name: "Geo", DataType: "ST_GEOMETRY", TypeSchema: "SDE", TypeKind: "user_defined"}
+	query := "SELECT " + oracleDamengProjection(c) + ` FROM "APP"."Mixed" DBG_SOURCE WHERE 1=0`
+	missing := errors.New("ORA-00904: ST_ASTEXT invalid identifier")
+	mock.ExpectQuery("^" + regexp.QuoteMeta(query) + "$").WillReturnError(missing)
+	err := r.ValidateOracleDamengSource(context.Background(), []*TableDDLInfo{{TableName: "Mixed", Columns: []ColumnInfo{c}}})
+	require.ErrorIs(t, err, missing)
+	require.ErrorContains(t, err, "Mixed")
+	require.ErrorContains(t, err, "Geo")
+	require.ErrorContains(t, err, "SDE.ST_GEOMETRY")
+	c.DataType, c.TypeSchema = "ST_CURVE", "SYSGEO"
+	err = r.ValidateOracleDamengSource(context.Background(), []*TableDDLInfo{{TableName: "Mixed", Columns: []ColumnInfo{c}}})
+	require.ErrorContains(t, err, "二维空间转换器")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, r.ValidateOracleDamengSource(ctx, nil), context.Canceled)
 }

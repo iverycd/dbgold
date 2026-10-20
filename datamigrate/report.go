@@ -16,7 +16,7 @@ type ObjectResult struct {
 	TargetTable   string                       `json:"target_table,omitempty"`
 	TargetSchema  string                       `json:"target_schema,omitempty"`
 	Table         string                       `json:"table,omitempty"` // Original source table name.
-	Stage         string                       `json:"stage,omitempty"` // metadata | unsupported | execute
+	Stage         string                       `json:"stage,omitempty"` // metadata | preflight | unsupported | execute
 	DDL           string                       `json:"ddl"`
 	SourceDDL     string                       `json:"source_ddl,omitempty"` // Source definition for reference, never executable target SQL.
 	Error         string                       `json:"error"`

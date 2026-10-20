@@ -23,6 +23,9 @@ type DaMengWriter struct {
 
 	identMu    sync.Mutex      // 保护 identCache
 	identCache map[string]bool // table → 是否含自增(IDENTITY)列
+
+	oracleDMMu sync.RWMutex
+	oracleDM   oracleDMCapabilityCache
 }
 
 // NewDaMeng 创建并连接达梦 Writer。

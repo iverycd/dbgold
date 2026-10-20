@@ -6,18 +6,19 @@ import (
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
+	"gitee.com/chunanyong/dm"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
 
 func TestOracleDamengCapabilitiesFailBeforeDDL(t *testing.T) {
-	for _, mode := range []string{"0", "1"} {
+	for _, result := range []string{"2024-01-02 03:04:05.123456000", "2024-01-02 03:04:05.123456789"} {
 		w, m := mockDM(t)
 		w.srcType = "oracle"
-		m.ExpectQuery("SELECT PARA_NAME,PARA_VALUE").WillReturnRows(sqlmock.NewRows([]string{"PARA_NAME", "PARA_VALUE"}).AddRow("COMPATIBLE_MODE", "2").AddRow("IFUN_DATETIME_MODE", mode))
+		m.ExpectQuery(`SELECT TO_CHAR\(CAST\(TO_TIMESTAMP\(\?,`).WithArgs("2024-01-02 03:04:05.123456789").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(result))
 		e := w.ValidateOracleDamengCapabilities(context.Background(), []*source.TableDDLInfo{{TableName: "T", Columns: []source.ColumnInfo{{Name: "TS", DataType: "TIMESTAMP(9)"}}}})
-		if mode == "0" {
-			require.ErrorContains(t, e, "IFUN_DATETIME_MODE=1")
+		if result == "2024-01-02 03:04:05.123456000" {
+			require.ErrorContains(t, e, "改变小数秒")
 		} else {
 			require.NoError(t, e)
 		}
@@ -53,8 +54,9 @@ func TestOracleDamengCopyUsesExplicitTemporalConversions(t *testing.T) {
 	w, m := mockDM(t)
 	w.srcType = "oracle"
 	w.identCache["T"] = false
+	m.ExpectQuery(`SELECT /\*\+ MY_STRICT_TABLES\(7\) \*/ CAST`).WithArgs("dbgold_invalid_number").WillReturnError(&dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"})
 	m.ExpectBegin()
-	p := m.ExpectPrepare(`INSERT INTO .*TO_TIMESTAMP\(\?, 'YYYY-MM-DD HH24:MI:SS.FF9'\).*TO_TIMESTAMP_TZ`)
+	p := m.ExpectPrepare(`INSERT /\*\+ MY_STRICT_TABLES\(7\) \*/ INTO .*TO_TIMESTAMP\(\?, 'YYYY-MM-DD HH24:MI:SS.FF9'\).*TO_TIMESTAMP_TZ`)
 	p.ExpectExec().WithArgs("2024-01-02 03:04:05.123456789", "2024-01-02 03:04:05.987654321 -05:00").WillReturnResult(sqlmock.NewResult(0, 1))
 	m.ExpectCommit()
 	require.NoError(t, w.CopyData(context.Background(), "T", []string{"TS", "TZ"}, []string{"TIMESTAMP(9)", "TIMESTAMP(9) WITH TIME ZONE"}, [][]interface{}{{"2024-01-02 03:04:05.123456789", "2024-01-02 03:04:05.987654321 -05:00"}}))

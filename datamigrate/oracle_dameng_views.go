@@ -57,7 +57,7 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 			return
 		}
 		needed[name] = true
-		discovery, _ := oracledameng.ConvertView(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, nil)
+		discovery, _ := oracledameng.ConvertViewWithOptions(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, nil, m.oracleDamengSQLOptions())
 		for _, dep := range discovery.Dependencies {
 			include(dep)
 		}
@@ -65,25 +65,6 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 	for _, v := range views {
 		if selected == nil || selected[v.ViewName] {
 			include(v.ViewName)
-		}
-	}
-	if checker, ok := m.writer.(interface {
-		ValidateOracleDamengCapabilities(context.Context, []*source.TableDDLInfo) error
-	}); ok {
-		infos := []*source.TableDDLInfo{}
-		for _, v := range views {
-			if needed[v.ViewName] {
-				infos = append(infos, &source.TableDDLInfo{TableName: v.ViewName, Columns: v.Columns})
-			}
-		}
-		if err := checker.ValidateOracleDamengCapabilities(ctx, infos); err != nil {
-			out := []ObjectResult{}
-			for _, v := range views {
-				if needed[v.ViewName] && (selected == nil || selected[v.ViewName]) {
-					out = append(out, objectResultForError(v.ViewName, "", err))
-				}
-			}
-			return out
 		}
 	}
 	catalog := map[string][]oracledameng.MappedColumn{}
@@ -139,7 +120,7 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 				failure(v, err)
 				continue
 			}
-			discovery, discoveryErr := oracledameng.ConvertView(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, nil)
+			discovery, discoveryErr := oracledameng.ConvertViewWithOptions(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, nil, m.oracleDamengSQLOptions())
 			if discoveryErr != nil {
 				failure(v, discoveryErr)
 				progress = true
@@ -180,13 +161,19 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 					e = fmt.Errorf("依赖表 %s 迁移失败", sourceTable)
 				}
 				if e == nil {
-					validator, ok := m.writer.(interface {
+					if validator, ok := m.writer.(interface {
+						ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
+					}); ok {
+						e = prepareOracleDamengWriter(ctx, m.writer, []*source.TableDDLInfo{p.target}, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+						if e == nil {
+							e = validator.ValidateOracleDamengExisting(ctx, p.target, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+						}
+					} else if validator, ok := m.writer.(interface {
 						ValidateDamengColumns(context.Context, *source.TableDDLInfo) error
-					})
-					if !ok {
-						e = fmt.Errorf("无法验证已有依赖表 %s 的目标列", sourceTable)
-					} else {
+					}); ok {
 						e = validator.ValidateDamengColumns(ctx, p.target)
+					} else {
+						e = fmt.Errorf("无法验证已有依赖表 %s 的目标列", sourceTable)
 					}
 				}
 				if e != nil {
@@ -205,7 +192,21 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 			if wait {
 				continue
 			}
-			converted, err := oracledameng.ConvertView(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, catalog)
+			if err := prepareOracleDamengWriter(ctx, m.writer, []*source.TableDDLInfo{{TableName: v.ViewName, Columns: v.Columns}}, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}); err != nil {
+				failure(v, fmt.Errorf("视图目标能力检查: %w", err))
+				progress = true
+				continue
+			}
+			if validator, ok := m.writer.(interface {
+				ValidateOracleDamengView(context.Context, string) error
+			}); ok {
+				if err := validator.ValidateOracleDamengView(ctx, v.Definition); err != nil {
+					failure(v, err)
+					progress = true
+					continue
+				}
+			}
+			converted, err := oracledameng.ConvertViewWithOptions(v.Definition, m.damengSourceSchema(), m.cfg.TargetSchema, catalog, m.oracleDamengSQLOptions())
 			if err == nil && len(v.Columns) > 0 {
 				v.Columns = append([]source.ColumnInfo(nil), v.Columns...)
 				if len(v.Columns) != len(converted.Columns) {

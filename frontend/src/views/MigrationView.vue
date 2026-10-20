@@ -217,7 +217,7 @@
                       <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
                     </a-col>
                     <a-col :span="12">
-                      <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">使用 nvarchar2</a-checkbox>
+                      <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">{{ selectedSrc?.db_type === 'oracle' && selectedDst?.db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 nvarchar2' }}</a-checkbox>
                     </a-col>
                     <a-col :span="12">
                       <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>

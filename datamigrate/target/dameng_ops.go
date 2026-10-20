@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/typemap"
 )
 
 // CopyData 用参数化批量 INSERT 写入(达梦占位符为 ?)。
@@ -18,6 +19,28 @@ import (
 func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) (retErr error) {
 	if len(rows) == 0 {
 		return nil
+	}
+	oracleFloatKinds := make([]string, len(cols))
+	if w.srcType == "oracle" {
+		if len(colTypes) != len(cols) {
+			return fmt.Errorf("表 %s 缺少源列类型", table)
+		}
+		if err := w.PrepareOracleDamengLoad(ctx); err != nil {
+			return err
+		}
+		for i, dt := range colTypes {
+			switch typemap.OracleDamengBaseType(dt) {
+			case "FLOAT", "REAL", "DOUBLE PRECISION", "BINARY_FLOAT", "BINARY_DOUBLE":
+				kind, err := w.OracleDamengColumnFloatKind(ctx, table, cols[i])
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", table, cols[i], err)
+				}
+				if kind != "decimal" && kind != "real" && kind != "double" {
+					return fmt.Errorf("%s.%s: 无法确认达梦目标浮点类型 %q", table, cols[i], kind)
+				}
+				oracleFloatKinds[i] = kind
+			}
+		}
 	}
 	hasIdentity, err := w.tableHasIdentity(ctx, table)
 	if err != nil {
@@ -68,7 +91,11 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 			placeholders[i] = valueconv.OracleDamengPlaceholder(colTypes[i])
 		}
 	}
-	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
+	insert := "INSERT INTO"
+	if w.srcType == "oracle" {
+		insert = "INSERT /*+ MY_STRICT_TABLES(7) */ INTO"
+	}
+	insertSQL := fmt.Sprintf(`%s %s (%s) VALUES (%s)`, insert,
 		w.qualifiedTable(table), strings.Join(quotedCols, ", "), strings.Join(placeholders, ", "))
 	stmt, err := tx.PrepareContext(ctx, insertSQL)
 	if err != nil {
@@ -87,7 +114,15 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 			}
 			conv = make([]interface{}, len(row))
 			for i, v := range row {
-				conv[i], err = valueconv.OracleDameng(v, colTypes[i])
+				if kind := oracleFloatKinds[i]; kind != "" {
+					bits := 64
+					if kind == "real" {
+						bits = 32
+					}
+					conv[i], err = valueconv.OracleDamengFloat(v, colTypes[i], kind == "decimal", bits)
+				} else {
+					conv[i], err = valueconv.OracleDameng(v, colTypes[i])
+				}
 				if err != nil {
 					return fmt.Errorf("%s.%s: %w", table, cols[i], err)
 				}

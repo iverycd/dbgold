@@ -50,10 +50,12 @@ export function failureStage(item: ObjectResult): ObjectResult['stage'] {
 export function describeFailure(item: ObjectResult, category?: string) {
   const stage = failureStage(item)
   const stageLabel = stage === 'metadata' ? '元数据读取失败'
+    : stage === 'preflight' ? '迁移预检失败'
     : stage === 'unsupported' ? '不支持自动转换'
     : stage === 'execute' ? 'DDL 执行失败'
     : category === 'data' ? '数据迁移失败' : '失败阶段未记录'
   const emptyDDLMessage = stage === 'metadata' ? '元数据读取失败，尚未生成目标 DDL。'
+    : stage === 'preflight' ? '预检未通过，尚未执行目标业务对象写入。'
     : stage === 'unsupported' ? '该对象暂不支持自动转换，未生成目标 DDL。'
     : stage === 'execute' ? 'DDL 执行失败，但报告未记录目标 DDL。' : '未记录 DDL。'
   return { stageLabel, emptyDDLMessage, sourceDDLLabel, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }

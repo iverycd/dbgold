@@ -166,6 +166,19 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	if prewarmed == nil && len(participating) == 0 {
 		progress(0, 0)
 	}
+	var oraclePrepareErr error
+	if m.isOracleDameng() && !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 {
+		infos := make([]*source.TableDDLInfo, 0, len(participating))
+		for _, table := range participating {
+			if plan, e := m.planDamengTable(ctx, table); e == nil {
+				infos = append(infos, plan.target)
+			}
+		}
+		oraclePrepareErr = prepareOracleDamengWriter(ctx, m.writer, infos, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+		if oraclePrepareErr == nil && m.cfg.Content != "data_only" {
+			oraclePrepareErr = validateOracleDamengDefaults(ctx, m.writer, infos, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+		}
+	}
 	selected := map[string]bool{}
 	add := func(o repair.Object, ss []dialect.Statement) {
 		o.ID = repairID(o.Kind, o.Table, o.TargetName)
@@ -215,8 +228,13 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				o.ColumnMapping[c.Name] = n
 				o.Columns[i].Name = n
 				o.Columns[i].DataType = m.writer.Dialect().MapType(c, m.reader.DBType(), dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+				if m.isOracleDameng() && strings.HasPrefix(o.Columns[i].DataType, "SYSGEO2.") {
+					o.Columns[i].TypeSchema = "SYSGEO2"
+				}
 			}
-			if !m.cfg.objectMode() && m.cfg.Content != "data_only" && len(m.cfg.ViewNames) == 0 {
+			if oraclePrepareErr != nil {
+				e = fmt.Errorf("目标能力检查: %w", oraclePrepareErr)
+			} else if !m.cfg.objectMode() && m.cfg.Content != "data_only" && len(m.cfg.ViewNames) == 0 {
 				ss, _, e = m.buildCreateTableDDL(ctx, t)
 			}
 		}

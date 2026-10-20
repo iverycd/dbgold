@@ -89,7 +89,7 @@ func TestOracleDamengTablePreflightBeforeAnyWrite(t *testing.T) {
 			r.ddl["Later"] = &source.TableDDLInfo{TableName: "Later", Columns: []source.ColumnInfo{{Name: "X", DataType: "NUMBER", Precision: 10}}}
 			switch kind {
 			case "type":
-				r.ddl["Later"].Columns[0].DataType = "XMLTYPE"
+				r.ddl["Later"].Columns[0].DataType = "UNSUPPORTED_TYPE"
 			case "default":
 				s := "SEQ.NEXTVAL"
 				r.ddl["Later"].Columns[0].Default = &s

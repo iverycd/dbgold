@@ -65,6 +65,7 @@ type viewConverter struct {
 	deps           []string
 	seenDeps       map[string]bool
 	firstErr       error
+	options        Options
 }
 
 // ConvertView selectively maps a standard Oracle SELECT body to its target
@@ -76,7 +77,11 @@ type viewConverter struct {
 // wildcard/output binding is deferred. With a non-nil catalog every relation and
 // column must resolve, including dependencies which already exist on the target.
 func ConvertView(raw, sourceSchema, targetSchema string, catalog map[string][]MappedColumn) (ViewResult, error) {
-	c := &viewConverter{raw: raw, source: sourceSchema, target: targetSchema, catalog: catalog, seenDeps: map[string]bool{}}
+	return ConvertViewWithOptions(raw, sourceSchema, targetSchema, catalog, Options{})
+}
+
+func ConvertViewWithOptions(raw, sourceSchema, targetSchema string, catalog map[string][]MappedColumn, opt Options) (ViewResult, error) {
+	c := &viewConverter{raw: raw, source: sourceSchema, target: targetSchema, catalog: catalog, seenDeps: map[string]bool{}, options: opt}
 	ts, err := tokenizeView(raw)
 	if err != nil {
 		return ViewResult{}, err
@@ -576,7 +581,84 @@ func (c *viewConverter) expression(start, end int, relations []viewRelation, ali
 	ts := c.ts
 	for i := start; i < end; i++ {
 		t := ts[i]
+		if t.kind == 's' {
+			literal, err := renderOracleLiteral(t.text)
+			if err != nil {
+				return err
+			}
+			if literal != t.text {
+				c.edit(i, i+1, literal)
+			}
+			continue
+		}
 		if !t.ident() {
+			continue
+		}
+		if (t.is("DATE") || t.is("TIMESTAMP")) && i+1 < end && ts[i+1].kind == 's' {
+			literal, err := renderOracleLiteral(ts[i+1].text)
+			if err != nil {
+				return err
+			}
+			if literal == "NULL" {
+				c.edit(i, i+2, "NULL")
+			} else {
+				if literal != ts[i+1].text {
+					c.edit(i+1, i+2, literal)
+				}
+				if t.is("DATE") && !c.options.UseDate {
+					c.edit(i, i+1, "CAST(DATE")
+					c.edits = append(c.edits, viewEdit{ts[i+1].end, ts[i+1].end, " AS TIMESTAMP(0))"})
+				}
+			}
+			i++
+			continue
+		}
+		if (t.is("CAST") || t.is("TO_DATE")) && i+1 < end && ts[i+1].text == "(" {
+			close := viewClosingParen(ts, i+1, end)
+			if close < 0 {
+				return fmt.Errorf("视图 %s 括号不匹配", t.text)
+			}
+			if t.is("CAST") {
+				as, depth := -1, 0
+				for j := i + 2; j < close; j++ {
+					if ts[j].text == "(" {
+						depth++
+					} else if ts[j].text == ")" {
+						depth--
+					} else if depth == 0 && ts[j].is("AS") {
+						if as >= 0 {
+							return fmt.Errorf("不支持 Oracle CAST 语法")
+						}
+						as = j
+					}
+				}
+				if as <= i+2 || as+1 >= close {
+					return fmt.Errorf("不支持 Oracle CAST 语法")
+				}
+				typeParts := make([]string, 0, close-as-1)
+				for _, token := range ts[as+1 : close] {
+					typeParts = append(typeParts, token.text)
+				}
+				mapped, err := oracleDMCastType(strings.Join(typeParts, " "), c.options)
+				if err != nil {
+					return err
+				}
+				if err = c.expression(i+2, as, relations, aliases); err != nil {
+					return err
+				}
+				c.edit(as+1, close, mapped)
+			} else {
+				args := splitViewTokens(ts, i+2, close, ",")
+				if len(args) != 2 || args[0][0] == args[0][1] || args[1][0] == args[1][1] || ts[close-1].text == "," {
+					return fmt.Errorf("视图 TO_DATE 仅支持两个参数")
+				}
+				if err := c.expression(i+2, close, relations, aliases); err != nil {
+					return err
+				}
+				c.edit(i, i+1, "CAST(TO_TIMESTAMP")
+				c.edits = append(c.edits, viewEdit{ts[close].end, ts[close].end, " AS TIMESTAMP(0))"})
+			}
+			i = close
 			continue
 		}
 		if i+1 < end && ts[i+1].text == "." {
@@ -630,6 +712,21 @@ func (c *viewConverter) expression(start, end int, relations []viewRelation, ali
 		c.edit(i, i+1, viewQuote(col.Target))
 	}
 	return nil
+}
+
+func viewClosingParen(ts []viewToken, open, end int) int {
+	depth := 0
+	for i := open; i < end; i++ {
+		if ts[i].text == "(" {
+			depth++
+		} else if ts[i].text == ")" {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 var viewFunctions = map[string]bool{}

@@ -54,7 +54,7 @@
         </div>
       </div>
     </section>
-    <a-table v-if="records.length" class="repair-table" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1040 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+    <a-table v-if="records.length" class="repair-table" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1280 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="emptyDescription" />
@@ -62,31 +62,33 @@
         </div>
       </template>
       <template #columns>
-        <a-table-column title="对象" :width="280">
+        <a-table-column title="对象" :width="360">
           <template #cell="{ record }">
-            <div class="repair-object-heading">
-              <a-tooltip>
-                <template #content><span class="repair-name-tooltip">{{ record.object.target_name }}</span></template>
-                <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
-              </a-tooltip>
-              <span class="repair-kind">{{ repairKind(record.object.kind) }}</span>
-              <a-tooltip v-if="record.batchReason" :trigger="['hover', 'focus']">
-                <template #content><span class="repair-name-tooltip">不可批量：{{ record.batchReason }}</span></template>
-                <button type="button" class="repair-batch-hint" :aria-label="`不可批量：${record.batchReason}`"><icon-info-circle /></button>
-              </a-tooltip>
-            </div>
-            <div class="repair-object-meta">
-              <a-tooltip>
-                <template #content><span class="repair-name-tooltip">模式：{{ record.object.schema || '—' }}</span></template>
-                <span class="repair-name">{{ record.object.schema || '—' }}</span>
-              </a-tooltip>
-              <template v-if="record.object.table && (!isTableRepair(record.object) || record.object.table !== record.object.target_name)">
-                <span class="repair-meta-divider" aria-hidden="true">·</span>
+            <div class="repair-object-cell">
+              <div class="repair-object-heading">
                 <a-tooltip>
-                  <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
-                  <span class="repair-name">所属表：{{ record.object.table }}</span>
+                  <template #content><span class="repair-name-tooltip">{{ record.object.target_name }}</span></template>
+                  <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
                 </a-tooltip>
-              </template>
+                <span class="repair-kind">{{ repairKind(record.object.kind) }}</span>
+                <a-tooltip v-if="record.batchReason" :trigger="['hover', 'focus']">
+                  <template #content><span class="repair-name-tooltip">不可批量：{{ record.batchReason }}</span></template>
+                  <button type="button" class="repair-batch-hint" :aria-label="`不可批量：${record.batchReason}`"><icon-info-circle /></button>
+                </a-tooltip>
+              </div>
+              <div class="repair-object-meta">
+                <a-tooltip>
+                  <template #content><span class="repair-name-tooltip">模式：{{ record.object.schema || '—' }}</span></template>
+                  <span class="repair-name">{{ record.object.schema || '—' }}</span>
+                </a-tooltip>
+                <template v-if="record.object.table && (!isTableRepair(record.object) || record.object.table !== record.object.target_name)">
+                  <span class="repair-meta-divider" aria-hidden="true">·</span>
+                  <a-tooltip>
+                    <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
+                    <span class="repair-name">所属表：{{ record.object.table }}</span>
+                  </a-tooltip>
+                </template>
+              </div>
             </div>
           </template>
         </a-table-column>
@@ -100,7 +102,7 @@
           </div>
           <span v-else class="muted">—</span>
         </template></a-table-column>
-        <a-table-column title="修复状态" :width="210">
+        <a-table-column title="修复状态" :width="360">
           <template #cell="{ record }">
             <div class="repair-statuses">
               <div v-for="state in repairDisplayStatuses(record)" :key="state.label" class="repair-status-line">
@@ -793,15 +795,15 @@ onUnmounted(() => {
 .repair-stat:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .repair-stats strong { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .attempt-banner, .editor-toolbar { margin: 12px 0; }
-.repair-statuses { display: flex; flex-direction: column; gap: 4px; }
-.repair-status-line { display: flex; align-items: center; gap: 4px; }
+.repair-statuses { display: flex; align-items: center; flex-wrap: nowrap; gap: 12px; white-space: nowrap; }
+.repair-status-line { display: flex; align-items: center; flex-shrink: 0; gap: 4px; white-space: nowrap; }
 .repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-3); }
-.repair-status-line :deep(.arco-tag) { height: auto; min-height: 20px; padding: 0 6px; font-size: 12px; line-height: 20px; white-space: normal; overflow-wrap: anywhere; }
+.repair-status-line :deep(.arco-tag) { height: auto; min-height: 20px; padding: 0 6px; font-size: 12px; line-height: 20px; white-space: nowrap; overflow-wrap: normal; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
-.repair-error-cell { min-width: 0; }
-.repair-error-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-2); line-height: 22px; }
+.repair-error-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.repair-error-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-2); line-height: 22px; }
 .repair-error-phase { color: var(--color-text-3); }
-.repair-error-actions { display: flex; align-items: center; gap: 8px; height: 22px; }
+.repair-error-actions { display: flex; align-items: center; flex-shrink: 0; gap: 8px; height: 22px; white-space: nowrap; }
 .repair-error-actions :deep(.arco-btn) { height: 22px; padding: 0; font-size: 12px; }
 .repair-error-object { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
 .repair-error-details { display: grid; gap: 12px; margin-top: 16px; }
@@ -809,16 +811,17 @@ onUnmounted(() => {
 .repair-error-detail h4 { margin: 0 0 8px; font-size: 13px; color: var(--color-text-2); }
 .repair-error-detail pre { margin: 0; font: 13px/1.7 var(--font-mono, monospace); color: var(--color-text-1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
-.repair-table :deep(.arco-table-td) { height: 68px; box-sizing: border-box; }
+.repair-table :deep(.arco-table-td) { height: 44px; box-sizing: border-box; }
 .repair-table :deep(.arco-table-td .arco-table-cell) { padding: 9px 12px; }
 .repair-table :deep(.arco-table-th .arco-table-cell) { padding: 10px 12px; color: var(--color-text-3); font-size: 12px; }
-.repair-object-heading { display: flex; align-items: center; gap: 7px; min-width: 0; line-height: 22px; }
+.repair-object-cell { display: flex; align-items: center; gap: 10px; min-width: 0; white-space: nowrap; }
+.repair-object-heading { display: flex; align-items: center; flex: 0 1 auto; gap: 7px; min-width: 0; line-height: 22px; }
 .repair-object-heading > .repair-name { flex: 0 1 auto; font-size: 13px; font-weight: 600; }
 .repair-kind { flex-shrink: 0; padding: 0 5px; border-radius: 4px; background: var(--color-fill-2); color: var(--color-text-3); font-size: 11px; line-height: 18px; }
 .repair-batch-hint { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; margin: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-4); font-size: 14px; cursor: help; }
 .repair-batch-hint:hover { color: var(--color-text-2); background: var(--color-fill-2); }
 .repair-batch-hint:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 1px; }
-.repair-object-meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 2px; font-size: 12px; line-height: 20px; color: var(--color-text-3); }
+.repair-object-meta { display: flex; align-items: center; flex: 0 0 auto; gap: 6px; min-width: 64px; max-width: 45%; font-size: 12px; line-height: 22px; color: var(--color-text-3); }
 .repair-meta-divider { flex-shrink: 0; color: var(--color-text-4); }
 .repair-row-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 2px; white-space: nowrap; }
 .repair-row-actions :deep(.arco-btn) { flex-shrink: 0; padding: 0 6px; }

@@ -10,42 +10,17 @@ import (
 	"dbgold/datamigrate/typemap"
 )
 
-// ValidateOracleDamengCapabilities observes the required target compatibility
-// and timestamp precision before destructive table operations. It never changes INI.
+// ValidateOracleDamengCapabilities retains the optional preflight interface used
+// by older callers. Preparation probes only features used by the selected columns.
 func (w *DaMengWriter) ValidateOracleDamengCapabilities(ctx context.Context, infos []*source.TableDDLInfo) error {
-	rows, err := w.db.QueryContext(ctx, `SELECT PARA_NAME,PARA_VALUE FROM V$DM_INI WHERE PARA_NAME IN ('COMPATIBLE_MODE','IFUN_DATETIME_MODE')`)
-	if err != nil {
-		return fmt.Errorf("读取达梦兼容能力: %w", err)
-	}
-	defer rows.Close()
-	parameters := map[string]string{}
-	for rows.Next() {
-		var key, val string
-		if err := rows.Scan(&key, &val); err != nil {
-			return err
-		}
-		parameters[strings.ToUpper(key)] = strings.TrimSpace(val)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if parameters["COMPATIBLE_MODE"] != "2" {
-		return fmt.Errorf("Oracle 迁移要求达梦 COMPATIBLE_MODE=2；不会自动修改数据库配置")
-	}
-	for _, info := range infos {
-		for _, c := range info.Columns {
-			if strings.HasPrefix(typemap.OracleDamengBaseType(c.DataType), "TIMESTAMP") && typemap.OracleDamengTimestampPrecision(c) > 6 && parameters["IFUN_DATETIME_MODE"] != "1" {
-				return fmt.Errorf("列 %s.%s 需要 IFUN_DATETIME_MODE=1 才能保留超过 6 位的小数秒；当前配置会截断", info.TableName, c.Name)
-			}
-		}
-	}
-	return nil
+	return w.PrepareOracleDameng(ctx, infos, dialect.TypeOpt{})
 }
 
 // ValidateOracleDamengExisting checks capacity as well as names in data/object
-// modes; an Oracle DATE requires TIMESTAMP(0), never DM DATE.
+// modes. Alias spellings are accepted only when the effective family and
+// capacity preserve the source values.
 func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *source.TableDDLInfo, opt dialect.TypeOpt) error {
-	rows, err := w.db.QueryContext(ctx, `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.CHAR_LENGTH,0),NVL(c.DATA_LENGTH,0),NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),c.NULLABLE,NVL(c.CHAR_USED,'B'),CASE WHEN sc.INFO2 & 0x01=0x01 THEN 1 ELSE 0 END FROM ALL_TAB_COLUMNS c JOIN ALL_OBJECTS o ON o.object_name=c.TABLE_NAME AND o.owner=c.OWNER JOIN SYS.SYSCOLUMNS sc ON sc.id=o.object_id AND sc.name=c.COLUMN_NAME WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`, w.schema, strings.ToUpper(info.TableName))
+	rows, err := w.db.QueryContext(ctx, `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.CHAR_LENGTH,0),NVL(c.DATA_LENGTH,0),NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),c.NULLABLE,CASE WHEN c.CHAR_USED='C' OR sc.SCALE IN (7,8) THEN 'C' ELSE NVL(c.CHAR_USED,'B') END,CASE WHEN sc.INFO2 & 0x01=0x01 THEN 1 ELSE 0 END FROM ALL_TAB_COLUMNS c JOIN ALL_OBJECTS o ON o.object_name=c.TABLE_NAME AND o.owner=c.OWNER JOIN SYS.SYSCOLUMNS sc ON sc.id=o.object_id AND sc.name=c.COLUMN_NAME WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`, w.schema, strings.ToUpper(info.TableName))
 	if err != nil {
 		return err
 	}
@@ -67,6 +42,11 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Release the catalog cursor before feature-specific metadata queries. Some
+	// migration pools deliberately use a single connection.
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if len(actual) != len(info.Columns) {
 		return fmt.Errorf("目标表 %s 不存在或列数不一致", info.TableName)
 	}
@@ -80,8 +60,46 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 		}
 		fail := func(reason string) error { return fmt.Errorf("目标列 %s.%s %s", info.TableName, src.Name, reason) }
 		want := typemap.OracleToDameng(src, opt.CharInLength, opt.UseNvarchar2)
-		base := dmBaseType(want)
-		if dmBaseType(c.kind) != base {
+		base, actualBase := oracleDMTypeFamily(want), oracleDMTypeFamily(c.kind)
+		srcBase := typemap.OracleDamengBaseType(source.OracleDamengSourceType(src))
+		isFloat := oracleDMFloatingSource(srcBase)
+		if srcBase == "DATE" && actualBase == "DATE" {
+			if !w.OracleDamengUsesDate() {
+				return fail("DATE 无法保证完整时分秒，所需类型为 TIMESTAMP(0)")
+			}
+			base = "DATE"
+		}
+		if srcBase == "TIMESTAMP WITH LOCAL TIME ZONE" && actualBase == "TIMESTAMP WITH LOCAL TIME ZONE" {
+			if err := w.validateOracleDMLocalTimestamp(ctx, typemap.OracleDamengTimestampPrecision(src)); err != nil {
+				return fail(err.Error())
+			}
+			base = actualBase
+		}
+		if isFloat {
+			switch actualBase {
+			case "NUMBER", "FLOAT", "REAL", "DOUBLE":
+				// FLOAT is intentionally allowed to round using its actual family.
+			default:
+				return fail(fmt.Sprintf("类型 %s 不是浮点或十进制数值类型", c.kind))
+			}
+			if actualBase == "NUMBER" && c.precision > 0 {
+				return fail("浮点值需要无固定标度的 NUMBER，禁止按整数/定点数截断")
+			}
+			kind, err := w.inspectOracleDMColumnFloat(ctx, info.TableName, src.Name)
+			if err != nil {
+				return fail(err.Error())
+			}
+			w.cacheOracleDMFloatColumn(info.TableName, src.Name, kind)
+			base = actualBase
+		} else if base == "XMLTYPE" || strings.HasPrefix(base, "SYSGEO2.ST_") {
+			if err := w.validateOracleDMSpecialColumn(ctx, info.TableName, src.Name, base); err != nil {
+				return fail(err.Error())
+			}
+		} else if base == "BFILE" && actualBase == "VARCHAR" && c.bytes == 512 && c.scale == 6 {
+			// DM represents BFILE internally as a masked VARCHAR(512).
+			actualBase = "BFILE"
+		}
+		if !isFloat && base != actualBase && base != "XMLTYPE" && !strings.HasPrefix(base, "SYSGEO2.ST_") {
 			return fail(fmt.Sprintf("类型 %s 与所需 %s 不匹配", c.kind, want))
 		}
 		if src.IsNullable && c.nullable != "Y" {
@@ -91,12 +109,12 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 			return fail("含 IDENTITY 属性，不能保留 Oracle 显式值写入语义")
 		}
 		switch base {
-		case "CHAR", "VARCHAR", "NVARCHAR2":
+		case "CHAR", "VARCHAR":
 			required, capacity := src.DataLength, c.bytes
-			charUnits := opt.CharInLength || opt.UseNvarchar2 || src.CharUsed == "C" || strings.HasPrefix(typemap.OracleDamengBaseType(src.DataType), "N")
+			charUnits := strings.Contains(strings.ToUpper(want), " CHAR)")
 			if charUnits {
 				required, capacity = src.Length, c.chars
-				if c.units != "C" && base != "NVARCHAR2" {
+				if !strings.EqualFold(c.units, "C") {
 					return fail("字符长度单位不足")
 				}
 			} else if required == 0 {
@@ -106,9 +124,14 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 				return fail("字符容量不足")
 			}
 		case "NUMBER":
+			if isFloat {
+				continue
+			}
 			p, s := src.Precision, src.Scale
-			srcBase := typemap.OracleDamengBaseType(src.DataType)
-			if srcBase == "FLOAT" || srcBase == "REAL" || srcBase == "DOUBLE PRECISION" || p == 0 {
+			if srcBase == "INTEGER" || srcBase == "INT" || srcBase == "SMALLINT" {
+				p, s = 38, 0
+			}
+			if p == 0 {
 				if c.precision > 0 {
 					return fail("需要无固定精度的 NUMBER，禁止窄化")
 				}
@@ -123,10 +146,19 @@ func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *s
 			if c.scale < p {
 				return fail("小数秒精度不足")
 			}
-		case "VARBINARY":
+		case "BINARY", "VARBINARY":
 			required := src.DataLength
 			if required == 0 {
 				required = src.Length
+			}
+			if srcBase == "ROWID" {
+				required = 18
+				if c.bytes != required {
+					return fail("ROWID 需要 BINARY(18)，避免定长补零改变标识")
+				}
+			}
+			if srcBase == "UROWID" {
+				required = 4000
 			}
 			if c.bytes < required {
 				return fail("二进制容量不足")

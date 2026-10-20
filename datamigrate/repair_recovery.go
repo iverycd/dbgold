@@ -101,23 +101,31 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		return p, err
 	}
 	if r.DBType() == "oracle" && w.DBType() == "dameng" {
+		if checker, ok := r.(interface {
+			ValidateOracleDamengSource(context.Context, []*source.TableDDLInfo) error
+		}); ok {
+			if err = checker.ValidateOracleDamengSource(ctx, []*source.TableDDLInfo{info}); err != nil {
+				return p, fmt.Errorf("补迁源端类型能力检查: %w", err)
+			}
+		}
 		mapped := slices.Clone(p.SourceColumns)
 		for i := range mapped {
 			mapped[i].Name = p.ColumnMapping[mapped[i].Name]
 		}
 		targetInfo := &source.TableDDLInfo{TableName: p.TargetTable, Columns: mapped}
+		if err = prepareOracleDamengWriter(ctx, w, []*source.TableDDLInfo{targetInfo}, dialect.TypeOpt{CharInLength: cfg.CharInLength, UseNvarchar2: cfg.UseNvarchar2}); err != nil {
+			return p, fmt.Errorf("补迁目标能力检查: %w", err)
+		}
+		if cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus != "succeeded" {
+			if err = prepareOracleDamengLoad(ctx, w); err != nil {
+				return p, fmt.Errorf("补迁目标数据写入能力检查: %w", err)
+			}
+		}
 		if checker, ok := w.(interface {
 			ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
 		}); ok {
 			if err = checker.ValidateOracleDamengExisting(ctx, targetInfo, dialect.TypeOpt{CharInLength: cfg.CharInLength, UseNvarchar2: cfg.UseNvarchar2}); err != nil {
 				return p, fmt.Errorf("补迁目标类型兼容检查: %w", err)
-			}
-		}
-		if checker, ok := w.(interface {
-			ValidateOracleDamengCapabilities(context.Context, []*source.TableDDLInfo) error
-		}); ok {
-			if err = checker.ValidateOracleDamengCapabilities(ctx, []*source.TableDDLInfo{targetInfo}); err != nil {
-				return p, err
 			}
 		}
 		if checker, ok := w.(interface {
