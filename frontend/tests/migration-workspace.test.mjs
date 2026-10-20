@@ -54,25 +54,25 @@ test('failure detail pages cover boundary counts and all 350 objects exactly onc
   try {
     const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'job' },
       'report, tableRows, getFailurePagination, setFailurePage, pagedFailureItems'))
-    for (const count of [0, 10, 11, 350]) {
+    for (const count of [0, 5, 6, 350]) {
       const original = failureReport(count)
       p.report.value = original
       p.setFailurePage('tables', 1)
       const row = p.tableRows.value.find(row => row.key === 'tables')
-      assert.equal(p.getFailurePagination('tables').pageSize, 10)
-      assert.equal(p.pagedFailureItems(row).length, Math.min(10, count))
+      assert.equal(p.getFailurePagination('tables').pageSize, 5)
+      assert.equal(p.pagedFailureItems(row).length, Math.min(5, count))
       const visited = []
-      for (let page = 1; page <= Math.ceil(count / 10); page++) {
+      for (let page = 1; page <= Math.ceil(count / 5); page++) {
         p.setFailurePage('tables', page)
         const items = p.pagedFailureItems(row)
-        assert.equal(items.length, Math.min(10, count - (page - 1) * 10))
+        assert.equal(items.length, Math.min(5, count - (page - 1) * 5))
         visited.push(...Array.from(items, item => item.name))
       }
       assert.deepEqual(visited, original.tables.items.map(item => item.name))
       assert.equal(new Set(visited).size, count)
       assert.equal(row.items.length, count, 'pagination preserves the complete report category')
     }
-    assert.equal(p.getFailurePagination('tables').current, 35)
+    assert.equal(p.getFailurePagination('tables').current, 70)
   } finally { scope.stop() }
 })
 
@@ -87,15 +87,15 @@ test('failure detail pagination isolates categories and resets the page when siz
     const row = key => p.tableRows.value.find(row => row.key === key)
     p.setFailurePage('tables', 3)
     p.setFailurePage('indexes', 2)
-    assert.equal(p.pagedFailureItems(row('tables'))[0].name, 'Orders_20')
-    assert.equal(p.pagedFailureItems(row('indexes'))[0].name, 'idx_Orders_10')
+    assert.equal(p.pagedFailureItems(row('tables'))[0].name, 'Orders_10')
+    assert.equal(p.pagedFailureItems(row('indexes'))[0].name, 'idx_Orders_5')
     p.setFailurePageSize('tables', 20)
     assert.equal(p.getFailurePagination('tables').current, 1)
     assert.equal(p.getFailurePagination('tables').pageSize, 20)
     assert.equal(p.pagedFailureItems(row('tables')).length, 20)
     assert.equal(p.pagedFailureItems(row('tables'))[0].name, 'Orders_0')
     assert.equal(p.getFailurePagination('indexes').current, 2)
-    assert.equal(p.getFailurePagination('indexes').pageSize, 10)
+    assert.equal(p.getFailurePagination('indexes').pageSize, 5)
     p.setFailurePage('tables', 3)
     assert.equal(p.pagedFailureItems(row('tables'))[0].name, 'Orders_40')
     p.setFailurePageSize('tables', 50)
@@ -117,13 +117,13 @@ test('reloading a report and switching jobs reset all failure pages and page siz
       'loadReport, failurePagination, getFailurePagination, setFailurePage, setFailurePageSize', {
         api: { getDataMigrationReport: id => new Promise(resolve => pending.push({ id, resolve })) },
       }))
-    p.setFailurePage('tables', 35)
+    p.setFailurePage('tables', 70)
     p.setFailurePageSize('indexes', 50)
     p.setFailurePage('indexes', 3)
     const reload = p.loadReport()
     assert.equal(Object.keys(p.failurePagination.value).length, 0, 'reset immediately when reloading starts')
     assert.equal(p.getFailurePagination('tables').current, 1)
-    assert.equal(p.getFailurePagination('indexes').pageSize, 10)
+    assert.equal(p.getFailurePagination('indexes').pageSize, 5)
     pending[0].resolve({ data: failureReport(350) })
     await reload
     p.setFailurePageSize('tables', 20)
@@ -133,8 +133,8 @@ test('reloading a report and switching jobs reset all failure pages and page siz
     assert.equal(pending[1].id, 'new-job')
     assert.equal(Object.keys(p.failurePagination.value).length, 0)
     assert.equal(p.getFailurePagination('tables').current, 1)
-    assert.equal(p.getFailurePagination('tables').pageSize, 10)
-    pending[1].resolve({ data: failureReport(11) })
+    assert.equal(p.getFailurePagination('tables').pageSize, 5)
+    pending[1].resolve({ data: failureReport(6) })
     await Vue.nextTick()
   } finally { scope.stop() }
 })

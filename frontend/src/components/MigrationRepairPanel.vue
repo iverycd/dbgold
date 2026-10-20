@@ -1,7 +1,7 @@
 <template>
   <section ref="repairSection" class="repair-panel" aria-label="对象修复" tabindex="-1">
     <div class="repair-heading">
-      <div><h3>对象修复</h3><p>同一张表的结构与数据结果合并展示，结构执行成功后可继续接续数据与关联对象。原始报告保持不变。</p></div>
+      <div><h3>对象修复</h3><p>修复对象后，可按需接续数据与关联对象迁移。原始报告保持不变。</p></div>
       <a-space wrap>
         <a-button size="small" :disabled="busy" @click="openBinding">连接与配置</a-button>
         <a-button size="small" @click="openHistory()">执行历史</a-button>
@@ -22,18 +22,21 @@
       <a-button size="mini" @click="openHistory(activeAttempt.object_id)">查看进度</a-button>
       <a-button v-if="attemptRunning(activeAttempt.status)" size="mini" status="danger" :loading="cancelling" @click="cancelAttempt">取消执行</a-button>
     </div>
-    <div class="repair-filters" v-if="records.length">
-      <a-select v-model="filter" style="width: 150px">
-        <a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option>
-        <a-option v-for="category in repairCategories" :key="category.key" :value="category.key">{{ category.label }}</a-option>
-      </a-select>
-      <a-input-search v-model="keyword" placeholder="搜索模式名、对象、所属表或错误" allow-clear style="max-width: 300px" />
-    </div>
-    <div v-if="records.length" class="batch-toolbar">
-      <a-button type="primary" size="small" :loading="batchPreparing" :disabled="busy || loading || saving || !binding?.configured || !selectedObjectIDs.length" @click="prepareBatch">批量执行（{{ selectedObjectIDs.length }}）</a-button>
-      <a-button size="small" :disabled="busy || loading" @click="selectAllFiltered">全选当前筛选结果</a-button>
-      <a-button size="small" :disabled="busy || !selectedObjectIDs.length" @click="clearBatchSelection">清空选择</a-button>
-      <span class="muted">使用已保存的 SQL，按依赖顺序逐项执行</span>
+    <div v-if="records.length" class="repair-toolbar">
+      <div class="repair-filters">
+        <a-select v-model="filter" style="width: 150px" size="small" aria-label="筛选修复状态">
+          <a-option value="attention">需要处理</a-option><a-option value="all">全部对象</a-option>
+          <a-option v-for="category in repairCategories" :key="category.key" :value="category.key">{{ category.label }}</a-option>
+        </a-select>
+        <a-input-search v-model="keyword" class="repair-search" placeholder="搜索对象、模式或错误" aria-label="搜索模式名、对象、所属表或错误" allow-clear size="small" />
+      </div>
+      <div class="batch-toolbar">
+        <a-tooltip content="仅使用已保存的 SQL，按依赖顺序逐项执行" :trigger="['hover', 'focus']">
+          <a-button type="primary" size="small" :loading="batchPreparing" :disabled="busy || loading || saving || !binding?.configured || !selectedObjectIDs.length" @click="prepareBatch">批量执行（{{ selectedObjectIDs.length }}）</a-button>
+        </a-tooltip>
+        <a-button size="small" :disabled="busy || loading" @click="selectAllFiltered">全选当前筛选结果</a-button>
+        <a-button type="text" size="small" :disabled="busy || !selectedObjectIDs.length" @click="clearBatchSelection">清空选择</a-button>
+      </div>
     </div>
     <section v-if="batchHasRun" class="batch-progress" aria-label="批量修复进度" aria-live="polite">
       <div class="unit-heading">
@@ -51,7 +54,7 @@
         </div>
       </div>
     </section>
-    <a-table v-if="records.length" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1250 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
+    <a-table v-if="records.length" class="repair-table" v-model:selected-keys="selectedObjectIDs" :row-selection="{ type: 'checkbox', onlyCurrent: false, showCheckedAll: true }" :data="visibleRecords" row-key="key" :pagination="{ pageSize: 10, current: page }" :scroll="{ x: 1040 }" size="small" :row-class="record => record.object.id === highlightedObjectID ? 'repair-row-highlighted' : ''" @page-change="page = $event">
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="emptyDescription" />
@@ -59,33 +62,45 @@
         </div>
       </template>
       <template #columns>
-        <a-table-column title="模式名" :width="180">
+        <a-table-column title="对象" :width="280">
           <template #cell="{ record }">
-            <a-tooltip>
-              <template #content><span class="repair-name-tooltip">{{ record.object.schema || '—' }}</span></template>
-              <span class="repair-name">{{ record.object.schema || '—' }}</span>
-            </a-tooltip>
-          </template>
-        </a-table-column>
-        <a-table-column title="对象名" :width="280">
-          <template #cell="{ record }">
-            <a-tooltip>
-              <template #content><span class="repair-name-tooltip">{{ record.object.target_name }}</span></template>
-              <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
-            </a-tooltip>
-            <div class="muted">{{ repairKind(record.object.kind) }}</div>
-            <div v-if="batchIneligibleReason(record.object)" class="muted">不可批量：{{ batchIneligibleReason(record.object) }}</div>
-            <a-tooltip v-if="record.object.table">
-              <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
-              <div class="repair-name muted">所属表：{{ record.object.table }}</div>
-            </a-tooltip>
+            <div class="repair-object-heading">
+              <a-tooltip>
+                <template #content><span class="repair-name-tooltip">{{ record.object.target_name }}</span></template>
+                <strong class="repair-name" :data-repair-object-id="record.object.id" tabindex="-1">{{ record.object.target_name }}</strong>
+              </a-tooltip>
+              <span class="repair-kind">{{ repairKind(record.object.kind) }}</span>
+              <a-tooltip v-if="record.batchReason" :trigger="['hover', 'focus']">
+                <template #content><span class="repair-name-tooltip">不可批量：{{ record.batchReason }}</span></template>
+                <button type="button" class="repair-batch-hint" :aria-label="`不可批量：${record.batchReason}`"><icon-info-circle /></button>
+              </a-tooltip>
+            </div>
+            <div class="repair-object-meta">
+              <a-tooltip>
+                <template #content><span class="repair-name-tooltip">模式：{{ record.object.schema || '—' }}</span></template>
+                <span class="repair-name">{{ record.object.schema || '—' }}</span>
+              </a-tooltip>
+              <template v-if="record.object.table && (!isTableRepair(record.object) || record.object.table !== record.object.target_name)">
+                <span class="repair-meta-divider" aria-hidden="true">·</span>
+                <a-tooltip>
+                  <template #content><span class="repair-name-tooltip">所属表：{{ record.object.table }}</span></template>
+                  <span class="repair-name">所属表：{{ record.object.table }}</span>
+                </a-tooltip>
+              </template>
+            </div>
           </template>
         </a-table-column>
         <a-table-column title="原始错误"><template #cell="{ record }">
-          <div v-for="detail in repairDisplayErrors(record)" :key="`${detail.label}:${detail.text}`" class="error-text repair-error"><strong v-if="detail.label">{{ detail.label }}：</strong>{{ detail.text }}</div>
-          <span v-if="!repairDisplayErrors(record).length">—</span>
+          <div v-if="record.errors.length" class="repair-error-cell">
+            <div class="repair-error-summary"><span v-if="record.errors[0].label" class="repair-error-phase">{{ record.errors[0].label }}：</span>{{ record.errors[0].text.replace(/\s+/g, ' ') }}</div>
+            <div class="repair-error-actions">
+              <span v-if="record.errors.length > 1" class="muted">共 {{ record.errors.length }} 条</span>
+              <a-button type="text" size="mini" :aria-label="`查看 ${qualified(record.object)} 的全部原始错误`" @click="openErrorDetails(record)">详情</a-button>
+            </div>
+          </div>
+          <span v-else class="muted">—</span>
         </template></a-table-column>
-        <a-table-column title="修复状态" :width="240">
+        <a-table-column title="修复状态" :width="210">
           <template #cell="{ record }">
             <div class="repair-statuses">
               <div v-for="state in repairDisplayStatuses(record)" :key="state.label" class="repair-status-line">
@@ -95,16 +110,30 @@
             </div>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="240"><template #cell="{ record }"><a-space wrap>
-          <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ hasRepairDDL(record.object) ? '编辑并执行' : '手动编写 DDL' }}</a-button>
+        <a-table-column title="操作" :width="220"><template #cell="{ record }"><div class="repair-row-actions">
+          <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ hasRepairDDL(record.object) ? '编辑 DDL' : '编写 DDL' }}</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(primaryRecord(record))">查看诊断</a-button>
-          <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(primaryRecord(record))">接续此表迁移</a-button>
+          <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(primaryRecord(record))">接续迁移</a-button>
           <a-button type="text" size="mini" @click="openHistory(record.object.id)">历史</a-button>
-        </a-space></template></a-table-column>
+        </div></template></a-table-column>
       </template>
     </a-table>
     <a-spin v-else-if="loading" />
     <a-empty v-else-if="!error" :description="emptyDescription" />
+
+    <a-modal v-model:visible="errorDetailsVisible" :mask-closable="false" width="min(800px, calc(100vw - 48px))" title="原始错误详情" :body-style="{ maxHeight: '60vh', overflow: 'auto' }" @close="closeErrorDetails">
+      <template v-if="errorDetailRecord">
+        <p class="repair-error-object">{{ qualified(errorDetailRecord.object) }}</p>
+        <p class="muted">原始迁移错误保留供排查，当前结果以修复状态为准。</p>
+        <div class="repair-error-details">
+          <article v-for="(detail, index) in repairDisplayErrors(errorDetailRecord)" :key="`${detail.label}:${detail.text}`" class="repair-error-detail">
+            <h4>{{ index + 1 }}. {{ detail.label ? `${detail.label}错误` : '原始错误' }}</h4>
+            <pre>{{ detail.text }}</pre>
+          </article>
+        </div>
+      </template>
+      <template #footer><a-button @click="closeErrorDetails">关闭</a-button></template>
+    </a-modal>
 
     <a-modal v-model:visible="batchPreviewVisible" :mask-closable="false" width="min(960px, calc(100vw - 48px))" title="确认批量执行 DDL" :footer="false">
       <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · 共选择 {{ batchItems.length }} 个对象，可执行 {{ batchExecutableCount }} 个</p>
@@ -136,7 +165,7 @@
       <template v-if="editing">
         <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
         <a-alert v-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。只重新创建或修复此对象；表数据及关联对象按需单独接续。</a-alert>
-        <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续此表迁移”。</a-alert>
+        <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
         <a-alert v-if="editing.object.status === 'unknown'" type="warning">上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
@@ -266,6 +295,8 @@ const cancelling = ref(false)
 const activeAttempt = ref<RepairAttempt | null>(null)
 const filter = ref<RepairFilter>('attention')
 const keyword = ref('')
+const errorDetailsVisible = ref(false)
+const errorObjectID = ref('')
 const editorVisible = ref(false)
 const editing = ref<RepairRecord | null>(null)
 const draftUnits = ref<RepairUnit[]>([])
@@ -315,7 +346,11 @@ const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.v
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
 const canExecute = computed(() => !busy.value && !!editing.value && canEditRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || reviewed.value))
 const displayRecords = computed(() => groupRepairRecords(records.value))
-const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => ({ ...record, key: record.object.id, disabled: busy.value || loading.value || !!batchIneligibleReason(record.object) })))
+const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
+const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
+  const batchReason = batchIneligibleReason(record.object)
+  return { ...record, key: record.object.id, errors: repairDisplayErrors(record), batchReason, disabled: busy.value || loading.value || !!batchReason }
+}))
 const batchExecutableCount = computed(() => batchItems.value.filter(item => item.status === 'pending').length)
 const batchCompletedCount = computed(() => batchItems.value.filter(item => !['pending', 'saving', 'running'].includes(item.status)).length)
 const stats = computed(() => {
@@ -347,6 +382,8 @@ function showError(e: unknown) { error.value = errorText(e); Message.error(error
 function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : status === 'not_required' ? 'gray' : 'orange' }
 function qualified(object: RepairObject) { return object.schema ? `${object.schema}.${object.target_name}` : object.target_name }
 function primaryRecord(row: RepairDisplayRow): RepairRecord { return row.members.find(member => member.object.id === row.object.id)! }
+function openErrorDetails(row: RepairDisplayRow) { errorObjectID.value = row.object.id; errorDetailsVisible.value = true }
+function closeErrorDetails() { errorDetailsVisible.value = false; errorObjectID.value = '' }
 function objectName(id: string) { const object = records.value.find(record => record.object.id === id)?.object; return object ? qualified(object) : id }
 function dependencyNames(object: RepairObject) { return (object.dependencies || []).map(objectName) }
 function connectionLabel(conn: Connection) { return `${conn.name} · ${conn.host}:${conn.port}/${conn.database} · ${conn.username}` }
@@ -686,6 +723,7 @@ async function exportHistory() {
 }
 defineExpose({ exportHistory, focusObject })
 watch(summary, value => emit('summary-change', value), { immediate: true })
+watch(errorDetailRecord, value => { if (!value) closeErrorDetails() })
 watch(loading, value => { if (!value) void applyPendingFocus() })
 watch([filter, keyword], () => { page.value = 1; clearBatchSelection() }, { flush: 'sync' })
 watch(() => visibleRecords.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length / 10))) })
@@ -697,6 +735,7 @@ watch(() => props.jobID, () => {
   batchHasRun.value = false; batchStopped.value = false; batchError.value = ''; batchExpectedBinding = ''
   records.value = []; binding.value = null; job.value = null; activeAttempt.value = null; attempts.value = []
   filter.value = 'attention'; keyword.value = ''; page.value = 1; highlightedObjectID.value = ''; pendingFocus.value = null
+  closeErrorDetails()
   editorVisible.value = false; executeConfirmVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
   loading.value = false; saving.value = false; submitting.value = false; cancelling.value = false; previewing.value = false; loadingHistory.value = false
   mappingForm.values = {}; mappingForm.source = ''; mappingForm.target = ''
@@ -729,9 +768,12 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.repair-panel { min-width: 0; padding: 18px; margin: 18px 0; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
+.repair-panel { min-width: 0; padding: 20px; margin: 18px 0; border: 1px solid var(--color-border-2); border-radius: 10px; background: var(--color-bg-1); container-type: inline-size; }
 .repair-heading, .unit-heading, .editor-toolbar, .attempt-banner, .repair-filters, .modal-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.repair-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; margin: 16px 0 12px; }
+.repair-filters { flex: 1 1 400px; min-width: 0; gap: 8px; }
+.repair-search { flex: 1 1 200px; min-width: 180px; max-width: 320px; }
+.batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .batch-progress { border: 1px solid var(--color-border-2); border-radius: 6px; padding: 12px; margin: 12px 0; }
 .batch-results { max-height: 260px; overflow: auto; }
 .batch-result { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
@@ -743,21 +785,43 @@ onUnmounted(() => {
 .repair-heading, .editor-toolbar { justify-content: space-between; }
 .repair-heading h3 { margin: 0; font-size: 16px; }
 .repair-heading p, .muted { font-size: 12px; color: var(--color-text-3); overflow-wrap: anywhere; }
-.repair-heading p { margin: 6px 0 12px; }
-.repair-stats { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 0; }
-.repair-stat { padding: 6px 10px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--color-text-1); font: inherit; cursor: pointer; }
+.repair-heading p { margin: 6px 0 0; line-height: 20px; }
+.repair-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.repair-stat { display: inline-flex; align-items: center; gap: 10px; padding: 7px 12px; border: 1px solid var(--color-border-2); border-radius: 6px; background: var(--color-bg-2); color: var(--color-text-2); font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; transition: background-color 150ms, border-color 150ms; }
 .repair-stat:hover { background: var(--color-fill-2); }
 .repair-stat-active { border-color: rgb(var(--primary-6)); background: var(--color-primary-light-1); color: rgb(var(--primary-6)); }
 .repair-stat:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
-.repair-stats strong { margin-left: 5px; font-variant-numeric: tabular-nums; }
-.repair-filters, .attempt-banner, .editor-toolbar { margin: 12px 0; }
-.repair-statuses { display: flex; flex-direction: column; gap: 6px; }
+.repair-stats strong { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.attempt-banner, .editor-toolbar { margin: 12px 0; }
+.repair-statuses { display: flex; flex-direction: column; gap: 4px; }
 .repair-status-line { display: flex; align-items: center; gap: 4px; }
-.repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-2); }
-.repair-status-line :deep(.arco-tag) { height: auto; min-height: 24px; white-space: normal; overflow-wrap: anywhere; }
+.repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-3); }
+.repair-status-line :deep(.arco-tag) { height: auto; min-height: 20px; padding: 0 6px; font-size: 12px; line-height: 20px; white-space: normal; overflow-wrap: anywhere; }
 .error-text { color: var(--color-danger-6); overflow-wrap: anywhere; white-space: pre-wrap; }
-.repair-error + .repair-error { margin-top: 8px; }
+.repair-error-cell { min-width: 0; }
+.repair-error-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-2); line-height: 22px; }
+.repair-error-phase { color: var(--color-text-3); }
+.repair-error-actions { display: flex; align-items: center; gap: 8px; height: 22px; }
+.repair-error-actions :deep(.arco-btn) { height: 22px; padding: 0; font-size: 12px; }
+.repair-error-object { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.repair-error-details { display: grid; gap: 12px; margin-top: 16px; }
+.repair-error-detail { padding: 14px; border: 1px solid var(--color-border-2); border-radius: 6px; background: var(--color-bg-2); }
+.repair-error-detail h4 { margin: 0 0 8px; font-size: 13px; color: var(--color-text-2); }
+.repair-error-detail pre { margin: 0; font: 13px/1.7 var(--font-mono, monospace); color: var(--color-text-1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .repair-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }
+.repair-table :deep(.arco-table-td) { height: 68px; box-sizing: border-box; }
+.repair-table :deep(.arco-table-td .arco-table-cell) { padding: 9px 12px; }
+.repair-table :deep(.arco-table-th .arco-table-cell) { padding: 10px 12px; color: var(--color-text-3); font-size: 12px; }
+.repair-object-heading { display: flex; align-items: center; gap: 7px; min-width: 0; line-height: 22px; }
+.repair-object-heading > .repair-name { flex: 0 1 auto; font-size: 13px; font-weight: 600; }
+.repair-kind { flex-shrink: 0; padding: 0 5px; border-radius: 4px; background: var(--color-fill-2); color: var(--color-text-3); font-size: 11px; line-height: 18px; }
+.repair-batch-hint { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; margin: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-4); font-size: 14px; cursor: help; }
+.repair-batch-hint:hover { color: var(--color-text-2); background: var(--color-fill-2); }
+.repair-batch-hint:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 1px; }
+.repair-object-meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 2px; font-size: 12px; line-height: 20px; color: var(--color-text-3); }
+.repair-meta-divider { flex-shrink: 0; color: var(--color-text-4); }
+.repair-row-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 2px; white-space: nowrap; }
+.repair-row-actions :deep(.arco-btn) { flex-shrink: 0; padding: 0 6px; }
 .repair-name { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repair-name-tooltip { display: block; max-width: min(360px, calc(100vw - 48px)); overflow-wrap: anywhere; white-space: normal; }
 .repair-empty { text-align: center; }
@@ -782,4 +846,9 @@ onUnmounted(() => {
 .preview-facts dt { min-width: 80px; color: var(--color-text-3); }
 .preview-facts dd { margin: 0; overflow-wrap: anywhere; }
 .history-attempt { margin: 16px 0; padding-bottom: 12px; border-bottom: 1px solid var(--color-border-2); }
+@container (max-width: 767px) {
+  .repair-filters { flex-basis: 100%; }
+  .repair-search { max-width: none; }
+  .batch-toolbar { width: 100%; }
+}
 </style>

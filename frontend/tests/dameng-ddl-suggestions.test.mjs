@@ -126,26 +126,26 @@ function componentInstances(vnode, name) {
   return Array.isArray(vnode.children) ? vnode.children.flatMap(child => componentInstances(child, name)) : []
 }
 
-test('failure detail rendering limits each page and shows pagination only above ten items', async () => {
+test('failure detail rendering limits each page and shows pagination only above five items', async () => {
   const scope = Vue.effectScope()
   try {
-    for (const count of [0, 10, 11, 350]) {
+    for (const count of [0, 5, 6, 350]) {
       const h = scope.run(harness)
       h.p.report.value = paginatedReport(count)
       const html = await renderToString(h.app)
-      assert.equal((html.match(/class="failure-item"/g) || []).length, Math.min(count, 10))
-      assert.equal((html.match(/class="arco-pagination /g) || []).length, count > 10 ? 1 : 0)
-      if (count > 10) {
+      assert.equal((html.match(/class="failure-item"/g) || []).length, Math.min(count, 5))
+      assert.equal((html.match(/class="arco-pagination /g) || []).length, count > 5 ? 1 : 0)
+      if (count > 5) {
         assert.match(html, /arco-pagination-total/)
         assert.match(html, /arco-pagination-options/)
-        assert.doesNotMatch(html, /class="failure-name">Orders_10</)
+        assert.doesNotMatch(html, /class="failure-name">Orders_5</)
       }
     }
     const h = scope.run(harness)
-    h.p.report.value = paginatedReport(11)
+    h.p.report.value = paginatedReport(6)
     h.p.setFailurePageSize('tables', 50)
     const html = await renderToString(h.app)
-    assert.equal((html.match(/class="failure-item"/g) || []).length, 11)
+    assert.equal((html.match(/class="failure-item"/g) || []).length, 6)
     assert.match(html, /arco-pagination-options/, 'page size remains adjustable when all objects fit the larger page')
     assert.match(html, /50 条\/页/)
   } finally { scope.stop() }
@@ -187,17 +187,17 @@ test('real Arco pagination navigates later failures, copies and repairs the visi
     assert.equal(pagination().props.total, 350)
     assert.equal(pagination().props.showTotal, true)
     assert.equal(instances('FailurePagination')[0].props.showPageSize, true)
-    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [10, 20, 50])
+    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [5, 10, 20, 50])
     h.clicks.length = 0
-    instances('Pager').find(instance => instance.props.pageNumber === 35).subTree.props.onClick({})
+    instances('Pager').find(instance => instance.props.pageNumber === 70).subTree.props.onClick({})
     await Vue.nextTick()
-    assert.equal(pagination().props.current, 35)
-    assert.equal(h.p.getFailurePagination('tables').current, 35)
+    assert.equal(pagination().props.current, 70)
+    assert.equal(h.p.getFailurePagination('tables').current, 70)
     const repairButtons = h.clicks.filter(button => button.label === '去修复')
     const copyButtons = h.clicks.filter(button => button.label === '复制 DDL')
-    const expectedNames = Array.from({ length: 10 }, (_, index) => `Orders_${340 + index}`)
-    assert.equal(repairButtons.length, 10)
-    assert.equal(copyButtons.length, 10)
+    const expectedNames = Array.from({ length: 5 }, (_, index) => `Orders_${345 + index}`)
+    assert.equal(repairButtons.length, 5)
+    assert.equal(copyButtons.length, 5)
     for (const button of copyButtons) await button.handler()
     assert.deepEqual(h.copied.slice().sort(), expectedNames.map(name => `CREATE TABLE ${name} (id INT)`).sort())
     for (const button of repairButtons) await button.handler()
@@ -214,7 +214,7 @@ test('real Arco pagination navigates later failures, copies and repairs the visi
     assert.equal(pagination().props.pageSize, 50)
     assert.equal(instances('FailurePagination')[0].props.showPageSize, true, 'page size controls remain available')
     assert.equal(h.p.pagedFailureItems(h.p.tableRows.value[0]).length, 50)
-    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [10, 20, 50])
+    assert.deepEqual(Array.from(pagination().props.pageSizeOptions), [5, 10, 20, 50])
   } finally { app?.unmount(); scope.stop() }
 })
 

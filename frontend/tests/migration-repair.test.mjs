@@ -24,7 +24,7 @@ function loadBatchUtils(timers) {
   return context.exports
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
-const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection'
+const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
 const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
@@ -235,7 +235,7 @@ test('focus waits for loading and task changes clear pending navigation and old 
   } finally { scope.stop() }
 })
 
-async function renderPanel(p, onRender, onEditor) {
+async function renderPanel(p, onRender, onEditor, onTooltip) {
   const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
   const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
   const app = Vue.createSSRApp({
@@ -243,8 +243,14 @@ async function renderPanel(p, onRender, onEditor) {
     render(...args) { const tree = render.apply(this, args); onRender?.(tree); return tree },
   })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-tooltip', 'a-textarea', 'a-space', 'a-button', 'a-alert', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  for (const name of ['a-textarea', 'a-space', 'a-button', 'a-alert', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  app.component('a-tooltip', { props: ['trigger'], setup: (props, { slots }) => () => {
+    const children = slots.default?.()
+    onTooltip?.({ trigger: props.trigger, children, content: slots.content?.() })
+    return Vue.h('div', children)
+  } })
   app.component('a-tag', { props: ['color'], setup: (props, { slots }) => () => Vue.h('span', { 'data-status-color': props.color }, slots.default?.()) })
+  app.component('icon-info-circle', { setup: () => () => Vue.h('svg', { 'aria-hidden': 'true' }) })
   app.component('a-empty', Arco.Empty)
   for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', [slots.default?.(), slots.footer?.()]) : null })
   app.component('a-table-column', { setup: () => () => null })
@@ -288,7 +294,7 @@ test('rendered repair statuses label each phase, color failures and show data re
       { text: '数据：导入成功', colors: ['green'] },
       { text: '数据：导入失败，待接续', colors: ['red'] },
     ])
-    assert.match(html, /同一张表的结构与数据结果合并展示，结构执行成功后可继续接续数据与关联对象。/)
+    assert.match(html, /修复对象后，可按需接续数据与关联对象迁移。原始报告保持不变。/)
     assert.match(html, /表结构已执行成功，无需重复执行 DDL/)
     assert.doesNotMatch(html, /执行成功即完成修复/)
     p.lifecycle.unmount()
@@ -303,6 +309,137 @@ function tableDataFailure() {
   const data = record({ id: 'data', kind: 'data', source_name: 'Orders', source_table: 'Orders', table: 'orders', target_name: 'orders', dependencies: ['table'], ddl: '', units: [], status: 'failed', original_status: 'failed', data_status: 'failed', original_error: 'numeric field overflow: updatetime', error: 'numeric field overflow: updatetime' })
   return [table, data]
 }
+
+const tableCells = html => Array.from(html.matchAll(/<section data-table-column="([^"]*)">([\s\S]*?)<\/section>/g), match => ({
+  title: match[1], html: match[2], text: match[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(),
+}))
+const objectCell = (html, objectID) => tableCells(html).find(cell => cell.html.includes(`data-repair-object-id="${objectID}"`))
+const nodeText = node => Array.isArray(node) ? node.map(nodeText).join('') : typeof node === 'string' ? node : nodeText(node?.children || '')
+
+test('compact object information retains full names and related tables without repeating a table itself', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    const longName = `Orders_${'WithLongName'.repeat(8)}`
+    p.records.value = [record({ id: 'table', target_name: longName, table: longName }), record({ id: 'index', kind: 'index', name: 'OrdersIndex', target_name: 'OrdersIndex', table: 'Orders' })]
+    const tooltips = []
+    const html = await renderPanel(p, undefined, undefined, tooltip => tooltips.push(tooltip))
+    assert.ok(tableCells(html).every(cell => cell.title !== '模式名'), 'schema belongs in the object column')
+    const table = objectCell(html, 'table'), index = objectCell(html, 'index')
+    assert.ok(table.text.includes(longName))
+    assert.ok(table.text.includes('public'))
+    assert.ok(table.text.includes('表'))
+    assert.ok(!table.text.includes('所属表：'), 'a table does not repeat its own name as parent metadata')
+    assert.ok(index.text.includes('public'))
+    assert.ok(index.text.includes('索引'))
+    assert.ok(index.text.includes('所属表：Orders'))
+    assert.ok(tooltips.some(tooltip => nodeText(tooltip.content).includes(longName)), 'the full object name remains available on hover')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('batch restriction moves to a keyboard reachable tooltip and preserves the disabled row identity', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [record({ units: [] })]
+    const row = p.visibleRecords.value[0], tooltips = []
+    const html = await renderPanel(p, undefined, undefined, tooltip => tooltips.push(tooltip))
+    assert.equal(row.key, 'obj')
+    assert.equal(row.disabled, true)
+    assert.equal(row.batchReason, p.batchIneligibleReason(row.object))
+    const tooltip = tooltips.find(item => (item.children || []).some(child => findNodes(child, node => node.type === 'button' && node.props?.['aria-label'] === `不可批量：${row.batchReason}`).length))
+    assert.ok(tooltip, 'batch restriction has a native button with an accessible explanation')
+    const button = tooltip.children.flatMap(child => findNodes(child, node => node.type === 'button'))[0]
+    assert.equal(button.props.type, 'button')
+    assert.ok(button.props.tabindex === undefined || Number(button.props.tabindex) >= 0)
+    assert.ok(!button.props.disabled)
+    assert.deepEqual(Array.from(tooltip.trigger).sort(), ['focus', 'hover'])
+    assert.ok(nodeText(tooltip.content).includes(row.batchReason))
+    assert.ok(!objectCell(html, 'obj').text.includes('不可批量：'), 'the long reason does not take up row space')
+    p.selectAllFiltered(); assert.equal(p.selectedObjectIDs.value.length, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('error summaries show one phase and expose every original grouped error in a read-only detail modal', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let requests = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => { requests++; return repairList([]) } })); await tick()
+    const errors = ['invalid structure identifier\nSQL position 42', 'numeric field overflow\ncolumn updatetime', 'permission denied for import archive']
+    const table = record({ id: 'table', table: 'Orders', source_name: 'Orders', source_table: 'Orders', original_error: errors[0] })
+    const data = (id, text) => record({ id, kind: 'data', table: 'Orders', source_name: 'Orders', source_table: 'Orders', original_error: text, dependencies: ['table'], ddl: '', units: [], data_status: 'failed' })
+    p.records.value = [table, data('data-one', errors[1]), data('data-two', errors[2])]
+    const row = p.visibleRecords.value[0]
+    assert.equal(row.errors.length, 3)
+    assert.deepEqual(Array.from(row.errors, detail => detail.text), errors)
+    let modal
+    const html = await renderPanel(p, tree => { modal = findNodes(tree, node => node.props?.title === '原始错误详情')[0] })
+    const summary = tableCells(html).find(cell => cell.title === '原始错误').text
+    assert.ok(summary.includes('结构：'))
+    assert.ok(summary.includes('invalid structure identifier'))
+    assert.ok(summary.includes('共 3 条'))
+    assert.ok(summary.includes('详情'))
+    assert.ok(!summary.includes('numeric field overflow'))
+    assert.ok(!summary.includes('permission denied'))
+    assert.equal(modal.props['mask-closable'], false)
+    assert.equal(p.errorDetailsVisible.value, false)
+    p.openErrorDetails(row); await tick()
+    assert.equal(p.errorDetailsVisible.value, true)
+    assert.equal(p.errorObjectID.value, 'table')
+    assert.equal(p.errorDetailRecord.value.object.id, 'table')
+    const details = await renderPanel(p)
+    for (const text of errors) assert.ok(details.includes(text), text)
+    assert.match(details, /数据/)
+    assert.doesNotMatch(details, /<textarea|contenteditable="true"/)
+    assert.equal(requests, 1, 'viewing existing error details does not fetch records again')
+    p.keyword.value = 'permission denied'; await tick()
+    assert.equal(p.visibleRecords.value.length, 1, 'search finds an error hidden by the summary')
+    p.keyword.value = 'unrelated'; await tick()
+    assert.equal(p.visibleRecords.value.length, 0)
+    assert.equal(p.errorDetailRecord.value.object.id, 'table', 'the open detail stays bound to all display records rather than search results')
+    for (const text of errors) assert.ok((await renderPanel(p)).includes(text), text)
+    p.closeErrorDetails(); await tick()
+    assert.equal(p.errorDetailsVisible.value, false)
+    assert.equal(p.errorObjectID.value, '')
+    assert.equal(p.errorDetailRecord.value, undefined)
+    assert.doesNotMatch(await renderPanel(p), /numeric field overflow|permission denied/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('switching tasks clears an open error detail and cannot show a same-ID record from the next task', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ jobID: 'old' })
+    const p = scope.run(() => panel(props, { listRepairs: async id => repairList([record({ original_error: `${id} task error` })]) })); await tick()
+    p.openErrorDetails(p.visibleRecords.value[0]); await tick()
+    assert.match(await renderPanel(p), /old task error/)
+    props.jobID = 'new'; await tick(); await tick()
+    assert.equal(p.errorDetailsVisible.value, false)
+    assert.equal(p.errorObjectID.value, '')
+    assert.equal(p.errorDetailRecord.value, undefined)
+    assert.doesNotMatch(await renderPanel(p), /old task error/)
+    p.openErrorDetails(p.visibleRecords.value[0]); await tick()
+    assert.equal(p.errorDetailRecord.value.object.original_error, 'new task error')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('compact row actions keep DDL, recovery and history in order and retain diagnostic access', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.records.value = [record({ id: 'editable' }), record({ id: 'manual', name: 'MissingDDL', target_name: 'MissingDDL', ddl: '', units: [] }), record({ id: 'diagnostic', diagnostic_only: true, name: 'Diagnostic', target_name: 'Diagnostic', ddl: '', units: [] })]
+    const actions = tableCells(await renderPanel(p)).filter(cell => cell.title === '操作').map(cell => cell.text)
+    assert.match(actions[0], /编辑 DDL.*接续迁移.*历史/)
+    assert.match(actions[1], /编写 DDL.*接续迁移.*历史/)
+    assert.match(actions[2], /查看诊断.*历史/)
+    assert.ok(!actions[2].includes('接续迁移'))
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('table and data failure render once, share counts and remain searchable by the data error', async () => {
   const scope = Vue.effectScope()
@@ -319,7 +456,7 @@ test('table and data failure render once, share counts and remain searchable by 
     assert.equal(row.object.original_error, '', 'data error must not be written onto the table object')
     const html = await renderPanel(p)
     assert.deepEqual(statusCells(html), [{ text: '表结构：执行成功数据：导入失败，待接续', colors: ['green', 'red'] }])
-    assert.equal(html.match(/接续此表迁移/g)?.length, 1)
+    assert.equal(html.match(/接续迁移/g)?.length, 1)
     assert.equal(html.match(/numeric field overflow: updatetime/g)?.length, 1)
     assert.match(html, /数据：/)
     p.keyword.value = 'updatetime'; await tick()
@@ -763,7 +900,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
         renderedDropdown = findNodes(tree, node => node.props?.style?.width === '150px' && node.props?.['onUpdate:modelValue'])[0]
       })
       assert.equal(renderedDropdown.props.modelValue, category.key)
-      const renderedButtons = html.match(/<button\b[^>]*>.*?<\/button>/gs)
+      const renderedButtons = html.match(/<button\b[^>]*class="[^"]*\brepair-stat\b[^"]*"[^>]*>.*?<\/button>/gs)
       assert.equal(renderedButtons.length, 4)
       assert.match(renderedButtons[index], /type="button"/)
       assert.match(renderedButtons[index], /aria-pressed="true"/)
@@ -794,7 +931,7 @@ test('zero-count categories stay clickable and explain empty results with a rese
     p.records.value = [record({ status: 'succeeded', original_status: 'succeeded' })]
     assert.equal(utils.repairCategories.find(category => category.key === 'repaired').empty, '当前无修复执行成功的对象')
     let buttons
-    await renderPanel(p, tree => { buttons = findNodes(tree, node => node.type === 'button') })
+    await renderPanel(p, tree => { buttons = findNodes(tree, node => node.type === 'button' && node.props?.class?.includes('repair-stat')) })
     for (const [index, category] of utils.repairCategories.entries()) {
       assert.equal(p.stats.value[category.key], 0)
       assert.equal(buttons[index].props.disabled, undefined)
@@ -916,7 +1053,7 @@ test('rendered manual repair shows its entry and editor while keeping source def
     const failed = record({ kind: 'index', table: 'Orders', target_name: 'ix', ddl: '', units: [], source_ddl: 'SOURCE REFERENCE SQL' })
     const p = scope.run(() => panel({ jobID: 'job' })); await tick()
     p.job.value.dst_db_type = 'gaussdb'; p.records.value = [failed]
-    assert.ok((await renderPanel(p)).includes('手动编写 DDL'))
+    assert.ok((await renderPanel(p)).includes('编写 DDL'))
     p.openEditor(failed)
     const html = await renderPanel(p)
     for (const label of ['添加执行单元', '保存草稿', '确认执行步骤', 'GaussDB', 'Schema：public', '所属表：Orders', '源端定义（只读', 'SOURCE REFERENCE SQL']) assert.ok(html.includes(label), label)
@@ -1404,7 +1541,7 @@ test('manual expression-index execution immediately completes the repair without
     assert.equal(p.visibleRecords.value.length, 1)
     const html = await renderPanel(p)
     assert.ok(html.includes('执行成功'))
-    assert.ok(html.includes('编辑并执行'))
+    assert.ok(html.includes('编辑 DDL'))
     assert.ok(html.includes('历史'))
     for (const text of ['重新核验', '人工确认已核验', '已执行待核验', '当前对象核验']) assert.ok(!html.includes(text), text)
     p.openEditor(p.records.value[0])

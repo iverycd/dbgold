@@ -10,6 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Match the complete dictionary query: sqlmock cannot validate that a selected
+// field actually belongs to its dictionary view. Prefix matches hid ORA-00904.
+const oracleDMExpectedColumnSQL = `SELECT c.COLUMN_NAME, c.DATA_TYPE,
+ NVL(c.CHAR_LENGTH,0), c.DATA_LENGTH, NVL(c.DATA_PRECISION,0), NVL(c.DATA_SCALE,0),
+ c.NULLABLE, c.DATA_DEFAULT, NVL(c.CHAR_USED,'B'), c.COLUMN_ID, c.DATA_TYPE_OWNER, vc.VIRTUAL_COLUMN
+ FROM ALL_TAB_COLUMNS c JOIN ALL_TAB_COLS vc
+ ON vc.OWNER=c.OWNER AND vc.TABLE_NAME=c.TABLE_NAME AND vc.COLUMN_NAME=c.COLUMN_NAME
+ WHERE c.OWNER=:1 AND c.TABLE_NAME=:2 ORDER BY c.COLUMN_ID`
+
 func oracleDMTestReader(t *testing.T, version int) (*OracleDamengReader, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -30,7 +39,7 @@ func TestOracleDamengColumnMetadataPreservesSource(t *testing.T) {
 		AddRow("RawData", "RAW", 0, 32, 0, 0, "Y", nil, "B", 2, nil, "NO").
 		AddRow("CreatedAt", "TIMESTAMP(9) WITH TIME ZONE", 0, 13, 0, 9, "Y", nil, "B", 3, nil, "NO").
 		AddRow("MixedId", "NUMBER", 0, 22, 20, 0, "N", `"APP"."ISEQ$$_42".nextval`, "B", 4, nil, "NO")
-	mock.ExpectQuery("SELECT COLUMN_NAME, DATA_TYPE").WithArgs("APP", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
+	mock.ExpectQuery("^"+regexp.QuoteMeta(oracleDMExpectedColumnSQL)+"$").WithArgs("APP", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
 	mock.ExpectQuery("SELECT i.COLUMN_NAME, i.GENERATION_TYPE").WithArgs("APP", "MixedTable").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "GENERATION_TYPE", "DEFAULT_ON_NULL"}).AddRow("MixedId", "BY DEFAULT", "YES")).RowsWillBeClosed()
 	info, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
 	require.NoError(t, err)
@@ -45,6 +54,26 @@ func TestOracleDamengColumnMetadataPreservesSource(t *testing.T) {
 	require.Nil(t, info.Columns[3].Default)
 	_, err = r.GetTableDDLInfo(context.Background(), "MixedTable")
 	require.NoError(t, err) // projected pages reuse the immutable metadata.
+}
+
+func TestOracleDameng11gVirtualColumnMetadataUsesDictionaryJoin(t *testing.T) {
+	r, mock := oracleDMTestReader(t, 11)
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE", "CHAR_LENGTH", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "DATA_DEFAULT", "CHAR_USED", "COLUMN_ID", "DATA_TYPE_OWNER", "VIRTUAL_COLUMN"}).
+		AddRow("MixedId", "NUMBER", 0, 22, 12, 0, "N", nil, "B", 1, nil, "NO").
+		AddRow("MixedComputed", "NUMBER", 0, 22, 12, 0, "Y", `"MixedId"+1`, "B", 2, nil, "YES")
+	mock.ExpectQuery("^"+regexp.QuoteMeta(oracleDMExpectedColumnSQL)+"$").WithArgs("APP", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
+	info, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
+	require.NoError(t, err)
+	require.Equal(t, "MixedId", info.Columns[0].Name)
+	require.Empty(t, info.Columns[0].Generated)
+	require.Equal(t, "MixedComputed", info.Columns[1].Name)
+	require.Equal(t, "virtual", info.Columns[1].Generated)
+	require.Equal(t, `"MixedId"+1`, *info.Columns[1].Default)
+	_, err = r.GetTableDDLInfo(context.Background(), "MixedTable")
+	require.NoError(t, err) // No identity query or repeated metadata query on 11g.
+	_, _, _, err = r.ReadPage(context.Background(), "MixedTable", []string{"MixedId"}, 0, 10)
+	require.ErrorContains(t, err, "MixedComputed")
+	require.ErrorContains(t, err, "虚拟列")
 }
 
 func TestOracleDamengPagingPreservesBytesAndStableTypes(t *testing.T) {

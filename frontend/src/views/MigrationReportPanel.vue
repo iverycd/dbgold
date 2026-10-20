@@ -71,12 +71,12 @@
             <template #expand-row="{ record }">
               <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
               <div v-else class="failure-list">
-                <div v-if="record.items.length > 10" class="failure-pagination">
+                <div v-if="record.items.length > 5" class="failure-pagination">
                   <a-pagination
                     :current="getFailurePagination(record.key).current"
                     :page-size="getFailurePagination(record.key).pageSize"
                     :total="record.items.length"
-                    :page-size-options="[10, 20, 50]"
+                    :page-size-options="[5, 10, 20, 50]"
                     show-total
                     show-page-size
                     size="small"
@@ -260,7 +260,7 @@ const preflightActiveKeys = ref<string[]>([])
 const failurePagination = ref<Record<string, { current: number; pageSize: number }>>({})
 
 function getFailurePagination(key: string) {
-  return failurePagination.value[key] ?? { current: 1, pageSize: 10 }
+  return failurePagination.value[key] ?? { current: 1, pageSize: 5 }
 }
 function setFailurePage(key: string, current: number) {
   failurePagination.value[key] = { ...getFailurePagination(key), current }

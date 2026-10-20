@@ -58,10 +58,12 @@ func (r *OracleDamengReader) GetTableDDLInfo(ctx context.Context, table string) 
 	if cached != nil {
 		return cached, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT COLUMN_NAME, DATA_TYPE,
- NVL(CHAR_LENGTH,0), DATA_LENGTH, NVL(DATA_PRECISION,0), NVL(DATA_SCALE,0),
- NULLABLE, DATA_DEFAULT, NVL(CHAR_USED,'B'), COLUMN_ID, DATA_TYPE_OWNER, VIRTUAL_COLUMN
- FROM ALL_TAB_COLUMNS WHERE OWNER=:1 AND TABLE_NAME=:2 ORDER BY COLUMN_ID`, r.owner, table)
+	rows, err := r.db.QueryContext(ctx, `SELECT c.COLUMN_NAME, c.DATA_TYPE,
+ NVL(c.CHAR_LENGTH,0), c.DATA_LENGTH, NVL(c.DATA_PRECISION,0), NVL(c.DATA_SCALE,0),
+ c.NULLABLE, c.DATA_DEFAULT, NVL(c.CHAR_USED,'B'), c.COLUMN_ID, c.DATA_TYPE_OWNER, vc.VIRTUAL_COLUMN
+ FROM ALL_TAB_COLUMNS c JOIN ALL_TAB_COLS vc
+ ON vc.OWNER=c.OWNER AND vc.TABLE_NAME=c.TABLE_NAME AND vc.COLUMN_NAME=c.COLUMN_NAME
+ WHERE c.OWNER=:1 AND c.TABLE_NAME=:2 ORDER BY c.COLUMN_ID`, r.owner, table)
 	if err != nil {
 		return nil, err
 	}

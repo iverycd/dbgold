@@ -29,12 +29,15 @@ func inspectColumns(ctx context.Context, w Writer, table string) ([]source.Colum
 		query = `SELECT column_name,data_type,COALESCE(character_maximum_length,0),COALESCE(numeric_precision,0),COALESCE(numeric_scale,0),is_nullable,column_default,CASE WHEN column_default LIKE 'nextval(%' OR COALESCE(row_to_json(c)->>'is_identity','NO')='YES' THEN 'auto_increment' ELSE '' END,ordinal_position,COALESCE(datetime_precision,0),CASE WHEN COALESCE(row_to_json(c)->>'is_generated','NEVER')='ALWAYS' THEN COALESCE(row_to_json(c)->>'generation_expression','generated') ELSE '' END FROM information_schema.columns c WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`
 	case "mysql":
 		query = `SELECT COLUMN_NAME,COLUMN_TYPE,COALESCE(CHARACTER_MAXIMUM_LENGTH,0),COALESCE(NUMERIC_PRECISION,0),COALESCE(NUMERIC_SCALE,0),IS_NULLABLE,COLUMN_DEFAULT,EXTRA,ORDINAL_POSITION,COALESCE(DATETIME_PRECISION,0),GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`
-	case "oracle", "dameng":
-		p1, p2 := ":1", ":2"
-		if a.family == "dameng" {
-			p1, p2 = "?", "?"
-		}
-		query = `SELECT COLUMN_NAME,DATA_TYPE,COALESCE(CHAR_LENGTH,DATA_LENGTH),COALESCE(DATA_PRECISION,0),COALESCE(DATA_SCALE,0),CASE WHEN NULLABLE='Y' THEN 'YES' ELSE 'NO' END,DATA_DEFAULT,'',COLUMN_ID,COALESCE(DATA_SCALE,0),CASE WHEN VIRTUAL_COLUMN='YES' THEN 'generated' ELSE '' END FROM ALL_TAB_COLUMNS WHERE OWNER=` + p1 + ` AND TABLE_NAME=` + p2 + ` ORDER BY COLUMN_ID`
+	case "oracle":
+		// ALL_TAB_COLUMNS preserves the visible column set. Oracle exposes
+		// VIRTUAL_COLUMN only through ALL_TAB_COLS (including on 11g).
+		query = `SELECT c.COLUMN_NAME,c.DATA_TYPE,COALESCE(c.CHAR_LENGTH,c.DATA_LENGTH),COALESCE(c.DATA_PRECISION,0),COALESCE(c.DATA_SCALE,0),CASE WHEN c.NULLABLE='Y' THEN 'YES' ELSE 'NO' END,c.DATA_DEFAULT,'',c.COLUMN_ID,COALESCE(c.DATA_SCALE,0),CASE WHEN vc.VIRTUAL_COLUMN='YES' THEN 'generated' ELSE '' END
+ FROM ALL_TAB_COLUMNS c
+ JOIN ALL_TAB_COLS vc ON vc.OWNER=c.OWNER AND vc.TABLE_NAME=c.TABLE_NAME AND vc.COLUMN_NAME=c.COLUMN_NAME
+ WHERE c.OWNER=:1 AND c.TABLE_NAME=:2 ORDER BY c.COLUMN_ID`
+	case "dameng":
+		query = `SELECT COLUMN_NAME,DATA_TYPE,COALESCE(CHAR_LENGTH,DATA_LENGTH),COALESCE(DATA_PRECISION,0),COALESCE(DATA_SCALE,0),CASE WHEN NULLABLE='Y' THEN 'YES' ELSE 'NO' END,DATA_DEFAULT,'',COLUMN_ID,COALESCE(DATA_SCALE,0),CASE WHEN VIRTUAL_COLUMN='YES' THEN 'generated' ELSE '' END FROM ALL_TAB_COLUMNS WHERE OWNER=? AND TABLE_NAME=? ORDER BY COLUMN_ID`
 	case "sqlserver":
 		query = `SELECT c.name,t.name,CASE WHEN t.name IN ('nvarchar','nchar') AND c.max_length>0 THEN c.max_length/2 ELSE c.max_length END,c.precision,c.scale,CASE WHEN c.is_nullable=1 THEN 'YES' ELSE 'NO' END,OBJECT_DEFINITION(c.default_object_id),CASE WHEN c.is_identity=1 THEN 'auto_increment' ELSE '' END,c.column_id,c.scale,CASE WHEN c.is_computed=1 OR t.name IN ('timestamp','rowversion') THEN 'generated' ELSE '' END FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id JOIN sys.tables tb ON tb.object_id=c.object_id JOIN sys.schemas s ON s.schema_id=tb.schema_id WHERE s.name=@p1 AND tb.name=@p2 ORDER BY c.column_id`
 	default:
