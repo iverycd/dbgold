@@ -339,21 +339,22 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
-		ExcludedObjects:    p.ExcludedObjects,
-		PageSize:           p.PageSize,
-		MaxParallel:        p.MaxParallel,
-		Mode:               p.MigrateMode,
-		Filter:             p.TableFilter,
-		Content:            p.MigrateContent,
-		LowerCaseNames:     p.LowerCaseNames,
-		CharInLength:       p.CharInLength,
-		UseNvarchar2:       p.UseNvarchar2,
-		Distributed:        p.Distributed,
-		TargetSchema:       p.TargetSchema,
-		ChangeOwner:        p.ChangeOwner,
-		IntraTableParallel: p.IntraTableParallel,
-		TargetDBType:       dstConn.DBType,
-		StripViewSchemas:   stripSchemas,
+		PreparationStartedAt: startup.startedAt,
+		ExcludedObjects:      p.ExcludedObjects,
+		PageSize:             p.PageSize,
+		MaxParallel:          p.MaxParallel,
+		Mode:                 p.MigrateMode,
+		Filter:               p.TableFilter,
+		Content:              p.MigrateContent,
+		LowerCaseNames:       p.LowerCaseNames,
+		CharInLength:         p.CharInLength,
+		UseNvarchar2:         p.UseNvarchar2,
+		Distributed:          p.Distributed,
+		TargetSchema:         p.TargetSchema,
+		ChangeOwner:          p.ChangeOwner,
+		IntraTableParallel:   p.IntraTableParallel,
+		TargetDBType:         dstConn.DBType,
+		StripViewSchemas:     stripSchemas,
 	}
 	started, proceed = startup.begin("初始化迁移准备信息")
 	if !proceed {
@@ -546,15 +547,16 @@ func StartObjectMigration(c *gin.Context) {
 		}
 
 		cfg := datamigrate.Config{
-			ExcludedObjects: req.ExcludedObjects,
-			Mode:            "all",
-			Objects:         req.MigrateObjects,
-			TableNames:      req.TableNames,
-			LowerCaseNames:  req.LowerCaseNames,
-			Distributed:     req.Distributed,
-			TargetSchema:    req.TargetSchema,
-			ChangeOwner:     changeOwner,
-			TargetDBType:    dstConn.DBType,
+			PreparationStartedAt: startup.startedAt,
+			ExcludedObjects:      req.ExcludedObjects,
+			Mode:                 "all",
+			Objects:              req.MigrateObjects,
+			TableNames:           req.TableNames,
+			LowerCaseNames:       req.LowerCaseNames,
+			Distributed:          req.Distributed,
+			TargetSchema:         req.TargetSchema,
+			ChangeOwner:          changeOwner,
+			TargetDBType:         dstConn.DBType,
 		}
 		started, proceed = startup.begin("初始化迁移准备信息")
 		if !proceed {

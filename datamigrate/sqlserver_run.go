@@ -145,6 +145,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			}
 			return failGlobal(e)
 		}
+		m.logPreparationComplete(ctx)
 		if len(selected) > 0 {
 			if e = inspector.DropDependencies(ctx, drops); e != nil {
 				return failGlobal(e)
@@ -162,6 +163,8 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				m.log.DDLf("创建表 %s ... OK", t)
 			}
 		}
+	} else if m.cfg.objectMode() {
+		m.logPreparationComplete(ctx)
 	}
 	dataFailed := map[string]bool{}
 	if !m.cfg.objectMode() && m.cfg.Content != "schema_only" {
@@ -191,6 +194,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				sqlServerResult(&report.Data, t, "", fmt.Errorf("已有外键形成循环依赖，不能按依赖顺序追加数据"))
 			}
 		}
+		m.logPreparationComplete(ctx)
 		migrateOne := func(t string) {
 			r := result{table: t}
 			if m.cfg.Content == "data_only" {

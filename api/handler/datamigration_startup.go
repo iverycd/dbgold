@@ -11,13 +11,14 @@ import (
 // Startup logs are emitted by the migration worker, which also owns LogCh's
 // lifetime. HTTP cancellation handlers must not write to that channel.
 type migrationStartup struct {
-	ctx context.Context
-	job *store.DataMigrationJob
-	log *datamigrate.Logger
+	ctx       context.Context
+	job       *store.DataMigrationJob
+	log       *datamigrate.Logger
+	startedAt time.Time
 }
 
 func newMigrationStartup(ctx context.Context, job *datamigrate.Job, dbJob *store.DataMigrationJob) *migrationStartup {
-	return &migrationStartup{ctx: ctx, job: dbJob, log: datamigrate.NewLogger(job.LogCh)}
+	return &migrationStartup{ctx: ctx, job: dbJob, log: datamigrate.NewLogger(job.LogCh), startedAt: time.Now()}
 }
 
 func (s *migrationStartup) begin(stage string) (time.Time, bool) {

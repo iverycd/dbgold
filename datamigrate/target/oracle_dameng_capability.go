@@ -3,7 +3,6 @@ package target
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -30,6 +29,7 @@ type oracleDMCapabilityCache struct {
 	features     map[string]error
 	floatColumns map[string]string
 	floatActual  map[string]bool
+	load         *oracleDMLoadCache
 }
 
 // OracleDamengCapabilityError distinguishes a column-specific unsupported path
@@ -49,37 +49,12 @@ func oracleDMTaskFailure(err error) bool {
 	return failure.IsTaskError(err)
 }
 
-const oracleDMStrictLoadProbeSQL = `SELECT /*+ MY_STRICT_TABLES(7) */ CAST(CAST(? AS VARCHAR(32)) AS INT) FROM DUAL`
-
-// PrepareOracleDamengLoad checks that invalid text cannot become a numeric zero
-// or NULL under a permissive compatibility mode. The INSERT uses the same
-// statement-scoped strictness hint; no session or instance setting is changed.
+// PrepareOracleDamengLoad remains for older callers. A SELECT CAST is not an
+// INSERT assignment: mode 4 can convert invalid text to zero in the former,
+// regardless of the statement hint. CopyData validates values and actual target
+// column capacities instead of treating that expression as an admission gate.
 func (w *DaMengWriter) PrepareOracleDamengLoad(ctx context.Context) error {
-	w.oracleDMMu.Lock()
-	defer w.oracleDMMu.Unlock()
-	if w.oracleDM.features == nil {
-		w.oracleDM.features = map[string]error{}
-	}
-	const key = "load:strict"
-	if err, ok := w.oracleDM.features[key]; ok {
-		return err
-	}
-	var result any
-	err := w.db.QueryRowContext(ctx, oracleDMStrictLoadProbeSQL, "dbgold_invalid_number").Scan(&result)
-	if oracleDMTaskFailure(err) {
-		return err
-	}
-	var dmErr *dm.DmError
-	if errors.As(err, &dmErr) && dmErr.ErrCode == -6111 {
-		w.oracleDM.features[key] = nil
-		return nil
-	}
-	if err == nil {
-		err = fmt.Errorf("非法数值被转换为 %v", result)
-	}
-	err = fmt.Errorf("达梦严格写入能力探针未返回预期的数据库转换错误，禁止继续写入: %w", err)
-	w.oracleDM.features[key] = err
-	return err
+	return ctx.Err()
 }
 
 func oracleDMColumnKey(table, column string) string {
@@ -317,7 +292,17 @@ func oracleDMNationalProbeSQL(kind string, literal bool) string {
 	if literal {
 		value = "'汉A'"
 	}
-	return fmt.Sprintf("SELECT CASE WHEN %s THEN 1 ELSE 0 END FROM (SELECT CAST(%s AS %s(2 CHAR)) AS V FROM DUAL) P", oracleDMStringExact, value, kind)
+	exact := oracleDMStringExact
+	if kind == "NCHAR" {
+		// Fixed-width expressions pad to their byte buffer in mode 4. The
+		// sentinel has no trailing spaces; remove only this expected padding.
+		exact = strings.ReplaceAll(exact, "P.V", "RTRIM(P.V)")
+	}
+	// On DM8 mode 4 with LENGTH_IN_CHAR=0, even CAST(... AS NVARCHAR(2
+	// CHAR)) limits this expression to two bytes, yielding an empty value for
+	// the four-byte UTF-8 sentinel. A wide buffer checks syntax and binding;
+	// it deliberately makes no claim about a real column's CHAR capacity.
+	return fmt.Sprintf("SELECT CASE WHEN %s THEN 1 ELSE 0 END FROM (SELECT CAST(%s AS %s(32 CHAR)) AS V FROM DUAL) P", exact, value, kind)
 }
 
 func (w *DaMengWriter) probeOracleDMNational(ctx context.Context, kind string) error {

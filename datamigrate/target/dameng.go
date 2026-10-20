@@ -74,6 +74,7 @@ func (w *DaMengWriter) qualifiedTable(table string) string {
 // CreateTable 执行建表 DDL。达梦不支持 DROP TABLE IF EXISTS,
 // 故 DDL 拆成 DROP + CREATE 两句,DROP 失败(表不存在)忽略。
 func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	w.resetOracleDMLoadColumns()
 	w.identMu.Lock()
 	w.identCache = map[string]bool{}
 	w.identMu.Unlock()

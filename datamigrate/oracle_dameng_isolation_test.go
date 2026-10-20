@@ -18,6 +18,7 @@ type oracleDMFaultWriter struct {
 	prepareErrors, existingErrors, copyErrors map[string]error
 	createError, loadError                    error
 	preparedTables, attemptedCopies           []string
+	legacyLoadCalls                           int
 }
 
 type oracleDMFaultReader struct {
@@ -60,7 +61,10 @@ func (w *oracleDMFaultWriter) PrepareOracleDameng(_ context.Context, infos []*so
 func (w *oracleDMFaultWriter) ValidateOracleDamengExisting(_ context.Context, info *source.TableDDLInfo, _ dialect.TypeOpt) error {
 	return w.existingErrors[info.TableName]
 }
-func (w *oracleDMFaultWriter) PrepareOracleDamengLoad(context.Context) error { return w.loadError }
+func (w *oracleDMFaultWriter) PrepareOracleDamengLoad(context.Context) error {
+	w.legacyLoadCalls++
+	return w.loadError
+}
 func (w *oracleDMFaultWriter) CreateTable(ctx context.Context, ss []dialect.Statement) error {
 	if w.createError != nil {
 		return w.createError
@@ -120,10 +124,12 @@ func TestOracleDamengPerTableCapabilitiesContinueAllModes(t *testing.T) {
 func TestOracleDamengExistingCapacityFailureOnlyBlocksOneTable(t *testing.T) {
 	_, w, m := oracleDMIsolationFixture("data_only")
 	w.existingErrors = map[string]error{"Mixed": fmt.Errorf("目标列容量不足")}
+	w.loadError = fmt.Errorf("宽松模式的旧 CAST 负例不能成为任务门槛")
 	report := m.Run(context.Background())
 	require.Equal(t, 1, report.Tables.Failed)
 	require.Equal(t, []string{"LATER"}, w.attemptedCopies)
 	require.Equal(t, 1, report.Data.Success)
+	require.Zero(t, w.legacyLoadCalls)
 }
 
 func TestOracleDamengSourcePreflightFailureIsIsolated(t *testing.T) {
@@ -234,7 +240,7 @@ func TestOracleDamengConnectionLossDuringIndexDiagnosticStopsPostDDL(t *testing.
 }
 
 func TestOracleDamengTaskErrorsStopBeforeBusinessWrites(t *testing.T) {
-	for _, stage := range []string{"preflight", "create", "load", "string-control"} {
+	for _, stage := range []string{"preflight", "create", "string-control"} {
 		t.Run(stage, func(t *testing.T) {
 			_, w, m := oracleDMIsolationFixture("both")
 			switch stage {
@@ -242,8 +248,6 @@ func TestOracleDamengTaskErrorsStopBeforeBusinessWrites(t *testing.T) {
 				w.prepareErrors = map[string]error{"Mixed": fmt.Errorf("连接检查: %w", driver.ErrBadConn)}
 			case "create":
 				w.createError = fmt.Errorf("建表连接已断开: %w", driver.ErrBadConn)
-			case "load":
-				w.loadError = fmt.Errorf("无法保证严格数据写入")
 			case "string-control":
 				w.prepareErrors = map[string]error{"Mixed": &target.OracleDamengCapabilityError{Scope: "task", Stage: "普通字符串绑定控制失败", Err: fmt.Errorf("数据库侧长度/字节校验未通过")}}
 			}

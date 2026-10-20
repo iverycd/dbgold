@@ -58,6 +58,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 		}
 	}
 	m.log.Infof("结构预检通过，计划 %d 个对象；数据在复制或创建约束时验证，失败时已提交批次可能保留", len(plan.Objects))
+	m.logPreparationComplete(ctx)
 	copiedCounts := map[string]int64{}
 	autoMax := map[string]map[string]int64{}
 	execute := func(obj PlannedObject) bool {

@@ -26,7 +26,7 @@ export ORACLE_DM_TEST_EXPECT_MODE=0
 
 DSN 格式沿用相应驱动。需要源库读取当前 schema 元数据及创建表、索引、视图、序列、触发器和注释的权限，以及原生 XMLTYPE；目标库需要读取 `V$DM_INI`、目标元数据，以及在指定测试 schema 中创建和删除相同对象的权限。源库和目标库的字符集需能保存测试中的中文。生产迁移只按所选对象读取必要能力；本测试为了记录验收矩阵会额外读取实例模式。
 
-BFILE 专项要求两端已有同名 DIRECTORY 并具备相应权限，只核对目录与文件名定位信息，不迁移目录对象或外部文件。Oracle 数据写入使用语句级 `MY_STRICT_TABLES(7)` hint，并先通过只读非法数值表达式确认严格转换生效；无法确认时必须停止，不能在宽松模式下把错误值静默改成 0/NULL。该设置不修改连接会话或实例参数。
+BFILE 专项要求两端已有同名 DIRECTORY 并具备相应权限，只核对目录与文件名定位信息，不迁移目录对象或外部文件。Oracle 数据写入在每页执行前完成数值和时间转换，以及按实际目标列字符数、物理字节容量和目标编码的检查；非法值或超限值拒绝整页写入。`MY_STRICT_TABLES(7)` hint 仅保留为附加保护，不作为正确性依据；不再用非法字符串的 `SELECT CAST` 结果判定 INSERT 是否安全，也不修改会话或实例参数。
 
 只有四项连接/schema 设置齐全且 `ORACLE_DM_TEST_ALLOW_DDL=1` 时才会创建对象。测试首先检查两端 schema 没有表，然后创建 `ODM<时间戳>` 前缀的唯一对象；结束时仅删除这些测试对象。进程被强制中止时，需要手动清理对应前缀的表、视图和序列，重新运行前恢复空测试 schema。
 
@@ -46,6 +46,29 @@ BFILE 专项要求两端已有同名 DIRECTORY 并具备相应权限，只核对
 Oracle 版本认证需要在实际 Oracle 11g 和实际较新版本各执行一次；较新版本的兼容设置不能替代 11g 分页验证。单元测试和默认跳过的集成测试不能证明已通过真实数据库验收。
 
 模式矩阵至少在 `COMPATIBLE_MODE=0`、`2`、`4` 的独立现有实例上各运行一次，并分别记录 Oracle/DM 版本、实际模式、NUMBER_MODE、IFUN_DATETIME_MODE 和输出日志。不同模式通过修改目标连接并设置 `ORACLE_DM_TEST_EXPECT_MODE` 运行；测试不会切换或重启实例。IFUN_DATETIME_MODE 的两种状态也要独立记录，不能以一种配置替代另一种。BFILE 外部文件定位及空间类型使用上述可选环境变量在具备相应组件和权限的专用实例验证；测试不创建外部目录、不读取文件内容、不安装空间组件。专项未启用时单独输出跳过并标记未验收，不能由普通表测试通过替代。
+
+## 只读字符探针验证（2026-10-20）
+
+`TestOracleDamengReadOnlyCharacterCapabilities` 仅执行 SELECT，需要 `ORACLE_DM_TEST_TARGET_DSN`，可选 `ORACLE_DM_TEST_TARGET_SCHEMA`；不需要 Oracle 连接或 `ALLOW_DDL`，不会创建或修改任何对象：
+
+```sh
+/Users/kay/sdk/go1.25.5/bin/go test ./datamigrate -run '^TestOracleDamengReadOnlyCharacterCapabilities$' -count=1 -v
+```
+
+已在 DM8 构建 `03134284294-20240919-243448-20119` 的现有模式 4 实例上完成只读对照。实际参数为 `LENGTH_IN_CHAR=0`、`NVARCHAR_LENGTH_IN_CHAR=1`、`MY_STRICT_TABLES=1`、`SF_GET_UNICODE_FLAG()=1`（UTF-8）。
+
+| 只读对照 | 观察结果 |
+|---|---|
+| 直接绑定“汉A” | 完整返回 2 字符、4 字节 |
+| VARCHAR/NVARCHAR 的 `CAST(... AS ...(2 CHAR))`，参数及字面量 | 表达式均返回空串，LENGTH/LENGTHB 为 0 |
+| NCHAR 的短 CAST | 补成两个空格，内容字符已丢失 |
+| NVARCHAR 的 `32 CHAR` 缓冲区及 NCHAR 同宽缓冲区去补空格 | 服务端长度/完整字节检查均通过，修正后的实际 Go 能力检查通过 |
+| `SELECT /*+ MY_STRICT_TABLES(7) */ CAST(... AS INT)` 的非法数值输入 | 返回 0；该参数在本实例的 `V$HINT_INI_INFO` 中没有记录 |
+| 已有国家字符列目录（仅读元数据） | CHAR_LENGTH=5、DATA_LENGTH=20、CHAR_USED=B、SYSCOLUMNS.SCALE=7；有效单位应识别为字符 |
+
+短 CAST 的长度行为不能代替真实列容量。国家字符探针现在只验证语法与足够缓冲区内的绑定内容；NCHAR 的定长补空格单独处理。写入容量依据真实目标列目录，字符单位也检查目标编码后的物理字节数。BFILE 的目录/文件引用不按原生定位器的 DATA_LENGTH 限制。
+
+本次只读诊断没有执行建表或数据写入，**不能替代模式 0/2/4 的完整迁移及字符单位建表验收**；该验收矩阵仍需在专用空 schema 中运行上面的 DDL/DML 测试。
 
 ## 视图自动转换边界
 

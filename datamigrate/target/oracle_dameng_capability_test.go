@@ -31,35 +31,15 @@ func TestOracleDMOrdinaryColumnsNeedNoINIPrivilege(t *testing.T) {
 	require.Empty(t, w.OracleDamengProfile().Mode)
 }
 
-func TestOracleDMStrictLoadProbeRejectsPermissiveAndUnrelatedFailures(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-		pass bool
-	}{
-		{name: "conversion_error", err: &dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"}, pass: true},
-		{name: "permissive_zero"},
-		{name: "permission", err: &dm.DmError{ErrCode: -5515, ErrText: "无权限"}},
-		{name: "driver_error", err: errors.New("client conversion failed")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w, m := mockDM(t)
-			q := m.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number")
-			if tc.err != nil {
-				q.WillReturnError(tc.err)
-			} else {
-				q.WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
-			}
-			for n := 0; n < 2; n++ {
-				err := w.PrepareOracleDamengLoad(context.Background())
-				if tc.pass {
-					require.NoError(t, err)
-				} else {
-					require.ErrorContains(t, err, "禁止继续写入")
-				}
-			}
-		})
-	}
+func TestOracleDMLegacyLoadPreparationDoesNotInferInsertFromSelectCast(t *testing.T) {
+	w, _ := mockDM(t)
+	// No SQL expectation: mode-specific SELECT coercion cannot establish
+	// INSERT safety. The per-page actual-column validator is tested separately.
+	require.NoError(t, w.PrepareOracleDamengLoad(context.Background()))
+	require.NoError(t, w.PrepareOracleDamengLoad(context.Background()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, w.PrepareOracleDamengLoad(ctx), context.Canceled)
 }
 
 func TestOracleDMDateUsesObservedFullSecondCapability(t *testing.T) {
@@ -125,15 +105,6 @@ func TestOracleDMDateDoesNotHideOrCacheConnectionFailure(t *testing.T) {
 	}
 }
 
-func TestOracleDMStrictLoadDoesNotCacheConnectionFailure(t *testing.T) {
-	w, m := mockDM(t)
-	m.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnError(sql.ErrConnDone)
-	require.ErrorIs(t, w.PrepareOracleDamengLoad(context.Background()), sql.ErrConnDone)
-	require.NotContains(t, w.oracleDM.features, "load:strict")
-	m.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnError(&dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"})
-	require.NoError(t, w.PrepareOracleDamengLoad(context.Background()))
-}
-
 func TestOracleDMTimestampProbesUseBindingAndCache(t *testing.T) {
 	w, m := mockDM(t)
 	const plain = "2024-01-02 03:04:05.123456700"
@@ -177,10 +148,10 @@ func capabilityScope(t *testing.T, err error) string {
 	return scoped.OracleDamengCapabilityScope()
 }
 
-func TestOracleDMNationalProbeDoesNotDependOnNationalResultDecoding(t *testing.T) {
+func TestOracleDMNationalProbeAvoidsShortCastByteTruncation(t *testing.T) {
 	w, m := mockDM(t)
-	// Reproduce the observed client-visible result of the old probe. It alone
-	// cannot establish what bytes the server stored in the national expression.
+	// Mode 4 / LENGTH_IN_CHAR=0 truncates the short CAST itself, even
+	// with literal input. This is not evidence about a real column's CHAR unit.
 	const oldSQL = "SELECT CAST(? AS NVARCHAR(2 CHAR)) FROM DUAL"
 	m.ExpectQuery(regexp.QuoteMeta(oldSQL)).WithArgs(oracleDMNationalSentinel).
 		WillReturnRows(sqlmock.NewRows([]string{"national_value"}).AddRow(""))
@@ -252,9 +223,11 @@ func TestOracleDMNationalProbePreservesExplicitCharAndDirectParameterPath(t *tes
 		{Name: "V", DataType: "NVARCHAR2", Length: 2},
 	}}}
 	require.NoError(t, w.PrepareOracleDameng(context.Background(), infos, dialect.TypeOpt{}))
-	require.Contains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "CAST(? AS NVARCHAR(2 CHAR))")
+	require.Contains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "CAST(? AS NVARCHAR(32 CHAR))")
 	require.NotContains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "CAST(CAST(?")
-	require.Contains(t, oracleDMNationalProbeSQL("NCHAR", false), "CAST(? AS NCHAR(2 CHAR))")
+	require.Contains(t, oracleDMNationalProbeSQL("NCHAR", false), "CAST(? AS NCHAR(32 CHAR))")
+	require.Contains(t, oracleDMNationalProbeSQL("NCHAR", false), "LENGTH(RTRIM(P.V))=2")
+	require.NotContains(t, oracleDMNationalProbeSQL("NVARCHAR", false), "RTRIM(")
 }
 
 func TestOracleDMNationalProbeTransientConnectionFailureIsNotCached(t *testing.T) {

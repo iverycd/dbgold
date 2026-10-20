@@ -17,8 +17,11 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
-	CaptureRepair bool                       `json:"CaptureRepair,omitempty"`
-	RepairSink    func(RepairManifest) error `json:"-"`
+	// PreparationStartedAt includes connection setup in the preparation duration.
+	// Zero falls back to the start of Run; the timestamp is never persisted.
+	PreparationStartedAt time.Time                  `json:"-"`
+	CaptureRepair        bool                       `json:"CaptureRepair,omitempty"`
+	RepairSink           func(RepairManifest) error `json:"-"`
 	// RepairObjectSink synchronously saves execution progress. It requires
 	// RepairSink for full checkpoints; nil retains the legacy full-save behavior.
 	RepairObjectSink   func(repair.Object) error `json:"-"`
@@ -55,6 +58,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	preparationStartedAt   time.Time
 	compatibilityFunctions *target.CompatibilityFunctionsReport
 	sourceDDLCache         sourceTableDDLCache
 	repairs                *repairRecorder
@@ -187,6 +191,12 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.preparationStartedAt = m.cfg.PreparationStartedAt
+	if m.preparationStartedAt.IsZero() {
+		m.preparationStartedAt = time.Now()
+	}
+	defer func() { m.preparationStartedAt = time.Time{} }()
+
 	if m.isOracleDameng() {
 		var cancel context.CancelCauseFunc
 		ctx, cancel = context.WithCancelCause(ctx)
@@ -200,6 +210,15 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.finishRepair(ctx, &report)
 	}
 	return report
+}
+
+// logPreparationComplete marks the transition into execution once per Run.
+func (m *Migrator) logPreparationComplete(ctx context.Context) {
+	if m.preparationStartedAt.IsZero() || ctx.Err() != nil {
+		return
+	}
+	m.log.Infof("准备阶段完成，总耗时 %s", time.Since(m.preparationStartedAt).Round(time.Millisecond))
+	m.preparationStartedAt = time.Time{}
 }
 
 func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
@@ -321,6 +340,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	if m.cfg.objectMode() {
 		m.log.Infof("开始对象迁移任务,共 %d 张表,对象类型: %s", len(tables), strings.Join(m.cfg.Objects, ", "))
 		report.Tables.Total = len(tables)
+		m.logPreparationComplete(ctx)
 		m.log.Info("=== 创建对象（主键/序列/索引/外键）===")
 		m.createPostDDL(ctx, &report, tables, allTables)
 		elapsed := time.Since(start).Round(time.Second)
@@ -340,6 +360,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	// Phase 1: 建表 DDL（串行）
+	m.logPreparationComplete(ctx)
 	if skipSchema {
 		m.log.Info("=== Phase 1: 跳过创建表结构（仅迁移数据行模式）===")
 	} else {

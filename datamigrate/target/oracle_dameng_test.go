@@ -6,7 +6,6 @@ import (
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
-	"gitee.com/chunanyong/dm"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +53,6 @@ func TestOracleDamengCopyUsesExplicitTemporalConversions(t *testing.T) {
 	w, m := mockDM(t)
 	w.srcType = "oracle"
 	w.identCache["T"] = false
-	m.ExpectQuery(`SELECT /\*\+ MY_STRICT_TABLES\(7\) \*/ CAST`).WithArgs("dbgold_invalid_number").WillReturnError(&dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"})
 	m.ExpectBegin()
 	p := m.ExpectPrepare(`INSERT /\*\+ MY_STRICT_TABLES\(7\) \*/ INTO .*TO_TIMESTAMP\(\?, 'YYYY-MM-DD HH24:MI:SS.FF9'\).*TO_TIMESTAMP_TZ`)
 	p.ExpectExec().WithArgs("2024-01-02 03:04:05.123456789", "2024-01-02 03:04:05.987654321 -05:00").WillReturnResult(sqlmock.NewResult(0, 1))

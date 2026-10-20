@@ -46,7 +46,6 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 		return true
 	}
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
-	usable := 0
 	for _, table := range tables {
 		if ctx.Err() != nil {
 			return false
@@ -65,15 +64,6 @@ func (m *Migrator) preflightOracleDameng(ctx context.Context, tables []string, r
 			}
 			issue(table, err)
 			continue
-		}
-		usable++
-	}
-	// Strict load semantics are shared by the whole task. Failure here cannot
-	// safely be isolated to a column or table, unlike feature-specific probes.
-	if usable > 0 && m.cfg.Content != "schema_only" {
-		if err := prepareOracleDamengLoad(ctx, m.writer); err != nil {
-			m.cancelOracleDamengTask(ctx, fmt.Errorf("目标数据写入能力检查: %w", err))
-			return false
 		}
 	}
 	return true
@@ -140,13 +130,6 @@ func prepareOracleDamengWriter(ctx context.Context, w interface{ Dialect() diale
 		if d, ok := w.Dialect().(*dialect.DaMengDialect); ok {
 			d.SetOracleDamengDate(profile.OracleDamengUsesDate())
 		}
-	}
-	return nil
-}
-
-func prepareOracleDamengLoad(ctx context.Context, w any) error {
-	if checker, ok := w.(interface{ PrepareOracleDamengLoad(context.Context) error }); ok {
-		return checker.PrepareOracleDamengLoad(ctx)
 	}
 	return nil
 }

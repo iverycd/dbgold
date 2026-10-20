@@ -354,6 +354,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "snapshot", "phase": "snapshot", "summary": "正在建立一致快照"})
 	srcCopy := *src
 	srcCopy.Database = j.SrcDatabase
+	preparationStartedAt := time.Now()
 	r, e := source.NewMySQL(buildDSN(&srcCopy), j.SrcDatabase, source.ConnPoolConfig{MaxOpenConns: 4, MaxIdleConns: 2})
 	if e != nil {
 		return e
@@ -395,7 +396,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	defer w.Close()
 	logJob := &datamigrate.Job{LogCh: make(chan string, 4096)}
 	journalDone := startIncrementalLogJournal(j.JobID, logJob)
-	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: dst.DBType})
+	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PreparationStartedAt: preparationStartedAt, PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: dst.DBType})
 	report := m.Run(ctx)
 	close(logJob.LogCh)
 	<-journalDone

@@ -116,11 +116,6 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		if err = prepareOracleDamengWriter(ctx, w, []*source.TableDDLInfo{targetInfo}, dialect.TypeOpt{CharInLength: cfg.CharInLength, UseNvarchar2: cfg.UseNvarchar2}); err != nil {
 			return p, fmt.Errorf("补迁目标能力检查: %w", err)
 		}
-		if cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus != "succeeded" {
-			if err = prepareOracleDamengLoad(ctx, w); err != nil {
-				return p, fmt.Errorf("补迁目标数据写入能力检查: %w", err)
-			}
-		}
 		if checker, ok := w.(interface {
 			ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
 		}); ok {

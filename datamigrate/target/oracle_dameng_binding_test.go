@@ -71,8 +71,13 @@ func oracleDamengBindingWriter(t *testing.T) (*DaMengWriter, sqlmock.Sqlmock) {
 		_ = db.Close()
 	})
 	w := &DaMengWriter{db: db, schema: "APP", srcType: "oracle", dia: dialect.NewDaMeng(), valueConv: valueconv.NewDaMeng(), identCache: map[string]bool{"T": false}}
-	mock.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnError(&dm.DmError{ErrCode: -6111, ErrText: "字符串转换出错"})
-	require.NoError(t, w.PrepareOracleDamengLoad(context.Background()))
+	// Binding tests supply known effective target limits. Dedicated load tests
+	// exercise the real catalog queries and character-set lookup.
+	w.oracleDM.load = &oracleDMLoadCache{charset: 1, charsetKnown: true, tables: map[string]map[string]oracleDMLoadColumn{"T": {
+		"RID": {kind: "BINARY", bytes: 18}, "URID": {kind: "VARBINARY", bytes: 4000},
+		"V": {kind: "NVARCHAR", chars: 36, bytes: 144, units: "C"},
+		"C": {kind: "CLOB"}, "B": {kind: "BLOB"}, "F": {kind: "BFILE", bytes: 512},
+	}}}
 	return w, mock
 }
 
@@ -107,13 +112,9 @@ func TestOracleDamengCopyBindsActualTargetFloatFamily(t *testing.T) {
 	}
 }
 
-func TestOracleDamengFloatFailureRollsBackCurrentPage(t *testing.T) {
+func TestOracleDamengFloatFailureRejectsEntirePageBeforeWrite(t *testing.T) {
 	w, mock := oracleDamengBindingWriter(t)
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "F" FROM "APP"."T" WHERE 1=0`)).WillReturnRows(sqlmock.NewRowsWithColumnDefinition(sqlmock.NewColumn("F").OfType("DOUBLE", float64(0))))
-	mock.ExpectBegin()
-	statement := mock.ExpectPrepare(regexp.QuoteMeta("INSERT /*+ MY_STRICT_TABLES(7) */ INTO"))
-	statement.ExpectExec().WithArgs(float64(1.25)).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectRollback()
 	err := w.CopyData(context.Background(), "T", []string{"F"}, []string{"BINARY_DOUBLE"}, [][]any{{float64(1.25)}, {math.Inf(1)}})
 	require.ErrorContains(t, err, "T.F")
 }
@@ -135,14 +136,13 @@ func TestOracleDamengUnknownFloatTargetFailsBeforeWrite(t *testing.T) {
 	require.Contains(t, err.Error(), "T.F")
 }
 
-func TestOracleDamengCopyRejectsPermissiveLoadBeforeTransaction(t *testing.T) {
-	for _, converted := range []driver.Value{int64(0), nil} {
-		w, mock := mockDM(t)
-		w.srcType = "oracle"
-		mock.ExpectQuery(regexp.QuoteMeta(oracleDMStrictLoadProbeSQL)).WithArgs("dbgold_invalid_number").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(converted))
-		err := w.CopyData(context.Background(), "T", []string{"V"}, []string{"VARCHAR2"}, [][]any{{"text"}})
-		require.ErrorContains(t, err, "严格写入能力")
-	}
+func TestOracleDamengCopyNeedsActualCapacityBeforeTransaction(t *testing.T) {
+	w, mock := mockDM(t)
+	w.srcType = "oracle"
+	mock.ExpectQuery(regexp.QuoteMeta(oracleDMLoadColumnsSQL)).WithArgs("APP", "T").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "chars", "bytes", "units"}))
+	mock.ExpectQuery(regexp.QuoteMeta(oracleDMLoadCharsetSQL)).WillReturnRows(sqlmock.NewRows([]string{"charset"}).AddRow(1))
+	err := w.CopyData(context.Background(), "T", []string{"V"}, []string{"VARCHAR2"}, [][]any{{"text"}})
+	require.ErrorContains(t, err, "T.V 缺少写入容量元数据")
 }
 
 func TestOracleDamengStructuredValuesStayParameterized(t *testing.T) {

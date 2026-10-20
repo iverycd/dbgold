@@ -366,6 +366,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	}
 	m.log.Infof("开始 MySQL → Oracle 迁移，共 %d 张表", len(p.tables))
 	failed := map[string]bool{}
+	m.logPreparationComplete(ctx)
 	if !m.cfg.objectMode() && m.cfg.Content != "data_only" {
 		m.log.Info("=== 创建 Oracle 表结构 ===")
 		for _, t := range p.tables {

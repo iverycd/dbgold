@@ -21,12 +21,10 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 		return nil
 	}
 	oracleFloatKinds := make([]string, len(cols))
+	var oracleRows [][]any
 	if w.srcType == "oracle" {
 		if len(colTypes) != len(cols) {
 			return fmt.Errorf("表 %s 缺少源列类型", table)
-		}
-		if err := w.PrepareOracleDamengLoad(ctx); err != nil {
-			return err
 		}
 		for i, dt := range colTypes {
 			switch typemap.OracleDamengBaseType(dt) {
@@ -40,6 +38,11 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 				}
 				oracleFloatKinds[i] = kind
 			}
+		}
+		var err error
+		oracleRows, err = w.prepareOracleDMLoadPage(ctx, table, cols, colTypes, rows, oracleFloatKinds)
+		if err != nil {
+			return err
 		}
 	}
 	hasIdentity, err := w.tableHasIdentity(ctx, table)
@@ -103,30 +106,15 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 	}
 	defer stmt.Close()
 
-	for _, row := range rows {
+	for rowIndex, row := range rows {
 		if len(row) != len(cols) {
 			return fmt.Errorf("表 %s 行列数不匹配", table)
 		}
-		conv := w.convertRow(row, colTypes)
+		var conv []interface{}
 		if w.srcType == "oracle" {
-			if len(colTypes) != len(cols) {
-				return fmt.Errorf("表 %s 缺少源列类型", table)
-			}
-			conv = make([]interface{}, len(row))
-			for i, v := range row {
-				if kind := oracleFloatKinds[i]; kind != "" {
-					bits := 64
-					if kind == "real" {
-						bits = 32
-					}
-					conv[i], err = valueconv.OracleDamengFloat(v, colTypes[i], kind == "decimal", bits)
-				} else {
-					conv[i], err = valueconv.OracleDameng(v, colTypes[i])
-				}
-				if err != nil {
-					return fmt.Errorf("%s.%s: %w", table, cols[i], err)
-				}
-			}
+			conv = oracleRows[rowIndex]
+		} else {
+			conv = w.convertRow(row, colTypes)
 		}
 		if w.srcType == "mysql" {
 			if len(colTypes) != len(cols) {
