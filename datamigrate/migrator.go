@@ -1249,15 +1249,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	}
 }
 
-// createOneView 处理单个视图:对象名规范化、定义调整、特殊视图修正、剥离跨库模式名,
-// 然后在目标库创建视图并按需修改 owner。返回实际执行的 DDL 与执行错误(nil 表示成功)。
-func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string, error) {
-	if m.isSQLServerDameng() {
-		v.ViewName = m.objName(v.ViewName)
-		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
-		return ddl, m.repairView(ctx, v)
-	}
-
+// prepareView shares the final view definition between execution and Oscar's
+// initial repair inventory, even if migration stops before reaching the view.
+func (m *Migrator) prepareView(v source.ViewInfo) (source.ViewInfo, error) {
 	vCopy := v
 	vCopy.ViewName = m.objName(v.ViewName)
 	vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
@@ -1275,13 +1269,33 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	}
 	// 去除用户指定的跨库模式名前缀(忽略大小写)
 	if m.isOscar() {
+		sourceSchema := ""
+		if m.reader.DBType() == "mysql" {
+			// The MySQL Oscar reader retains quoting and schema prefixes. Remove
+			// only this migration's source database automatically.
+			sourceSchema = m.dmSourceSchema
+		}
 		var err error
-		vCopy.Definition, err = normalizeOscarView(vCopy.Definition, m.cfg.StripViewSchemas)
+		vCopy.Definition, err = normalizeOscarViewForSource(vCopy.Definition, m.cfg.StripViewSchemas, sourceSchema)
 		if err != nil {
-			return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
+			return vCopy, err
 		}
 	} else {
 		vCopy.Definition = m.stripViewSchemas(vCopy.Definition)
+	}
+	return vCopy, nil
+}
+
+// createOneView 创建准备后的视图并按需修改 owner，返回实际 DDL 与执行错误。
+func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string, error) {
+	if m.isSQLServerDameng() {
+		v.ViewName = m.objName(v.ViewName)
+		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
+		return ddl, m.repairView(ctx, v)
+	}
+	vCopy, err := m.prepareView(v)
+	if err != nil {
+		return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
 	}
 	// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
 	viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)

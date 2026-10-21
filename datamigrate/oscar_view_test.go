@@ -58,3 +58,53 @@ func TestOscarViewRejectsMalformedSQL(t *testing.T) {
 		require.Error(t, err, sql)
 	}
 }
+
+func TestOscarViewDottedMySQLSchemas(t *testing.T) {
+	quote := func(name string) string { return "`" + strings.ReplaceAll(name, "`", "``") + "`" }
+	schema := quote("FinancePlatform_3.0")
+	query := "SELECT " + schema + ".`AppManage_ElementRight`.`PortalEltGuid`, " + schema + ".`AppManage_ElementRight`.*, t.`PortalEltGuid`, 1.0, .0, 'FinancePlatform_3.0.tbl `Keep`' FROM " + schema + ".`AppManage_ElementRight` t JOIN " + schema + ".`OtherTable` b ON t.`Id` = b.`Id` /* FinancePlatform_3.0.tbl */ -- `Keep`\n"
+	for _, tt := range []struct {
+		name   string
+		strip  []string
+		prefix string
+	}{
+		{name: "preserve external schema", prefix: `"FinancePlatform_3.0".`},
+		{name: "strip whole schema", strip: []string{"financeplatform_3.0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeOscarView(query, tt.strip)
+			require.NoError(t, err)
+			want := `SELECT ` + tt.prefix + `"APPMANAGE_ELEMENTRIGHT"."PORTALELTGUID", ` + tt.prefix + `"APPMANAGE_ELEMENTRIGHT".*, "T"."PORTALELTGUID", 1.0, .0, 'FinancePlatform_3.0.tbl ` + "`Keep`" + `' FROM ` + tt.prefix + `"APPMANAGE_ELEMENTRIGHT" "T" JOIN ` + tt.prefix + `"OTHERTABLE" "B" ON "T"."ID" = "B"."ID" /* FinancePlatform_3.0.tbl */ -- ` + "`Keep`\n"
+			require.Equal(t, want, got)
+		})
+	}
+
+	t.Run("escaped schema spelling", func(t *testing.T) {
+		name := "External`\"Db.3.0"
+		query := "SELECT " + quote(name) + ".`t``x`.`c\"y` FROM " + quote(name) + ".`t``x`"
+		got, err := normalizeOscarView(query, nil)
+		require.NoError(t, err)
+		require.Equal(t, "SELECT \"External`\"\"Db.3.0\".\"T`X\".\"C\"\"Y\" FROM \"External`\"\"Db.3.0\".\"T`X\"", got)
+		got, err = normalizeOscarView(query, []string{name})
+		require.NoError(t, err)
+		require.Equal(t, "SELECT \"T`X\".\"C\"\"Y\" FROM \"T`X\"", got)
+	})
+}
+
+func TestOscarViewDottedQualifiedFunctions(t *testing.T) {
+	query := "SELECT `FinancePlatform_3.0`.`MixedFn`(t.id), `External.Db`.`OtherFn`(t.id), `LocalFn`(t.id) FROM tbl t"
+	for _, tt := range []struct {
+		name, source, localPrefix, externalPrefix string
+		strip                                     []string
+	}{
+		{name: "preserve", localPrefix: `"FinancePlatform_3.0".`, externalPrefix: `"External.Db".`},
+		{name: "source database", source: "FinancePlatform_3.0", externalPrefix: `"External.Db".`},
+		{name: "configured", strip: []string{"financeplatform_3.0", "external.db"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeOscarViewForSource(query, tt.strip, tt.source)
+			require.NoError(t, err)
+			require.Equal(t, `SELECT `+tt.localPrefix+`"MixedFn"("T"."ID"), `+tt.externalPrefix+`"OtherFn"("T"."ID"), "LocalFn"("T"."ID") FROM "TBL" "T"`, got)
+		})
+	}
+}

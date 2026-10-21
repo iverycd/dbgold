@@ -220,7 +220,7 @@ func (r *MySQLReader) oracleForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *MySQLReader) GetViewsForTarget(ctx context.Context, target string) ([]ViewInfo, error) {
-	if target != "oracle" {
+	if target != "oracle" && target != "oscar" {
 		return r.GetViews(ctx)
 	}
 	rows, err := r.queryContext(ctx, `SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME`, r.dbName)
@@ -235,16 +235,22 @@ func (r *MySQLReader) GetViewsForTarget(ctx context.Context, target string) ([]V
 		if err = rows.Scan(&v.ViewName, &def); err != nil {
 			return nil, err
 		}
-		if !def.Valid {
+		if !def.Valid || target == "oscar" && strings.TrimSpace(def.String) == "" {
 			return nil, fmt.Errorf("视图 %s 定义不可读，请检查 SHOW VIEW 权限", v.ViewName)
 		}
 		v.Definition = def.String
+		if target == "oscar" {
+			v.Definition = transformMySQLViewForOscar(v.ViewName, v.Definition)
+		}
 		out = append(out, v)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
 	rows.Close()
+	if target == "oscar" {
+		return out, nil
+	}
 	for i := range out {
 		info, err := r.oracleTableInfo(ctx, out[i].ViewName)
 		if err != nil {

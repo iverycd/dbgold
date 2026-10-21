@@ -198,9 +198,15 @@ var oscarViewKeywords = func() map[string]bool {
 }()
 
 // normalizeOscarView quotes uppercased relation/column/alias identifiers. SQL
-// keywords, function names, cast types and external schema names are retained.
+// keywords, function names, cast types and external schema spelling are retained.
 // stripSchemas applies only to actual qualified references, never string text.
 func normalizeOscarView(sql string, stripSchemas []string) (string, error) {
+	return normalizeOscarViewForSource(sql, stripSchemas, "")
+}
+
+// Automatic MySQL source matching is exact: databases differing only in case
+// may be distinct. Explicit stripSchemas keeps its case-insensitive behavior.
+func normalizeOscarViewForSource(sql string, stripSchemas []string, sourceSchema string) (string, error) {
 	tokens, err := lexOscarView(sql)
 	if err != nil {
 		return sql, err
@@ -225,6 +231,21 @@ func normalizeOscarView(sql string, stripSchemas []string) (string, error) {
 	}
 	ident := func(i int) bool {
 		return i >= 0 && i < len(sig) && (tokens[sig[i]].kind == 'i' || tokens[sig[i]].kind == 'q')
+	}
+	quote := func(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
+	rewriteSchema := func(i int) {
+		part := &tokens[sig[i]]
+		strip := sourceSchema != "" && part.name == sourceSchema
+		for _, schema := range stripSchemas {
+			strip = strip || strings.EqualFold(strings.TrimSpace(schema), part.name)
+		}
+		if strip {
+			part.text = ""
+			tokens[sig[i+1]].text = ""
+		} else if part.kind == 'q' {
+			// Convert backticks/brackets while preserving external schema spelling.
+			part.text = quote(part.name)
+		}
 	}
 	// Pair parentheses once, so CAST type clauses and CTE column lists are not
 	// mistaken for aliases/functions. Malformed SQL fails before CREATE VIEW.
@@ -353,6 +374,12 @@ func normalizeOscarView(sql string, stripSchemas []string) (string, error) {
 			function = false
 		} // CTE name(columns) AS (...)
 		if function {
+			for j := i; j < end; j += 2 {
+				rewriteSchema(j)
+			}
+			if part := &tokens[sig[end]]; part.kind == 'q' {
+				part.text = quote(part.name) // preserve function spelling
+			}
 			continue
 		}
 		if t.kind == 'i' && oscarViewKeywords[word(i)] && end == i {
@@ -372,16 +399,10 @@ func normalizeOscarView(sql string, stripSchemas []string) (string, error) {
 		for j := i; j <= end; j += 2 {
 			part := &tokens[sig[j]]
 			if j <= schemaEnd {
-				for _, schema := range stripSchemas {
-					if strings.EqualFold(strings.TrimSpace(schema), part.name) {
-						part.text = ""
-						tokens[sig[j+1]].text = ""
-						break
-					}
-				}
+				rewriteSchema(j)
 				continue
 			}
-			part.text = `"` + strings.ReplaceAll(strings.ToUpper(part.name), `"`, `""`) + `"`
+			part.text = quote(strings.ToUpper(part.name))
 		}
 	}
 	var out strings.Builder

@@ -477,8 +477,20 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			if len(m.cfg.ViewNames) > 0 && !slices.Contains(m.cfg.ViewNames, src) {
 				continue
 			}
-			v.ViewName = m.objName(src)
-			add(repair.Object{Kind: "view", Name: v.ViewName, SourceName: src, TargetName: v.ViewName}, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
+			name := m.objName(src)
+			o := repair.Object{Kind: "view", Name: name, SourceName: src, TargetName: name}
+			if m.isOscar() {
+				var err error
+				v, err = m.prepareView(v)
+				if err != nil {
+					o.Error = err.Error()
+					add(o, nil)
+					continue
+				}
+			} else {
+				v.ViewName = name
+			}
+			add(o, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
 		}
 		finishStage()
 		if cancelled() {
