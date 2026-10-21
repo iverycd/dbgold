@@ -3,8 +3,8 @@
 
 
     <div class="migration-connections">
-      <div class="migration-connection-side"><a-card class="conn-card" :body-style="{ padding: '24px' }">
-        <div class="conn-card-header"><a-tag color="orange" size="small">源库</a-tag><span class="conn-card-title">从哪里迁移</span></div>
+      <div class="migration-connection-side"><a-card class="conn-card">
+        <div class="conn-card-header"><a-tag color="orange" size="small">源库</a-tag></div>
         <a-form-item label="源连接">
           <div style="width: 100%">
             <a-select
@@ -34,8 +34,8 @@
         <DatabaseNameEditor :connection="selectedSrc" />
       </a-card></div>
       <div class="migration-connection-arrow"><icon-arrow-right /></div>
-      <div class="migration-connection-side"><a-card class="conn-card" :body-style="{ padding: '24px' }">
-        <div class="conn-card-header"><a-tag color="blue" size="small">目标库</a-tag><span class="conn-card-title">迁移到哪里</span></div>
+      <div class="migration-connection-side"><a-card class="conn-card">
+        <div class="conn-card-header"><a-tag color="blue" size="small">目标库</a-tag></div>
         <a-form-item label="目标连接">
           <div style="width: 100%">
             <a-select

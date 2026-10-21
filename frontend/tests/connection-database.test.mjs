@@ -244,6 +244,8 @@ function component(store, props) {
     ]),
   })
   app.component('a-spin', { setup: () => () => Vue.h('span', { class: 'arco-spin' }) })
+  app.component('a-tooltip', { props: ['trigger', 'content'], setup: (_, { slots }) => () => slots.default?.() })
+  app.component('icon-info-circle', { setup: () => () => Vue.h('span') })
   return { values: context.exports, messages, controls, render: () => renderToString(app) }
 }
 

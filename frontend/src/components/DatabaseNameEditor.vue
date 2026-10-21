@@ -1,6 +1,13 @@
 <template>
   <div v-if="connection && editor && supportsDatabaseEditing(connection.db_type)" class="database-editor">
-    <label class="database-editor-label">数据库</label>
+    <div class="database-editor-label">
+      <span>数据库</span>
+      <a-tooltip :trigger="['hover', 'focus']" content="修改后将更新此连接的默认数据库；数据库必须已存在。">
+        <button type="button" class="database-editor-help" aria-label="数据库修改说明">
+          <icon-info-circle aria-hidden="true" />
+        </button>
+      </a-tooltip>
+    </div>
     <div class="database-editor-controls">
       <a-auto-complete
         :model-value="editor.draft"
@@ -44,8 +51,8 @@
         <a-button type="text" size="mini" :disabled="editor.loadingCatalogs || locked" @click="editor.loadCatalogs(true)">重试</a-button>
       </div>
     </a-alert>
-    <p v-else class="database-editor-hint">
-      {{ editor.dirty ? '数据库名称尚未保存，请验证并保存后继续。' : '修改后将更新此连接的默认数据库；数据库必须已存在。' }}
+    <p v-else-if="editor.dirty" class="database-editor-hint">
+      数据库名称尚未保存，请验证并保存后继续。
     </p>
     <p v-if="editor.dirty" class="database-editor-hint">历史任务修复仍需使用指向原数据库的连接。</p>
   </div>
@@ -78,7 +85,10 @@ async function save() {
 
 <style scoped>
 .database-editor { margin-top: 12px; }
-.database-editor-label { display: block; margin-bottom: 6px; color: var(--color-text-2); font-size: 12px; }
+.database-editor-label { display: flex; align-items: center; gap: 4px; min-height: 18px; margin-bottom: 6px; color: var(--color-text-2); font-size: 12px; }
+.database-editor-help { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-3); font-size: 13px; cursor: help; }
+.database-editor-help:hover { background: var(--color-fill-2); color: var(--color-text-2); }
+.database-editor-help:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .database-editor-controls { display: flex; align-items: center; gap: 8px; }
 .database-editor-input { flex: 1; min-width: 0; }
 .database-editor-status { margin-top: 10px; padding: 12px; border-radius: 6px; }

@@ -17,10 +17,26 @@
           <!-- 源库 / 目标库选择 -->
           <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">从哪里迁移</span>
+                  <a-tooltip
+                    v-if="dataMigrate.srcDatabase && canExportRoutines"
+                    :trigger="['hover', 'focus']"
+                    content="导出源库自定义函数/存储过程/触发器原始 DDL 为 .sql 文件。跨厂商语法不兼容，导出内容未做转换，需手动适配目标库。"
+                  >
+                    <a-button
+                      class="conn-card-export"
+                      type="text"
+                      size="small"
+                      :loading="exportingRoutines"
+                      :disabled="databaseSelectionBlocked('data')"
+                      @click="handleExportRoutines"
+                    >
+                      <template #icon><icon-download /></template>
+                      导出 SQL
+                    </a-button>
+                  </a-tooltip>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -61,33 +77,15 @@
                   <template #prefix><span class="migration-select-label">源 Schema</span></template>
                   <a-option v-for="db in dataMigrate.srcDatabases" :key="db" :value="db" :label="db" />
                 </a-select>
-                <a-tooltip
-                  v-if="dataMigrate.srcDatabase && canExportRoutines"
-                  content="导出源库自定义函数/存储过程/触发器原始 DDL 为 .sql 文件。跨厂商语法不兼容，导出内容未做转换，需手动适配目标库。"
-                >
-                  <a-button
-                    type="outline"
-                    size="small"
-                    long
-                    style="margin-top: 10px"
-                    :loading="exportingRoutines"
-                    :disabled="databaseSelectionBlocked('data')"
-                    @click="handleExportRoutines"
-                  >
-                    <template #icon><icon-download /></template>
-                    导出函数/存储过程/触发器
-                  </a-button>
-                </a-tooltip>
               </a-card>
             </div>
             <div class="migration-connection-arrow">
-              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+              <icon-arrow-right />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -118,22 +116,29 @@
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
                 <DatabaseNameEditor :connection="selectedDst" />
-                <a-select
-                  v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'"
-                  v-model="dataMigrate.dstSchema"
-                  :placeholder="selectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
-                  :allow-clear="selectedDst?.db_type === 'oracle'"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                >
-                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
-                  <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
-                </a-select>
-                <div v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
-                  <icon-info-circle style="flex-shrink:0" />
-                  <span v-if="selectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
-                  <span v-else-if="selectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。</span>
-                  <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
+                <div v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'" class="migration-schema-field">
+                  <div class="migration-schema-control">
+                    <a-select
+                      v-model="dataMigrate.dstSchema"
+                      :placeholder="selectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                      :allow-clear="selectedDst?.db_type === 'oracle'"
+                      class="migration-schema-select"
+                      allow-search
+                    >
+                      <template #prefix><span class="migration-select-label">目标 Schema</span></template>
+                      <a-option v-for="s in dataMigrate.dstSchemas" :key="s" :value="s" :label="s" />
+                    </a-select>
+                    <a-tooltip :trigger="['hover', 'focus']">
+                      <template #content>
+                        <span v-if="selectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。请确保该用户具备创建对象的权限。</span>
+                        <span v-else-if="selectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。请确保目标 Schema 具备创建对象的权限。</span>
+                        <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
+                      </template>
+                      <button type="button" class="migration-field-help" aria-label="目标 Schema 说明">
+                        <icon-info-circle aria-hidden="true" />
+                      </button>
+                    </a-tooltip>
+                  </div>
                 </div>
               </a-card>
             </div>
@@ -389,10 +394,9 @@
           <!-- 源库 / 目标库选择 -->
           <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">从哪里迁移</span>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -437,13 +441,12 @@
               </a-card>
             </div>
             <div class="migration-connection-arrow">
-              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+              <icon-arrow-right />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -474,22 +477,29 @@
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedDst.username }}</span>
                 </div>
                 <DatabaseNameEditor :connection="vmSelectedDst" />
-                <a-select
-                  v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'"
-                  v-model="viewMigrate.dstSchema"
-                  :placeholder="vmSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
-                  :allow-clear="vmSelectedDst?.db_type === 'oracle'"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                >
-                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
-                  <a-option v-for="s in viewMigrate.dstSchemas" :key="s" :value="s" :label="s" />
-                </a-select>
-                <div v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
-                  <icon-info-circle style="flex-shrink:0" />
-                  <span v-if="vmSelectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。</span>
-                  <span v-else-if="vmSelectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。</span>
-                  <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
+                <div v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'" class="migration-schema-field">
+                  <div class="migration-schema-control">
+                    <a-select
+                      v-model="viewMigrate.dstSchema"
+                      :placeholder="vmSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                      :allow-clear="vmSelectedDst?.db_type === 'oracle'"
+                      class="migration-schema-select"
+                      allow-search
+                    >
+                      <template #prefix><span class="migration-select-label">目标 Schema</span></template>
+                      <a-option v-for="s in viewMigrate.dstSchemas" :key="s" :value="s" :label="s" />
+                    </a-select>
+                    <a-tooltip :trigger="['hover', 'focus']">
+                      <template #content>
+                        <span v-if="vmSelectedDst?.db_type === 'oracle'">Schema 为已有 Oracle 用户，留空使用当前登录用户；连接中的数据库为 Service Name。请确保该用户具备创建对象的权限。</span>
+                        <span v-else-if="vmSelectedDst?.db_type === 'sqlserver'">Schema 属于上方已保存的数据库，默认 dbo。请确保目标 Schema 具备创建对象的权限。</span>
+                        <span v-else>请确保目标 Schema 拥有创建对象的权限，否则请在目标数据库中自行处理模式权限后再执行迁移。</span>
+                      </template>
+                      <button type="button" class="migration-field-help" aria-label="目标 Schema 说明">
+                        <icon-info-circle aria-hidden="true" />
+                      </button>
+                    </a-tooltip>
+                  </div>
                 </div>
               </a-card>
             </div>
@@ -630,10 +640,9 @@
           <!-- 源库 / 目标库选择 -->
           <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
-                  <span class="conn-card-title">从哪里迁移</span>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -678,13 +687,12 @@
               </a-card>
             </div>
             <div class="migration-connection-arrow">
-              <icon-arrow-right style="font-size: 28px; color: #165dff" />
+              <icon-arrow-right />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '20px' }">
+              <a-card class="conn-card">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
-                  <span class="conn-card-title">迁移到哪里</span>
                 </div>
                 <div class="migration-connection-selectors">
                   <a-select
@@ -715,20 +723,28 @@
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedDst.username }}</span>
                 </div>
                 <DatabaseNameEditor :connection="omSelectedDst" />
-                <a-select
-                  v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'"
-                  v-model="objMigrate.dstSchema"
-                  :placeholder="omSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
-                  :allow-clear="omSelectedDst?.db_type === 'oracle'"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                >
-                  <template #prefix><span class="migration-select-label">目标 Schema</span></template>
-                  <a-option v-for="s in objMigrate.dstSchemas" :key="s" :value="s" :label="s" />
-                </a-select>
-                <div v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'" class="schema-permission-tip">
-                  <icon-info-circle style="flex-shrink:0" />
-                  对象迁移仅向目标库已存在的表补建对象，请确保目标表与引用表已迁移完成。
+                <div v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'" class="migration-schema-field">
+                  <div class="migration-schema-control">
+                    <a-select
+                      v-model="objMigrate.dstSchema"
+                      :placeholder="omSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
+                      :allow-clear="omSelectedDst?.db_type === 'oracle'"
+                      class="migration-schema-select"
+                      allow-search
+                    >
+                      <template #prefix><span class="migration-select-label">目标 Schema</span></template>
+                      <a-option v-for="s in objMigrate.dstSchemas" :key="s" :value="s" :label="s" />
+                    </a-select>
+                    <a-tooltip :trigger="['hover', 'focus']">
+                      <template #content>
+                        目标 Schema 需具备创建对象的权限。对象迁移仅向已存在的表补建对象，请先迁移目标表及引用表。
+                      </template>
+                      <button type="button" class="migration-field-help" aria-label="目标 Schema 说明">
+                        <icon-info-circle aria-hidden="true" />
+                      </button>
+                    </a-tooltip>
+                  </div>
+                  <p class="schema-object-tip"><icon-info-circle />请先迁移目标表及引用表</p>
                 </div>
               </a-card>
             </div>
@@ -2080,17 +2096,11 @@ watch(() => objMigrate.currentJobId, () => { objMigrateResultTab.value = 'logs' 
 .conn-card {
   border: 1px solid var(--color-border-2);
   border-radius: 6px;
-  height: 100%;
 }
 .conn-card-header {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.conn-card-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-1);
 }
 .conn-meta {
   display: flex;
@@ -2105,19 +2115,6 @@ watch(() => objMigrate.currentJobId, () => { objMigrateResultTab.value = 'logs' 
 .conn-meta-label {
   color: var(--color-text-4);
   margin-right: 3px;
-}
-.schema-permission-tip {
-  display: flex;
-  align-items: flex-start;
-  gap: 5px;
-  margin-top: 10px;
-  padding: 7px 10px;
-  background: #fffbe6;
-  border: 1px solid #ffe58f;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #7d5a00;
-  line-height: 1.5;
 }
 .report-conn-bar {
   display: flex;
