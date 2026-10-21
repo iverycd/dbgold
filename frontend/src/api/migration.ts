@@ -169,7 +169,18 @@ export interface CompatibilityFunctionsReport {
   extensions?: CompatibilityExtensionResult[]
 }
 
+export interface TriggerAdaptationReport {
+  recorded: boolean
+  total: number
+  success: number
+  failed: number
+  blocked: number
+  pending: number
+  unknown: number
+}
+
 export interface MigrationReport {
+  trigger_adaptation?: TriggerAdaptationReport
  compatibility_functions?: CompatibilityFunctionsReport
 	 auto_repairs?: AutoRepair[]
 	 warnings?: { table: string; column: string; reason: string; count: number }[]

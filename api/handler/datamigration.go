@@ -973,5 +973,14 @@ func GetDataMigrationReport(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "报告不存在"})
 		return
 	}
+	if dbJob.SrcDBType == "oracle" && dbJob.DstDBType == "dameng" {
+		body, err := enrichOracleDamengTriggerReport([]byte(r.ReportJSON))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "报告格式错误"})
+			return
+		}
+		c.Data(http.StatusOK, "application/json", body)
+		return
+	}
 	c.Data(http.StatusOK, "application/json", []byte(r.ReportJSON))
 }

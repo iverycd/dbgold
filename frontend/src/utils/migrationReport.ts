@@ -1,4 +1,4 @@
-import type { CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult } from '@/api/migration'
+import type { CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
 
 const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
 
@@ -67,12 +67,18 @@ export function describeFailure(item: ObjectResult, category?: string) {
 
 export function categoryPresentation(category: CategoryReport) {
   const metadataFailed = category.items?.some(item => failureStage(item) === 'metadata') ?? false
-  const totalUnknown = category.total_unknown === true || metadataFailed
+  // Older reports represented a category-wide read failure with a synthetic
+  // item. A named object's metadata failure still has known object counts.
+  const legacyMetadataFailure = category.total_unknown === undefined && (category.items?.some(item =>
+    item.name === '元数据读取' && failureStage(item) === 'metadata' && !item.ddl?.trim()
+      && !item.source_name && !item.target_name && !item.table && !item.target_table,
+  ) ?? false)
+  const totalUnknown = category.total_unknown === true || legacyMetadataFailure
   return {
     totalLabel: totalUnknown ? '未知' : String(category.total),
     failedLabel: totalUnknown ? '未知' : String(category.failed),
-    statusLabel: metadataFailed ? '元数据读取失败' : category.failed > 0 ? '部分失败'
-      : totalUnknown ? '对象总数未知' : category.total === 0 ? '无对象' : '全部成功',
+    statusLabel: totalUnknown ? (metadataFailed ? '元数据读取失败' : '对象总数未知')
+      : category.failed > 0 ? '部分失败' : category.total === 0 ? '无对象' : '全部成功',
     statusColor: metadataFailed || category.failed > 0 ? 'orange'
       : totalUnknown || category.total === 0 ? 'gray' : 'green',
   }
@@ -106,7 +112,24 @@ export function compatibilityReportGroups(report?: CompatibilityFunctionsReport)
     : groups
 }
 
+function triggerAdaptationPresentation(report: TriggerAdaptationReport) {
+  if (!report.recorded) return { totalLabel: '未记录', failedLabel: '—', statusLabel: '关联触发器结果未记录', statusColor: 'gray' }
+  const complete = report.success === report.total && !report.failed && !report.blocked && !report.pending && !report.unknown
+  const status: string[] = []
+  if (report.success > 0) status.push('部分适配')
+  if (report.failed > 0) status.push(`失败${report.failed}个`)
+  if (report.blocked > 0) status.push(`阻塞${report.blocked}个`)
+  if (report.pending > 0) status.push(`待执行${report.pending}个`)
+  if (report.unknown > 0) status.push(`结果未知${report.unknown}个`)
+  return {
+    totalLabel: String(report.total), failedLabel: String(report.failed),
+    statusLabel: report.total === 0 ? '无关联触发器' : complete ? '全部适配' : status.join('，') || '尚未适配',
+    statusColor: report.total === 0 ? 'gray' : complete ? 'green' : 'orange',
+  }
+}
+
 export function reportCategories(report: MigrationReport) {
+  const adaptation = report.trigger_adaptation
   const categories = [
     ['tables', '表'], ['data', '数据写入'], ['primaryKeys', '主键'], ['views', '视图'],
     ['indexes', '索引'], ['constraints', '外键'], ['sequences', '序列'],
@@ -114,10 +137,17 @@ export function reportCategories(report: MigrationReport) {
   ] as const
   const sources = [
     ...categories.map(([key, label]) => ({
-      key, label, category: report[key] ?? { total: 0, success: 0, failed: 0, items: [] },
+      key, label: key === 'triggers' && adaptation ? '源端触发器' : label,
+      category: report[key] ?? { total: 0, success: 0, failed: 0, items: [] },
       compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
       compatibilityKind: undefined as 'function' | 'procedure' | undefined,
     })),
+    ...(adaptation ? [{
+      key: 'trigger_adaptation', label: '序列关联触发器',
+      category: { total: adaptation.total, success: adaptation.success, failed: adaptation.failed, items: [] as ObjectResult[] },
+      compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
+      compatibilityKind: undefined as 'function' | 'procedure' | undefined,
+    }] : []),
     ...compatibilityReportGroups(report.compatibility_functions).map(group => ({
       key: group.key, label: group.label, category: group.report,
       compatibilityReport: group.report, compatibilityKind: group.kind,
@@ -125,9 +155,17 @@ export function reportCategories(report: MigrationReport) {
   ]
   return sources.map(({ key, label, category, compatibilityReport, compatibilityKind }) => {
     const isTrigger = key === 'triggers'
+    const isTriggerAdaptation = key === 'trigger_adaptation'
+    const sourceInventoryOnly = isTrigger && !!adaptation
+    const presentation = isTriggerAdaptation && adaptation ? triggerAdaptationPresentation(adaptation) : categoryPresentation(category)
     const isCompatibility = !!compatibilityReport
     return {
-      ...category, ...categoryPresentation(category), key, label, isTrigger, isCompatibility,
+      ...category, ...presentation, key, label, isTrigger, isTriggerAdaptation, isCompatibility,
+      isInformational: isTrigger || isTriggerAdaptation, sourceInventoryOnly,
+      totalLabel: sourceInventoryOnly && category.total < 0 ? '获取失败' : presentation.totalLabel,
+      successLabel: isTrigger || isTriggerAdaptation && !adaptation?.recorded ? '—' : String(category.success),
+      failedLabel: sourceInventoryOnly ? '—' : presentation.failedLabel,
+      statusLabel: sourceInventoryOnly ? '仅统计源端数量' : presentation.statusLabel,
       compatibilityReport, compatibilityKind,
       created: compatibilityReport?.created ?? 0,
       reused: compatibilityReport?.reused ?? 0,
@@ -150,9 +188,9 @@ export function formatReportCategories(report: MigrationReport): string[] {
   const lines = ['=== 迁移概览 ===']
   for (const row of categories) {
     if (row.isTrigger) {
-      lines.push(`${row.label.padEnd(6)} 总计 ${row.total === -1 ? '获取失败' : row.totalLabel}  （未迁移）`)
+      lines.push(`${row.label.padEnd(6)} 总计 ${row.total === -1 ? '获取失败' : row.totalLabel}  （${row.sourceInventoryOnly ? row.statusLabel : '未迁移'}）`)
     } else {
-      lines.push(`${row.label.padEnd(6)} 总计 ${row.totalLabel}  成功 ${row.success}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
+      lines.push(`${row.label.padEnd(6)} 总计 ${row.totalLabel}  成功 ${row.successLabel}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
     }
   }
   for (const group of compatibilityReportGroups(report.compatibility_functions)) {
@@ -174,7 +212,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
     }
   }
   lines.push('')
-  const failedCategories = categories.filter(row => !row.isCompatibility && row.failed > 0 && row.items.length > 0)
+  const failedCategories = categories.filter(row => !row.isInformational && !row.isCompatibility && row.failed > 0 && row.items.length > 0)
   if (!failedCategories.length) return lines
   lines.push('=== 失败项详情 ===')
   for (const row of failedCategories) {

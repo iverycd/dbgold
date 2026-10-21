@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import vm from 'node:vm'
+import ts from 'typescript'
+import * as Vue from 'vue'
 import { createSSRApp, h } from 'vue'
+import { parse } from '@vue/compiler-sfc'
 import { renderToString } from '@vue/server-renderer'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 
 const { failureStage, describeFailure, categoryPresentation, compatibilityReportGroups, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
 const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
@@ -65,6 +71,112 @@ for (const [label, category] of [
     assert.doesNotMatch(text, /索引\s+总计 1/)
   })
 }
+
+function knownMetadataSequenceReport() {
+  const r = report(empty())
+  r.sequences = {
+    total: 34, success: 30, failed: 4,
+    items: [2017, 2018, 2019, 2020].map(year => failure({
+      name: `SQ_CODE_MAIN_${year}`, source_name: `SQ_CODE_MAIN_${year}`,
+      table: `CODE_MAIN_${year}`, stage: 'metadata', error: `源序列 SQ_CODE_MAIN_${year} 不存在或当前账号不可见`,
+    })),
+  }
+  return r
+}
+
+test('individual sequence metadata failures retain known totals, detail stages and exported counts', () => {
+  const r = knownMetadataSequenceReport()
+  const row = reportCategories(r).find(row => row.key === 'sequences')
+  assert.equal(row.totalLabel, '34')
+  assert.equal(row.success, 30)
+  assert.equal(row.failedLabel, '4')
+  assert.equal(row.failed, 4)
+  assert.equal(row.statusLabel, '部分失败')
+  assert.equal(row.statusColor, 'orange')
+  assert.equal(row.items.length, 4)
+  for (const item of row.items) {
+    assert.equal(item.stageLabel, '元数据读取失败')
+    assert.match(item.emptyDDLMessage, /尚未生成目标 DDL/)
+  }
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /序列\s+总计 34\s+成功 30\s+失败 4\s+状态：部分失败/)
+  assert.equal((text.match(/失败阶段：元数据读取失败/g) || []).length, 4)
+  assert.doesNotMatch(text, /序列[^\n]*未知/)
+  for (const item of r.sequences.items) {
+    assert.ok(text.includes(item.name))
+    assert.ok(text.includes(item.error))
+  }
+})
+
+for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
+  test(`${view} presents and exports the known 34/30/4 sequence counts`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const { descriptor } = parse(readFileSync(new URL(`../src/views/${view}.vue`, import.meta.url), 'utf8'))
+      const fields = view === 'MigrationReportPanel' ? 'report, tableRows, exportReport' : 'report, job, categoryRows, exportReport'
+      const downloads = []
+      const context = {
+        exports: {}, Blob, defineProps: () => ({ jobID: 'known-sequences' }), defineEmits: () => () => {}, defineExpose() {},
+        URL: { createObjectURL: blob => { downloads.push(blob); return 'blob:known-sequences' }, revokeObjectURL() {} },
+        document: { createElement: () => ({ click() {} }) },
+        require: id => {
+          if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
+          if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'known-sequences' } }), useRouter: () => ({}) }
+          if (id === '@/utils/migrationReport') return migrationReportUtils
+          if (id === '@/utils/autoRepairs') return autoRepairUtils
+          if (id === '@/api/migration' || id === '@/utils/clipboard') return {}
+          if (id === '@arco-design/web-vue') return { Message: { error: message => assert.fail(message), success() {} } }
+          throw new Error(`Unexpected report import ${id}`)
+        },
+      }
+      scope.run(() => vm.runInNewContext(ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { ${fields} };`, {
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      }).outputText, context))
+      const panel = context.exports
+      panel.report.value = knownMetadataSequenceReport()
+      if (panel.job) panel.job.value = { job_id: 'known-sequences' }
+      const row = (panel.tableRows ?? panel.categoryRows).value.find(row => row.key === 'sequences')
+      assert.equal(row.totalLabel, '34')
+      assert.equal(row.success, 30)
+      assert.equal(row.failedLabel, '4')
+      assert.equal(row.statusLabel, '部分失败')
+      await panel.exportReport()
+      assert.equal(downloads.length, 1)
+      const text = await downloads[0].text()
+      assert.match(text, /序列\s+总计 34\s+成功 30\s+失败 4\s+状态：部分失败/)
+      assert.equal((text.match(/失败阶段：元数据读取失败/g) || []).length, 4)
+      assert.doesNotMatch(text, /序列[^\n]*未知/)
+    } finally { scope.stop() }
+  })
+}
+
+for (const [label, identity] of [
+  ['table identity', { table: 'Orders' }],
+  ['source object identity', { source_name: '元数据读取' }],
+  ['target object identity', { target_name: 'MetadataReadObject' }],
+]) {
+  test(`a real object named 元数据读取 with ${label} does not imply unknown category counts`, () => {
+    const r = report({ total: 3, success: 2, failed: 1, items: [failure({ name: '元数据读取', stage: 'metadata', ...identity })] })
+    const row = reportCategories(r).find(row => row.key === 'indexes')
+    assert.equal(row.totalLabel, '3')
+    assert.equal(row.failedLabel, '1')
+    assert.equal(row.statusLabel, '部分失败')
+    assert.equal(row.items[0].stageLabel, '元数据读取失败')
+    assert.match(formatReportCategories(r).join('\n'), /索引\s+总计 3\s+成功 2\s+失败 1\s+状态：部分失败/)
+  })
+}
+
+test('explicit total_unknown false trusts known counts even for a legacy metadata label', () => {
+  const r = report({ total: 1, total_unknown: false, success: 0, failed: 1, items: [failure({ name: '元数据读取', stage: 'metadata' })] })
+  const row = reportCategories(r).find(row => row.key === 'indexes')
+  assert.equal(row.totalLabel, '1')
+  assert.equal(row.failedLabel, '1')
+  assert.equal(row.failed, 1)
+  assert.equal(row.items[0].stageLabel, '元数据读取失败')
+  const text = formatReportCategories(r).join('\n')
+  assert.match(text, /索引\s+总计 1\s+成功 0\s+失败 1/)
+  assert.doesNotMatch(text, /索引[^\n]*未知/)
+})
 
 test('unsupported objects retain known counts and source-only DDL is clearly separated', () => {
   const ddl = 'CREATE TABLE `Orders` (`id` int, KEY `idx_expr` ((abs(`id`))))'

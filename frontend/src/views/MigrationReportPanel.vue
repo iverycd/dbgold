@@ -48,8 +48,7 @@
               <a-table-column title="总数" data-index="totalLabel" :width="80" />
               <a-table-column title="成功" :width="80">
                 <template #cell="{ record }">
-                  <span v-if="record.isTrigger">—</span>
-                  <span v-else>{{ record.success }}</span>
+                  <span>{{ record.successLabel }}</span>
                 </template>
               </a-table-column>
               <a-table-column title="失败" :width="80">
@@ -61,7 +60,8 @@
               <a-table-column title="状态">
                 <template #cell="{ record }">
                   <span v-if="record.isTrigger" style="color: #86909c">
-                    ⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）
+                    <template v-if="record.sourceInventoryOnly">{{ record.statusLabel }}</template>
+                    <template v-else>⊘ 未迁移（{{ record.total === -1 ? '获取失败' : record.total + ' 个' }}）</template>
                   </span>
                   <template v-else><a-tag :color="record.statusColor">{{ record.statusLabel }}</a-tag><span v-if="record.isCompatibility"> 新建 {{ record.created }}，复用 {{ record.reused }}</span></template>
                 </template>
@@ -304,7 +304,7 @@ const sortedRowCounts = computed<TableRowCount[]>(() => [
   ...mismatchedRows.value,
   ...allRowCounts.value.filter(row => row.match),
 ])
-const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isTrigger ? 0 : row.failed), 0))
+const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isInformational ? 0 : row.failed), 0))
 let reportRequest = 0
 
 async function loadReport() {

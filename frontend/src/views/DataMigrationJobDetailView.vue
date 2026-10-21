@@ -116,20 +116,18 @@
                 <template #columns>
                   <a-table-column title="对象类型" data-index="label" :width="150" />
                   <a-table-column title="总数" data-index="totalLabel" :width="100" />
-                  <a-table-column title="成功" :width="100"><template #cell="{ record }">{{ record.isTrigger ? '—' : record.success }}</template></a-table-column>
-                  <a-table-column title="失败" :width="100"><template #cell="{ record }"><span :class="{ 'danger-text': record.failed > 0 }">{{ record.isTrigger ? '—' : record.failed }}</span></template></a-table-column>
+                  <a-table-column title="成功" :width="100"><template #cell="{ record }">{{ record.successLabel }}</template></a-table-column>
+                  <a-table-column title="失败" :width="100"><template #cell="{ record }"><span :class="{ 'danger-text': record.failed > 0 }">{{ record.isTrigger ? '—' : record.failedLabel }}</span></template></a-table-column>
                   <a-table-column title="成功率" :width="180">
                     <template #cell="{ record }">
-                      <span v-if="record.isTrigger || record.total <= 0">—</span>
+                      <span v-if="record.isInformational || record.total <= 0">—</span>
                       <a-progress v-else size="small" :percent="record.success / record.total" :show-text="false" :status="record.failed > 0 ? 'warning' : 'success'" />
                     </template>
                   </a-table-column>
                   <a-table-column title="状态">
                     <template #cell="{ record }">
-                      <a-tag v-if="record.isTrigger" color="gray">{{ record.total === -1 ? '获取失败 · 未迁移' : `${record.total} 个 · 未迁移` }}</a-tag>
-                      <a-tag v-else-if="record.failed > 0" color="orange">部分失败</a-tag>
-                      <a-tag v-else-if="record.total === 0" color="gray">无对象</a-tag>
-                      <a-tag v-else color="green">全部成功</a-tag>
+                      <a-tag v-if="record.isTrigger" color="gray">{{ record.sourceInventoryOnly ? record.statusLabel : record.total === -1 ? '获取失败 · 未迁移' : `${record.total} 个 · 未迁移` }}</a-tag>
+                      <a-tag v-else :color="record.statusColor">{{ record.statusLabel }}</a-tag>
                       <span v-if="record.isCompatibility"> 新建 {{ record.created }}，复用 {{ record.reused }}</span>
                     </template>
                   </a-table-column>
@@ -283,7 +281,7 @@ let loadVersion = 0
 
 const jobID = computed(() => String(route.params.jobId || ''))
 const categoryRows = computed(() => report.value ? reportCategories(report.value) : [])
-const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isTrigger))
+const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isInformational))
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))
 const objectSuccessCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.success, 0))
 const failedObjectCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.failed, 0))

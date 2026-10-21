@@ -46,6 +46,18 @@ type CategoryReport struct {
 	Items        []ObjectResult `json:"items"`
 }
 
+// TriggerAdaptationSummary describes recorded automatic-numbering trigger
+// outcomes without adding the owning sequence failures to category totals.
+type TriggerAdaptationSummary struct {
+	Recorded bool `json:"recorded"`
+	Total    int  `json:"total"`
+	Success  int  `json:"success"`
+	Failed   int  `json:"failed"`
+	Blocked  int  `json:"blocked"`
+	Pending  int  `json:"pending"`
+	Unknown  int  `json:"unknown"`
+}
+
 // A metadata failure is one failure event, not one discovered database object.
 // Keep Failed nonzero for existing job-status and report consumers.
 func recordMetadataFailure(category *CategoryReport, err error) {
@@ -58,6 +70,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 type MigrationReport struct {
 	CompatibilityFunctions *target.CompatibilityFunctionsReport `json:"compatibility_functions,omitempty"`
 	RepairManifest         *RepairManifest                      `json:"repair_manifest,omitempty"`
+	TriggerAdaptation      *TriggerAdaptationSummary            `json:"trigger_adaptation,omitempty"`
 	AutoRepairs            []AutoRepair                         `json:"auto_repairs,omitempty"`
 	Warnings               []valueconv.MigrationWarning         `json:"warnings,omitempty"`
 	Preflight              *PGMySQLPreflight                    `json:"preflight,omitempty"`
