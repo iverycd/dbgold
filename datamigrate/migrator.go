@@ -42,10 +42,13 @@ type Config struct {
 	TargetDBType       string   // 目标库类型；Oscar 命名策略由此字段启用
 	StripViewSchemas   []string // 需从视图定义中剥离的模式名前缀(忽略大小写)
 	// Objects 为"仅对象迁移"模式的对象类型白名单,取值:
-	// "primary_keys" | "indexes" | "sequences" | "foreign_keys" | "comments"。
+	// "primary_keys" | "indexes" | "sequences" | "foreign_keys" | "comments" | "triggers"。
 	// 为空时保持完整迁移流程(建表+数据+全部 Post-DDL);非空时只执行所列对象类型的 Post-DDL,
 	// 跳过建表、数据迁移、行数对比。
 	Objects []string
+	// MigrateTriggers opts ordinary MySQL -> PG schema jobs into trigger conversion.
+	// CDC and old saved jobs leave this false; object mode selects "triggers" explicitly.
+	MigrateTriggers bool
 	// TableNames 精确表名列表(源库原始大小写)。仅对象迁移模式下作为迁移表集合,
 	// 与 ListTables 结果取交集;为空则回退到 Mode+Filter 过滤。
 	TableNames []string
@@ -60,6 +63,8 @@ func (c Config) objectMode() bool {
 type Migrator struct {
 	preparationStartedAt   time.Time
 	compatibilityFunctions *target.CompatibilityFunctionsReport
+	mysqlPGTriggers        []preparedMySQLPGTrigger
+	mysqlPGTriggerError    error
 	sourceDDLCache         sourceTableDDLCache
 	repairs                *repairRecorder
 	dmPlans                map[string]*damengTablePlan
@@ -227,6 +232,8 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	m.dmSequenceBoundsLogged = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
+	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
+	m.prepareMySQLPGTriggers(ctx)
 	if !m.cfg.CaptureRepair {
 		report := m.runPrepared(ctx)
 		report.CompatibilityFunctions = m.compatibilityFunctions
@@ -271,8 +278,10 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	report := newMigrationReport()
 	start := time.Now()
 
-	// 查询触发器总数（失败时 Total=-1，前端展示"获取失败"）
-	if count, err := m.reader.GetTriggerCount(ctx); err != nil {
+	// New opt-in results distinguish installed triggers from historical inventories.
+	if m.mysqlPGTriggerRequested() {
+		m.initializeMySQLPGTriggerReport(&report)
+	} else if count, err := m.reader.GetTriggerCount(ctx); err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
 			return report
 		}
@@ -312,6 +321,14 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	} else {
 		tables = FilterTables(allTables, m.cfg.Mode, m.cfg.Filter)
 	}
+	if m.cfg.Content == "data_only" && len(tables) > 0 && m.reader.DBType() == "mysql" && source.IsPGFamily(m.writer.DBType()) {
+		if err := target.CheckMySQLPGLoadTriggers(ctx, m.writer, m.mysqlPGTargetTables(tables)); err != nil {
+			report.Data.Total, report.Data.Failed = 1, 1
+			report.Data.Items = append(report.Data.Items, ObjectResult{Name: "目标触发器检查", Stage: "preflight", Error: err.Error()})
+			m.log.Errorf("目标触发器检查失败，未复制数据: %v", err)
+			return report
+		}
+	}
 	if m.isOscar() {
 		if err := m.preflightOscarNames(ctx, tables, allTables); err != nil {
 			m.log.Errorf("Oscar 对象命名预检失败，未执行目标 DDL: %v", err)
@@ -343,8 +360,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		m.log.Infof("开始对象迁移任务,共 %d 张表,对象类型: %s", len(tables), strings.Join(m.cfg.Objects, ", "))
 		report.Tables.Total = len(tables)
 		m.logPreparationComplete(ctx)
-		m.log.Info("=== 创建对象（主键/序列/索引/外键）===")
+		m.log.Info("=== 创建所选对象 ===")
 		m.createPostDDL(ctx, &report, tables, allTables)
+		m.createMySQLPGTriggers(ctx, &report)
 		elapsed := time.Since(start).Round(time.Second)
 		m.log.Donef("对象迁移完成,耗时 %s", elapsed)
 		return report
@@ -562,6 +580,8 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		return report
 	}
 
+	// Install business triggers after historical data and row-count validation.
+	m.createMySQLPGTriggers(ctx, &report)
 	elapsed := time.Since(start).Round(time.Second)
 	m.log.Donef("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",
 		report.Data.Success, report.Tables.Failed+report.Data.Failed, elapsed)

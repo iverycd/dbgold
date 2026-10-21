@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	"dbgold/datamigrate/repair"
+	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/target"
 )
 
 var repairDDLHead = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?(?:\s+UNIQUE)?(?:\s+(?:CLUSTERED|NONCLUSTERED))?\s+(TABLE|VIEW|INDEX|SEQUENCE|TRIGGER)|ALTER\s+(TABLE|VIEW|SEQUENCE)|COMMENT\s+ON\s+(TABLE|COLUMN)|DROP\s+(INDEX|VIEW|SEQUENCE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`)
@@ -131,6 +133,15 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.Kind == "trigger" && obj.MySQLPGTrigger == nil {
+		return fmt.Errorf("触发器修复缺少可信原生成计划")
+	}
+	if obj.MySQLPGTrigger != nil {
+		if !source.IsPGFamily(dbType) {
+			return fmt.Errorf("触发器原生成计划仅支持 PostgreSQL 内核目标")
+		}
+		return target.ValidateMySQLPGTriggerRepair(obj, units)
+	}
 	for _, u := range units {
 		if !u.Selected || u.Status == "succeeded" {
 			continue

@@ -310,6 +310,9 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 		return Stats{}, err
 	}
 	defer tx.Rollback()
+	if err = a.checkTransactionTriggers(ctx, tx, changes); err != nil {
+		return Stats{}, err
+	}
 	var stats Stats
 	for _, ch := range changes {
 		switch ch.Action {

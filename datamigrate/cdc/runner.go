@@ -46,6 +46,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer applier.Close()
+	if err = checkTargetBusinessTriggers(ctx, applier.db, r.cfg, tables); err != nil {
+		return err
+	}
 	record, recordExists, err := applier.LoadBootstrapRecord(ctx)
 	if err != nil {
 		return err

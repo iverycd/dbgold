@@ -134,6 +134,7 @@
                   </a-col>
                 </a-row>
                 <a-space wrap>
+                  <a-checkbox v-model="options.migrate_triggers" :disabled="options.migrate_content === 'data_only'">迁移触发器（仅应用于 MySQL → PG 内核行）</a-checkbox>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
                   <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
                   <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
@@ -154,6 +155,7 @@
               <a-input v-model="batchObjectDraft.name" placeholder="源对象名（原始大小写）" style="width:210px" />
               <a-button @click="addBatchObjectExclusion">明确排除</a-button>
             </a-space>
+            <a-alert v-if="options.migrate_triggers" type="info">触发器以 SECURITY INVOKER 执行，业务写入用户需有相关表权限；源库与目标会话应使用一致时区。其他迁移组合保持原流程。</a-alert>
             <div v-for="(objects, row) in options.excluded_objects_by_row" :key="row">
               第 {{ row }} 行：<a-tag v-for="(object, index) in objects" :key="index" closable color="orange" @close="objects.splice(index, 1)">{{ object.kind }}: {{ object.table ? object.table + '.' : '' }}{{ object.name }}</a-tag>
             </div>
@@ -288,6 +290,7 @@ const validateResult = ref<BatchValidateResult | null>(null)
 // 整批共用的迁移选项，默认值对齐单任务（MigrationView.vue）
 const options = reactive<BatchOptions>({
   migrate_content: 'both',
+  migrate_triggers: false,
   page_size: 20000,
   max_parallel: 10,
   intra_table_parallel: 8,
@@ -307,6 +310,7 @@ const exclusionKinds = [
 ]
 const pgMySQLRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.dst_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(row.src_db_type)))
 const batchObjectDraft = reactive({ row: undefined as number | undefined, kind: 'table', table: '', name: '' })
+watch(() => options.migrate_content, content => { if (content === 'data_only') options.migrate_triggers = false })
 watch(selectedFile, () => { options.excluded_objects_by_row = {}; batchObjectDraft.row = undefined })
 function addBatchObjectExclusion() {
   const draft = batchObjectDraft

@@ -497,6 +497,16 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
+	if m.mysqlPGTriggerRequested() {
+		for _, prepared := range m.mysqlPGTriggers {
+			o := m.triggerRepairObject(prepared)
+			var ss []dialect.Statement
+			if prepared.err == nil {
+				ss = triggerStatements(prepared.plan)
+			}
+			add(o, ss)
+		}
+	}
 	// Administrative attributes are separate recoverable work even when their
 	// parent failed before the original migration reached these operations.
 	for _, parent := range slices.Clone(m.repairs.objects) {
@@ -585,6 +595,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	}
 	if o.Comment != nil {
 		old.Comment = o.Comment
+	}
+	if o.MySQLPGTrigger != nil {
+		old.MySQLPGTrigger = o.MySQLPGTrigger
 	}
 	if err := m.flushRepairObjectLocked(*old); err != nil {
 		old.Status = "failed"
@@ -680,7 +693,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		if err == nil && u.Status == "pending" {
 			u.Status = "succeeded"
 		}
-		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) {
+		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) && !target.IsMySQLPGTriggerPreflight(err) {
 			u.Status = "unknown"
 		}
 		u.Selected = u.Status != "succeeded" && !u.Destructive
@@ -986,7 +999,7 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			if legacy.SourceDDL != "" {
 				o.SourceDDL = legacy.SourceDDL
 			}
-			if legacy.Status != "blocked" {
+			if legacy.Status != "blocked" && o.MySQLPGTrigger == nil {
 				o.DiagnosticOnly = legacy.DiagnosticOnly
 			}
 			if o.Status == "pending" || o.Status == "blocked" {
@@ -1025,6 +1038,12 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 		kind string
 		cat  CategoryReport
 	}{{"table", report.Tables}, {"data", report.Data}, {"primary_key", report.PrimaryKeys}, {"view", report.Views}, {"index", report.Indexes}, {"foreign_key", report.Constraints}, {"sequence", report.Sequences}, {"comment", report.Comments}}
+	if report.TriggerMigrationEnabled {
+		categories = append(categories, struct {
+			kind string
+			cat  CategoryReport
+		}{"trigger", report.Triggers})
+	}
 	result := []repair.Object{}
 	for _, c := range categories {
 		for i, item := range c.cat.Items {
@@ -1034,6 +1053,11 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 			o := repair.Object{ID: repair.Hash([]any{c.kind, i, item.Name, item.DDL, item.Error})[:32], Kind: c.kind, Name: item.Name, SourceName: item.Name, TargetName: item.Name, Schema: schema, DDL: item.DDL, SuggestedDDL: item.SuggestedDDL, Error: item.Error, Status: "failed", Legacy: true, OriginalStatus: "failed", OriginalError: item.Error, RequiresReview: true, Dependencies: []string{}, Units: []repair.Unit{}}
 			o.SourceDDL = item.SourceDDL
 			o.DiagnosticOnly = repairDiagnostic(item)
+			if c.kind == "trigger" {
+				// Procedural SQL without the original structured conversion plan
+				// never establishes authority for a retry.
+				o.DiagnosticOnly = true
+			}
 			if item.Stage == "dependency" {
 				o.Status, o.OriginalStatus = "blocked", "blocked"
 				o.DiagnosticOnly = false

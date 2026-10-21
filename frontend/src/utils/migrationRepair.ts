@@ -44,7 +44,7 @@ export function matchesRepairFilter(object: RepairObject, filter: RepairFilter, 
 }
 
 function canonicalRepairKind(kind: string): string {
-  return ({ tables: 'table', data: 'table', primary_keys: 'primary_key', primaryKeys: 'primary_key', indexes: 'index', unique: 'index', foreign_keys: 'foreign_key', constraints: 'foreign_key', sequences: 'sequence', views: 'view', comments: 'comment' } as Record<string, string>)[kind] || kind
+  return ({ tables: 'table', data: 'table', primary_keys: 'primary_key', primaryKeys: 'primary_key', indexes: 'index', unique: 'index', foreign_keys: 'foreign_key', constraints: 'foreign_key', sequences: 'sequence', views: 'view', comments: 'comment', triggers: 'trigger' } as Record<string, string>)[kind] || kind
 }
 
 // Match recorded identifiers exactly; case folding can select a different object.
@@ -78,12 +78,19 @@ export function repairObjectStatuses(object: RepairObject): { label: string; sta
   return statuses
 }
 export function repairKind(value: string) {
-  return ({ table: '表', tables: '表', data: '数据', primary_key: '主键', primary_keys: '主键', primaryKeys: '主键', index: '索引', indexes: '索引', unique: '唯一约束', foreign_key: '外键', foreign_keys: '外键', constraints: '外键', sequence: '序列 / 自增', sequences: '序列 / 自增', view: '视图', views: '视图', comment: '表 / 列注释', comments: '表 / 列注释', owner: 'Owner', distribution: '分布属性' } as Record<string, string>)[value] || value
+  return ({ table: '表', tables: '表', data: '数据', primary_key: '主键', primary_keys: '主键', primaryKeys: '主键', index: '索引', indexes: '索引', unique: '唯一约束', foreign_key: '外键', foreign_keys: '外键', constraints: '外键', sequence: '序列 / 自增', sequences: '序列 / 自增', view: '视图', views: '视图', comment: '表 / 列注释', comments: '表 / 列注释', trigger: '触发器', triggers: '触发器', owner: 'Owner', distribution: '分布属性' } as Record<string, string>)[value] || value
 }
 export const attemptRunning = (status: string) => ['running', 'queued', 'cancelling'].includes(status)
 export const unitCommitted = (status: string) => ['succeeded', 'success', 'repaired'].includes(status)
 export const isTableRepair = (object: RepairObject) => ['table', 'tables', 'data'].includes(object.kind)
 export const hasRepairDDL = (object: RepairObject) => !!(object.ddl || object.units?.length || object.suggested_ddl)
+export const isMySQLPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_pg_trigger
+export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
+  if (!isMySQLPGTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back'].includes(object.status)) return false
+  return object.units?.length === 2 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(unit.status))
+}
+export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object)
+
 export function canEditRepairDDL(object: RepairObject): boolean {
   if (object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
   if (['table', 'tables', 'view', 'views', 'sequence', 'sequences', 'owner', 'distribution'].includes(object.kind)) return true
@@ -105,6 +112,11 @@ export function repairAttemptStatus(attempt: RepairAttempt) {
 }
 export function cloneRepairUnits(units: RepairUnit[] | null | undefined): RepairUnit[] {
   return (units || []).map(unit => ({ ...unit, selected: unitCommitted(unit.status) || unit.destructive ? false : !!unit.selected }))
+}
+export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
+  const units = cloneRepairUnits(object.units)
+  if (canRetryMySQLPGTrigger(object)) units.forEach(unit => { unit.selected = true })
+  return units
 }
 export function mappingError(mapping: Record<string, string>): string {
   const targets = Object.values(mapping)

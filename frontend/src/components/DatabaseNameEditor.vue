@@ -21,11 +21,29 @@
       <a-button v-if="editor.dirty" :disabled="locked || editor.saving" @click="editor.resetDraft">撤销</a-button>
     </div>
     <p v-if="editor.error" class="database-editor-error" role="alert">{{ editor.error }}</p>
-    <p v-if="editor.catalogError" class="database-editor-hint">
-      {{ editor.catalogError }}，仍可手动输入数据库名称。
-      <a-link :disabled="editor.loadingCatalogs || locked" @click="editor.loadCatalogs(true)">重试</a-link>
-    </p>
-    <p v-else-if="editor.loadingCatalogs" class="database-editor-hint">正在加载数据库列表，可直接输入名称。</p>
+    <a-alert
+      v-if="editor.loadingCatalogs"
+      type="info"
+      title="正在加载数据库列表"
+      class="database-editor-status database-editor-status-loading"
+      role="status"
+      aria-live="polite"
+    >
+      <template #icon><a-spin :size="16" aria-hidden="true" /></template>
+      无需等待，可直接输入数据库名称。
+    </a-alert>
+    <a-alert
+      v-else-if="editor.catalogError"
+      type="warning"
+      title="数据库列表加载失败"
+      class="database-editor-status"
+    >
+      <div>{{ editor.catalogError }}</div>
+      <div class="database-editor-status-actions">
+        <span>可手动输入数据库名称。</span>
+        <a-button type="text" size="mini" :disabled="editor.loadingCatalogs || locked" @click="editor.loadCatalogs(true)">重试</a-button>
+      </div>
+    </a-alert>
     <p v-else class="database-editor-hint">
       {{ editor.dirty ? '数据库名称尚未保存，请验证并保存后继续。' : '修改后将更新此连接的默认数据库；数据库必须已存在。' }}
     </p>
@@ -63,6 +81,14 @@ async function save() {
 .database-editor-label { display: block; margin-bottom: 6px; color: var(--color-text-2); font-size: 12px; }
 .database-editor-controls { display: flex; align-items: center; gap: 8px; }
 .database-editor-input { flex: 1; min-width: 0; }
+.database-editor-status { margin-top: 10px; padding: 12px; border-radius: 6px; }
+.database-editor-status :deep(.arco-alert-body) { min-width: 0; }
+.database-editor-status :deep(.arco-alert-title) { font-size: 14px; font-weight: 600; }
+.database-editor-status :deep(.arco-alert-content) { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.database-editor-status-loading { background-color: rgb(var(--arcoblue-1)); border-color: rgb(var(--arcoblue-3)); }
+.database-editor-status-loading :deep(.arco-alert-title),
+.database-editor-status-loading :deep(.arco-spin-icon) { color: rgb(var(--arcoblue-7)); }
+.database-editor-status-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; }
 .database-editor-hint, .database-editor-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; }
 .database-editor-hint { color: var(--color-text-3); }
 .database-editor-error { color: rgb(var(--danger-6)); }

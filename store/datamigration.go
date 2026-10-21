@@ -38,6 +38,7 @@ type PageResult[T any] struct {
 }
 
 type DataMigrationJob struct {
+	MigrateTriggers          bool       `json:"migrate_triggers"`
 	SourceDatabase           string     `json:"source_database"`
 	SourceConnectionDatabase string     `json:"source_connection_database"`
 	SourceSchema             string     `json:"source_schema"`

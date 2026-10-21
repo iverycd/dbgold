@@ -1591,3 +1591,35 @@ test('legacy verification history remains explicitly historical in the drawer an
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
+
+test('MySQL PG triggers retry both original units read-only without saving a draft', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let saves = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, { saveRepairDraft: async () => { saves++; throw new Error('trigger must stay read-only') } }))
+    await tick()
+    const trigger = record({ kind: 'trigger', table: 'Orders', mysql_pg_trigger: {}, units: [unit('function', 'failed'), unit('trigger', 'rolled_back')] })
+    p.records.value = [trigger]
+    p.openEditor(trigger)
+    assert.equal(utils.canEditRepairDDL(trigger.object), false)
+    assert.equal(utils.canRetryMySQLPGTrigger(trigger.object), true)
+    assert.equal(p.canExecute.value, true)
+    await p.prepareExecute()
+    assert.equal(saves, 0)
+    assert.equal(p.executeConfirmVisible.value, true)
+    assert.equal(p.executionSnapshot.value.length, 2)
+    assert.deepEqual([...p.executionSnapshot.value.map(item => item.sql)], ['CREATE function', 'CREATE trigger'])
+    const editors = []
+    const html = await renderPanel(p, undefined, editor => editors.push(editor))
+    assert.match(html, /触发器 SQL 为只读/)
+    assert.equal(editors.length, 0)
+    for (const state of ['unknown', 'running', 'succeeded']) {
+      trigger.object.units[0].status = state
+      assert.equal(utils.canRetryMySQLPGTrigger(trigger.object), false)
+    }
+    trigger.object.units[0].status = 'failed'
+    trigger.object.units[0].sql += ' -- edited'
+    assert.equal(utils.canRetryMySQLPGTrigger(trigger.object), false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})

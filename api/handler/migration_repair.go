@@ -416,8 +416,13 @@ func UpdateMigrationRepairBinding(c *gin.Context) {
 			return
 		}
 		cfg := *req.Config
+		cfg.MigrateTriggers = cfg.MigrateTriggers || j.MigrateTriggers
 		if cfg.Content != "both" && cfg.Content != "schema_only" && cfg.Content != "data_only" {
 			repairError(c, fmt.Errorf("请显式补齐原迁移内容"))
+			return
+		}
+		if err := validateRepairTriggerConfig(j, cfg); err != nil {
+			repairError(c, err)
 			return
 		}
 		if cfg.TargetSchema != "" && b.TargetSchema != "" && cfg.TargetSchema != b.TargetSchema {
@@ -859,7 +864,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !o.CanEditDDL() {
+	if !o.CanExecuteDDL() {
 		repairError(c, fmt.Errorf("此记录不是可执行 DDL 的目标对象"))
 		return
 	}
@@ -888,7 +893,16 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
-	if o.RequiresReview {
+	if o.MySQLPGTrigger != nil {
+		// The read-only retry action always requests the whole frozen transaction;
+		// it does not expose or depend on persisted per-unit selection controls.
+		for i := range o.Units {
+			if o.Units[i].Status != "succeeded" {
+				o.Units[i].Selected = true
+			}
+		}
+	}
+	if o.RequiresReview && o.MySQLPGTrigger == nil {
 		repairError(c, fmt.Errorf("请先审阅并保存执行单元"))
 		return
 	}
@@ -903,6 +917,10 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		return
 	}
 	if e := validateRepairObjectScope(o, o.Units, j.DstDBType); e != nil {
+		repairError(c, e)
+		return
+	}
+	if e := validateMySQLPGTriggerDependencies(j.JobID, o); e != nil {
 		repairError(c, e)
 		return
 	}
@@ -925,6 +943,10 @@ func ExecuteMigrationRepair(c *gin.Context) {
 	}
 	response := attemptResponse(a)
 	startRepairWorker(a, func(ctx context.Context) {
+		if e := validateMySQLPGTriggerDependencies(j.JobID, o); e != nil {
+			finishRepair(a, o, e)
+			return
+		}
 		w, e := buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
 		if e != nil {
 			finishRepair(a, o, e)

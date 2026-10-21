@@ -164,6 +164,7 @@
                   <div class="failure-detail">
                     <div><strong>完整错误</strong><pre>{{ record.error || '—' }}</pre><a-button size="mini" type="text" @click="copy(record.error, '错误详情')"><icon-copy /> 复制错误</a-button></div>
                     <div v-if="record.ddl"><strong>失败 DDL</strong><pre>{{ record.ddl }}</pre><a-button size="mini" type="text" @click="copy(record.ddl, '失败 DDL')"><icon-copy /> 复制 DDL</a-button></div>
+                    <div v-if="record.source_ddl"><strong>源端定义（只读，仅供适配参考）</strong><pre>{{ record.source_ddl }}</pre><a-button size="mini" type="text" @click="copy(record.source_ddl, '源端定义')"><icon-copy /> 复制源端定义</a-button></div>
                   </div>
                 </template>
               </a-table>
@@ -215,6 +216,7 @@
                   <div><dt>分页大小</dt><dd>{{ job.page_size || '—' }}</dd></div>
                   <div><dt>最大并行</dt><dd>{{ job.max_parallel || '—' }}</dd></div>
                   <div><dt>表内并行</dt><dd>{{ job.intra_table_parallel || '—' }}</dd></div>
+                  <div><dt>触发器迁移</dt><dd>{{ yesNo(job.migrate_triggers) }}</dd></div>
                   <div><dt>名称转小写</dt><dd>{{ yesNo(job.lower_case_names) }}</dd></div>
                   <div><dt>字符按长度映射</dt><dd>{{ yesNo(job.char_in_length) }}</dd></div>
                   <div><dt>{{ job.src_db_type === 'oracle' && job.dst_db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 NVARCHAR2' }}</dt><dd>{{ yesNo(job.use_nvarchar2) }}</dd></div>
@@ -316,12 +318,15 @@ const durationText = computed(() => {
   const remainder = seconds % 60
   return hours ? `${hours} 小时 ${minutes} 分` : minutes ? `${minutes} 分 ${remainder} 秒` : `${remainder} 秒`
 })
+const pendingTriggerCount = computed(() => report.value?.trigger_migration_enabled
+  ? Math.max(0, report.value.triggers.total - report.value.triggers.success - report.value.triggers.failed) : 0)
 const reportHealthText = computed(() => {
   if (!report.value) return job.value?.status === 'running' ? '生成中' : '暂无报告'
   if (failedObjectCount.value || mismatchedRows.value.length) return '需要处理'
+  if (pendingTriggerCount.value) return '尚未完成'
   return '全部通过'
 })
-const summaryText = computed(() => job.value?.summary || (job.value?.status === 'running' ? '迁移正在执行，完成后将在此生成对象与行数校验报告。' : reportHealthText.value === '全部通过' ? '迁移对象与行数校验均已通过。' : '迁移已结束，请核对失败对象和行数差异。'))
+const summaryText = computed(() => job.value?.summary || (job.value?.status === 'running' ? '迁移正在执行，完成后将在此生成对象与行数校验报告。' : reportHealthText.value === '全部通过' ? '迁移对象与行数校验均已通过。' : pendingTriggerCount.value ? '迁移已结束，部分触发器尚未执行，请核对迁移概览。' : '迁移已结束，请核对失败对象和行数差异。'))
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
   if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
@@ -329,6 +334,7 @@ const risks = computed<RiskItem[]>(() => {
     items.push({ key: row.key, level: 'danger', title: `${row.label}初始化失败`, description: `在迁移概览展开${row.label}，查看初始化结果、DDL 和错误明细。`, tab: 'overview', action: `查看${row.label}` })
   }
   if (failedBusinessObjectCount.value > 0) items.push({ key: 'objects', level: 'danger', title: `${failedBusinessObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
+  if (pendingTriggerCount.value) items.push({ key: 'pending-triggers', level: 'warning', title: `${pendingTriggerCount.value} 个触发器尚未执行`, description: '原任务结束前未完成这些触发器，请核对对象修复记录后重试原生成 SQL。', tab: 'overview', action: '查看迁移概览' })
   if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items

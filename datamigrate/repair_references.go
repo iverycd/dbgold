@@ -43,7 +43,9 @@ func EnrichRepairReferences(objects []repair.Object, report MigrationReport) {
 			if o.SourceDDL == "" {
 				o.SourceDDL = matches[0].SourceDDL
 			}
-			o.DiagnosticOnly = o.DiagnosticOnly || matches[0].DiagnosticOnly
+			if o.MySQLPGTrigger == nil {
+				o.DiagnosticOnly = o.DiagnosticOnly || matches[0].DiagnosticOnly
+			}
 		}
 	}
 }

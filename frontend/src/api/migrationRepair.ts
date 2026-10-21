@@ -22,6 +22,7 @@ export interface RepairColumn {
 export interface RepairVerification { status: string; message: string }
 export interface ManualVerification { confirmed_by: number; confirmed_at: string; evidence: string; fingerprint: string }
 export interface RepairObject {
+  mysql_pg_trigger?: Record<string, unknown>
   verification?: RepairVerification
   manual_verification?: ManualVerification
   id: string
@@ -95,6 +96,7 @@ export interface RecoveryPreview {
 }
 export interface RecoveryPlan { token: string; preview: RecoveryPreview }
 export interface RepairConfig {
+  MigrateTriggers?: boolean
   Content: string
   PageSize: number
   LowerCaseNames: boolean

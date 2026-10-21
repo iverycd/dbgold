@@ -62,7 +62,7 @@ export function describeFailure(item: ObjectResult, category?: string) {
     : stage === 'task' ? '任务已终止，后续对象未执行；此前已成功提交的对象和分页予以保留。'
     : stage === 'unsupported' ? '该对象暂不支持自动转换，未生成目标 DDL。'
     : stage === 'execute' ? 'DDL 执行失败，但报告未记录目标 DDL。' : '未记录 DDL。'
-  return { stageLabel, emptyDDLMessage, sourceDDLLabel, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
+  return { stageLabel, emptyDDLMessage, sourceDDLLabel: category === 'triggers' ? '源端触发器定义（仅供参考，需适配目标库）' : sourceDDLLabel, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
 }
 
 export function categoryPresentation(category: CategoryReport) {
@@ -128,6 +128,18 @@ function triggerAdaptationPresentation(report: TriggerAdaptationReport) {
   }
 }
 
+function triggerMigrationPresentation(category: CategoryReport) {
+  const presentation = categoryPresentation(category)
+  if (category.total_unknown || presentation.totalLabel === '未知') return presentation
+  const pending = Math.max(0, category.total - category.success - category.failed)
+  if (!pending) return presentation
+  return {
+    ...presentation,
+    statusLabel: `${category.failed ? '部分失败' : category.success ? '部分完成' : '尚未执行'}，待执行${pending}个`,
+    statusColor: category.failed || category.success ? 'orange' : 'gray',
+  }
+}
+
 export function reportCategories(report: MigrationReport) {
   const adaptation = report.trigger_adaptation
   const categories = [
@@ -154,10 +166,11 @@ export function reportCategories(report: MigrationReport) {
     })),
   ]
   return sources.map(({ key, label, category, compatibilityReport, compatibilityKind }) => {
-    const isTrigger = key === 'triggers'
+    const isTrigger = key === 'triggers' && !report.trigger_migration_enabled
     const isTriggerAdaptation = key === 'trigger_adaptation'
     const sourceInventoryOnly = isTrigger && !!adaptation
-    const presentation = isTriggerAdaptation && adaptation ? triggerAdaptationPresentation(adaptation) : categoryPresentation(category)
+    const presentation = isTriggerAdaptation && adaptation ? triggerAdaptationPresentation(adaptation)
+      : key === 'triggers' && report.trigger_migration_enabled ? triggerMigrationPresentation(category) : categoryPresentation(category)
     const isCompatibility = !!compatibilityReport
     return {
       ...category, ...presentation, key, label, isTrigger, isTriggerAdaptation, isCompatibility,

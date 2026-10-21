@@ -1,5 +1,5 @@
 import type { RepairAttempt, RepairBinding, RepairList, RepairObject, RepairRecord } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, cloneRepairUnits, unitCommitted } from '@/utils/migrationRepair'
+import { attemptRunning, canExecuteRepairDDL, cloneRepairExecutionUnits, unitCommitted } from '@/utils/migrationRepair'
 
 export type RepairBatchStatus = 'pending' | 'saving' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'stopped' | 'unknown'
 export interface RepairBatchItem {
@@ -31,8 +31,8 @@ export function batchIneligibleReason(object: RepairObject): string {
   if (object.diagnostic_only) return '仅供诊断的记录不可执行'
   if (unitCommitted(object.status)) return ['table', 'tables'].includes(object.kind) ? '表结构已执行成功，无需重复执行 DDL' : '对象已执行成功，无需再次执行'
   if (attemptRunning(object.status) || (object.units || []).some(unit => attemptRunning(unit.status))) return '对象正在执行'
-  if (!canEditRepairDDL(object)) return '缺少可执行的目标对象信息'
-  const selected = cloneRepairUnits(object.units).filter(unit => unit.selected)
+  if (!canExecuteRepairDDL(object)) return '缺少可执行的目标对象信息'
+  const selected = cloneRepairExecutionUnits(object).filter(unit => unit.selected)
   if (!selected.length) return '没有已勾选的有效执行单元，请先编辑并保存草稿'
   if (selected.some(unit => !unit.sql?.trim())) return '已勾选的执行单元包含空 SQL，请先编辑并保存草稿'
   return ''
@@ -50,7 +50,7 @@ export function buildRepairBatch(records: RepairRecord[], selectedIDs: string[],
     const source = all.get(id)
     const record: RepairRecord = source ? copy(source) : { version: 0, object: { id, name: id, target_name: id, kind: '', schema: '', ddl: '', units: [], dependencies: [], legacy: false, requires_review: true, status: 'unknown' } }
     const reason = source ? batchIneligibleReason(record.object) : '对象已不存在，请刷新后重新选择'
-    record.object.units = cloneRepairUnits(record.object.units)
+    record.object.units = cloneRepairExecutionUnits(record.object)
     selected.set(id, { record, requestID: newKey(), status: reason ? 'skipped' : 'pending', reason })
   }
   const ordered: RepairBatchItem[] = [], visiting: string[] = [], visited = new Set<string>(), cycles = new Set<string>()
@@ -93,7 +93,7 @@ export function buildRepairBatch(records: RepairRecord[], selectedIDs: string[],
 }
 
 function unitsKey(record: RepairRecord): string {
-  return JSON.stringify(cloneRepairUnits(record.object.units).map(unit => [unit.id, unit.sql, unit.selected, unit.destructive]))
+  return JSON.stringify(cloneRepairExecutionUnits(record.object).map(unit => [unit.id, unit.sql, unit.selected, unit.destructive]))
 }
 function targetKey(record: RepairRecord): string {
   const object = record.object

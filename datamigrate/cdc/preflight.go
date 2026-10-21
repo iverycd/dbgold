@@ -209,6 +209,9 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 		if len(tables) > 0 && targetMetadataReady {
+			if triggerErr := checkTargetBusinessTriggers(ctx, dst, cfg, tables); triggerErr != nil {
+				r.Errors = append(r.Errors, triggerErr.Error())
+			}
 			resolved := resolveLocatorStrategiesFromMetadata(cfg, tables, targetMetadata)
 			r.Tables = resolved
 			var fullRow []string

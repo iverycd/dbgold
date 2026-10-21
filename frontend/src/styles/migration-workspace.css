@@ -77,6 +77,11 @@
 .migration-workspace .migration-connection-arrow { display: flex; align-items: center; justify-content: center; }
 .migration-workspace .migration-connection-arrow .arco-icon { font-size: 22px !important; color: #16a34a !important; }
 .migration-workspace .conn-card { height: 100%; border-radius: 10px !important; box-shadow: none !important; }
+.migration-workspace .migration-connections-compact { align-items: start; }
+.migration-workspace .migration-connections-compact .conn-card { height: auto; }
+.migration-workspace .migration-connections-compact .migration-connection-arrow { align-self: start; padding-top: 20px; }
+.migration-workspace .migration-connections-compact .migration-connection-selectors { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-top: 10px; }
+.migration-workspace .migration-connections-compact .migration-connection-selectors > * { min-width: 0; }
 .migration-workspace .conn-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .migration-workspace .conn-card-title { font-size: 15px; font-weight: 600; }
 .migration-workspace .conn-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 0 2px; margin: 0; }
@@ -109,6 +114,9 @@
 .migration-workspace .arco-tabs-content, .migration-workspace .arco-tabs-pane, .migration-workspace .arco-form-item-wrapper { min-width: 0; }
 .migration-workspace .arco-table-cell { overflow-wrap: anywhere; }
 .migration-workspace .migration-settings .arco-space { max-width: 100%; }
+@container (min-width: 1100px) {
+  .migration-workspace .migration-connections-compact .migration-connection-selectors { grid-template-columns: 140px minmax(0, 1fr); }
+}
 @container (max-width: 1099px) {
   .migration-workspace .migration-advanced-grid > .arco-col { flex: 0 0 100%; max-width: 100%; }
   .migration-workspace .migration-advanced-grid > .arco-col + .arco-col { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--color-border-2); }
@@ -119,6 +127,7 @@
   .migration-workspace .migration-mode-tabs > .arco-tabs-nav > .arco-tabs-nav-tab { justify-content: flex-start; }
   .migration-workspace .migration-connections { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .migration-workspace .migration-connection-arrow { height: 24px; transform: rotate(90deg); }
+  .migration-workspace .migration-connections-compact .migration-connection-arrow { padding-top: 0; }
   .migration-workspace .migration-surface { padding: 16px; }
   .migration-workspace .conn-card .arco-card-body { padding: 16px !important; }
   .migration-workspace .migration-settings .arco-col { flex: 0 0 100%; max-width: 100%; }

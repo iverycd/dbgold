@@ -237,6 +237,13 @@ function component(store, props) {
     },
   })
   app.component('a-link', { setup: (_, { slots }) => () => Vue.h('a', slots.default?.()) })
+  app.component('a-alert', {
+    props: ['type', 'title'],
+    setup: (p, { slots }) => () => Vue.h('div', { class: `arco-alert-${p.type}` }, [
+      slots.icon?.(), Vue.h('strong', p.title), slots.default?.(),
+    ]),
+  })
+  app.component('a-spin', { setup: () => () => Vue.h('span', { class: 'arco-spin' }) })
   return { values: context.exports, messages, controls, render: () => renderToString(app) }
 }
 

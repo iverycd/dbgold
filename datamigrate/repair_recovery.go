@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -188,6 +189,8 @@ func repairKindOrder(k string) int {
 		return 5
 	case "comment":
 		return 6
+	case "trigger":
+		return 7
 	}
 	return 7
 }
@@ -494,6 +497,33 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	if o.MySQLPGTrigger != nil {
+		if err := mysqltrigger.ValidatePlan(*o.MySQLPGTrigger); err != nil {
+			o.Status, o.Error, o.DiagnosticOnly = "blocked", err.Error(), true
+			return o
+		}
+		// A trigger body is frozen SQL, not a draft that can safely follow arbitrary
+		// column swaps. Even a swap between equal-typed columns changes its meaning.
+		for _, sourceTable := range o.MySQLPGTrigger.SourceTables {
+			if sourceTable.TableName != table.SourceName && sourceTable.TableName != table.SourceTable {
+				continue
+			}
+			for _, col := range sourceTable.Columns {
+				expected := col.Name
+				if o.MySQLPGTrigger.LowerCaseNames {
+					expected = strings.ToLower(expected)
+				}
+				if mapped, ok := mapping[col.Name]; ok && mapped != expected {
+					o.Status, o.Error, o.DiagnosticOnly = "blocked", "表列映射已改变，请重新迁移触发器；原生成 SQL 不能跟随手工映射重放", true
+					return o
+				}
+			}
+		}
+		// The immutable program is reviewed as a whole at execution confirmation;
+		// it has no editable draft that could clear the ordinary review gate.
+		o.RequiresReview = false
+		return o
+	}
 	if o.Sequence != nil && o.Sequence.Native != nil && nativeSequenceDependsOn(*o.Sequence, table.Table) {
 		v, changed := *o.Sequence, false
 		n := *v.Native

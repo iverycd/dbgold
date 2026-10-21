@@ -137,6 +137,9 @@ func repairErrorStatus(err error) string {
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error) ([]repair.Unit, error) {
+	if obj.Kind == "trigger" && obj.MySQLPGTrigger != nil {
+		return executeMySQLPGTriggerRepair(ctx, w, obj, units, onStep)
+	}
 	out := slices.Clone(units)
 	persist := func() error {
 		if onStep == nil {

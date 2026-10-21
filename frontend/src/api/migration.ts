@@ -3,11 +3,13 @@ import api from './index'
 // ===== 数据迁移 =====
 
 export interface SupportedPair {
+  supports_triggers?: boolean
   source: string
   target: string
 }
 
 export interface StartDataMigrationRequest {
+  migrate_triggers?: boolean
   excluded_objects?: MigrationObjectRef[]
   src_conn_id: number
   dst_conn_id: number
@@ -43,6 +45,7 @@ export interface ConnSnapshot {
 }
 
 export interface DataMigrationJob {
+  migrate_triggers?: boolean
   id: number
   job_id: string
   src_conn_id: number
@@ -180,6 +183,7 @@ export interface TriggerAdaptationReport {
 }
 
 export interface MigrationReport {
+  trigger_migration_enabled?: boolean
   trigger_adaptation?: TriggerAdaptationReport
  compatibility_functions?: CompatibilityFunctionsReport
 	 auto_repairs?: AutoRepair[]
@@ -471,7 +475,7 @@ export const migrateViews = (data: MigrateViewsRequest) =>
 // ===== 对象迁移（主键/索引/序列/外键）=====
 
 // 对象迁移支持的对象类型
-export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'comments'
+export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'comments' | 'triggers'
 
 // listConnectionTables 列出源连接指定库下的全部表名
 export const listConnectionTables = (connId: number, database?: string, targetType?: string) =>
@@ -546,6 +550,7 @@ export const validateBatch = (file: File) => {
 
 // 批量迁移整批共用的迁移选项（对齐单任务默认值）
 export interface BatchOptions {
+  migrate_triggers?: boolean
   excluded_objects_by_row?: Record<number, MigrationObjectRef[]>
   migrate_content: 'both' | 'schema_only' | 'data_only'
   page_size: number
@@ -567,6 +572,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   if (excludeRows.length) fd.append('exclude_rows', excludeRows.join(','))
   if (opts.excluded_objects_by_row) fd.append('excluded_objects_by_row', JSON.stringify(opts.excluded_objects_by_row))
   fd.append('migrate_content', opts.migrate_content)
+  fd.append('migrate_triggers', String(!!opts.migrate_triggers))
   fd.append('page_size', String(opts.page_size))
   fd.append('max_parallel', String(opts.max_parallel))
   fd.append('intra_table_parallel', String(opts.intra_table_parallel))

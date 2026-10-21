@@ -4,6 +4,7 @@ package repair
 import (
 	"context"
 	"crypto/sha256"
+	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/source"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ type Unit struct {
 }
 
 type Object struct {
+	MySQLPGTrigger *mysqltrigger.Plan `json:"mysql_pg_trigger,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -109,6 +111,12 @@ func (o Object) CanEditDDL() bool {
 	default:
 		return false
 	}
+}
+
+// Generated MySQL trigger programs can be retried as a complete immutable
+// transaction, while remaining unavailable to the general SQL draft editor.
+func (o Object) CanExecuteDDL() bool {
+	return o.CanEditDDL() || (!o.DiagnosticOnly && o.Kind == "trigger" && o.MySQLPGTrigger != nil && o.Schema != "" && o.TargetName != "")
 }
 
 type RecoveryPreview struct {

@@ -15,34 +15,36 @@
       <a-tab-pane key="data-migrate" title="单次迁移">
         <a-form :model="dataMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <div class="migration-connections">
+          <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
                   <span class="conn-card-title">从哪里迁移</span>
                 </div>
-                <a-select
-                  v-model="srcEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="dataMigrate.srcConnId"
-                  placeholder="选择源库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { checkPairSupport(); loadSrcDatabases(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="srcEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="dataMigrate.srcConnId"
+                    placeholder="选择源库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { checkPairSupport(); loadSrcDatabases(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="selectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedSrc.host }}:{{ selectedSrc.port }}</span>
                   <span v-if="selectedSrc.database && !supportsDatabaseEditing(selectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ selectedSrc.database }}</span>
@@ -82,32 +84,34 @@
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">迁移到哪里</span>
                 </div>
-                <a-select
-                  v-model="dstEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="dataMigrate.dstConnId"
-                  placeholder="选择目标库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { checkPairSupport(); loadDstSchemas(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="dstEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="dataMigrate.dstConnId"
+                    placeholder="选择目标库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { checkPairSupport(); loadDstSchemas(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="selectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ selectedDst.host }}:{{ selectedDst.port }}</span>
                   <span v-if="!supportsDatabaseEditing(selectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}</span>
@@ -175,6 +179,11 @@
               <a-radio value="schema_only">仅创建表结构</a-radio>
               <a-radio value="data_only">仅迁移数据行</a-radio>
             </a-radio-group>
+          </a-form-item>
+
+          <a-form-item v-if="dataSupportsTriggers" label="触发器迁移">
+            <a-checkbox v-model="dataMigrate.migrateTriggers" :disabled="dataMigrate.content === 'data_only'">迁移所选表的触发器</a-checkbox>
+            <p class="muted">转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</p>
           </a-form-item>
 
           <!-- 高级设置 -->
@@ -378,34 +387,36 @@
       <a-tab-pane key="view-migrate" title="视图迁移">
         <a-form :model="viewMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <div class="migration-connections">
+          <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
                   <span class="conn-card-title">从哪里迁移</span>
                 </div>
-                <a-select
-                  v-model="srcEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="viewMigrate.srcConnId"
-                  placeholder="选择源库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { vmCheckPairSupport(); vmLoadSrcDatabases(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="srcEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="viewMigrate.srcConnId"
+                    placeholder="选择源库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { vmCheckPairSupport(); vmLoadSrcDatabases(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="vmSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedSrc.host }}:{{ vmSelectedSrc.port }}</span>
                   <span v-if="vmSelectedSrc.database && !supportsDatabaseEditing(vmSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ vmSelectedSrc.database }}</span>
@@ -429,32 +440,34 @@
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">迁移到哪里</span>
                 </div>
-                <a-select
-                  v-model="dstEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="viewMigrate.dstConnId"
-                  placeholder="选择目标库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { vmCheckPairSupport(); vmLoadDstSchemas(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="dstEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="viewMigrate.dstConnId"
+                    placeholder="选择目标库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { vmCheckPairSupport(); vmLoadDstSchemas(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="vmSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ vmSelectedDst.host }}:{{ vmSelectedDst.port }}</span>
                   <span v-if="!supportsDatabaseEditing(vmSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(vmSelectedDst, viewMigrate.dstSchema) }}</span>
@@ -615,34 +628,36 @@
       <a-tab-pane key="object-migrate" title="对象迁移">
         <a-form :model="objMigrate" layout="vertical" class="migration-form">
           <!-- 源库 / 目标库选择 -->
-          <div class="migration-connections">
+          <div class="migration-connections migration-connections-compact">
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="orange" size="small">源库</a-tag>
                   <span class="conn-card-title">从哪里迁移</span>
                 </div>
-                <a-select
-                  v-model="srcEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="objMigrate.srcConnId"
-                  placeholder="选择源库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { omCheckPairSupport(); omLoadSrcDatabases(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="srcEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="objMigrate.srcConnId"
+                    placeholder="选择源库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { omCheckPairSupport(); omLoadSrcDatabases(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in srcConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="omSelectedSrc" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedSrc.host }}:{{ omSelectedSrc.port }}</span>
                   <span v-if="omSelectedSrc.database && !supportsDatabaseEditing(omSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ omSelectedSrc.database }}</span>
@@ -666,32 +681,34 @@
               <icon-arrow-right style="font-size: 28px; color: #165dff" />
             </div>
             <div class="migration-connection-side">
-              <a-card class="conn-card" :body-style="{ padding: '24px' }">
+              <a-card class="conn-card" :body-style="{ padding: '20px' }">
                 <div class="conn-card-header">
                   <a-tag color="blue" size="small">目标库</a-tag>
                   <span class="conn-card-title">迁移到哪里</span>
                 </div>
-                <a-select
-                  v-model="dstEnvFilter"
-                  placeholder="按环境筛选"
-                  style="width: 100%; margin-top: 10px"
-                  allow-clear
-                >
-                  <template #prefix><span class="migration-select-label">环境</span></template>
-                  <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
-                </a-select>
-                <a-select
-                  v-model="objMigrate.dstConnId"
-                  placeholder="选择目标库连接"
-                  style="width: 100%; margin-top: 10px"
-                  allow-search
-                  @change="(val) => { omCheckPairSupport(); omLoadDstSchemas(val as number) }"
-                >
-                  <template #prefix><span class="migration-select-label">连接</span></template>
-                  <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
-                    <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
-                  </a-option>
-                </a-select>
+                <div class="migration-connection-selectors">
+                  <a-select
+                    v-model="dstEnvFilter"
+                    placeholder="按环境筛选"
+                    style="width: 100%"
+                    allow-clear
+                  >
+                    <template #prefix><span class="migration-select-label">环境</span></template>
+                    <a-option v-for="e in envHistory" :key="e" :value="e" :label="e" />
+                  </a-select>
+                  <a-select
+                    v-model="objMigrate.dstConnId"
+                    placeholder="选择目标库连接"
+                    style="width: 100%"
+                    allow-search
+                    @change="(val) => { omCheckPairSupport(); omLoadDstSchemas(val as number) }"
+                  >
+                    <template #prefix><span class="migration-select-label">连接</span></template>
+                    <a-option v-for="c in pgConnections" :key="c.id" :value="c.id" :label="c.name">
+                      <a-tag :color="getDbTypeColor(c.db_type)" size="small" style="margin-right:6px">{{ getDbTypeLabel(c.db_type) }}</a-tag>{{ c.name }}
+                    </a-option>
+                  </a-select>
+                </div>
                 <div v-if="omSelectedDst" class="conn-meta">
                   <span class="conn-meta-item"><span class="conn-meta-label">地址</span>{{ omSelectedDst.host }}:{{ omSelectedDst.port }}</span>
                   <span v-if="!supportsDatabaseEditing(omSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(omSelectedDst, objMigrate.dstSchema) }}</span>
@@ -733,9 +750,11 @@
           <!-- 对象类型选择 -->
           <a-form-item label="迁移对象类型" style="margin-bottom: 16px">
             <a-checkbox-group v-model="objMigrate.objects" class="migration-object-options">
-              <a-checkbox v-for="opt in OBJECT_TYPE_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</a-checkbox>
+              <a-checkbox v-for="opt in objectTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-checkbox>
             </a-checkbox-group>
           </a-form-item>
+
+          <a-alert v-if="objMigrate.objects.includes('triggers')" type="info">触发器以 SECURITY INVOKER 执行，业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</a-alert>
 
           <!-- 表选择 -->
           <a-spin :loading="objMigrate.loadingTables" style="display:block">
@@ -956,6 +975,7 @@ const dataMigrate = reactive({
   mode: 'all' as 'all' | 'include' | 'exclude',
   filter: '',
   content: 'both' as 'both' | 'schema_only' | 'data_only',
+  migrateTriggers: false,
   pageSize: 20000,
   maxParallel: 10,
   intraTableParallel: 8,
@@ -1075,6 +1095,9 @@ const selectedDst = computed(() =>
 function sourceUsesSchema(connection?: Connection): boolean {
   return !!connection && connection.db_type !== 'mysql' && connection.db_type !== 'sqlserver'
 }
+
+const dataSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === selectedSrc.value?.db_type && pair.target === selectedDst.value?.db_type && pair.supports_triggers))
+watch([dataSupportsTriggers, () => dataMigrate.content], ([supported, content]) => { if (!supported || content === 'data_only') dataMigrate.migrateTriggers = false })
 
 watch(() => dataMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)
@@ -1455,6 +1478,7 @@ const OBJECT_TYPE_OPTIONS: { label: string; value: MigrateObjectType }[] = [
   { label: '序列（自增列）', value: 'sequences' },
   { label: '外键', value: 'foreign_keys' },
   { label: '注释', value: 'comments' },
+  { label: '触发器', value: 'triggers' },
 ]
 
 const objMigrate = reactive({
@@ -1485,6 +1509,10 @@ const objLogContainer = ref<HTMLElement | null>(null)
 
 const omSelectedSrc = computed(() => connections.value.find((c) => c.id === objMigrate.srcConnId))
 const omSelectedDst = computed(() => connections.value.find((c) => c.id === objMigrate.dstConnId))
+
+const objectSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === omSelectedSrc.value?.db_type && pair.target === omSelectedDst.value?.db_type && pair.supports_triggers))
+const objectTypeOptions = computed(() => OBJECT_TYPE_OPTIONS.filter(option => option.value !== 'triggers' || objectSupportsTriggers.value))
+watch(objectSupportsTriggers, supported => { if (!supported) objMigrate.objects = objMigrate.objects.filter(kind => kind !== 'triggers') })
 
 const omFilteredRows = computed(() => {
   const kw = objMigrate.search.trim().toLowerCase()
@@ -1865,6 +1893,7 @@ return {
       migrate_mode: dataMigrate.mode,
       table_filter: dataMigrate.filter,
       migrate_content: dataMigrate.content,
+      migrate_triggers: dataMigrate.migrateTriggers,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       intra_table_parallel: dataMigrate.intraTableParallel,

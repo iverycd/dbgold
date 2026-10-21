@@ -92,7 +92,7 @@ test('reports without adaptation information retain the historical trigger row a
 
 function viewHarness(view) {
   const { descriptor } = parse(readFileSync(new URL(`../src/views/${view}.vue`, import.meta.url), 'utf8'))
-  const fields = view === 'MigrationReportPanel' ? 'report, tableRows, failedCount, exportReport' : 'report, job, categoryRows, migratedCategories, objectTotalCount, objectSuccessCount, failedObjectCount, failedBusinessObjectCount, failedItems, exportReport'
+  const fields = view === 'MigrationReportPanel' ? 'report, tableRows, failedCount, exportReport' : 'report, job, categoryRows, migratedCategories, objectTotalCount, objectSuccessCount, failedObjectCount, failedBusinessObjectCount, failedItems, pendingTriggerCount, reportHealthText, summaryText, risks, exportReport'
   const downloads = []
   const context = {
     exports: {}, Blob, defineProps: () => ({ jobID: 'trigger-report' }), defineEmits: () => () => {}, defineExpose() {},
@@ -139,3 +139,25 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
     } finally { scope.stop() }
   })
 }
+
+
+test('unfinished migrated triggers cannot produce an all-passed detail headline', () => {
+  const scope = Vue.effectScope()
+  try {
+    const { panel } = scope.run(() => viewHarness('DataMigrationJobDetailView'))
+    const value = report()
+    for (const key of ['tables', 'data', 'primaryKeys', 'views', 'indexes', 'constraints', 'sequences', 'comments']) value[key] = { total: 0, success: 0, failed: 0, items: [] }
+    value.trigger_migration_enabled = true
+    value.triggers = { total: 3, success: 1, failed: 0, items: [] }
+    panel.report.value = value
+    panel.job.value = { status: 'cancelled' }
+    assert.equal(panel.pendingTriggerCount.value, 2)
+    assert.equal(panel.reportHealthText.value, '尚未完成')
+    assert.match(panel.summaryText.value, /部分触发器尚未执行/)
+    assert.ok(panel.risks.value.some(item => item.key === 'pending-triggers'))
+    value.trigger_migration_enabled = false
+    panel.report.value = { ...value }
+    assert.equal(panel.pendingTriggerCount.value, 0, 'historical inventories never become unfinished business work')
+    assert.equal(panel.reportHealthText.value, '全部通过')
+  } finally { scope.stop() }
+})

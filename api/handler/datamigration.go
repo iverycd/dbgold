@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +23,9 @@ import (
 
 // SupportedPair 表示一个支持的迁移组合
 type SupportedPair struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
+	Source           string `json:"source"`
+	Target           string `json:"target"`
+	SupportsTriggers bool   `json:"supports_triggers"`
 }
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
@@ -88,10 +90,30 @@ var supportedPairs = []SupportedPair{
 
 // GetSupportedPairs 返回支持的迁移组合列表
 func GetSupportedPairs(c *gin.Context) {
-	c.JSON(http.StatusOK, supportedPairs)
+	pairs := append([]SupportedPair(nil), supportedPairs...)
+	for i := range pairs {
+		pairs[i].SupportsTriggers = supportsTriggerMigration(pairs[i].Source, pairs[i].Target)
+	}
+	c.JSON(http.StatusOK, pairs)
+}
+
+func supportsTriggerMigration(src, dst string) bool { return src == "mysql" && source.IsPGFamily(dst) }
+
+func validateTriggerMigration(src, dst, content string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if !supportsTriggerMigration(src, dst) {
+		return fmt.Errorf("触发器迁移仅支持 MySQL → PG 内核目标")
+	}
+	if content == "data_only" {
+		return fmt.Errorf("仅迁移数据时不能启用触发器迁移")
+	}
+	return nil
 }
 
 type startDataMigrationRequest struct {
+	MigrateTriggers    bool                    `json:"migrate_triggers"`
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
@@ -163,6 +185,11 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
+	if err := validateTriggerMigration(srcConn.DBType, dstConn.DBType, req.MigrateContent, req.MigrateTriggers); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	jobID := uuid.New().String()
 	ctx, cancel := context.WithCancel(context.Background())
 	job := datamigrate.Registry.Register(jobID, cancel)
@@ -173,6 +200,7 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		MigrateTriggers:    req.MigrateTriggers,
 		ExcludedObjects:    encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:            middleware.GetCurrentUserID(c),
 		JobID:              jobID,
@@ -209,6 +237,7 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	p := migrationParams{
+		MigrateTriggers:    req.MigrateTriggers,
 		ExcludedObjects:    req.ExcludedObjects,
 		MigrateMode:        req.MigrateMode,
 		TableFilter:        req.TableFilter,
@@ -245,6 +274,7 @@ func StartDataMigration(c *gin.Context) {
 
 // migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
 type migrationParams struct {
+	MigrateTriggers  bool
 	ExcludedObjects  []datamigrate.ObjectRef
 	MigrateMode      string
 	TableFilter      string
@@ -339,6 +369,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
+		MigrateTriggers:      p.MigrateTriggers,
 		PreparationStartedAt: startup.startedAt,
 		ExcludedObjects:      p.ExcludedObjects,
 		PageSize:             p.PageSize,
@@ -401,7 +432,7 @@ type startObjectMigrationRequest struct {
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
-	MigrateObjects     []string                `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments"`
+	MigrateObjects     []string                `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments triggers"`
 	TableNames         []string                `json:"table_names" binding:"required,min=1"`
 	SrcDatabase        string                  `json:"src_database"`
 	TargetSchema       string                  `json:"target_schema"`
@@ -446,6 +477,11 @@ func StartObjectMigration(c *gin.Context) {
 		return
 	}
 
+	if err := validateTriggerMigration(srcConn.DBType, dstConn.DBType, "schema_only", slices.Contains(req.MigrateObjects, "triggers")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	jobID := uuid.New().String()
 	ctx, cancel := context.WithCancel(context.Background())
 	job := datamigrate.Registry.Register(jobID, cancel)
@@ -455,6 +491,7 @@ func StartObjectMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		MigrateTriggers: slices.Contains(req.MigrateObjects, "triggers"),
 		ExcludedObjects: encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:         middleware.GetCurrentUserID(c),
 		JobID:           jobID,
@@ -547,6 +584,7 @@ func StartObjectMigration(c *gin.Context) {
 		}
 
 		cfg := datamigrate.Config{
+			MigrateTriggers:      slices.Contains(req.MigrateObjects, "triggers"),
 			PreparationStartedAt: startup.startedAt,
 			ExcludedObjects:      req.ExcludedObjects,
 			Mode:                 "all",
