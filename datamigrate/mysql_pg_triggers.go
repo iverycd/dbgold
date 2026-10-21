@@ -80,6 +80,18 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 		m.mysqlPGTriggerError = err
 		return
 	}
+	var characters *source.TriggerCharacterMetadata
+	var characterErr error
+	if reader, ok := m.reader.(source.TriggerCharacterReader); ok && len(values) > 0 {
+		characters, characterErr = reader.GetTriggerCharacterMetadata(ctx)
+		if characterErr != nil {
+			characters = nil
+			if ctx.Err() != nil {
+				m.mysqlPGTriggerError = ctx.Err()
+				return
+			}
+		}
+	}
 	groups, names := map[string]int{}, map[string]int{}
 	for _, v := range values {
 		groups[v.TableName+"\x00"+strings.ToUpper(v.Timing)+"\x00"+strings.ToUpper(v.Event)]++
@@ -119,7 +131,10 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 		case names[m.objName(v.TableName)+"\x00"+m.objName(v.Name)] > 1:
 			p.err = fmt.Errorf("目标触发器名称在大小写转换后冲突")
 		default:
-			p.plan, p.err = mysqltrigger.Convert(v, metadata, mysqltrigger.Options{Schema: m.cfg.TargetSchema, Name: m.objName})
+			p.plan, p.err = mysqltrigger.Convert(v, metadata, mysqltrigger.Options{Schema: m.cfg.TargetSchema, Name: m.objName, CharacterMetadata: characters})
+			if p.err != nil && characterErr != nil {
+				p.err = fmt.Errorf("%v；读取源字符排序元数据失败: %w", p.err, characterErr)
+			}
 			if p.err == nil {
 				m.freezeMySQLPGTriggerTables(&p.plan, metadata)
 			}
@@ -129,6 +144,109 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 	if len(m.mysqlPGTriggers) > 0 {
 		m.log.Info("触发器使用 SECURITY INVOKER，不映射源 DEFINER；时间函数使用目标业务会话时区，请保持两端一致")
 	}
+}
+
+// BuildMySQLPGTriggerRepairPlan only reads metadata. The caller owns auth,
+// original-report provenance, preview hashes, and the eventual ledger CAS.
+func BuildMySQLPGTriggerRepairPlan(ctx context.Context, r source.Reader, w target.Writer, cfg Config, original repair.Object, existing []repair.Object) (repair.Object, error) {
+	if original.Kind != "trigger" || original.SourceName == "" || original.SourceTable == "" || original.SourceDDL == "" {
+		return repair.Object{}, fmt.Errorf("触发器缺少可核对的原始身份或源 DDL")
+	}
+	if r.DBType() != "mysql" || !source.IsPGFamily(w.DBType()) {
+		return repair.Object{}, fmt.Errorf("触发器重新规划仅支持 MySQL → PG 内核目标")
+	}
+	if original.Schema == "" || cfg.TargetSchema != "" && cfg.TargetSchema != original.Schema {
+		return repair.Object{}, fmt.Errorf("触发器目标 schema 已偏离原记录")
+	}
+	cfg.TargetSchema = original.Schema
+	cfg.TargetDBType = w.DBType()
+	cfg.CaptureRepair = false
+	cfg.RepairSink = nil
+	cfg.RepairObjectSink = nil
+	cfg.Content = "schema_only"
+	cfg.Objects = []string{"triggers"}
+	cfg.TableNames = []string{original.SourceTable}
+	cfg.ViewNames = nil
+	cfg.MigrateTriggers = true
+	m := NewMigrator(r, w, &Job{LogCh: make(chan string, 1024)}, cfg)
+	if m.objName(original.SourceTable) != original.Table || m.objName(original.SourceName) != original.TargetName {
+		return repair.Object{}, fmt.Errorf("触发器名称映射已偏离原记录")
+	}
+	m.prepareMySQLPGTriggers(ctx)
+	if m.mysqlPGTriggerError != nil {
+		return repair.Object{}, m.mysqlPGTriggerError
+	}
+	var found *preparedMySQLPGTrigger
+	for i := range m.mysqlPGTriggers {
+		p := &m.mysqlPGTriggers[i]
+		if p.source.Name == original.SourceName && p.source.TableName == original.SourceTable {
+			if found != nil {
+				return repair.Object{}, fmt.Errorf("源触发器身份不唯一")
+			}
+			found = p
+		}
+	}
+	if found == nil {
+		return repair.Object{}, fmt.Errorf("原源触发器已不存在或当前账号不可见")
+	}
+	if found.source.SourceDDL != original.SourceDDL {
+		return repair.Object{}, fmt.Errorf("源触发器 DDL 已改变，不能替换原迁移的冻结计划")
+	}
+	if found.err != nil {
+		return repair.Object{}, found.err
+	}
+	if found.plan.Table != original.Table || found.plan.Name != original.TargetName || found.plan.Schema != original.Schema {
+		return repair.Object{}, fmt.Errorf("重新规划后的触发器身份与原对象不一致")
+	}
+	candidate := original
+	plan := found.plan
+	candidate.MySQLPGTrigger = &plan
+	candidate.DiagnosticOnly = false
+	candidate.RequiresReview = false
+	candidate.Status = "pending"
+	candidate.Error = ""
+	candidate.SuggestedDDL = ""
+	candidate.DDL = dialect.JoinSQL(triggerStatements(plan))
+	candidate.Units = unitsFor(triggerStatements(plan))
+	candidate.Dependencies = []string{}
+	for _, name := range plan.Dependencies {
+		var match *repair.Object
+		for _, item := range existing {
+			targetName := item.Table
+			if targetName == "" {
+				targetName = item.TargetName
+			}
+			if item.Kind != "table" || targetName != name {
+				continue
+			}
+			if item.Schema != plan.Schema {
+				return repair.Object{}, fmt.Errorf("依赖表 %s 的 ledger schema 与原触发器不一致", name)
+			}
+			if match != nil {
+				return repair.Object{}, fmt.Errorf("依赖表 %s 的 ledger 身份不唯一", name)
+			}
+			var sourceName string
+			for _, table := range plan.SourceTables {
+				if m.objName(table.TableName) == name {
+					sourceName = table.TableName
+					break
+				}
+			}
+			identity := item.SourceTable
+			if identity == "" {
+				identity = item.SourceName
+			}
+			if sourceName == "" || identity != sourceName || item.TargetName != name || item.ID == "" {
+				return repair.Object{}, fmt.Errorf("依赖表 %s 的 ledger 身份已偏离原迁移", name)
+			}
+			copied := item
+			match = &copied
+		}
+		if match != nil {
+			candidate.Dependencies = append(candidate.Dependencies, match.ID)
+		}
+	}
+	return candidate, nil
 }
 
 func (m *Migrator) excludedMySQLPGTrigger(v source.TriggerInfo) bool {

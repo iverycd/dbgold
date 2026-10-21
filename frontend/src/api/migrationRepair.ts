@@ -54,6 +54,7 @@ export interface RepairObject {
 }
 export interface RepairRecord { object: RepairObject; version: number }
 export interface SequenceRepairPlan extends RepairRecord { has_changes: boolean; message: string }
+export interface TriggerRepairPlan extends RepairRecord { binding_version: number; plan_hash: string; message: string }
 export interface RepairBinding {
   src_conn_id: number
   dst_conn_id: number
@@ -120,6 +121,8 @@ export const listRepairs = (job: string) => api.get<RepairList>(`${base(job)}/re
 export const bindRepairConnections = (job: string, data: BindingRequest) => api.put(`${base(job)}/repairs/binding`, data)
 export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean }) => api.put<RepairRecord>(objectURL(job, object), data)
 export const refreshSequenceRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/sequence-plan`, data)
+export const previewTriggerRepairPlan = (job: string, object: string, data: { version: number }) => api.post<TriggerRepairPlan>(`${objectURL(job, object)}/trigger-plan`, data)
+export const saveTriggerRepairPlan = (job: string, object: string, data: { version: number; binding_version: number; plan_hash: string; reviewed: true }) => api.put<RepairRecord>(`${objectURL(job, object)}/trigger-plan`, data)
 export const executeRepair = (job: string, object: string, data: { version: number; request_id: string; confirmed: true }) => api.post<RepairAttempt>(`${objectURL(job, object)}/execute`, data)
 export const listRepairAttempts = (job: string) => api.get<{ items: RepairAttempt[] }>(`${base(job)}/repair-attempts`)
 export const getRepairAttempt = (job: string, attempt: string) => api.get<RepairAttempt>(`${base(job)}/repair-attempts/${encodeURIComponent(attempt)}`)

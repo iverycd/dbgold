@@ -178,6 +178,18 @@
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
         <a-collapse><a-collapse-item v-if="editing.object.source_ddl" key="source" header="源端定义（只读，仅供手工适配参考）"><pre class="sql-preview">{{ editing.object.source_ddl }}</pre></a-collapse-item><a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" header="建议 DDL（需显式采用或整理到对应执行单元）"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item><a-collapse-item key="original" header="原始目标 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || (canEditRepairDDL(editing.object) ? '未生成目标 DDL，请根据源端定义手动编写。' : '该记录没有可执行的对象 DDL。') }}</pre></a-collapse-item></a-collapse>
+        <div v-if="triggerPlanAvailable" class="editor-toolbar">
+          <a-button size="small" :loading="refreshingTriggerPlan" :disabled="!canRefreshTriggerPlan" @click="refreshTriggerPlan">重新生成触发器方案</a-button>
+          <span class="muted">读取当前源定义，核对后保存方案，再确认执行。</span>
+        </div>
+        <template v-if="triggerPlanCandidate">
+          <a-alert type="info">{{ triggerPlanCandidate.message }}</a-alert>
+          <a-collapse><a-collapse-item key="trigger-source" header="本次核对的源定义（只读）"><pre class="sql-preview">{{ triggerPlanCandidate.object.source_ddl }}</pre></a-collapse-item></a-collapse>
+          <div v-for="(unit, index) in triggerPlanCandidate.object.units" :key="`candidate:${unit.id}`" class="unit-editor">
+            <div class="unit-heading"><strong>新方案步骤 {{ index + 1 }} · 与另一单元一起执行</strong></div>
+            <pre class="sql-preview">{{ unit.sql }}</pre>
+          </div>
+        </template>
         <a-form v-if="isTableRepair(editing.object) && canEditRepairDDL(editing.object)" :model="mappingForm" layout="vertical" class="editor-mapping">
           <a-form-item label="源列 → 目标列映射（修改建表列名时同时保存）">
             <div class="mapping-list"><div v-for="source in Object.keys(mappingForm.values)" :key="source" class="mapping-row editable-mapping"><code>{{ source }}</code><span>→</span><a-input v-model="mappingForm.values[source]" placeholder="修复 DDL 中的目标列名" /><a-button type="text" size="mini" :disabled="(editing.object.source_columns || editing.object.columns || []).some(column => column.Name === source)" @click="delete mappingForm.values[source]">移除</a-button></div><span v-if="!Object.keys(mappingForm.values).length" class="muted">旧报告没有列元数据时，可按源表与修复 DDL 显式补充映射；接续预检会核对实际列。</span></div>
@@ -202,7 +214,9 @@
       </template>
       <template #footer>
         <div v-if="editing" class="repair-editor-footer">
+          <a-checkbox v-if="triggerPlanCandidate" v-model="triggerPlanReviewed" :disabled="saving || refreshingTriggerPlan">我已核对当前源定义和完整触发器方案</a-checkbox>
           <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
+          <a-button v-if="triggerPlanCandidate" type="primary" :loading="saving" :disabled="busy || saving || !triggerPlanReviewed || !binding?.configured" @click="saveTriggerPlan">核对并保存触发器方案</a-button>
           <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canExecuteRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">{{ isMySQLPGTrigger(editing.object) ? '重试原触发器' : '确认执行步骤' }}</a-button></div>
         </div>
       </template>
@@ -281,8 +295,8 @@ import { computed, defineAsyncComponent, nextTick, onUnmounted, reactive, ref, w
 import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
-import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, refreshSequenceRepairPlan, saveRepairDraft, startRecovery, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRetryMySQLPGTrigger, isMySQLPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
+import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, isMySQLPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
@@ -314,6 +328,9 @@ const reviewed = ref(false)
 const refreshingSequencePlan = ref(false)
 const sequencePlanPending = ref(false)
 const sequencePlanMessage = ref('')
+const refreshingTriggerPlan = ref(false)
+const triggerPlanCandidate = ref<TriggerRepairPlan | null>(null)
+const triggerPlanReviewed = ref(false)
 const executeConfirmVisible = ref(false)
 const executionSnapshot = ref<RepairUnit[]>([])
 const executeVersion = ref(0)
@@ -354,7 +371,9 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let pollSerial = 0
 let disposed = false
 
-const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value)
+const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value || refreshingTriggerPlan.value)
+const triggerPlanAvailable = computed(() => job.value?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(job.value?.dst_db_type || '') && !!editing.value && canRegenerateTriggerPlan(editing.value.object))
+const canRefreshTriggerPlan = computed(() => triggerPlanAvailable.value && !busy.value && !saving.value && !!binding.value?.configured)
 const nativeOracleDamengSequence = computed(() => job.value?.src_db_type === 'oracle' && job.value?.dst_db_type === 'dameng' && editing.value?.object.kind === 'sequence' && !!editing.value.object.sequence?.Native?.Name)
 const canRefreshSequencePlan = computed(() => {
   const object = editing.value?.object
@@ -364,7 +383,7 @@ const canRefreshSequencePlan = computed(() => {
   return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && unit.sql === object.units[index].sql)
 })
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
-const canExecute = computed(() => !busy.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isMySQLPGTrigger(editing.value.object) || reviewed.value))
+const canExecute = computed(() => !busy.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isMySQLPGTrigger(editing.value.object) || reviewed.value))
 const displayRecords = computed(() => groupRepairRecords(records.value))
 const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
 const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
@@ -580,6 +599,7 @@ function openEditor(record: RepairRecord) {
   editorSerial++
   editing.value = record
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  clearTriggerPlan()
   draftUnits.value = cloneRepairExecutionUnits(record.object)
   if (canEditRepairDDL(record.object) && !draftUnits.value.length && !hasRepairDDL(record.object) && !unitCommitted(record.object.status) && record.object.status !== 'unknown') addUnit()
   mappingForm.values = { ...(record.object.column_mapping || {}) }
@@ -594,6 +614,7 @@ function openEditor(record: RepairRecord) {
 function closeEditor() {
   editorSerial++; executeConfirmVisible.value = false; editing.value = null; draftUnits.value = []
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  clearTriggerPlan()
   if (returnToRecovery.value) { returnToRecovery.value = false; recoveryVisible.value = true; void loadPreview() }
 }
 function addColumnMapping() {
@@ -646,6 +667,35 @@ async function refreshSequencePlan() {
     sequencePlanPending.value = true; sequencePlanMessage.value = candidate.message
   } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e) }
   finally { if (current(scope, id) && serial === editorSerial) refreshingSequencePlan.value = false }
+}
+function clearTriggerPlan() {
+  triggerPlanCandidate.value = null; triggerPlanReviewed.value = false; refreshingTriggerPlan.value = false
+}
+async function refreshTriggerPlan() {
+  if (!canRefreshTriggerPlan.value || !editing.value) return
+  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial
+  refreshingTriggerPlan.value = true; triggerPlanReviewed.value = false
+  try {
+    const candidate = (await previewTriggerRepairPlan(id, objectID, { version: editing.value.version })).data
+    if (!current(scope, id) || serial !== editorSerial || !editorVisible.value) return
+    triggerPlanCandidate.value = candidate
+  } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e) }
+  finally { if (current(scope, id) && serial === editorSerial) refreshingTriggerPlan.value = false }
+}
+async function saveTriggerPlan(): Promise<boolean> {
+  const candidate = triggerPlanCandidate.value
+  if (!candidate || !editing.value || !triggerPlanReviewed.value || busy.value || saving.value || !binding.value?.configured) return false
+  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial
+  saving.value = true
+  try {
+    const saved = (await saveTriggerRepairPlan(id, objectID, { version: candidate.version, binding_version: candidate.binding_version, plan_hash: candidate.plan_hash, reviewed: true })).data
+    if (!current(scope, id) || serial !== editorSerial) return false
+    replaceRecord(saved); editing.value = saved
+    draftUnits.value = cloneRepairExecutionUnits(saved.object)
+    clearTriggerPlan(); executeConfirmVisible.value = false
+    Message.success('触发器方案已保存，请核对执行步骤后确认执行'); return true
+  } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e); return false }
+  finally { if (current(scope, id)) saving.value = false }
 }
 async function prepareExecute() {
   if (!canExecute.value || !editing.value) return
@@ -783,6 +833,7 @@ watch(() => props.jobID, () => {
   editorVisible.value = false; executeConfirmVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
   loading.value = false; saving.value = false; submitting.value = false; cancelling.value = false; previewing.value = false; loadingHistory.value = false
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  clearTriggerPlan()
   mappingForm.values = {}; mappingForm.source = ''; mappingForm.target = ''
   returnToRecovery.value = false; editing.value = null; recoveryObject.value = null; draftUnits.value = []; recoveryPlan.value = null
   void refresh()

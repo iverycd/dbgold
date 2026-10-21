@@ -229,6 +229,16 @@ func validateMySQLPGTriggerTarget(ctx context.Context, tx *sql.Tx, p mysqltrigge
 	if !available {
 		return fmt.Errorf("目标未安装 plpgsql，无法创建触发器函数")
 	}
+	if p.RequiresTextSemantics {
+		if err := validateMySQLPGTextSemantics(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if p.CharacterMetadata != nil && len(p.CharacterMetadata.Profiles) > 0 {
+		if err := validateMySQLPGCharacterCapabilities(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if len(p.Tables) == 0 {
 		return fmt.Errorf("触发器计划缺少冻结目标表结构")
 	}
@@ -280,6 +290,42 @@ func validateMySQLPGTriggerTarget(ctx context.Context, tx *sql.Tx, p mysqltrigge
 		if !seen[name] {
 			return fmt.Errorf("触发器依赖表 %s 缺少冻结结构", name)
 		}
+	}
+	return nil
+}
+
+const mysqlPGCharacterCapabilitySQL = `SELECT current_setting('server_encoding'),
+pg_catalog.convert_to(pg_catalog.translate(pg_catalog.regexp_replace(pg_catalog.rtrim($1::text,' ') COLLATE pg_catalog."C",$2::text,$3::text,'g'),$4::text,$5::text),'UTF8')=pg_catalog.convert_to($6::text,'UTF8')
+AND pg_catalog.translate(NULL::text,'a','b') IS NULL
+AND pg_catalog.convert_to(pg_catalog.rtrim(''::text,' '),'UTF8')=pg_catalog.decode('','hex')`
+
+const mysqlPGTextSemanticsSQL = `SELECT pg_catalog.octet_length(''::text)=0
+AND ('a'::text || ''::text)='a'::text
+AND ('a'::text || NULL::text) IS NULL
+AND pg_catalog.octet_length(COALESCE(NULL::text,'a '::text))=2`
+
+func validateMySQLPGTextSemantics(ctx context.Context, tx *sql.Tx) error {
+	var compatible sql.NullBool
+	if err := tx.QueryRowContext(ctx, mysqlPGTextSemanticsSQL).Scan(&compatible); err != nil {
+		return fmt.Errorf("目标空字符串及 NULL 拼接语义验证失败: %w", err)
+	}
+	if !compatible.Valid || !compatible.Bool {
+		return fmt.Errorf("目标兼容模式的空字符串、NULL 拼接或文本转换语义与 MySQL 不一致")
+	}
+	return nil
+}
+
+// Probe the exact primitives used by v2 character keys before installing DDL.
+// This intentionally does not depend on the target database's business collation.
+func validateMySQLPGCharacterCapabilities(ctx context.Context, tx *sql.Tx) error {
+	var encoding string
+	var compatible bool
+	err := tx.QueryRowContext(ctx, mysqlPGCharacterCapabilitySQL, "Aé😀 ", "[\U00010000-\U0010ffff]", "�", "Aé", "ae", "ae�").Scan(&encoding, &compatible)
+	if err != nil {
+		return fmt.Errorf("目标字符比较能力验证失败: %w", err)
+	}
+	if !strings.EqualFold(encoding, "UTF8") || !compatible {
+		return fmt.Errorf("目标需要 UTF8 及兼容的字符映射、补充字符和 NULL 比较能力（当前编码 %s）", encoding)
 	}
 	return nil
 }

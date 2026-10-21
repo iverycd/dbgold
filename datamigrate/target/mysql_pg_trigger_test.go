@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"testing"
 
@@ -192,5 +193,62 @@ func TestTriggerIdentifiersAndTypes(t *testing.T) {
 	require.Equal(t, `"目""标"."表""名"`, qualifiedTriggerIdent(`目"标`, `表"名`))
 	for _, pair := range [][2]string{{"int", "integer"}, {"int4", "int"}, {"char(12)", "character(12)"}, {"char", "character(1)"}, {"bit", "bit(1)"}, {"double", "double precision"}, {"float", "float8"}, {"decimal(10,2)", "numeric(10,2)"}, {"VARCHAR(12)", "character varying(12)"}, {"TIMESTAMP(3)", "timestamp(3) without time zone"}, {"TIMESTAMP", "timestamp(6) without time zone"}, {"NUMERIC(10)", "numeric(10,0)"}, {"TIMESTAMP(3) WITH TIME ZONE", "timestamptz(3)"}} {
 		require.Equal(t, canonicalTriggerType(pair[0]), canonicalTriggerType(pair[1]))
+	}
+}
+
+func TestMySQLPGCharacterCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name, encoding string
+		compatible     bool
+		queryError     error
+		valid          bool
+	}{
+		{name: "utf8", encoding: "UTF8", compatible: true, valid: true},
+		{name: "wrong encoding", encoding: "LATIN1", compatible: true},
+		{name: "wrong primitives", encoding: "UTF8", compatible: false},
+		{name: "missing capability", queryError: errors.New("function unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, m := triggerWriterFixture(t)
+			m.ExpectBegin()
+			tx, err := w.db.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			q := m.ExpectQuery(regexp.QuoteMeta(mysqlPGCharacterCapabilitySQL)).WithArgs("Aé😀 ", "[\U00010000-\U0010ffff]", "�", "Aé", "ae", "ae�")
+			if tc.queryError != nil {
+				q.WillReturnError(tc.queryError)
+			} else {
+				q.WillReturnRows(sqlmock.NewRows([]string{"encoding", "compatible"}).AddRow(tc.encoding, tc.compatible))
+			}
+			err = validateMySQLPGCharacterCapabilities(context.Background(), tx)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			m.ExpectRollback()
+			require.NoError(t, tx.Rollback())
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestMySQLPGTextSemantics(t *testing.T) {
+	for _, value := range []any{true, false, nil} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			w, m := triggerWriterFixture(t)
+			m.ExpectBegin()
+			tx, err := w.db.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			m.ExpectQuery(regexp.QuoteMeta(mysqlPGTextSemanticsSQL)).WillReturnRows(sqlmock.NewRows([]string{"compatible"}).AddRow(value))
+			err = validateMySQLPGTextSemantics(context.Background(), tx)
+			if value == true {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "语义与 MySQL 不一致")
+			}
+			m.ExpectRollback()
+			require.NoError(t, tx.Rollback())
+			require.NoError(t, m.ExpectationsWereMet())
+		})
 	}
 }

@@ -18,6 +18,84 @@ type triggerTestReader struct {
 	reads      int
 }
 
+type triggerCharacterTestReader struct {
+	*triggerTestReader
+	characters     *source.TriggerCharacterMetadata
+	characterErr   error
+	characterReads int
+}
+
+func (r *triggerCharacterTestReader) GetTriggerCharacterMetadata(context.Context) (*source.TriggerCharacterMetadata, error) {
+	r.characterReads++
+	return r.characters, r.characterErr
+}
+
+func TestTriggerCharacterReadFailureDoesNotBlockNumericTrigger(t *testing.T) {
+	m, r, w := triggerFixture(t)
+	reader := &triggerCharacterTestReader{triggerTestReader: r, characterErr: errors.New("unknown source collation version")}
+	m.reader = reader
+	m.prepareMySQLPGTriggers(context.Background())
+	require.Nil(t, m.mysqlPGTriggerError)
+	require.Len(t, m.mysqlPGTriggers, 1)
+	require.NoError(t, m.mysqlPGTriggers[0].err)
+	require.Equal(t, 1, reader.characterReads)
+	require.Empty(t, w.plans, "preparation must stay read-only")
+	reader.ddl["OrderData"].Columns = append(reader.ddl["OrderData"].Columns, source.ColumnInfo{Name: "Text", DataType: "varchar"})
+	reader.triggers[0].Body = "IF NEW.Text <> OLD.Text THEN SET NEW.Amount = 1; END IF"
+	reader.triggers[0].Event = "UPDATE"
+	m.mysqlPGTriggers = nil
+	m.prepareMySQLPGTriggers(context.Background())
+	require.Nil(t, m.mysqlPGTriggerError)
+	require.Len(t, m.mysqlPGTriggers, 1)
+	require.ErrorContains(t, m.mysqlPGTriggers[0].err, "unknown source collation version")
+}
+
+func TestBuildMySQLPGTriggerRepairPlanReadsOriginalScope(t *testing.T) {
+	m, r, w := triggerFixture(t)
+	info := r.triggers[0]
+	original := repair.Object{ID: "original-trigger", Kind: "trigger", Schema: m.cfg.TargetSchema, Table: m.objName(info.TableName), Name: m.objName(info.Name), TargetName: m.objName(info.Name), SourceTable: info.TableName, SourceName: info.Name, SourceDDL: info.SourceDDL, Status: "failed", OriginalStatus: "failed", Error: "old unsupported", OriginalError: "old unsupported", DiagnosticOnly: true}
+	dep := repair.Object{ID: "table-id", Kind: "table", Schema: original.Schema, Table: original.Table, TargetName: original.Table, SourceTable: info.TableName}
+	candidate, err := BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{dep})
+	require.NoError(t, err)
+	require.Equal(t, original.ID, candidate.ID)
+	require.Equal(t, original.OriginalError, candidate.OriginalError)
+	require.Equal(t, original.OriginalStatus, candidate.OriginalStatus)
+	require.Equal(t, original.SourceDDL, candidate.SourceDDL)
+	require.False(t, candidate.DiagnosticOnly)
+	require.False(t, candidate.RequiresReview)
+	require.Equal(t, "pending", candidate.Status)
+	require.Equal(t, []string{"table-id"}, candidate.Dependencies)
+	require.Len(t, candidate.Units, 2)
+	for _, u := range candidate.Units {
+		require.Equal(t, "pending", u.Status)
+		require.True(t, u.Selected)
+		require.Equal(t, u.SQL, u.OriginalSQL)
+	}
+	require.Empty(t, w.plans)
+	r.triggers[0].SourceDDL += " -- changed"
+	_, err = BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{dep})
+	require.ErrorContains(t, err, "DDL 已改变")
+	r.triggers[0].SourceDDL = info.SourceDDL
+	other := info
+	other.Name = "another"
+	r.triggers = append(r.triggers, other)
+	_, err = BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{dep})
+	require.ErrorContains(t, err, "多个触发器")
+	r.triggers = r.triggers[:1]
+	duplicate := dep
+	duplicate.ID = "other-id"
+	_, err = BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{dep, duplicate})
+	require.ErrorContains(t, err, "不唯一")
+	wrong := dep
+	wrong.Schema = "Other"
+	_, err = BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{wrong})
+	require.ErrorContains(t, err, "schema")
+	wrong = dep
+	wrong.SourceTable = "OtherSource"
+	_, err = BuildMySQLPGTriggerRepairPlan(context.Background(), r, w, m.cfg, original, []repair.Object{wrong})
+	require.ErrorContains(t, err, "身份已偏离")
+}
+
 func (r *triggerTestReader) GetTriggers(context.Context) ([]source.TriggerInfo, error) {
 	r.reads++
 	return r.triggers, r.triggerErr

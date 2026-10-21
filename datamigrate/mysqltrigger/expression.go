@@ -245,6 +245,9 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 			// MySQL collations often compare case/accent-insensitively. Do not
 			// claim equivalent semantics for textual predicates on a PG target.
 			if a.kind == kindText {
+				if c.version >= 2 {
+					return c.textComparison(e, a, b, t)
+				}
 				return bad("字符比较依赖源库排序规则，需要人工适配")
 			}
 			if a.kind == kindTime {
@@ -266,6 +269,9 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 			return bad("不支持用户定义或跨 schema 函数")
 		}
 		fn := strings.ToLower(e.FnName.O)
+		if c.version >= 2 && fn == "concat" {
+			return c.concat(e, t)
+		}
 		if fn == "now" || fn == "current_timestamp" {
 			fsp := int64(0)
 			if len(e.Args) > 1 {
@@ -311,6 +317,14 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 				}
 			}
 			parts = append(parts, v.sql)
+		}
+		// PG otherwise resolves CHAR plus an unknown literal as bpchar, so
+		// its text conversion can trim spaces from the literal fallback.
+		if c.version >= 2 && kind == kindText {
+			c.requiresTextSemantics = true
+			for i := range parts {
+				parts[i] = "CAST(" + parts[i] + " AS text)"
+			}
 		}
 		return expression{"COALESCE(" + strings.Join(parts, ", ") + ")", kind}, nil
 	}

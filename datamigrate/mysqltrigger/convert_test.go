@@ -22,7 +22,7 @@ func TestConvertAssignmentsBranchesAndTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`NEW."note" := COALESCE(NEW."note", E'default');`, `ELSIF (NEW."amount" IS NULL) THEN`, `pg_catalog.date_trunc('second', pg_catalog.statement_timestamp())::timestamp without time zone`, `RETURN NEW;`, `-- ` + ToolMarker} {
+	for _, want := range []string{`NEW."note" := COALESCE(CAST(NEW."note" AS text), CAST(E'default' AS text));`, `ELSIF (NEW."amount" IS NULL) THEN`, `pg_catalog.date_trunc('second', pg_catalog.statement_timestamp())::timestamp without time zone`, `RETURN NEW;`, `-- ` + ToolMarker} {
 		if !strings.Contains(p.FunctionBody, want) {
 			t.Fatalf("missing %q in %s", want, p.FunctionBody)
 		}
@@ -83,7 +83,7 @@ func TestConvertRejectsUnsupportedAndUnsafeSemantics(t *testing.T) {
 		"UPDATE Orders SET Amount=1", "SET NEW.Amount=NEW.Id+OLD.Id; DROP TABLE Audit", "SET NEW.Amount=1/0",
 		"SET NEW.Note=_binary'abc'", "SET NEW.Note='\\0'", "SET NEW.Amount=/*!50000 1 */",
 		"SET NEW.Amount=1 UNION SELECT 2", "SET NEW.Amount=1 FROM Audit", "SET NEW.Amount=1 AS value",
-		"SET NEW.Amount = NEW.Amount + '1'", "SET NEW.Note = CONCAT(NEW.Note,'x')", "SELECT Amount INTO @a FROM Audit",
+		"SET NEW.Amount = NEW.Amount + '1'", "SELECT Amount INTO @a FROM Audit",
 		"INSERT HIGH_PRIORITY INTO Audit(Amount) VALUES(1)", "INSERT INTO Audit PARTITION(p0) (Amount) VALUES(1)", "INSERT INTO Audit SET Amount=1",
 		"UPDATE LOW_PRIORITY Audit SET Amount=1", "UPDATE IGNORE Audit SET Amount=1", "UPDATE Audit SET Amount=1 ORDER BY Id",
 		"DELETE QUICK FROM Audit", "DELETE LOW_PRIORITY FROM Audit", "DELETE IGNORE FROM Audit", "DELETE FROM Audit ORDER BY Id",

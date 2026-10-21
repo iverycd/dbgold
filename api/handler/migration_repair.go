@@ -700,6 +700,8 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	c.JSON(200, gin.H{"object": o, "version": req.Version + 1})
 }
 
+var newMigrationRepairWriter = buildDstWriter
+
 var repairCancels sync.Map
 
 func attemptResponse(a *store.MigrationRepairAttempt) gin.H {
@@ -947,7 +949,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			finishRepair(a, o, e)
 			return
 		}
-		w, e := buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
+		w, e := newMigrationRepairWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
 		if e != nil {
 			finishRepair(a, o, e)
 			return

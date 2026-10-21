@@ -85,6 +85,7 @@ export const unitCommitted = (status: string) => ['succeeded', 'success', 'repai
 export const isTableRepair = (object: RepairObject) => ['table', 'tables', 'data'].includes(object.kind)
 export const hasRepairDDL = (object: RepairObject) => !!(object.ddl || object.units?.length || object.suggested_ddl)
 export const isMySQLPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_pg_trigger
+export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
 export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
   if (!isMySQLPGTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back'].includes(object.status)) return false
   return object.units?.length === 2 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(unit.status))

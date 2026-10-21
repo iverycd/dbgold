@@ -15,13 +15,18 @@ import (
 )
 
 type converter struct {
-	info   source.TriggerInfo
-	tables map[string]*source.TableDDLInfo
-	opt    Options
-	parser *parser.Parser
-	tokens []token
-	pos    int
-	deps   map[string]*source.TableDDLInfo
+	info                  source.TriggerInfo
+	tables                map[string]*source.TableDDLInfo
+	opt                   Options
+	parser                *parser.Parser
+	tokens                []token
+	pos                   int
+	deps                  map[string]*source.TableDDLInfo
+	version               int
+	characterColumns      map[string]source.TriggerColumnCharacter
+	characterProfiles     map[string]source.TriggerCollationProfile
+	numericColumns        map[string]source.TriggerNumericColumn
+	requiresTextSemantics bool
 }
 
 func quote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
@@ -29,6 +34,12 @@ func quote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"
 // Convert never executes SQL. Unknown syntax produces an adaptation error and
 // no executable plan, including syntax hidden inside otherwise valid DML.
 func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, opt Options) (Plan, error) {
+	return convertVersion(info, tables, opt, CurrentVersion)
+}
+
+// Version one remains the byte-for-byte generator for plans saved before v2.
+// New syntax and collation rules must only be added behind the v2 branch.
+func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, opt Options, version int) (Plan, error) {
 	var empty Plan
 	if info.MetadataError != "" {
 		return empty, fmt.Errorf("%s", info.MetadataError)
@@ -57,7 +68,8 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 	if err = checkNames(tables, opt.Name); err != nil {
 		return empty, err
 	}
-	c := &converter{info: info, tables: tables, opt: opt, parser: parser.New(), deps: map[string]*source.TableDDLInfo{}}
+	c := &converter{info: info, tables: tables, opt: opt, parser: parser.New(), deps: map[string]*source.TableDDLInfo{}, version: version,
+		characterColumns: map[string]source.TriggerColumnCharacter{}, characterProfiles: map[string]source.TriggerCollationProfile{}, numericColumns: map[string]source.TriggerNumericColumn{}}
 	c.parser.SetSQLMode(mode)
 	if _, err = c.table(info.Schema, info.TableName); err != nil {
 		return empty, err
@@ -84,7 +96,7 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 	if c.pos != len(c.tokens) {
 		return empty, fmt.Errorf("触发器正文包含未支持的后续语句")
 	}
-	p := Plan{Source: info, Schema: opt.Schema, Table: opt.Name(info.TableName), Name: opt.Name(info.Name)}
+	p := Plan{Version: version, Source: info, Schema: opt.Schema, Table: opt.Name(info.TableName), Name: opt.Name(info.Name)}
 	if !validIdent(p.Table) || !validIdent(p.Name) {
 		return empty, fmt.Errorf("转换后对象名无效或超过 63 字节")
 	}
@@ -94,7 +106,11 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 	if info.Event == "DELETE" {
 		ret = "OLD"
 	}
-	p.FunctionBody = "\n-- " + ToolMarker + "\nBEGIN\n" + body + "RETURN " + ret + ";\nEND;\n"
+	marker := ToolMarker
+	if version == 1 {
+		marker = legacyToolMarker
+	}
+	p.FunctionBody = "\n-- " + marker + "\nBEGIN\n" + body + "RETURN " + ret + ";\nEND;\n"
 	p.FunctionSQL = functionSQL(p)
 	p.TriggerSQL = triggerSQL(p)
 	for name := range c.deps {
@@ -107,6 +123,8 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 		p.SourceTables = append(p.SourceTables, t)
 	}
 	p.LowerCaseNames = opt.Name("DbGoldMixed") == "dbgoldmixed"
+	p.CharacterMetadata = c.frozenCharacterMetadata()
+	p.RequiresTextSemantics = c.requiresTextSemantics
 	return p, nil
 }
 
@@ -133,15 +151,25 @@ func ValidatePlan(p Plan) error {
 		}
 		tables[t.TableName] = t
 	}
-	op := Options{Schema: p.Schema}
+	version := p.Version
+	if version == 0 {
+		version = 1
+	}
+	if version != 1 && version != CurrentVersion {
+		return fmt.Errorf("不支持触发器计划版本 %d", p.Version)
+	}
+	if version == 1 && p.CharacterMetadata != nil {
+		return fmt.Errorf("旧版触发器计划不支持字符比较配置")
+	}
+	op := Options{Schema: p.Schema, CharacterMetadata: p.CharacterMetadata}
 	if p.LowerCaseNames {
 		op.Name = strings.ToLower
 	}
-	regenerated, err := Convert(p.Source, tables, op)
+	regenerated, err := convertVersion(p.Source, tables, op, version)
 	if err != nil {
 		return err
 	}
-	if p.Table != regenerated.Table || p.Name != regenerated.Name || p.FunctionName != regenerated.FunctionName || p.FunctionSQL != regenerated.FunctionSQL || p.TriggerSQL != regenerated.TriggerSQL || p.FunctionBody != regenerated.FunctionBody || !reflect.DeepEqual(p.Dependencies, regenerated.Dependencies) {
+	if p.Table != regenerated.Table || p.Name != regenerated.Name || p.FunctionName != regenerated.FunctionName || p.FunctionSQL != regenerated.FunctionSQL || p.TriggerSQL != regenerated.TriggerSQL || p.FunctionBody != regenerated.FunctionBody || !reflect.DeepEqual(p.Dependencies, regenerated.Dependencies) || !reflect.DeepEqual(p.CharacterMetadata, regenerated.CharacterMetadata) || p.RequiresTextSemantics != regenerated.RequiresTextSemantics {
 		return fmt.Errorf("触发器计划与冻结的源定义不一致")
 	}
 	return nil

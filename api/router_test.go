@@ -49,6 +49,24 @@ func TestRepairVerificationRoutesAreRemoved(t *testing.T) {
 	require.True(t, executionRegistered)
 }
 
+func TestTriggerPlanRoutesRequireAuthentication(t *testing.T) {
+	r, _ := setupRouterTest(t)
+	found := map[string]bool{}
+	path := "/api/migration/data-migrate/:jobID/repairs/:objectID/trigger-plan"
+	for _, route := range r.Routes() {
+		if route.Path == path {
+			found[route.Method] = true
+		}
+	}
+	require.True(t, found[http.MethodPost])
+	require.True(t, found[http.MethodPut])
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		response := httptest.NewRecorder()
+		r.ServeHTTP(response, httptest.NewRequest(method, "/api/migration/data-migrate/job/repairs/trg/trigger-plan", nil))
+		require.Equal(t, http.StatusUnauthorized, response.Code)
+	}
+}
+
 func TestStaticSiteAndSPAFallback(t *testing.T) {
 	r, _ := setupRouterTest(t)
 

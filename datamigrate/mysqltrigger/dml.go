@@ -10,6 +10,10 @@ import (
 )
 
 func (c *converter) dmlTable(ref *ast.TableRefsClause) (*source.TableDDLInfo, error) {
+	return c.tableReference(ref, false)
+}
+
+func (c *converter) tableReference(ref *ast.TableRefsClause, read bool) (*source.TableDDLInfo, error) {
 	if ref == nil || ref.TableRefs == nil {
 		return nil, fmt.Errorf("缺少 DML 目标表")
 	}
@@ -25,7 +29,7 @@ func (c *converter) dmlTable(ref *ast.TableRefsClause) (*source.TableDDLInfo, er
 	if !ok || len(tn.IndexHints) > 0 || len(tn.PartitionNames) > 0 || tn.TableSample != nil || tn.AsOf != nil {
 		return nil, fmt.Errorf("DML 表引用需要人工适配")
 	}
-	if tn.Name.O == c.info.TableName {
+	if !read && tn.Name.O == c.info.TableName {
 		return nil, fmt.Errorf("触发器修改所属表需要人工适配")
 	}
 	return c.table(tn.Schema.O, tn.Name.O)
@@ -40,7 +44,8 @@ func (c *converter) dml(s string) (string, error) {
 	}
 	switch n := n.(type) {
 	case *ast.InsertStmt:
-		if n.IsReplace || n.IgnoreErr || n.Setlist || n.Priority != mysql.NoPriority || len(n.OnDuplicate) > 0 || n.Select != nil || len(n.TableHints) > 0 || len(n.PartitionNames) > 0 || len(n.Columns) == 0 || len(n.Lists) == 0 {
+		selectInsert := c.version >= 2 && n.Select != nil
+		if n.IsReplace || n.IgnoreErr || n.Setlist || n.Priority != mysql.NoPriority || len(n.OnDuplicate) > 0 || (!selectInsert && n.Select != nil) || len(n.TableHints) > 0 || len(n.PartitionNames) > 0 || len(n.Columns) == 0 || (!selectInsert && len(n.Lists) == 0) || (selectInsert && len(n.Lists) != 0) {
 			return "", fmt.Errorf("仅支持带明确列清单的 INSERT VALUES")
 		}
 		t, err := c.dmlTable(n.Table)
@@ -74,6 +79,9 @@ func (c *converter) dml(s string) (string, error) {
 			if !seen[c.opt.Name(col.Name)] && implicitExpression(col) {
 				return "", fmt.Errorf("INSERT 省略列 %s 依赖源库表达式默认值或生成列，需要人工适配", col.Name)
 			}
+		}
+		if selectInsert {
+			return c.insertSelect(n.Select, t, columns, cols, s)
 		}
 		var values []string
 		for _, list := range n.Lists {

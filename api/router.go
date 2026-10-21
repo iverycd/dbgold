@@ -101,6 +101,8 @@ func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 		authed.GET("/migration/data-migrate/:jobID/repairs/:objectID", handler.GetMigrationRepair)
 		authed.PUT("/migration/data-migrate/:jobID/repairs/:objectID", handler.SaveMigrationRepairDraft)
 		authed.POST("/migration/data-migrate/:jobID/repairs/:objectID/sequence-plan", handler.RefreshMigrationSequencePlan)
+		authed.POST("/migration/data-migrate/:jobID/repairs/:objectID/trigger-plan", handler.RefreshMigrationTriggerPlan)
+		authed.PUT("/migration/data-migrate/:jobID/repairs/:objectID/trigger-plan", handler.SaveMigrationTriggerPlan)
 		authed.GET("/migration/data-migrate/:jobID/repairs/:objectID/attempts", handler.ListMigrationRepairAttempts)
 		authed.POST("/migration/data-migrate/:jobID/repairs/:objectID/attempts", handler.ExecuteMigrationRepair)
 		authed.POST("/migration/data-migrate/:jobID/repairs/:objectID/execute", handler.ExecuteMigrationRepair)
