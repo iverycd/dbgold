@@ -243,7 +243,8 @@ func historyEmptyReadDDL(ctx context.Context, conn *sql.Conn, schema, table stri
 	return ddl, err
 }
 
-// nativeHistoryEmptyTouch uses a transactional NULL-only temporary row. It
+// nativeHistoryEmptyTouch uses NULLs and frozen native scalar constants in a
+// transactional temporary row. It
 // never evaluates an ON NULL default, consumes an identity value, or exposes
 // an intermediate committed row. Independent cleanup restores every frozen
 // attribute even after cancellation; the next attempt reconciles catalog state

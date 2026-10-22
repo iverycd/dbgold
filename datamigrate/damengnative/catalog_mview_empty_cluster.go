@@ -11,6 +11,16 @@ import (
 // Prefer one actual historical key tuple when the immutable native log has it;
 // besides unusual scalar keys this preserves LIST-partition routing.
 func (r *catalogReader) populateMaterializedEmptyCluster(t Table, p *MaterializedEmptyTouch) error {
+	if err := r.populateMaterializedEmptyList(t, p); err != nil {
+		return err
+	}
+	hasPK := false
+	for _, c := range p.Constraints {
+		hasPK = hasPK || c.Table == t.Name && c.Kind == "P"
+	}
+	if !hasPK {
+		return nil
+	}
 	rows, err := r.db.QueryContext(r.ctx, `SELECT c.CONSTRAINT_NAME FROM ALL_CONSTRAINTS c JOIN ALL_INDEXES i ON i.OWNER=c.INDEX_OWNER AND i.INDEX_NAME=c.INDEX_NAME WHERE c.OWNER=? AND c.TABLE_NAME=? AND c.CONSTRAINT_TYPE='P' AND i.INDEX_TYPE='CLUSTER'`, r.schema, t.Name)
 	if err != nil {
 		return err
@@ -111,10 +121,124 @@ func (r *catalogReader) populateMaterializedEmptyCluster(t Table, p *Materialize
 	}
 	for i := range p.Columns {
 		if value, found := values[p.Columns[i].Name]; found {
-			p.Columns[i].ValueSQL = value
+			if p.Columns[i].ValueSQL == "" {
+				p.Columns[i].ValueSQL = value
+			}
 		}
 	}
 	return nil
+}
+
+func (r *catalogReader) populateMaterializedEmptyList(t Table, p *MaterializedEmptyTouch) error {
+	tokens, err := nativeTokens(p.DefinitionSQL)
+	if err != nil {
+		return err
+	}
+	var keys []string
+	for i := 0; i+3 < len(tokens); i++ {
+		if tokens[i].kind != 'i' || !strings.EqualFold(tokens[i].value, "PARTITION") || !strings.EqualFold(tokens[i+1].value, "BY") || !strings.EqualFold(tokens[i+2].value, "LIST") || tokens[i+3].value != "(" {
+			continue
+		}
+		for j := i + 4; j < len(tokens) && tokens[j].value != ")"; j++ {
+			if tokens[j].kind == 'q' {
+				keys = append(keys, tokens[j].value)
+			} else if tokens[j].kind == 'i' {
+				keys = append(keys, strings.ToUpper(tokens[j].value))
+			}
+		}
+		break
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	rows, err := r.db.QueryContext(r.ctx, `SELECT HIGH_VALUE FROM ALL_TAB_PARTITIONS WHERE TABLE_OWNER=? AND TABLE_NAME=? ORDER BY PARTITION_POSITION`, r.schema, t.Name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var tuple []string
+	for rows.Next() {
+		var value sql.NullString
+		if err = rows.Scan(&value); err != nil {
+			return err
+		}
+		if !value.Valid || strings.EqualFold(strings.TrimSpace(value.String), "DEFAULT") {
+			continue
+		}
+		tuple, err = materializedEmptyListTuple(value.String, len(keys))
+		if err != nil {
+			return err
+		}
+		break
+	}
+	if err = rows.Err(); err != nil || len(tuple) == 0 {
+		return err // A DEFAULT-only list accepts the ordinary NULL/typed seeds.
+	}
+	types := map[string]Column{}
+	for _, c := range t.Columns {
+		types[c.Name] = c
+	}
+	for i, key := range keys {
+		c, found := types[key]
+		if !found || !c.Writable {
+			return fmt.Errorf("LIST 分区列 %s 缺少原生可写类型", key)
+		}
+		typeSQL := c.SQLType
+		if typeSQL == "" {
+			typeSQL = c.DataType
+		}
+		for j := range p.Columns {
+			if p.Columns[j].Name == key {
+				p.Columns[j].ValueSQL = "CAST(" + tuple[i] + " AS " + typeSQL + ")"
+			}
+		}
+	}
+	return nil
+}
+
+// HIGH_VALUE is native constant SQL, potentially containing quoted commas or
+// a multi-column list of tuples. Freeze the first complete tuple without
+// splitting any literal, CAST, or interval expression.
+func materializedEmptyListTuple(high string, width int) ([]string, error) {
+	tokens, err := nativeTokens(high)
+	if err != nil || len(tokens) == 0 || width < 1 {
+		return nil, fmt.Errorf("LIST 分区边界不是完整原生常量")
+	}
+	start, depth, baseline := 0, 0, 0
+	if tokens[0].value == "(" {
+		start, depth, baseline = 1, 1, 1
+	}
+	var parts []string
+	for i := start; i < len(tokens); i++ {
+		token := tokens[i]
+		if token.kind != 'p' {
+			continue
+		}
+		if token.value == "(" {
+			depth++
+		}
+		if token.value == "," && depth == baseline || token.value == ")" && depth == baseline {
+			if i == start {
+				return nil, fmt.Errorf("LIST 分区边界包含空值表达式")
+			}
+			parts = append(parts, high[tokens[start].start:tokens[i-1].end])
+			if len(parts) == width {
+				return parts, nil
+			}
+			start = i + 1
+		}
+		if token.value == ")" {
+			depth--
+			if depth < baseline {
+				break
+			}
+		}
+	}
+	if start < len(tokens) && len(parts)+1 == width {
+		parts = append(parts, high[tokens[start].start:tokens[len(tokens)-1].end])
+		return parts, nil
+	}
+	return nil, fmt.Errorf("LIST 分区边界元组列数与分区键不一致")
 }
 
 func materializedEmptyClusterRead(c Column) string {

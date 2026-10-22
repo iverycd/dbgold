@@ -133,7 +133,7 @@ func createMySQLPGTrigger(ctx context.Context, w Writer, p mysqltrigger.Plan, ow
 	}
 	if creator, ok := w.(interface {
 		CreateMySQLPGTrigger(context.Context, mysqltrigger.Plan, string) error
-	}); ok {
+	}); ok && !p.NativeUserVariables {
 		return creator.CreateMySQLPGTrigger(ctx, p, owner)
 	}
 	a, err := repairAccess(w)
@@ -152,6 +152,11 @@ func createMySQLPGTrigger(ctx context.Context, w Writer, p mysqltrigger.Plan, ow
 		return err
 	}
 	defer tx.Rollback()
+	if p.NativeUserVariables {
+		if err = validateMySQLPGNativeUserVariables(ctx, tx, w); err != nil {
+			return err
+		}
+	}
 	if err = validateMySQLPGTriggerTarget(ctx, tx, p); err != nil {
 		return err
 	}

@@ -103,6 +103,48 @@ func TestMySQLTriggerCharacterMetadataRejectsUnknownServer(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
+func TestMySQLTriggerServerIdentityAllowsOnlyKnownBuildLabels(t *testing.T) {
+	for _, tc := range []struct {
+		version, comment string
+		want             bool
+	}{
+		{"8.0.42", "Source distribution", true},
+		{"8.0.42", " source DISTRIBUTION ", true},
+		{"5.7.44-log", "MySQL Community Server (GPL)", true},
+		{"8.4.11", "MySQL Community Server - GPL", true},
+		{"8.0.42", "Unknown Server", false},
+		{"8.0.42", "Source distribution customized", false},
+		{"8.1.0", "Source distribution", false},
+		{"8.0.42-MariaDB", "Source distribution", false},
+		{"8.0.42", "MySQL Percona Server", false},
+		{"8.0.42", "MySQL MariaDB", false},
+		{"8.0.42", "MySQL TiDB", false},
+		{"8.0.42", "MySQL OceanBase", false},
+		{"8.0.42", "MySQL GreatSQL", false},
+		{"8.0.42", "MySQL PolarDB", false},
+	} {
+		t.Run(tc.version+"/"+tc.comment, func(t *testing.T) {
+			require.Equal(t, tc.want, supportedTriggerMySQLServer(tc.version, tc.comment))
+		})
+	}
+}
+
+func TestMySQLTriggerSourceDistributionStillValidatesCharacterWeights(t *testing.T) {
+	r, m := characterReaderFixture(t)
+	m.ExpectQuery(`SELECT VERSION(),@@version_comment`).WillReturnRows(sqlmock.NewRows([]string{"version", "comment"}).AddRow("8.0.42", "Source distribution"))
+	m.ExpectQuery(mysqlTriggerCharacterColumnsSQL).WithArgs("SourceDB").WillReturnRows(sqlmock.NewRows([]string{"schema", "table", "column", "charset", "collation"}).AddRow("SourceDB", "MiXeD", "Note", "utf8mb4", "utf8mb4_general_ci"))
+	m.ExpectQuery(mysqlTriggerNumericColumnsSQL).WithArgs("SourceDB").WillReturnRows(sqlmock.NewRows([]string{"schema", "table", "column", "type"}).AddRow("SourceDB", "MiXeD", "CurrentValue", "int"))
+	expectGeneralWeightRead(m)
+	meta, err := r.GetTriggerCharacterMetadata(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "8.0.42 Source distribution", meta.ServerVersion)
+	require.Len(t, meta.Profiles, 1)
+	require.Equal(t, "MiXeD", meta.Columns[0].Table)
+	require.Equal(t, "CurrentValue", meta.NumericColumns[0].Name)
+	require.NoError(t, ValidateTriggerCharacterMetadata(meta))
+	require.NoError(t, m.ExpectationsWereMet())
+}
+
 func TestMySQLTriggerCharacterMetadataDoesNotReadUnneededProfile(t *testing.T) {
 	r, m := characterReaderFixture(t)
 	m.ExpectQuery(`SELECT VERSION(),@@version_comment`).WillReturnRows(sqlmock.NewRows([]string{"version", "comment"}).AddRow("5.7.20-log", "MySQL Community Server (GPL)"))

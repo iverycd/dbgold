@@ -19,12 +19,22 @@ func mysqlTriggerWeightSQL(characters int) string {
 	return fmt.Sprintf(`SELECT HEX(WEIGHT_STRING(CONVERT(CAST(? AS BINARY) USING utf8mb4) COLLATE utf8mb4_general_ci AS CHAR(%d)))`, characters)
 }
 
+func supportedTriggerMySQLServer(version, comment string) bool {
+	if !supportedTriggerMySQLVersion(version + " " + comment) {
+		return false
+	}
+	// Source builds use this default comment without the MySQL product name.
+	// Keep it an exact label rather than accepting arbitrary vendor comments.
+	comment = strings.TrimSpace(comment)
+	return strings.Contains(comment, "MySQL") || strings.EqualFold(comment, "Source distribution")
+}
+
 func (r *MySQLReader) GetTriggerCharacterMetadata(ctx context.Context) (*TriggerCharacterMetadata, error) {
 	var version, comment string
 	if err := r.queryRowContext(ctx, `SELECT VERSION(),@@version_comment`).Scan(&version, &comment); err != nil {
 		return nil, fmt.Errorf("读取 MySQL 字符排序版本: %w", err)
 	}
-	if !supportedTriggerMySQLVersion(version) || !strings.Contains(comment, "MySQL") || strings.Contains(strings.ToLower(comment), "percona") {
+	if !supportedTriggerMySQLServer(version, comment) {
 		return nil, fmt.Errorf("严格字符比较仅验证官方 MySQL 5.7、8.0、8.4，当前 %s %s", version, comment)
 	}
 	meta := &TriggerCharacterMetadata{ServerVersion: version + " " + comment}

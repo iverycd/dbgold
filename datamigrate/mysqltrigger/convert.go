@@ -28,6 +28,7 @@ type converter struct {
 	characterProfiles     map[string]source.TriggerCollationProfile
 	numericColumns        map[string]source.TriggerNumericColumn
 	requiresTextSemantics bool
+	nativeUserVariables   bool
 }
 
 func quote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
@@ -40,6 +41,7 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 
 // Legacy versions retain their exact SQL for saved-plan retries. Version three
 // changes only the auxiliary function name and marker, inheriting v2 semantics.
+// Version four adds explicitly enabled Kingbase native user-variable writes.
 func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, opt Options, version int) (Plan, error) {
 	var empty Plan
 	if info.MetadataError != "" {
@@ -131,6 +133,8 @@ func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLI
 		marker = legacyToolMarker
 	case 2:
 		marker = v2ToolMarker
+	case 3:
+		marker = v3ToolMarker
 	}
 	p.FunctionBody = "\n-- " + marker + "\nBEGIN\n" + body + "RETURN " + ret + ";\nEND;\n"
 	p.FunctionSQL = functionSQL(p)
@@ -147,6 +151,7 @@ func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLI
 	p.LowerCaseNames = opt.Name("DbGoldMixed") == "dbgoldmixed"
 	p.CharacterMetadata = c.frozenCharacterMetadata()
 	p.RequiresTextSemantics = c.requiresTextSemantics
+	p.NativeUserVariables = c.nativeUserVariables
 	return p, nil
 }
 
@@ -177,13 +182,16 @@ func ValidatePlan(p Plan) error {
 	if version == 0 {
 		version = 1
 	}
-	if version != 1 && version != 2 && version != 3 {
+	if version != 1 && version != 2 && version != 3 && version != 4 {
 		return fmt.Errorf("不支持触发器计划版本 %d", p.Version)
 	}
 	if version == 1 && p.CharacterMetadata != nil {
 		return fmt.Errorf("旧版触发器计划不支持字符比较配置")
 	}
-	op := Options{Schema: p.Schema, CharacterMetadata: p.CharacterMetadata}
+	if version < 4 && p.NativeUserVariables {
+		return fmt.Errorf("旧版触发器计划不支持原生会话变量")
+	}
+	op := Options{Schema: p.Schema, CharacterMetadata: p.CharacterMetadata, NativeUserVariables: p.NativeUserVariables}
 	if p.LowerCaseNames {
 		op.Name = strings.ToLower
 	}
@@ -191,7 +199,7 @@ func ValidatePlan(p Plan) error {
 	if err != nil {
 		return err
 	}
-	if p.Table != regenerated.Table || p.Name != regenerated.Name || p.FunctionName != regenerated.FunctionName || p.FunctionSQL != regenerated.FunctionSQL || p.TriggerSQL != regenerated.TriggerSQL || p.FunctionBody != regenerated.FunctionBody || !reflect.DeepEqual(p.Dependencies, regenerated.Dependencies) || !reflect.DeepEqual(p.CharacterMetadata, regenerated.CharacterMetadata) || p.RequiresTextSemantics != regenerated.RequiresTextSemantics {
+	if p.Table != regenerated.Table || p.Name != regenerated.Name || p.FunctionName != regenerated.FunctionName || p.FunctionSQL != regenerated.FunctionSQL || p.TriggerSQL != regenerated.TriggerSQL || p.FunctionBody != regenerated.FunctionBody || !reflect.DeepEqual(p.Dependencies, regenerated.Dependencies) || !reflect.DeepEqual(p.CharacterMetadata, regenerated.CharacterMetadata) || p.RequiresTextSemantics != regenerated.RequiresTextSemantics || p.NativeUserVariables != regenerated.NativeUserVariables {
 		return fmt.Errorf("触发器计划与冻结的源定义不一致")
 	}
 	return nil
@@ -304,6 +312,9 @@ func (c *converter) statement() (string, error) {
 	}
 	tokens := c.tokens[start:c.pos]
 	if tokens[0].word == "SET" {
+		if c.version >= 4 && len(tokens) > 1 && tokens[1].raw == "@" {
+			return c.setNativeUserVariable(tokens)
+		}
 		return c.setNew(tokens)
 	}
 	if tokens[0].word != "INSERT" && tokens[0].word != "UPDATE" && tokens[0].word != "DELETE" {

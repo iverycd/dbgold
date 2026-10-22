@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -80,6 +81,15 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 		m.mysqlPGTriggerError = err
 		return
 	}
+	var nativeVariables bool
+	var nativeVariableErr error
+	if len(values) > 0 {
+		nativeVariables, nativeVariableErr = target.DetectMySQLPGNativeUserVariables(ctx, m.writer)
+		if ctx.Err() != nil {
+			m.mysqlPGTriggerError = ctx.Err()
+			return
+		}
+	}
 	var characters *source.TriggerCharacterMetadata
 	var characterErr error
 	if reader, ok := m.reader.(source.TriggerCharacterReader); ok && len(values) > 0 {
@@ -131,8 +141,11 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 		case names[m.objName(v.TableName)+"\x00"+m.objName(v.Name)] > 1:
 			p.err = fmt.Errorf("目标触发器名称在大小写转换后冲突")
 		default:
-			p.plan, p.err = mysqltrigger.Convert(v, metadata, mysqltrigger.Options{Schema: m.cfg.TargetSchema, Name: m.objName, CharacterMetadata: characters})
-			if p.err != nil && characterErr != nil {
+			p.plan, p.err = mysqltrigger.Convert(v, metadata, mysqltrigger.Options{Schema: m.cfg.TargetSchema, Name: m.objName, CharacterMetadata: characters, NativeUserVariables: nativeVariables})
+			if errors.Is(p.err, mysqltrigger.ErrNativeUserVariablesRequired) && nativeVariableErr != nil {
+				p.err = fmt.Errorf("%v；检查目标原生会话变量能力失败: %w", p.err, nativeVariableErr)
+			}
+			if errors.Is(p.err, mysqltrigger.ErrSourceMetadataRequired) && characterErr != nil {
 				p.err = fmt.Errorf("%v；读取源字符排序元数据失败: %w", p.err, characterErr)
 			}
 			if p.err == nil {

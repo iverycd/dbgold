@@ -51,6 +51,41 @@ func TestTriggerCharacterReadFailureDoesNotBlockNumericTrigger(t *testing.T) {
 	require.ErrorContains(t, m.mysqlPGTriggers[0].err, "unknown source collation version")
 }
 
+func TestTriggerCharacterReadFailureOnlyExplainsMetadataDependentErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		dependent  bool
+	}{
+		{"session assignment syntax", "SET @CurrentValue=OLD.Id+1", false},
+		{"unsupported statement", "CALL unsupported_routine()", false},
+		{"unsupported text ordering", "IF OLD.Text>NEW.Text THEN SET NEW.Amount=1; END IF", false},
+		{"text equality", "IF OLD.Text<>NEW.Text THEN SET NEW.Amount=1; END IF", true},
+		{"numeric concat", "SET NEW.Text=CONCAT(OLD.Id)", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, r, w := triggerFixture(t)
+			r.ddl["OrderData"].Columns = append(r.ddl["OrderData"].Columns, source.ColumnInfo{Name: "Text", DataType: "varchar"})
+			r.triggers[0].Body, r.triggers[0].Event = tc.body, "UPDATE"
+			readErr := errors.New("source identity rejected")
+			reader := &triggerCharacterTestReader{triggerTestReader: r, characterErr: readErr}
+			m.reader = reader
+			m.prepareMySQLPGTriggers(context.Background())
+			require.NoError(t, m.mysqlPGTriggerError)
+			require.Len(t, m.mysqlPGTriggers, 1)
+			err := m.mysqlPGTriggers[0].err
+			require.Error(t, err)
+			if tc.dependent {
+				require.ErrorIs(t, err, readErr)
+				require.ErrorContains(t, err, "读取源字符排序元数据失败")
+			} else {
+				require.NotErrorIs(t, err, readErr)
+				require.NotContains(t, err.Error(), "读取源字符排序元数据失败")
+			}
+			require.Empty(t, w.plans)
+		})
+	}
+}
+
 func TestBuildMySQLPGTriggerRepairPlanReadsOriginalScope(t *testing.T) {
 	m, r, w := triggerFixture(t)
 	info := r.triggers[0]

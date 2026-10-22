@@ -27,6 +27,7 @@ func TestMaterializedEmptyTouchFreezesMetadataWithoutWrites(t *testing.T) {
 	fkDDL := `ALTER TABLE "MiXeD"."Child" ADD CONSTRAINT "Fk" FOREIGN KEY("ParentId") REFERENCES "MiXeD"."EmptyBase"("Id") ON DELETE CASCADE DISABLE`
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("CONSTRAINT", "Fk", "MiXeD").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(fkDDL))
 	m.ExpectQuery(`SELECT COLUMN_NAME FROM ALL_CONS_COLUMNS`).WithArgs("MiXeD", "Child", "Fk").WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("ParentId"))
+	m.ExpectQuery(`SELECT c.CONSTRAINT_NAME FROM ALL_CONSTRAINTS c JOIN ALL_INDEXES`).WithArgs("MiXeD", "EmptyBase").WillReturnRows(sqlmock.NewRows([]string{"name"}))
 	p, err := r.freezeMaterializedEmptyTouch(Table{Name: "EmptyBase", Rows: 0, Columns: []Column{{Name: "Id", Writable: true, Identity: true}, {Name: "Text", Writable: true}, {Name: "Generated", Writable: false}}, Restore: []Unit{{SQL: "frozenDrop"}, {SQL: "frozenAdd"}}})
 	require.NoError(t, err)
 	require.Equal(t, "EmptyBase", p.Table)

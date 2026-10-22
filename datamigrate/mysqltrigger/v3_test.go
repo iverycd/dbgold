@@ -11,6 +11,10 @@ import (
 	"dbgold/datamigrate/source"
 )
 
+func convertV3(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, opt Options) (Plan, error) {
+	return convertVersion(info, tables, opt, 3)
+}
+
 func TestV3ReadableFunctionNamesAndByteBoundaries(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"update_enableuser", "update_enableuser_fn"},
@@ -29,7 +33,7 @@ func TestV3ReadableFunctionNamesAndByteBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			i := trigger("SET NEW.Amount=1")
 			i.Name = tc.name
-			p, err := Convert(i, fixture(), Options{Schema: "Dest"})
+			p, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -45,7 +49,7 @@ func TestV3ReadableFunctionNamesAndByteBoundaries(t *testing.T) {
 			if err = ValidatePlan(p); err != nil {
 				t.Fatal(err)
 			}
-			repeated, err := Convert(i, fixture(), Options{Schema: "Dest"})
+			repeated, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 			if err != nil || !reflect.DeepEqual(p, repeated) {
 				t.Fatal("repeated planning changed the name or frozen SQL", err)
 			}
@@ -56,7 +60,7 @@ func TestV3ReadableFunctionNamesAndByteBoundaries(t *testing.T) {
 func TestV3ReadableFunctionNameUsesConfiguredCaseAndEscapesQuotes(t *testing.T) {
 	i := trigger("SET NEW.Amount=1")
 	i.Name = `Update"User`
-	p, err := Convert(i, fixture(), Options{Schema: `Dest"Schema`, Name: strings.ToLower})
+	p, err := convertV3(i, fixture(), Options{Schema: `Dest"Schema`, Name: strings.ToLower})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +78,12 @@ func TestV3ReadableFunctionNameUsesConfiguredCaseAndEscapesQuotes(t *testing.T) 
 func TestV3LongFunctionNameTracksIdentityAndNotProgramBody(t *testing.T) {
 	i := trigger("SET NEW.Amount=1")
 	i.Name = strings.Repeat("a", 61)
-	first, err := Convert(i, fixture(), Options{Schema: "Dest"})
+	first, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	i.Body = "SET NEW.Amount=2"
-	changedBody, err := Convert(i, fixture(), Options{Schema: "Dest"})
+	changedBody, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +99,7 @@ func TestV3LongFunctionNameTracksIdentityAndNotProgramBody(t *testing.T) {
 		{"SourceDB", "Dest", strings.ToLower},
 	} {
 		i.Schema = tc.schema
-		p, err := Convert(i, fixture(), Options{Schema: tc.target, Name: tc.name})
+		p, err := convertV3(i, fixture(), Options{Schema: tc.target, Name: tc.name})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +116,7 @@ func TestV3ReadableFunctionNamesRejectInvalidNamesWithoutExecutableSQL(t *testin
 	for _, name := range []string{strings.Repeat("a", 64), strings.Repeat("触", 22), "bad\x00name", string([]byte{'b', 0xff})} {
 		i := trigger("SET NEW.Amount=1")
 		i.Name = name
-		p, err := Convert(i, fixture(), Options{Schema: "Dest"})
+		p, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 		if err == nil || p.FunctionSQL != "" || p.TriggerSQL != "" {
 			t.Fatalf("accepted invalid source name or exposed partial SQL: %q", name)
 		}
@@ -121,7 +125,7 @@ func TestV3ReadableFunctionNamesRejectInvalidNamesWithoutExecutableSQL(t *testin
 
 func TestV3FunctionNameAndVersionAreFrozen(t *testing.T) {
 	i := trigger("SET NEW.Amount=1")
-	p, err := Convert(i, fixture(), Options{Schema: "Dest"})
+	p, err := convertV3(i, fixture(), Options{Schema: "Dest"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +143,7 @@ func TestV3FunctionNameAndVersionAreFrozen(t *testing.T) {
 			p.TriggerSQL = strings.ReplaceAll(p.TriggerSQL, `"OrdersAudit_fn"`, `"other_fn"`)
 		}},
 		{"downgrade", func(p *Plan) { p.Version = 2 }},
-		{"unknown version", func(p *Plan) { p.Version = 4 }},
+		{"unknown version", func(p *Plan) { p.Version = 99 }},
 		{"legacy marker", func(p *Plan) {
 			p.FunctionBody = strings.ReplaceAll(p.FunctionBody, "dbgold:mysql-trigger:v3", "dbgold:mysql-trigger:v2")
 			p.FunctionSQL = strings.ReplaceAll(p.FunctionSQL, "dbgold:mysql-trigger:v3", "dbgold:mysql-trigger:v2")
@@ -249,7 +253,7 @@ func TestV3InheritsV2BusinessTriggerSemantics(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			current, err := Convert(i, tables, opt)
+			current, err := convertV3(i, tables, opt)
 			if err != nil {
 				t.Fatal(err)
 			}

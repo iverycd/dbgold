@@ -33,7 +33,10 @@ func legacyTriggerPlanFixture(version int) mysqltrigger.Plan {
 	if markerVersion == 0 {
 		markerVersion = 1
 	}
-	const functionName = "dbgold_trg_6f9a645b2bee48811d0e90743e9c06fa"
+	functionName := "dbgold_trg_6f9a645b2bee48811d0e90743e9c06fa"
+	if version == 3 {
+		functionName = "BeforeInsert_fn"
+	}
 	body := fmt.Sprintf("\n-- dbgold:mysql-trigger:v%d\nBEGIN\nNEW.\"Value\" := (NEW.\"Value\" + 1);\nRETURN NEW;\nEND;\n", markerVersion)
 	return mysqltrigger.Plan{
 		Version: version,
@@ -193,7 +196,7 @@ func TestMySQLPGTriggerReadOnlyRepair(t *testing.T) {
 }
 
 func TestLegacyMySQLPGTriggerReadOnlyRetryPreservesNames(t *testing.T) {
-	for _, version := range []int{0, 1, 2} {
+	for _, version := range []int{0, 1, 2, 3} {
 		for _, mode := range []string{"install", "reuse"} {
 			t.Run(fmt.Sprintf("v%d/%s", version, mode), func(t *testing.T) {
 				saved, err := json.Marshal(legacyTriggerPlanFixture(version))

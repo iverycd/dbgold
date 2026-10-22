@@ -186,11 +186,11 @@ func TestDamengNativeMaterializedEmptyListTouchIntegration(t *testing.T) {
 				}
 			})
 			exec := func(s string) { _, e := w.db.ExecContext(ctx, s); require.NoError(t, e, s) }
-			key := "PRIMARY KEY"
+			columns := `("Id" INT PRIMARY KEY,"K" INT NOT NULL)`
 			if clustered {
-				key = "CLUSTER PRIMARY KEY"
+				columns = `("Id" INT NOT NULL,"K" INT NOT NULL,CLUSTER PRIMARY KEY("Id","K"))`
 			}
-			exec("CREATE TABLE " + q + "(\"Id\" INT " + key + ",\"K\" INT NOT NULL) PARTITION BY LIST(\"K\")(PARTITION \"P1\" VALUES(1,2),PARTITION \"P2\" VALUES(3))")
+			exec("CREATE TABLE " + q + columns + " PARTITION BY LIST(\"K\")(PARTITION \"P1\" VALUES(1,2),PARTITION \"P2\" VALUES(3))")
 			// Deliberately omit the partition key from the native log. The frozen
 			// native partition tuple, rather than a deleted-row guess, routes it.
 			exec("CREATE MATERIALIZED VIEW LOG ON " + q + " WITH PRIMARY KEY")

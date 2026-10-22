@@ -18,7 +18,7 @@ type MaterializedEmptyColumn struct {
 	NotNull       bool   `json:"not_null"`
 	DefaultSQL    string `json:"default_sql,omitempty"`
 	DefaultOnNull bool   `json:"default_on_null,omitempty"`
-	ValueSQL      string `json:"value_sql,omitempty"` // frozen non-NULL scalar seed for an immutable clustered key
+	ValueSQL      string `json:"value_sql,omitempty"` // frozen non-NULL scalar seed for a clustered key or partition routing
 }
 
 type MaterializedEmptyConstraint struct {

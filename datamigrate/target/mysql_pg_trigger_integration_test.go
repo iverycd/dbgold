@@ -48,7 +48,7 @@ func TestMySQLPGTriggerSQLIntegration(t *testing.T) {
 			for _, tr := range []struct{ name, timing, event, body string }{{"bi", "BEFORE", "INSERT", "SET NEW.Value = NEW.Value + 1"}, {"ai", "AFTER", "INSERT", "INSERT INTO Audit (Event,Value) VALUES (1,NEW.Value)"}, {"bu", "BEFORE", "UPDATE", "SET NEW.Value = NEW.Value + 1"}, {"au", "AFTER", "UPDATE", "BEGIN INSERT INTO Audit (Event,Value) VALUES (2,NEW.Value); INSERT INTO Audit (Event,Value) VALUES (3,OLD.Value); END"}, {"bd", "BEFORE", "DELETE", "INSERT INTO Audit (Event,Value) VALUES (4,OLD.Value)"}, {"ad", "AFTER", "DELETE", "INSERT INTO Audit (Event,Value) VALUES (5,OLD.Value)"}} {
 				p, err := mysqltrigger.Convert(source.TriggerInfo{Schema: "Source", TableName: "Orders", Name: tr.name, Timing: tr.timing, Event: tr.event, Body: tr.body}, tables, mysqltrigger.Options{Schema: schema})
 				require.NoError(t, err)
-				require.Equal(t, 3, p.Version)
+				require.Equal(t, mysqltrigger.CurrentVersion, p.Version)
 				require.Equal(t, tr.name+"_fn", p.FunctionName)
 				for _, src := range p.SourceTables {
 					target := src

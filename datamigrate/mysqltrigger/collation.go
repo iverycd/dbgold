@@ -50,7 +50,7 @@ func (c *converter) frozenCharacterMetadata() *source.TriggerCharacterMetadata {
 func (c *converter) characterColumn(t *source.TableDDLInfo, col *source.ColumnInfo) (string, error) {
 	m := c.opt.CharacterMetadata
 	if m == nil {
-		return "", fmt.Errorf("字符比较缺少源库字符集、排序规则及权重快照，需要重新读取源元数据")
+		return "", sourceMetadataRequired("字符比较缺少源库字符集、排序规则及权重快照，需要重新读取源元数据")
 	}
 	var found *source.TriggerColumnCharacter
 	for i := range m.Columns {
@@ -63,7 +63,7 @@ func (c *converter) characterColumn(t *source.TableDDLInfo, col *source.ColumnIn
 		}
 	}
 	if found == nil {
-		return "", fmt.Errorf("字符列 %s.%s 缺少排序规则快照", t.TableName, col.Name)
+		return "", sourceMetadataRequired("字符列 %s.%s 缺少排序规则快照", t.TableName, col.Name)
 	}
 	if found.Charset != "utf8mb4" || found.Collation != "utf8mb4_general_ci" {
 		return "", fmt.Errorf("字符列 %s.%s 的排序规则 %s 需要人工适配", t.TableName, col.Name, found.Collation)
@@ -79,7 +79,7 @@ func (c *converter) characterColumn(t *source.TableDDLInfo, col *source.ColumnIn
 		}
 	}
 	if profile == nil {
-		return "", fmt.Errorf("排序规则 %s 缺少源权重快照", found.Collation)
+		return "", sourceMetadataRequired("排序规则 %s 缺少源权重快照", found.Collation)
 	}
 	check := &source.TriggerCharacterMetadata{ServerVersion: m.ServerVersion, Columns: []source.TriggerColumnCharacter{*found}, Profiles: []source.TriggerCollationProfile{*profile}}
 	if err := source.ValidateTriggerCharacterMetadata(check); err != nil {

@@ -127,6 +127,9 @@ func (r *catalogReader) freezeMaterializedEmptyTouch(t Table) (*MaterializedEmpt
 			return nil, iteration
 		}
 	}
+	if err = r.populateMaterializedEmptyCluster(t, p); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 

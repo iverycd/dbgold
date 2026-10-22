@@ -111,7 +111,7 @@ var concatNumericType = regexp.MustCompile(`(?i)^(tinyint|smallint|mediumint|int
 func (c *converter) concatNumericColumn(t *source.TableDDLInfo, col *source.ColumnInfo) error {
 	m := c.opt.CharacterMetadata
 	if m == nil {
-		return fmt.Errorf("CONCAT 数值列 %s.%s 缺少源 COLUMN_TYPE 格式快照", t.TableName, col.Name)
+		return sourceMetadataRequired("CONCAT 数值列 %s.%s 缺少源 COLUMN_TYPE 格式快照", t.TableName, col.Name)
 	}
 	var found *source.TriggerNumericColumn
 	for i := range m.NumericColumns {
@@ -124,7 +124,7 @@ func (c *converter) concatNumericColumn(t *source.TableDDLInfo, col *source.Colu
 		}
 	}
 	if found == nil {
-		return fmt.Errorf("CONCAT 数值列 %s.%s 缺少源 COLUMN_TYPE 格式快照", t.TableName, col.Name)
+		return sourceMetadataRequired("CONCAT 数值列 %s.%s 缺少源 COLUMN_TYPE 格式快照", t.TableName, col.Name)
 	}
 	for _, v := range m.Columns {
 		if v.Schema == found.Schema && v.Table == found.Table && v.Name == found.Name {
