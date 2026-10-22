@@ -136,6 +136,8 @@ func (m *Migrator) executeNativeSavedUnit(ctx context.Context, w damengnative.Wr
 		r.mu.Unlock()
 		return fmt.Errorf("对象执行结果未知，需先核验目标状态: %s", id)
 	}
+	object := *r.objects[idx].Native
+	nativeUnit := object.Units[unit]
 	r.mu.Unlock()
 	observed := repair.WithObserver(ctx, func(event repair.Event) error {
 		r.mu.Lock()
@@ -158,7 +160,7 @@ func (m *Migrator) executeNativeSavedUnit(ctx context.Context, w damengnative.Wr
 		}
 		return m.flushRepairObjectLocked(*o)
 	})
-	return w.ExecuteDamengNative(observed, sql)
+	return damengnative.ExecuteUnit(observed, w, object, nativeUnit)
 }
 
 func (m *Migrator) setNativeDataStatus(id string, cause error) error {

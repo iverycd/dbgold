@@ -52,6 +52,10 @@ type nativeTestWriter struct {
 	copyErr          error
 	disable, restore []damengnative.Unit
 	batchSizes       []int
+	lifecycle        []string
+	verifyErr        error
+	policyVerifyErr  error
+	verifySnapshot   *damengnative.Snapshot
 	mu               sync.Mutex
 }
 
@@ -66,6 +70,7 @@ func (w *nativeTestWriter) ExecuteDamengNative(ctx context.Context, sql string) 
 	}
 	w.mu.Lock()
 	w.statements = append(w.statements, sql)
+	w.lifecycle = append(w.lifecycle, sql)
 	var e error
 	if w.fail[sql] > 0 {
 		w.fail[sql]--
@@ -99,8 +104,10 @@ func (w *nativeTestWriter) CopyDamengNativeBatch(_ context.Context, t damengnati
 func (w *nativeTestWriter) NativeRecoveryState(context.Context, string) ([]damengnative.Unit, []damengnative.Unit, error) {
 	return w.disable, w.restore, nil
 }
-func (w *nativeTestWriter) VerifyDamengNative(context.Context, *damengnative.Snapshot) ([]damengnative.Issue, error) {
-	return nil, nil
+func (w *nativeTestWriter) VerifyDamengNative(_ context.Context, snapshot *damengnative.Snapshot) ([]damengnative.Issue, error) {
+	w.lifecycle = append(w.lifecycle, "verify")
+	w.verifySnapshot = snapshot
+	return nil, w.verifyErr
 }
 func (w *nativeTestWriter) CountRows(context.Context, string) (int64, error) {
 	w.mu.Lock()

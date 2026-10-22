@@ -12,10 +12,12 @@ import (
 // The inventory is captured before table DDL. Validation must never silently
 // adopt a new source selection or column set after migration has finished.
 type frozenValidationTable struct {
-	name     string
-	target   string // optional native materialized-view storage mapping
-	metadata validation.Table
-	err      error
+	name          string
+	target        string // optional native materialized-view storage mapping
+	metadata      validation.Table
+	err           error
+	rebasedRowIDs map[string]bool // only direct MV outputs with a proven completed native baseline
+	note          string
 }
 
 func (m *Migrator) dataValidationEnabled() bool {
@@ -107,10 +109,36 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 					table.Status, table.Error = validation.StatusError, err.Error()
 				} else {
 					m.log.Infof("开始内容校验 [%s]", frozen.name)
-					table = validation.Validate(ctx, src, dst, plan)
+					if len(plan.SourceColumns) == 0 && len(frozen.rebasedRowIDs) > 0 {
+						_, err = (&nativeRowIDProjectionScanner{Scanner: src, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}).DescribeValidationTable(ctx, frozen.name)
+						if err == nil {
+							_, err = (&nativeRowIDProjectionScanner{Scanner: dst, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}).DescribeValidationTable(ctx, targetName)
+						}
+						if err == nil {
+							table.SourceRows, err = m.reader.CountRows(ctx, frozen.name)
+						}
+						if err == nil {
+							table.TargetRows, err = m.writer.CountRows(ctx, targetName)
+						}
+						table.Status = validation.StatusPassed
+						if err != nil {
+							table.Status, table.Error = validation.StatusError, err.Error()
+						} else if table.SourceRows != table.TargetRows {
+							table.Status = validation.StatusMismatch
+							table.Error = "物理 ROWID 语义核验后的行数不同"
+						}
+					} else {
+						validationSource, validationTarget := src, dst
+						if len(frozen.rebasedRowIDs) > 0 {
+							validationSource = &nativeRowIDProjectionScanner{Scanner: src, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
+							validationTarget = &nativeRowIDProjectionScanner{Scanner: dst, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
+						}
+						table = validation.Validate(ctx, validationSource, validationTarget, plan)
+					}
 				}
 			}
 		}
+		table.Note = frozen.note
 		result.Tables = append(result.Tables, table)
 		if table.Status == validation.StatusPassed {
 			m.log.Dataf("内容校验 [%s]: 源=%d 目标=%d ... OK", frozen.name, table.SourceRows, table.TargetRows)
@@ -160,6 +188,24 @@ func (m *Migrator) dataValidationPlan(ctx context.Context, dst validation.Scanne
 	}
 	if len(actual) > 0 {
 		return plan, fmt.Errorf("目标存在未映射列")
+	}
+	if len(frozen.rebasedRowIDs) > 0 {
+		var sourceColumns, targetColumns []validation.Column
+		for i, c := range plan.SourceColumns {
+			if frozen.rebasedRowIDs[c.Name] {
+				continue
+			}
+			sourceColumns = append(sourceColumns, c)
+			targetColumns = append(targetColumns, plan.TargetColumns[i])
+		}
+		keys := plan.PrimaryKey
+		for _, key := range plan.PrimaryKey {
+			if frozen.rebasedRowIDs[key] {
+				keys = nil
+				break
+			}
+		}
+		plan.SourceColumns, plan.TargetColumns, plan.PrimaryKey = sourceColumns, targetColumns, keys
 	}
 	return plan, nil
 }

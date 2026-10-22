@@ -44,8 +44,15 @@ func TestDamengNativeIntegrationExactCopy(t *testing.T) {
 	}}
 	decimal := "-1234567890123456789.1234567890123456789"
 	text := "AbC\x00中文😀"
-	stamp := time.Date(2024, 2, 29, 12, 34, 56, 123456789, time.FixedZone("", 8*3600))
-	require.NoError(t, w.CopyDamengNativeBatch(ctx, table, [][]any{{int64(42), decimal, text, "", []byte{}, stamp}, {int64(43), nil, nil, nil, nil, nil}}))
+	var referenceStamp time.Time
+	require.NoError(t, w.db.QueryRowContext(ctx, `SELECT CAST('2024-02-29 12:34:56.123456789' AS TIMESTAMP(9)) FROM DUAL`).Scan(&referenceStamp))
+	var referenceText string
+	require.NoError(t, w.db.QueryRowContext(ctx, `SELECT TO_CHAR(CAST('2024-02-29 12:34:56.123456789' AS TIMESTAMP(9)), 'YYYY-MM-DD HH24:MI:SS.FF9') FROM DUAL`).Scan(&referenceText))
+	// Older DM8 builds normalize TIMESTAMP(9) literals to microseconds. Copy
+	// the independently read source value; never invent precision the source
+	// server itself cannot store.
+	populated := "源LOB中文😀\x00"
+	require.NoError(t, w.CopyDamengNativeBatch(ctx, table, [][]any{{int64(42), decimal, text, "", []byte{}, referenceStamp}, {int64(43), nil, nil, nil, nil, nil}, {int64(44), nil, nil, populated, []byte{0, 1, 255}, nil}}))
 	var gotDecimal, gotText string
 	var at time.Time
 	var bodyNull, blobNull int
@@ -54,11 +61,18 @@ func TestDamengNativeIntegrationExactCopy(t *testing.T) {
 	require.Equal(t, text, gotText)
 	require.Zero(t, bodyNull)
 	require.Zero(t, blobNull)
-	require.Equal(t, 123456789, at.Nanosecond())
+	require.Equal(t, referenceStamp.Nanosecond(), at.Nanosecond())
+	var gotTimestamp string
+	require.NoError(t, w.db.QueryRowContext(ctx, `SELECT TO_CHAR("At",'YYYY-MM-DD HH24:MI:SS.FF9') FROM `+qualified+` WHERE "Id"=42`).Scan(&gotTimestamp))
+	require.Equal(t, referenceText, gotTimestamp)
 	require.NoError(t, w.db.QueryRowContext(ctx, `SELECT CASE WHEN "Body" IS NULL THEN 1 ELSE 0 END,CASE WHEN "Payload" IS NULL THEN 1 ELSE 0 END FROM `+qualified+` WHERE "Id"=43`).Scan(&bodyNull, &blobNull))
 	require.Equal(t, 1, bodyNull)
 	require.Equal(t, 1, blobNull)
+	var gotBody, gotBlob any
+	require.NoError(t, w.db.QueryRowContext(ctx, `SELECT "Body","Payload" FROM `+qualified+` WHERE "Id"=44`).Scan(&gotBody, &gotBlob))
+	require.Equal(t, populated, gotBody)
+	require.Equal(t, []byte{0, 1, 255}, gotBlob)
 	rows, err := w.CountRows(ctx, name)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), rows)
+	require.Equal(t, int64(3), rows)
 }

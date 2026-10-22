@@ -18,7 +18,6 @@ import (
 	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
-	"dbgold/datamigrate/valueconv"
 	"gitee.com/chunanyong/dm"
 )
 
@@ -106,6 +105,19 @@ func (w *DaMengNativeWriter) CopyData(context.Context, string, []string, []strin
 }
 
 func (w *DaMengNativeWriter) ExecuteDamengNative(ctx context.Context, statement string) error {
+	if strings.Contains(statement, "__DBGOLD_DBLINK_CREDENTIAL__") {
+		return fmt.Errorf("禁止执行尚未核对源凭据的 DBLink 公开定义")
+	}
+	if public, err := damengnative.PublicLinkSQL(statement); err == nil {
+		return w.ExecuteDamengNativeSensitive(ctx, public, statement)
+	}
+	if damengnative.LooksLikeLinkDDL(statement) {
+		return fmt.Errorf("DBLink 定义无法完整脱敏，禁止通过通用执行器回放")
+	}
+	return w.executeDamengNativeStatement(ctx, statement, statement, false)
+}
+
+func (w *DaMengNativeWriter) executeDamengNativeStatement(ctx context.Context, statement, display string, sensitive bool) error {
 	if err := validateDamengNativeSQL(w.schema, statement); err != nil {
 		return err
 	}
@@ -119,7 +131,11 @@ func (w *DaMengNativeWriter) ExecuteDamengNative(ctx context.Context, statement 
 	if _, err = conn.ExecContext(ctx, "SET SCHEMA "+damengnative.Quote(w.schema)); err != nil {
 		return err
 	}
-	_, err = execObserved(ctx, conn, statement)
+	if sensitive {
+		err = execNativeLinkObserved(ctx, conn, display, statement)
+	} else {
+		_, err = execObserved(ctx, conn, statement)
+	}
 	if err == nil {
 		w.identMu.Lock()
 		w.identCache = map[string]bool{}
@@ -194,6 +210,10 @@ func nativePlaceholder(c damengnative.Column) (string, error) {
 	}
 	kind := nativeColumnKind(c)
 	switch kind {
+	case "ROWID":
+		// The native source projects ROWIDTOCHAR. Bind as VARCHAR so the
+		// driver does not attempt its unsupported string-to-ROWID codec.
+		return "CHARTOROWID(CAST(? AS VARCHAR(18)))", nil
 	case "DECIMAL", "DEC", "NUMERIC", "NUMBER":
 		t, err := nativeTypeSQL(c)
 		if err != nil {
@@ -274,27 +294,26 @@ func nativeCopyValue(c damengnative.Column, value any, schema string) (any, int,
 			if v == nil || !v.Valid {
 				return nil, 0, nil
 			}
-		}
-		sourceOwner := ""
-		if c.TypeSchema == schema {
-			typeName, err := nativeComplexSQLName(value)
-			if err != nil {
-				return nil, 0, err
-			}
-			parts, err := nativeSQLTokens(typeName)
-			if err != nil {
-				return nil, 0, err
-			}
-			if len(parts) == 3 && parts[1] == "." {
-				sourceOwner = nativeTokenName(parts[0])
-			}
+		default:
+			return nil, 0, fmt.Errorf("对象列未返回达梦对象或数组值: %T", value)
 		}
 		size, err := DamengNativeValueSize(value)
 		if err != nil {
 			return nil, 0, err
 		}
-		v, err := nativeComplexValue(value, sourceOwner, c.TypeSchema)
-		return v, size, err
+		attributes, err := nativeComplexValueAt(value, "", "", false)
+		if err != nil {
+			return nil, 0, err
+		}
+		// The driver's GetSQLTypeName joins raw catalog identifiers without
+		// quoting. Parsing it as SQL folds mixed case and cannot distinguish a
+		// dot inside a name. The frozen column already holds the exact target
+		// identity; nested member types come from that target descriptor.
+		name := damengnative.Qualified(c.TypeSchema, c.TypeName)
+		if _, array := value.(*dm.DmArray); array {
+			return dm.NewDmArray(name, attributes.([]any)), size, nil
+		}
+		return dm.NewDmStruct(name, attributes.([]any)), size, nil
 	}
 	kind := nativeColumnKind(c)
 	if nativeYMInterval.MatchString(kind) || nativeDTInterval.MatchString(kind) {
@@ -412,9 +431,6 @@ func nativeComplexValue(value any, sourceOwner, schema string) (any, error) {
 func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any, error) {
 	switch v := value.(type) {
 	case *dm.DmBlob:
-		if !top {
-			return nil, fmt.Errorf("达梦 Go 驱动无法无损绑定自定义对象内部的 BLOB")
-		}
 		if v == nil || !v.Valid {
 			return nil, nil
 		}
@@ -435,11 +451,12 @@ func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any,
 				return nil, fmt.Errorf("对象 BLOB 读取不完整")
 			}
 		}
-		return dm.NewBlob(data), nil
-	case *dm.DmClob:
+		local := dm.NewBlob(data)
 		if !top {
-			return nil, fmt.Errorf("达梦 Go 驱动无法无损绑定自定义对象内部的 CLOB")
+			return *local, nil
 		}
+		return local, nil
+	case *dm.DmClob:
 		if v == nil || !v.Valid {
 			return nil, nil
 		}
@@ -460,7 +477,11 @@ func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any,
 				return nil, fmt.Errorf("对象 CLOB 读取不完整")
 			}
 		}
-		return dm.NewClob(text), nil
+		local := dm.NewClob(text)
+		if !top {
+			return *local, nil
+		}
+		return local, nil
 	case dm.DmBlob:
 		return nativeComplexValueAt(&v, sourceOwner, schema, top)
 	case dm.DmClob:
@@ -529,28 +550,31 @@ func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any,
 		}
 		return dm.NewDmArray(nativeComplexTypeName(sourceOwner, schema, name), elements), nil
 	case *dm.DmDecimal:
-		if v == nil {
+		if v == nil || !v.Valid {
 			return nil, nil
 		}
-		checked, err := valueconv.OracleDameng(v.String(), "NUMBER")
+		checked, err := nativeExactUDTDecimal(v.String())
 		if err != nil {
 			return nil, err
 		}
 		if !top {
-			return *checked.(*dm.DmDecimal), nil
+			return *checked, nil
 		}
 		return checked, nil
 	case dm.DmDecimal:
-		checked, err := valueconv.OracleDameng(v.String(), "NUMBER")
+		if !v.Valid {
+			return nil, nil
+		}
+		checked, err := nativeExactUDTDecimal(v.String())
 		if err != nil {
 			return nil, err
 		}
 		if !top {
-			return *checked.(*dm.DmDecimal), nil
+			return *checked, nil
 		}
 		return checked, nil
 	case *dm.DmIntervalDT:
-		if v == nil {
+		if v == nil || !v.Valid {
 			return nil, nil
 		}
 		if !top {
@@ -558,7 +582,7 @@ func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any,
 		}
 		return v, nil
 	case *dm.DmIntervalYM:
-		if v == nil {
+		if v == nil || !v.Valid {
 			return nil, nil
 		}
 		if !top {
@@ -570,6 +594,29 @@ func nativeComplexValueAt(value any, sourceOwner, schema string, top bool) (any,
 	default:
 		return nil, fmt.Errorf("对象字段类型 %T 无法无损复制", value)
 	}
+}
+
+func nativeExactUDTDecimal(raw string) (*dm.DmDecimal, error) {
+	if _, err := nativeDecimalText(raw); err != nil {
+		return nil, err
+	}
+	number, ok := new(big.Float).SetPrec(1024).SetString(raw)
+	if !ok {
+		return nil, fmt.Errorf("无效的精确对象十进制值")
+	}
+	decimal, err := dm.NewDecimalFromBigFloat(number)
+	if err != nil {
+		return nil, err
+	}
+	want, ok := new(big.Rat).SetString(raw)
+	if !ok {
+		return nil, fmt.Errorf("无效的精确对象十进制值")
+	}
+	got, ok := new(big.Rat).SetString(decimal.String())
+	if !ok || want.Cmp(got) != 0 {
+		return nil, fmt.Errorf("对象十进制转换未保留原始精度")
+	}
+	return decimal, nil
 }
 func nativeComplexTypeName(sourceOwner, schema, name string) string {
 	// Type names obtained from the driver are qualified. Rebind the owner while
@@ -663,14 +710,45 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 		}
 		identityEnabled = true
 	}
-	statement := "INSERT INTO " + qualified + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
-	stmt, err := tx.PrepareContext(ctx, statement)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
+	prepared := map[string]*sql.Stmt{}
+	defer func() {
+		for _, stmt := range prepared {
+			_ = stmt.Close()
+		}
+	}()
 	for _, row := range converted {
-		if _, err = stmt.ExecContext(ctx, row...); err != nil {
+		rowPlaceholders := append([]string{}, placeholders...)
+		bind := make([]any, 0, len(row))
+		for j, value := range row {
+			empty, e := nativeEmptyLOBExpression(value)
+			if e != nil {
+				return e
+			}
+			if empty != "" {
+				rowPlaceholders[j] = empty
+			} else {
+				bind = append(bind, value)
+			}
+		}
+		statement := "INSERT INTO " + qualified + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(rowPlaceholders, ", ") + ")"
+		stmt := prepared[statement]
+		if stmt == nil {
+			// A table with many LOB columns can produce many empty/NULL
+			// shapes. Bound both server handles and retained SQL per batch.
+			if len(prepared) >= 16 {
+				for cachedSQL, cached := range prepared {
+					_ = cached.Close()
+					delete(prepared, cachedSQL)
+					break
+				}
+			}
+			stmt, err = tx.PrepareContext(ctx, statement)
+			if err != nil {
+				return err
+			}
+			prepared[statement] = stmt
+		}
+		if _, err = stmt.ExecContext(ctx, bind...); err != nil {
 			return err
 		}
 	}
@@ -721,16 +799,16 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 		}
 		if !want.Managed {
 			for _, unit := range want.Units {
-				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" {
+				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" {
 					continue
 				}
-				mapped, _, rewriteErr := damengnative.RewriteSchema(unit.SQL, expected.Profile.Schema, w.schema)
+				mappedUnit, _, rewriteErr := damengnative.RewriteUnit(unit, expected.Profile.Schema, w.schema)
 				if rewriteErr != nil {
 					return issues, rewriteErr
 				}
 				match := false
 				for _, candidate := range got.Units {
-					if nativeDefinitionsEqual(mapped, candidate.SQL) {
+					if nativeDefinitionsEqual(mappedUnit.SQL, candidate.SQL) && (unit.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(mappedUnit, candidate)) {
 						match = true
 						break
 					}

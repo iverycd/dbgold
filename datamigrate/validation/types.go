@@ -112,6 +112,7 @@ type TableResult struct {
 	DuplicateKeys int64        `json:"duplicate_keys"`
 	Samples       []Difference `json:"samples,omitempty"`
 	Error         string       `json:"error,omitempty"`
+	Note          string       `json:"note,omitempty"`
 }
 
 type Report struct {

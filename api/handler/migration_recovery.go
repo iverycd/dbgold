@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -314,6 +315,9 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 		}
 		defer r.Close()
 		defer w.Close()
+		if linkReader, ok := r.(damengnative.LinkDDLReader); ok {
+			ctx = damengnative.WithSourceLinkResolver(ctx, linkReader, b.SourceSchema)
+		}
 		previewObject, e := recoveryPreviewObject(j.JobID, o)
 		if e != nil {
 			finishRepair(a, o, e)
@@ -372,9 +376,11 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				completed[item.ID] = true
 			}
 		}
+		nativeRecoveryCompleteManaged(all, completed)
 		var firstErr error
 		sequenceColumns := map[string]bool{}
-		for _, item := range orderedRecoveryObjects(fresh.Related) {
+		orderedRelated := orderedRecoveryObjects(fresh.Related)
+		for position, item := range orderedRelated {
 			if ctx.Err() != nil {
 				firstErr = ctx.Err()
 				break
@@ -388,10 +394,18 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			if blocked {
 				item.Status = "blocked"
 				item.Error = "依赖对象尚未成功"
+				if firstErr == nil {
+					firstErr = fmt.Errorf("关联对象 %s 的依赖尚未完成", item.Name)
+				}
 			} else {
-				units, executeErr := target.ExecuteRepair(ctx, w, item, item.Units, func(units []repair.Unit) error {
-					return persistRepairProgress(a, item, units, executedUnits)
-				})
+				selectedUnits := nativeRecoveryPhaseUnits(item, "install")
+				units, executeErr := item.Units, error(nil)
+				if item.Native == nil || nativeRecoveryHasSelected(selectedUnits) {
+					units, executeErr = target.ExecuteRepair(ctx, w, item, selectedUnits, func(units []repair.Unit) error {
+						return persistRepairProgress(a, item, nativeRecoveryMergeSelections(item, units), executedUnits)
+					})
+				}
+				units = nativeRecoveryMergeSelections(item, units)
 				for i := range units {
 					if units[i].Status == "succeeded" {
 						units[i].Selected = false
@@ -412,9 +426,15 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 					}
 				} else {
 					item.Status = "succeeded"
+					if item.Native != nil && !item.AllUnitsSucceeded() {
+						item.Status = "pending"
+					}
 					item.Verification = nil
 					item.ManualVerification = nil
-					completed[item.ID] = item.Status == "succeeded"
+					completed[item.ID] = nativeRecoveryInstallationComplete(item)
+					if completed[item.ID] {
+						nativeRecoveryCompleteManaged(all, completed)
+					}
 					if completed[item.ID] && item.Kind == "sequence" && item.Sequence != nil {
 						sequenceColumns[item.Sequence.ColumnName] = true
 						if item.Sequence.Native != nil {
@@ -427,6 +447,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 					}
 				}
 			}
+			orderedRelated[position] = item
 			if e = store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", j.JobID, item.ID).Updates(map[string]any{"object_json": repairJSON(item), "version": gorm.Expr("version + 1")}).Error; e != nil {
 				a.Status = "unknown"
 				firstErr = e
@@ -442,6 +463,37 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			if calibrationErr != nil && firstErr == nil {
 				firstErr = fmt.Errorf("数据已完成，最终自增校准失败: %w", calibrationErr)
 			}
+		}
+		if firstErr == nil && src.DBType == "dameng" && dst.DBType == "dameng" {
+			var pin func(context.Context, func(context.Context) error) error
+			if finalizer, ok := w.(interface {
+				WithDamengNativeEventFinalization(context.Context, func(context.Context) error) error
+			}); ok {
+				pin = finalizer.WithDamengNativeEventFinalization
+			}
+			_, firstErr = executeNativeRecoveryFinalStates(ctx, orderedRelated, nativeRecoveryFinalization{
+				execute: func(run context.Context, item repair.Object, units []repair.Unit, step func([]repair.Unit) error) ([]repair.Unit, error) {
+					return target.ExecuteRepair(run, w, item, units, step)
+				},
+				proof: func(proof context.Context) error {
+					objects, _, err := repairObjects(j.JobID)
+					if err != nil {
+						return err
+					}
+					if err = datamigrate.NativeRepairFinalizationReady(objects, ""); err != nil {
+						return err
+					}
+					return datamigrate.VerifyNativeRepairFinalization(proof, r, w, cfg, objects)
+				},
+				pinEvents: pin,
+				progress: func(item repair.Object, units []repair.Unit) error {
+					return persistRepairProgress(a, item, units, executedUnits)
+				},
+				save: func(item repair.Object) error {
+					executedUnits = append(executedUnits, item.Units...)
+					return store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", j.JobID, item.ID).Updates(map[string]any{"object_json": repairJSON(item), "version": gorm.Expr("version + 1")}).Error
+				},
+			})
 		}
 		// The table remains repaired even when an independent attached object fails.
 		finishRepair(a, o, firstErr)

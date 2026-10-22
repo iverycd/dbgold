@@ -10,7 +10,7 @@
       </div>
       <a-alert v-if="dataValidationNeedsAttention(report)" type="warning" class="validation-notice">内容校验未全部通过，请核查差异与失败原因后再进行业务切换。</a-alert>
       <a-table :data="sortedTables" row-key="source_table" size="small" :pagination="{ pageSize: 20 }" :scroll="{ x: 1120 }"
-        :expandable="{ icon: (_, record) => record.error || record.samples?.length ? undefined : null }">
+        :expandable="{ icon: (_, record) => record.error || record.note || record.samples?.length ? undefined : null }">
         <template #columns>
           <a-table-column title="源表 / 目标表" :width="240"><template #cell="{ record }"><div>{{ record.source_table }}</div><div class="target-table">→ {{ record.target_table }}</div></template></a-table-column>
           <a-table-column title="状态" :width="145"><template #cell="{ record }"><a-tag :color="dataValidationStatus(record.status).color">{{ dataValidationStatus(record.status).label }}</a-tag></template></a-table-column>
@@ -24,6 +24,7 @@
         <template #expand-row="{ record }">
           <div class="validation-detail">
             <a-alert v-if="record.error" type="error">{{ record.error }}</a-alert>
+            <a-alert v-if="record.note" type="info">{{ record.note }}</a-alert>
             <template v-if="record.samples?.length">
               <p>差异样例最多显示 20 条；长文本截断展示，二进制显示长度及摘要。无主键表按整行及重复次数比较，差异显示为缺失或多余。</p>
               <div v-for="(sample, index) in record.samples" :key="index" class="difference-sample">

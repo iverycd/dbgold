@@ -180,6 +180,9 @@ func ReadCatalog(ctx context.Context, db *sql.DB, schema string, definitions boo
 	if err = r.inventory(); err != nil {
 		return nil, err
 	}
+	if err = r.classifyMaterializedViews(); err != nil {
+		return nil, err
+	}
 	if err = r.readConstraints(); err != nil {
 		return nil, err
 	}
@@ -286,7 +289,7 @@ func nativeKind(sub string, info int64) string {
 }
 func normalizedKind(kind string) string {
 	switch strings.ToUpper(kind) {
-	case "DATABASE LINK", "DB LINK":
+	case "DATABASE LINK", "DB LINK", "DBLINK":
 		return "db_link"
 	case "MATERIALIZED VIEW":
 		return "materialized_view"
@@ -367,7 +370,8 @@ func (r *catalogReader) inventory() error {
 				break
 			}
 		}
-		r.add(id, Object{Kind: kind, Name: raw.name, Schema: r.schema, Status: status, EventTrigger: raw.sub == "TRIG" && raw.info1&2 == 0})
+		event := raw.sub == "TRIG" && raw.info1&2 == 0
+		r.add(id, Object{Kind: kind, Name: raw.name, Schema: r.schema, Status: status, EventTrigger: event})
 	}
 	for _, c := range compat {
 		if c.kind == "sch" || c.kind == "schema" {

@@ -217,6 +217,7 @@ export interface DataValidationTable {
   duplicate_keys: number
   samples?: DataValidationDifference[]
   error?: string
+  note?: string
 }
 
 export interface DataValidationReport {

@@ -18,6 +18,8 @@ func (w *DaMengNativeWriter) CheckDamengNativeReference(ctx context.Context, ref
 		query, args = `SELECT COUNT(*) FROM ALL_USERS WHERE USERNAME=?`, []any{ref.Name}
 	case "role":
 		query, args = `SELECT COUNT(*) FROM DBA_ROLES WHERE ROLE=?`, []any{ref.Name}
+	case "schema":
+		query, args = `SELECT COUNT(*) FROM SYS.SYSOBJECTS WHERE TYPE$='SCH' AND NAME=?`, []any{ref.Schema}
 	default:
 		if ref.Schema == "" || ref.Name == "" {
 			return fmt.Errorf("外部依赖缺少完整 schema/对象名")
@@ -84,7 +86,7 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 				priv = "CREATE INDEX"
 			}
 		case "db_link":
-			priv = "CREATE DATABASE LINK"
+			priv = "CREATE LINK"
 		}
 		if priv != "" && username != "SYSDBA" && username != "SYS" {
 			anyPriv := strings.Replace(priv, "CREATE ", "CREATE ANY ", 1)
@@ -93,9 +95,25 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 			}
 		}
 		for _, u := range o.Units {
-			if err := validateDamengNativeSQL(w.schema, u.SQL); err != nil {
+			if err := validateNativeObjectUnit(w.schema, o, u); err != nil {
 				add(o, err.Error())
 				continue
+			}
+			if u.Phase == "event_create" && damengnative.EventTriggerHasCheckpoint(u.SQL) {
+				if err := nativeCheckpointEventsDisabled(ctx, w.db); err != nil {
+					add(o, err.Error())
+				}
+			}
+			if u.Phase == "event_create" && username != "SYSDBA" && username != "SYS" {
+				scope, _, scopeErr := damengnative.EventTriggerScope(u.SQL, o.Schema)
+				if scopeErr != nil {
+					add(o, scopeErr.Error())
+				} else if scope == "database" && !grants["CREATE ANY TRIGGER"] {
+					add(o, "数据库级事件触发器需要 CREATE ANY TRIGGER 权限")
+				}
+				if username != w.schema && !grants["ALTER ANY TRIGGER"] {
+					add(o, "跨 Schema 禁用与恢复事件触发器需要 ALTER ANY TRIGGER 权限")
+				}
 			}
 			tokens, err := nativeSQLTokens(u.SQL)
 			if err != nil {
@@ -160,7 +178,7 @@ func nativeDropPrivilege(kind, verb string) string {
 	case "class", "class_body", "type", "type_body":
 		return "DROP ANY TYPE"
 	case "db_link":
-		return "DROP ANY DATABASE LINK"
+		return "DROP ANY LINK"
 	}
 	return ""
 }
@@ -188,7 +206,7 @@ func (w *DaMengNativeWriter) nativeExternalDropDependencies(ctx context.Context,
 			return reasons
 		}
 	}
-	rows, err := w.db.QueryContext(ctx, `SELECT DISTINCT s.NAME,dep.NAME FROM SYS.SYSDEPENDENCIES d JOIN SYS.SYSOBJECTS ref ON ref.ID=d.REFED_ID JOIN SYS.SYSOBJECTS rs ON rs.ID=ref.SCHID JOIN SYS.SYSOBJECTS dep ON dep.ID=d.ID JOIN SYS.SYSOBJECTS s ON s.ID=dep.SCHID WHERE rs.NAME=? AND ref.NAME=? AND s.NAME<>? ORDER BY s.NAME,dep.NAME`, w.schema, object.Name, w.schema)
+	rows, err := w.db.QueryContext(ctx, `SELECT DISTINCT s.NAME,dep.NAME FROM SYS.SYSDEPENDENCIES d JOIN SYS.SYSOBJECTS referenced_object ON referenced_object.ID=d.REFED_ID JOIN SYS.SYSOBJECTS rs ON rs.ID=referenced_object.SCHID JOIN SYS.SYSOBJECTS dep ON dep.ID=d.ID JOIN SYS.SYSOBJECTS s ON s.ID=dep.SCHID WHERE rs.NAME=? AND referenced_object.NAME=? AND s.NAME<>? ORDER BY s.NAME,dep.NAME`, w.schema, object.Name, w.schema)
 	if err != nil {
 		return append(reasons, "无法完整检查覆盖对象的外部依赖: "+err.Error())
 	}

@@ -111,11 +111,24 @@ func nativeTokenName(token string) string {
 	}
 	return strings.ToUpper(token)
 }
+
+func nativeIdentifierToken(token string) bool {
+	if len(token) >= 2 && token[0] == '"' && token[len(token)-1] == '"' {
+		return len(nativeTokenName(token)) > 0 && !strings.ContainsRune(token, 0)
+	}
+	for i, r := range token {
+		if !unicode.IsLetter(r) && r != '_' && r != '$' && r != '#' && !(i > 0 && unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return token != ""
+}
+
 func nativeHeadIdentity(tokens []string, index int, schema string) (int, error) {
 	if index >= len(tokens) {
 		return index, fmt.Errorf("原生 DDL 缺少对象名")
 	}
-	if tokens[index] == "'" || strings.HasPrefix(tokens[index], "'") || strings.ContainsAny(tokens[index], "();,") {
+	if !nativeIdentifierToken(tokens[index]) {
 		return index, fmt.Errorf("无效原生 DDL 对象名")
 	}
 	if index+1 < len(tokens) && tokens[index+1] == "." {
@@ -123,7 +136,7 @@ func nativeHeadIdentity(tokens []string, index int, schema string) (int, error) 
 			return index, fmt.Errorf("原生 DDL 不能修改目标 schema %s 以外的对象", schema)
 		}
 		index += 2
-		if index >= len(tokens) || strings.ContainsAny(tokens[index], ".;(),") {
+		if index >= len(tokens) || !nativeIdentifierToken(tokens[index]) {
 			return index, fmt.Errorf("原生 DDL 缺少对象名")
 		}
 		if index+1 < len(tokens) && tokens[index+1] == "." {
@@ -154,6 +167,25 @@ func validateDamengNativeSQL(schema, statement string) error {
 	procedural := false
 	identityChecked := false
 	switch upper(0) {
+	case "REFRESH":
+		if upper(1) != "MATERIALIZED" || upper(2) != "VIEW" {
+			return fmt.Errorf("原生基线仅允许物化视图 COMPLETE 刷新")
+		}
+		next, e := nativeHeadIdentity(tokens, 3, schema)
+		if e != nil {
+			return e
+		}
+		if upper(next) != "COMPLETE" {
+			return fmt.Errorf("原生基线刷新必须显式使用 COMPLETE")
+		}
+		next++
+		if next < len(tokens) && tokens[next] == ";" {
+			next++
+		}
+		if next != len(tokens) {
+			return fmt.Errorf("原生基线刷新只能包含一条 COMPLETE 语句")
+		}
+		return nil
 	case "CREATE", "ALTER", "DROP", "TRUNCATE":
 		if upper(i) == "OR" && upper(i+1) == "REPLACE" {
 			i += 2
@@ -212,8 +244,8 @@ func validateDamengNativeSQL(schema, statement string) error {
 			}
 		}
 	case "COMMENT":
-		if upper(1) != "ON" || (upper(2) != "TABLE" && upper(2) != "COLUMN") {
-			return fmt.Errorf("只允许目标表/列注释")
+		if upper(1) != "ON" || (upper(2) != "TABLE" && upper(2) != "VIEW" && upper(2) != "COLUMN" && upper(2) != "SEQUENCE") {
+			return fmt.Errorf("只允许目标表、视图、列或序列注释")
 		}
 		i = 3
 		// A column identity has a third part after its schema/table.

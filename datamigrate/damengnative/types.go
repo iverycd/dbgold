@@ -29,25 +29,43 @@ type Issue struct {
 type Unit struct {
 	SQL   string `json:"sql"`
 	Phase string `json:"phase"` // before_data | after_data | restore
+	// DBLink credentials live only in memory. Reloaded plans obtain the exact
+	// frozen definition from the source, never from a user-editable SQL draft.
+	SourceSQLHash string `json:"source_sql_hash,omitempty"`
+	executableSQL string
 }
 
 type Object struct {
-	ID             string      `json:"id"`
-	Kind           string      `json:"kind"`
-	Name           string      `json:"name"`
-	Schema         string      `json:"schema"`
-	Table          string      `json:"table,omitempty"`
-	ParentID       string      `json:"parent_id,omitempty"`
-	Managed        bool        `json:"managed,omitempty"`         // recreated with its parent
-	Generated      bool        `json:"generated,omitempty"`       // catalog proves generated name
-	ConstraintType string      `json:"constraint_type,omitempty"` // original P/U/R/C kind
-	EventTrigger   bool        `json:"event_trigger,omitempty"`   // schema/database event trigger
-	Status         string      `json:"status,omitempty"`
-	Dependencies   []string    `json:"dependencies"`
-	External       []Reference `json:"external,omitempty"`
-	Units          []Unit      `json:"units"`
-	DropSQL        string      `json:"drop_sql,omitempty"`
-	CompileSQL     string      `json:"compile_sql,omitempty"`
+	ID             string             `json:"id"`
+	Kind           string             `json:"kind"`
+	Name           string             `json:"name"`
+	Schema         string             `json:"schema"`
+	Table          string             `json:"table,omitempty"`
+	ParentID       string             `json:"parent_id,omitempty"`
+	Managed        bool               `json:"managed,omitempty"`         // recreated with its parent
+	Generated      bool               `json:"generated,omitempty"`       // catalog proves generated name
+	ConstraintType string             `json:"constraint_type,omitempty"` // original P/U/R/C kind
+	EventTrigger   bool               `json:"event_trigger,omitempty"`   // schema/database event trigger
+	Materialized   *MaterializedState `json:"materialized,omitempty"`
+	Status         string             `json:"status,omitempty"`
+	Dependencies   []string           `json:"dependencies"`
+	External       []Reference        `json:"external,omitempty"`
+	Units          []Unit             `json:"units"`
+	DropSQL        string             `json:"drop_sql,omitempty"`
+	CompileSQL     string             `json:"compile_sql,omitempty"`
+}
+
+// MaterializedState records the explicit logical baseline action. A physical
+// ROWID cannot survive copying into a new database; only direct ROWID output
+// columns may be rebased, after all ordinary values and multiplicities match.
+type MaterializedState struct {
+	Query           string   `json:"query"`
+	RefreshMethod   string   `json:"refresh_method"`
+	RefreshRule     string   `json:"refresh_rule"`
+	Staleness       string   `json:"staleness"`
+	Baseline        bool     `json:"baseline"`
+	SnapshotColumns []string `json:"snapshot_columns"`
+	RowIDColumns    []int    `json:"rowid_columns,omitempty"` // zero-based direct output ordinals
 }
 
 type Reference struct {
@@ -141,6 +159,8 @@ func HasErrors(issues []Issue) bool {
 func NormalizeKind(kind string) string {
 	kind = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(kind)), " ", "_")
 	switch kind {
+	case "dblink", "database_link":
+		return "db_link"
 	case "package_spec", "pkg_spec":
 		return "package"
 	case "pkg_body":

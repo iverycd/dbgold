@@ -62,7 +62,7 @@ func TestReadCatalogExtractsNativeDefinitionsAndBlocksUnknown(t *testing.T) {
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("PKG_BODY", "MixedPkg", "MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow("CREATE PACKAGE BODY \"MixedOwner\".\"MixedPkg\" AS PROCEDURE P AS BEGIN NULL; END; END;\n/"))
 	m.ExpectQuery(`SELECT c.COLUMN_NAME,c.DATA_TYPE`).WithArgs("MixedOwner", "MixedTable").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "precision", "scale", "flags", "extra", "owner"}).AddRow("MixedCol", "VARCHAR", 0, 0, 0, 0, nil).AddRow("Amount", "DECIMAL", 38, 4, 0, 0, nil))
 	m.ExpectQuery(`SELECT COUNT\(\*\) FROM "MixedOwner"."MixedTable"`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
-	m.ExpectQuery(`SELECT TABLE_NAME,CAST\(NULL`).WithArgs("MixedOwner", "MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"table", "column", "text"}).AddRow("MixedTable", nil, "KeepMiXeD注释"))
+	m.ExpectQuery(`SELECT TVNAME,CAST\(NULL`).WithArgs("MixedOwner", "MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"table", "column", "text"}).AddRow("MixedTable", nil, "KeepMiXeD注释"))
 	m.ExpectQuery(`SELECT g.OBJID,COUNT`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}))
 	s, e := ReadCatalog(context.Background(), db, "MixedOwner", true)
 	require.NoError(t, e)
@@ -137,7 +137,8 @@ func TestMaterializedViewCopiesStoredSnapshotIntoPrebuiltStorage(t *testing.T) {
 	helper := r.snapshot.Objects[2]
 	require.True(t, strings.HasPrefix(helper.Name, "DBGOLD_MV_"))
 	require.Equal(t, "MTAB$_Mv", helper.Table)
-	require.Contains(t, r.snapshot.Objects[0].Units[0].SQL, "FOR "+Qualified("App", helper.Name)+" ON PREBUILT TABLE REFRESH COMPLETE ON DEMAND AS")
+	require.Contains(t, r.snapshot.Objects[0].Units[0].SQL, "FOR "+Qualified("App", helper.Name)+" ON PREBUILT TABLE NEVER REFRESH AS")
+	require.Equal(t, Unit{SQL: `ALTER MATERIALIZED VIEW "App"."Mv" REFRESH COMPLETE ON DEMAND`, Phase: "mv_restore"}, r.snapshot.Objects[0].Units[1])
 	require.NotContains(t, r.snapshot.Objects[0].Units[0].SQL, "BUILD IMMEDIATE")
 	require.NotContains(t, helper.Units[0].SQL, `"MTAB$_Mv"`)
 	require.NoError(t, m.ExpectationsWereMet())
@@ -158,12 +159,13 @@ func TestCatalogInventoryIncludesOverwriteDropWithoutReadingDDL(t *testing.T) {
 	profileMock(m)
 	m.ExpectQuery(`SELECT o.ID,o.NAME,o.TYPE\$`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "main", "sub", "pid", "valid", "i1", "i2", "i3"}).AddRow(1, "V", "SCHOBJ", "VIEW", -1, "Y", 0, 0, 0))
 	m.ExpectQuery(`SELECT OBJECT_ID,OBJECT_NAME,OBJECT_TYPE,STATUS`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kind", "status"}).AddRow(1, "V", "VIEW", "VALID"))
+	m.ExpectQuery(`SELECT MVIEW_NAME FROM SYS.USER_MVIEWS`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"name"}))
 	m.ExpectQuery(`SELECT CONSTRAINT_NAME,TABLE_NAME`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"name", "table", "type", "index", "status"}))
 	m.ExpectQuery(`SELECT i.NAME,t.NAME,x.FLAG,x.XTYPE FROM SYS.SYSINDEXES`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"name", "table", "flags", "xtype"}))
 	m.ExpectQuery(`SELECT MASTER,LOG_TABLE FROM ALL_MVIEW_LOGS`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"master", "log"}))
-	m.ExpectQuery(`SELECT s.NAME,o.NAME,o.INFO1 FROM SYS.SYSOBJECTS`).WillReturnRows(sqlmock.NewRows([]string{"owner", "name", "flags"}))
+	m.ExpectQuery(`SELECT s.NAME,o.NAME,o.INFO1`).WillReturnRows(sqlmock.NewRows([]string{"owner", "name", "flags"}))
 	m.ExpectQuery(`SELECT d.ID,d.TYPE\$`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"id", "kind", "refid", "refkind", "schema", "name"}))
-	m.ExpectQuery(`SELECT TABLE_NAME,CAST\(NULL`).WithArgs("App", "App").WillReturnRows(sqlmock.NewRows([]string{"table", "column", "text"}))
+	m.ExpectQuery(`SELECT TVNAME,CAST\(NULL`).WithArgs("App", "App").WillReturnRows(sqlmock.NewRows([]string{"table", "column", "text"}))
 	m.ExpectQuery(`SELECT g.OBJID,COUNT`).WithArgs("App").WillReturnRows(sqlmock.NewRows([]string{"id", "count"}))
 	s, e := ReadCatalog(context.Background(), db, "App", false)
 	require.NoError(t, e)
@@ -207,10 +209,26 @@ func TestNativeTriggerStateAndDBLinkCredentials(t *testing.T) {
 	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "db_link", Name: "Link", Schema: "App"}}}}
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("DB_LINK", "Link", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE LINK "App"."Link" CONNECT 'u' IDENTIFIED BY 'SecretPassword' USING 'remote'`))
 	r.extractDefinitions()
-	require.True(t, HasErrors(r.snapshot.Issues))
-	require.Empty(t, r.snapshot.Objects[0].Units)
-	require.NotContains(t, r.snapshot.Issues[0].Reason, "SecretPassword")
+	require.False(t, HasErrors(r.snapshot.Issues))
+	require.Len(t, r.snapshot.Objects[0].Units, 1)
+	require.NotContains(t, r.snapshot.Objects[0].Units[0].SQL, "SecretPassword")
+	require.NotEmpty(t, r.snapshot.Objects[0].Units[0].SourceSQLHash)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestNativeDBLinkMetadataErrorNeverEntersIssues(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "db_link", Name: "Link", Schema: "App"}}}}
+	mock.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("DB_LINK", "Link", "App").WillReturnError(errors.New("GET_DDL failed while parsing IDENTIFIED BY 'SecretPassword' USING 'PWD=EndpointPassword'"))
+	r.extractDefinitions()
+	require.True(t, HasErrors(r.snapshot.Issues))
+	require.Len(t, r.snapshot.Issues, 1)
+	require.NotContains(t, r.snapshot.Issues[0].Reason, "SecretPassword")
+	require.NotContains(t, r.snapshot.Issues[0].Reason, "EndpointPassword")
+	require.Empty(t, r.snapshot.Objects[0].Units)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestNativeLOBLimitFailsBeforeCopy(t *testing.T) {
@@ -270,17 +288,31 @@ func TestExistingIndexReferenceBlocksButInlineStorageIsAllowed(t *testing.T) {
 	require.Empty(t, r.snapshot.Issues)
 }
 
-func TestEventTriggerSourceIsBlockedWithoutAtomicDisable(t *testing.T) {
+func TestEventTriggerSourceFreezesDefinitionAndFinalState(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
 	defer db.Close()
 	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "trigger", Name: "Event", Schema: "App", EventTrigger: true}}}}
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("TRIGGER", "Event", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TRIGGER "App"."Event" AFTER DDL ON SCHEMA BEGIN NULL; END;`))
+	m.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs("App", "Event").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("ENABLED"))
 	r.extractDefinitions()
-	require.True(t, HasErrors(r.snapshot.Issues))
-	require.Empty(t, r.snapshot.Objects[0].Units)
+	require.Empty(t, r.snapshot.Issues)
+	require.Equal(t, []Unit{{SQL: `CREATE TRIGGER "App"."Event" AFTER DDL ON SCHEMA BEGIN NULL; END;`, Phase: "event_create"}, {SQL: EventTriggerStateSQL("App", "Event", true), Phase: "event_activate"}}, r.snapshot.Objects[0].Units)
 	require.NoError(t, m.ExpectationsWereMet())
 	require.False(t, nativeTriggerIsEvent(`CREATE TRIGGER "Tr" AFTER UPDATE OF "DATABASE" ON "App"."T" BEGIN NULL; END;`))
+}
+
+func TestTimerTriggerSourceBlocksUnsafeImmediateScheduling(t *testing.T) {
+	db, m, e := sqlmock.New()
+	require.NoError(t, e)
+	defer db.Close()
+	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "trigger", Name: "Timer", Schema: "App", EventTrigger: true}}}}
+	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("TRIGGER", "Timer", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TRIGGER "App"."Timer" AFTER TIMER ON DATABASE FOR EACH 1 MINUTE BEGIN NULL; END;`))
+	r.extractDefinitions()
+	require.True(t, HasErrors(r.snapshot.Issues))
+	require.Contains(t, r.snapshot.Issues[0].Reason, "TIMER")
+	require.Empty(t, r.snapshot.Objects[0].Units)
+	require.NoError(t, m.ExpectationsWereMet())
 }
 
 func TestTargetDatabaseEventHooksAreCheckedAcrossSchemas(t *testing.T) {
@@ -288,7 +320,7 @@ func TestTargetDatabaseEventHooksAreCheckedAcrossSchemas(t *testing.T) {
 	require.NoError(t, e)
 	defer db.Close()
 	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{}}
-	m.ExpectQuery(`SELECT s.NAME,o.NAME,o.INFO1 FROM SYS.SYSOBJECTS`).WillReturnRows(sqlmock.NewRows([]string{"owner", "name", "flags"}).AddRow("Other", "Global", 8192).AddRow("Other", "Scoped", 8192).AddRow("App", "Local", 8192))
+	m.ExpectQuery(`SELECT s.NAME,o.NAME,o.INFO1`).WillReturnRows(sqlmock.NewRows([]string{"owner", "name", "flags", "status"}).AddRow("Other", "Global", 4, "Y").AddRow("Other", "Scoped", 4, "Y").AddRow("App", "Local", 4, "Y"))
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL\('TRIGGER',\?,\?\)`).WithArgs("Global", "Other").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TRIGGER "Other"."Global" AFTER LOGIN ON DATABASE BEGIN NULL; END;`))
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL\('TRIGGER',\?,\?\)`).WithArgs("Scoped", "Other").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TRIGGER "Other"."Scoped" AFTER DDL ON SCHEMA BEGIN NULL; END;`))
 	require.NoError(t, r.checkActiveEventTriggers())

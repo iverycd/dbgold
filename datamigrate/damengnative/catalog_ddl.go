@@ -9,6 +9,9 @@ import (
 )
 
 func (r *catalogReader) getDDL(kind, name string) (string, error) {
+	if kind == "MATERIALIZED_VIEW_LOG" {
+		name = r.materializedLogDDLName(name)
+	}
 	var ddl sql.NullString
 	err := r.db.QueryRowContext(r.ctx, `SELECT DBMS_METADATA.GET_DDL(?,?,?)`, kind, name, r.schema).Scan(&ddl)
 	if err != nil {
@@ -65,25 +68,25 @@ func (r *catalogReader) extractDefinitions() {
 		}
 		ddl, err := r.getDDL(kind, o.Name)
 		if err != nil {
-			r.issue(o, "读取原生 DDL 失败: "+err.Error())
+			if o.Kind == "db_link" {
+				r.issue(o, "读取 DBLink 原生定义失败（服务端详情已脱敏）")
+			} else {
+				r.issue(o, "读取原生 DDL 失败: "+err.Error())
+			}
+			continue
+		}
+		if o.Kind == "db_link" {
+			unit, e := FreezeLinkUnit(ddl, phase)
+			if e != nil {
+				r.issue(o, e.Error())
+			} else {
+				o.Units = append(o.Units, unit)
+			}
 			continue
 		}
 		if _, err = nativeTokens(ddl); err != nil {
 			r.issue(o, err.Error())
 			continue
-		}
-		if o.Kind == "db_link" {
-			tokens, _ := nativeTokens(ddl)
-			sensitive := false
-			for _, token := range tokens {
-				if token.kind == 'i' && (strings.EqualFold(token.value, "IDENTIFIED") || strings.EqualFold(token.value, "PASSWORD")) {
-					sensitive = true
-				}
-			}
-			if sensitive {
-				r.issue(o, "私有 DBLink 定义包含登录凭据；请先提供目标端安全凭据配置，原始密码不会写入迁移计划或报告")
-				continue
-			}
 		}
 		if o.Kind == "table" {
 			ddl = r.disableConstraintDefinitions(o.Name, ddl)
@@ -115,8 +118,18 @@ func (r *catalogReader) extractDefinitions() {
 			}
 		} else {
 			if o.Kind == "trigger" && (o.EventTrigger || nativeTriggerIsEvent(ddl)) {
-				r.issue(o, "Schema/数据库事件触发器创建后会立即启用；当前 DM8 CREATE TRIGGER 无原子禁用选项，已阻止其在迁移中触发业务逻辑")
-				continue
+				o.EventTrigger = true
+				if scopeKind, scope, scopeErr := nativeTriggerTarget(ddl, r.schema); scopeErr != nil {
+					r.issue(o, scopeErr.Error())
+					continue
+				} else if scopeKind == "schema" && scope != r.schema {
+					o.External = append(o.External, Reference{Kind: "schema", Schema: scope, Name: scope})
+				}
+				if EventTriggerHasTimer(ddl) {
+					r.issue(o, "TIMER 触发器创建后可能立即被后台调度；当前驱动缺少可验证的原子禁用安装机制")
+					continue
+				}
+				phase = "event_create"
 			}
 			o.Units = append(o.Units, Unit{SQL: ddl, Phase: phase})
 		}
@@ -128,11 +141,16 @@ func (r *catalogReader) extractDefinitions() {
 				switch strings.ToUpper(strings.TrimSpace(status)) {
 				case "DISABLED", "DISABLE", "N", "0":
 					o.Status = "DISABLED"
-					o.Units = append(o.Units, Unit{SQL: "ALTER TRIGGER " + Qualified(r.schema, o.Name) + " DISABLE", Phase: "restore"})
+					if !o.EventTrigger {
+						o.Units = append(o.Units, Unit{SQL: "ALTER TRIGGER " + Qualified(r.schema, o.Name) + " DISABLE", Phase: "restore"})
+					}
 				case "ENABLED", "ENABLE", "Y", "1":
 					o.Status = "ENABLED"
 				default:
 					r.issue(o, "触发器启用状态不能识别: "+status)
+				}
+				if o.EventTrigger && (o.Status == "ENABLED" || o.Status == "DISABLED") {
+					o.Units = append(o.Units, Unit{SQL: EventTriggerStateSQL(r.schema, o.Name, o.Status == "ENABLED"), Phase: "event_activate"})
 				}
 			}
 		}
@@ -173,7 +191,7 @@ func ddlOptions(o Object) (kind, phase, drop, compile string) {
 	case "package":
 		return "PKG_SPEC", "before_data", "DROP PACKAGE " + q, "ALTER PACKAGE " + q + " COMPILE"
 	case "package_body":
-		return "PKG_BODY", "after_data", "DROP PACKAGE BODY " + q, "ALTER PACKAGE " + q + " COMPILE BODY"
+		return "PKG_BODY", "after_data", "DROP PACKAGE BODY " + q, "ALTER PACKAGE " + q + " COMPILE"
 	case "function":
 		return "FUNCTION", phase, "DROP FUNCTION " + q, "ALTER FUNCTION " + q + " COMPILE"
 	case "procedure":
@@ -544,7 +562,10 @@ func (r *catalogReader) sequenceDDL(o *Object, ddl string) (string, error) {
 }
 
 func (r *catalogReader) readCommentsAndGrants() error {
-	rows, err := r.db.QueryContext(r.ctx, `SELECT TABLE_NAME,CAST(NULL AS VARCHAR(128)),COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER=? AND COMMENTS IS NOT NULL UNION ALL SELECT TABLE_NAME,COLUMN_NAME,COMMENTS FROM ALL_COL_COMMENTS WHERE OWNER=? AND COMMENTS IS NOT NULL`, r.schema, r.schema)
+	// ALL_COL_COMMENTS can silently omit columns in a separately named Schema
+	// owned by the current user on DM8. Read the native, exact-Schema catalogs;
+	// SYSTABLECOMMENTS also includes sequence comments absent from ALL_TAB_COMMENTS.
+	rows, err := r.db.QueryContext(r.ctx, `SELECT TVNAME,CAST(NULL AS VARCHAR(128)),COMMENT$ FROM SYS.SYSTABLECOMMENTS WHERE SCHNAME=? AND COMMENT$ IS NOT NULL UNION ALL SELECT TVNAME,COLNAME,COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME=? AND COMMENT$ IS NOT NULL`, r.schema, r.schema)
 	if err != nil {
 		return fmt.Errorf("注释清单不可读取: %w", err)
 	}
@@ -560,6 +581,11 @@ func (r *catalogReader) readCommentsAndGrants() error {
 			continue
 		}
 		kind, qn := "TABLE", Qualified(r.schema, table)
+		if parent.Kind == "sequence" {
+			kind = "SEQUENCE"
+		} else if parent.Kind == "view" {
+			kind = "VIEW"
+		}
 		name := table
 		if col.Valid && col.String != "" {
 			kind, qn, name = "COLUMN", qn+"."+Quote(col.String), table+"."+Quote(col.String)
@@ -617,15 +643,74 @@ func (r *catalogReader) readCommentsAndGrants() error {
 			continue
 		}
 		for _, unit := range units {
+			// Some DM8 builds emit unqualified, unquoted mixed-case object names
+			// here. The catalog OBJID proves the identity; bind that one reference
+			// to its exact stored name before mapping the selected Schema.
+			unit, err = bindNativeGrantObject(unit, r.schema, parent.Name)
+			if err != nil {
+				r.issue(&r.snapshot.Objects[i], err.Error())
+				break
+			}
 			r.snapshot.Objects[i].Units = append(r.snapshot.Objects[i].Units, Unit{SQL: unit, Phase: "after_data"})
 		}
 	}
 	return nil
 }
+
+func bindNativeGrantObject(ddl, schema, name string) (string, error) {
+	tokens, err := nativeTokens(ddl)
+	if err != nil {
+		return "", err
+	}
+	for i, token := range tokens {
+		if token.kind != 'i' || !strings.EqualFold(token.value, "ON") || i+1 >= len(tokens) {
+			continue
+		}
+		start := i + 1
+		if tokens[start].kind == 'i' {
+			switch strings.ToUpper(tokens[start].value) {
+			case "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "TYPE", "CLASS", "SEQUENCE":
+				start++
+			}
+		}
+		if start >= len(tokens) {
+			break
+		}
+		end := start
+		if end+2 < len(tokens) && tokens[end+1].value == "." {
+			if !strings.EqualFold(tokens[start].value, schema) {
+				return "", fmt.Errorf("原生授权对象 Schema 与目录归属不一致")
+			}
+			end += 2
+		}
+		if (tokens[end].kind != 'i' && tokens[end].kind != 'q') || !strings.EqualFold(tokens[end].value, name) {
+			return "", fmt.Errorf("原生授权对象名与目录标识不一致")
+		}
+		var prefix strings.Builder
+		last, depth := 0, 0
+		// Native metadata also omits quotes around mixed-case column grants.
+		// Only the identifier lists before ON are column names; principals and
+		// privilege keywords retain the native spelling.
+		for _, column := range tokens[:i] {
+			if column.value == "(" {
+				depth++
+			} else if column.value == ")" {
+				depth--
+			} else if depth > 0 && (column.kind == 'i' || column.kind == 'q') {
+				prefix.WriteString(ddl[last:column.start])
+				prefix.WriteString(Quote(column.value))
+				last = column.end
+			}
+		}
+		prefix.WriteString(ddl[last:tokens[start].start])
+		return prefix.String() + Qualified(schema, name) + ddl[tokens[end].end:], nil
+	}
+	return "", fmt.Errorf("原生授权缺少可确认的对象引用")
+}
 func (r *catalogReader) namedObject(name string) *Object {
 	for i := range r.snapshot.Objects {
 		o := &r.snapshot.Objects[i]
-		if o.Name == name && (o.Kind == "table" || o.Kind == "view" || o.Kind == "materialized_view") {
+		if o.Name == name && (o.Kind == "table" || o.Kind == "view" || o.Kind == "materialized_view" || o.Kind == "sequence") {
 			return o
 		}
 	}
@@ -637,9 +722,23 @@ func splitSimpleDDL(ddl string) ([]string, error) {
 		return nil, err
 	}
 	var units []string
-	start := 0
-	for _, t := range tokens {
-		if t.value == ";" {
+	start, depth := 0, 0
+	for i, t := range tokens {
+		if t.value == "(" {
+			depth++
+		} else if t.value == ")" {
+			depth--
+		}
+		// DM GET_DEPENDENT_DDL can join independent grants with CRLF and no
+		// semicolon. GRANT OPTION belongs to one statement; other top-level
+		// GRANT heads begin the next (never split procedural SQL here).
+		if depth == 0 && t.kind == 'i' && strings.EqualFold(t.value, "GRANT") && i > 0 && (i+1 >= len(tokens) || !strings.EqualFold(tokens[i+1].value, "OPTION")) {
+			if s := strings.TrimSpace(ddl[start:t.start]); s != "" {
+				units = append(units, s)
+			}
+			start = t.start
+		}
+		if depth == 0 && t.kind == 'p' && t.value == ";" {
 			s := strings.TrimSpace(ddl[start:t.start])
 			if s != "" {
 				units = append(units, s)

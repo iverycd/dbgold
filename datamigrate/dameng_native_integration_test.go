@@ -123,6 +123,7 @@ func TestDamengNativeIntegration(t *testing.T) {
 	sourceExec("INSERT INTO " + sq(parent) + ` ("Id","MixedText") VALUES (3,'after MV snapshot')`)
 	sourceExec("CREATE SYNONYM " + sq(syn) + " FOR " + sq(parent))
 	sourceExec("GRANT SELECT ON " + sq(parent) + " TO PUBLIC")
+	sourceExec("GRANT UPDATE(\"MixedText\") ON " + sq(parent) + " TO PUBLIC")
 	exec(dst, "CREATE TABLE "+dq(marker)+` ("Sentinel" INT)`)
 	exec(dst, "INSERT INTO "+dq(marker)+" VALUES (9876)")
 	require.EqualValues(t, 3, count(src, sq(audit)))
@@ -172,7 +173,7 @@ func TestDamengNativeIntegration(t *testing.T) {
 		require.Equal(t, "Memo MiXeD 中文", memo)
 		require.Equal(t, "2024-02-29 12:34:56.123456", stamp)
 		var comment string
-		require.NoError(t, dst.QueryRowContext(ctx, `SELECT COMMENTS FROM ALL_COL_COMMENTS WHERE OWNER=? AND TABLE_NAME=? AND COLUMN_NAME='MixedText'`, dstSchema, parent).Scan(&comment))
+		require.NoError(t, dst.QueryRowContext(ctx, `SELECT COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME=? AND TVNAME=? AND COLNAME='MixedText'`, dstSchema, parent).Scan(&comment))
 		require.Equal(t, "DM8 MiXeD 列注释", comment)
 		var value int
 		require.NoError(t, dst.QueryRowContext(ctx, "SELECT "+dq(fn)+"(7) FROM DUAL").Scan(&value))

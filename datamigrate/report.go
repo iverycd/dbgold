@@ -98,10 +98,12 @@ type NativeCategoryReport struct {
 }
 
 type NativeSchemaReport struct {
-	Preflight    *damengnative.Preflight `json:"preflight"`
-	Inventory    []damengnative.Object   `json:"inventory"`
-	Categories   []NativeCategoryReport  `json:"categories"`
-	Verification []damengnative.Issue    `json:"verification"`
+	Preflight     *damengnative.Preflight `json:"preflight"`
+	Inventory     []damengnative.Object   `json:"inventory"`
+	Categories    []NativeCategoryReport  `json:"categories"`
+	Verification  []damengnative.Issue    `json:"verification"`
+	pendingPlan   *damengnative.Preflight
+	pendingStates map[string]error
 }
 
 // AutoRepair is emitted only after successful CREATE or existing-column validation.

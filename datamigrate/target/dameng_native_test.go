@@ -36,11 +36,13 @@ func TestDamengNativeNamesAndNoRegeneration(t *testing.T) {
 
 func TestDamengNativeSQLScope(t *testing.T) {
 	valid := []string{
+		`CREATE TYPE "MixedOwner"."Name.With""Quote;,(" AS OBJECT ("Value" INT)`,
 		`CREATE TABLE "MixedOwner"."T" ("c" VARCHAR(20) DEFAULT 'a;b')`,
 		`CREATE UNIQUE INDEX "MixedOwner"."ix" ON "MixedOwner"."T" ("c")`,
 		`ALTER TABLE "MixedOwner"."T" DISABLE CONSTRAINT "FK"`,
 		`DROP VIEW "MixedOwner"."V"`,
 		`TRUNCATE TABLE "MixedOwner"."T"`,
+		`REFRESH MATERIALIZED VIEW "MixedOwner"."M" COMPLETE`,
 		`COMMENT ON COLUMN "MixedOwner"."T"."c" IS '中文'`,
 		`COMMENT ON COLUMN "T"."c" IS '中文'`,
 		`GRANT SELECT ON "MixedOwner"."T" TO "Reader"`,
@@ -58,6 +60,9 @@ func TestDamengNativeSQLScope(t *testing.T) {
 		`GRANT CREATE ANY TABLE TO "Reader"`,
 		`DELETE FROM "MixedOwner"."T"`,
 		`CREATE USER "Other" IDENTIFIED BY secret`,
+		`REFRESH MATERIALIZED VIEW "Other"."M" COMPLETE`,
+		`REFRESH MATERIALIZED VIEW "MixedOwner"."M" FAST`,
+		`REFRESH MATERIALIZED VIEW "MixedOwner"."M" COMPLETE;DROP TABLE "MixedOwner"."T"`,
 		`BEGIN EXECUTE IMMEDIATE 'DROP TABLE Other.T'; END;`,
 	}
 	for _, query := range invalid {
@@ -145,6 +150,21 @@ func TestDamengNativeBatchRejectsBeforeMutation(t *testing.T) {
 	require.ErrorContains(t, w.CopyDamengNativeBatch(context.Background(), table, [][]any{{"value"}}), "无损写入器")
 }
 
+func TestDamengNativeBatchDistinguishesNullAndEmptyLOB(t *testing.T) {
+	w, mock := mockNativeDM(t)
+	table := damengnative.Table{Name: "T", Schema: "MixedOwner", Columns: []damengnative.Column{{Name: "Body", DataType: "CLOB", Writable: true}, {Name: "Payload", DataType: "BLOB", Writable: true}}}
+	mock.ExpectBegin()
+	empty := mock.ExpectPrepare(regexp.QuoteMeta(`INSERT INTO "MixedOwner"."T" ("Body", "Payload") VALUES (EMPTY_CLOB(), EMPTY_BLOB())`))
+	empty.ExpectExec().WithArgs().WillReturnResult(sqlmock.NewResult(0, 1))
+	bound := mock.ExpectPrepare(regexp.QuoteMeta(`INSERT INTO "MixedOwner"."T" ("Body", "Payload") VALUES (?, ?)`))
+	bound.ExpectExec().WithArgs(nil, nil).WillReturnResult(sqlmock.NewResult(0, 1))
+	empty.ExpectExec().WithArgs().WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	err := w.CopyDamengNativeBatch(context.Background(), table, [][]any{{"", []byte{}}, {nil, nil}, {"", []byte{}}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestDamengNativeWholeProgramExecutionObserved(t *testing.T) {
 	w, mock := mockNativeDM(t)
 	query := `CREATE OR REPLACE PROCEDURE "MixedOwner"."p" AS BEGIN NULL; NULL; END;`
@@ -220,8 +240,15 @@ func TestDamengNativeValueBudgetIncludesNestedLOBs(t *testing.T) {
 	bound, err := nativeComplexValueAt(decimal, "Source", "Target", false)
 	require.NoError(t, err)
 	require.IsType(t, dm.DmDecimal{}, bound)
-	_, err = nativeComplexValueAt(dm.NewBlob([]byte{1, 2}), "Source", "Target", false)
-	require.ErrorContains(t, err, "对象内部")
+	bound, err = nativeComplexValueAt(dm.NewBlob([]byte{1, 2}), "Source", "Target", false)
+	require.NoError(t, err)
+	require.IsType(t, dm.DmBlob{}, bound)
+	negative := "-1234567890123456789.1234567890123456789"
+	exact, err := nativeExactUDTDecimal(negative)
+	require.NoError(t, err)
+	bound, err = nativeComplexValueAt(exact, "Source", "Target", false)
+	require.NoError(t, err)
+	require.Equal(t, negative, bound.(dm.DmDecimal).String())
 }
 
 func TestDamengNativeDefinitionComparisonPreservesSemantics(t *testing.T) {

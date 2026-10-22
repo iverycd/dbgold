@@ -235,6 +235,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		report.DataValidation = dataValidation
 		m.validateDataContent(ctx, &report)
 	}
+	m.finalizeDamengNativeEvents(ctx, &report)
 	m.recordOracleDamengTaskFailure(ctx, &report)
 	if m.cfg.CaptureRepair {
 		m.finishRepair(ctx, &report)

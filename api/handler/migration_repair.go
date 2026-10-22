@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -935,7 +936,14 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
-	_, dst, e := resolveRepairConnections(c, j, b, false)
+	needsLinkSource := false
+	needsNativeFinalState := datamigrate.NativeRepairHasFinalState(o)
+	if o.Native != nil {
+		for _, unit := range o.Native.Units {
+			needsLinkSource = needsLinkSource || unit.SourceSQLHash != ""
+		}
+	}
+	src, dst, e := resolveRepairConnections(c, j, b, needsLinkSource || needsNativeFinalState)
 	if e != nil {
 		repairError(c, e)
 		return
@@ -970,8 +978,40 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			return
 		}
 		defer w.Close()
+		if needsLinkSource || needsNativeFinalState {
+			r, err := buildSrcReader(src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
+			if err != nil {
+				finishRepair(a, o, fmt.Errorf("原生重试无法连接原始源库"))
+				return
+			}
+			defer r.Close()
+			if needsLinkSource {
+				reader, ok := r.(damengnative.LinkDDLReader)
+				if !ok {
+					finishRepair(a, o, fmt.Errorf("源库不支持重新核对 DBLink 凭据"))
+					return
+				}
+				ctx = damengnative.WithSourceLinkResolver(ctx, reader, b.SourceSchema)
+			}
+			if needsNativeFinalState {
+				cfg, err := recoveryConfig(b)
+				if err != nil {
+					finishRepair(a, o, err)
+					return
+				}
+				ctx, err = nativeRepairFinalizationContext(ctx, j.JobID, o.ID, r, w, cfg)
+				if err != nil {
+					finishRepair(a, o, err)
+					return
+				}
+			}
+		}
 		if setter, ok := w.(interface{ SetSourceType(string) }); ok {
 			setter.SetSourceType(j.SrcDBType)
+		}
+		if e := checkNativeRepairEventSafety(ctx, w, o); e != nil {
+			finishRepair(a, o, e)
+			return
 		}
 		units, e := target.ExecuteRepair(ctx, w, o, o.Units, func(units []repair.Unit) error {
 			return persistRepairProgress(a, o, units, nil)

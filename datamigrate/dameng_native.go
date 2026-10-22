@@ -106,14 +106,35 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		mapped.Schema = p.Target.Schema
 		mapped.Units = append([]damengnative.Unit{}, o.Units...)
 		mapped.External = append([]damengnative.Reference{}, o.External...)
+		if o.Materialized != nil {
+			materialized := *o.Materialized
+			materialized.SnapshotColumns = append([]string{}, o.Materialized.SnapshotColumns...)
+			materialized.RowIDColumns = append([]int{}, o.Materialized.RowIDColumns...)
+			materialized.Query, _, err = damengnative.RewriteSchema(materialized.Query, p.Source.Schema, p.Target.Schema)
+			if err != nil {
+				issue(o.Kind, o.Name, err.Error())
+			}
+			mapped.Materialized = &materialized
+			if materialized.Baseline {
+				if _, ok := w.(interface {
+					RebaseDamengNativeMaterialized(context.Context, damengnative.Object) error
+				}); !ok {
+					issue(o.Kind, o.Name, "目标写入器缺少带前后多重集核验的物化视图基线初始化能力")
+				}
+			}
+		}
 		for i, u := range mapped.Units {
-			sql, warnings, e := damengnative.RewriteSchema(u.SQL, p.Source.Schema, p.Target.Schema)
+			if o.EventTrigger && u.Phase == "event_activate" {
+				mapped.Units[i] = damengnative.Unit{SQL: damengnative.EventTriggerStateSQL(p.Target.Schema, o.Name, o.Status == "ENABLED"), Phase: u.Phase}
+				continue
+			}
+			unit, warnings, e := damengnative.RewriteUnit(u, p.Source.Schema, p.Target.Schema)
 			if e != nil {
 				issue(o.Kind, o.Name, e.Error())
 				continue
 			}
-			mapped.Units[i].SQL = sql
-			if o.Kind == "trigger" {
+			mapped.Units[i] = unit
+			if o.Kind == "trigger" && !o.EventTrigger {
 				if u.Phase == "restore" {
 					mapped.Units[i].Phase = "trigger_restore"
 				} else {
@@ -134,6 +155,15 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		}
 		if !o.Managed && len(o.Units) == 0 {
 			issue(o.Kind, o.Name, "没有可回放的原生 DDL，不能遗漏该对象")
+		}
+		if o.EventTrigger {
+			if _, ok := w.(interface {
+				InstallDamengNativeEvent(context.Context, damengnative.Object, damengnative.Unit) error
+				WithDamengNativeEventFinalization(context.Context, func(context.Context) error) error
+				SetDamengNativeEventState(context.Context, damengnative.Object, damengnative.Unit) error
+			}); !ok {
+				issue(o.Kind, o.Name, "目标写入器缺少事件触发器安装与最终启用生命周期")
+			}
 		}
 		p.Objects = append(p.Objects, mapped)
 	}
@@ -521,8 +551,18 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 			}
 		}
 	}
+	if err := m.executeNativePhase(ctx, w, p.Objects, "mv_prepare", states); err != nil {
+		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化视图基线准备", err))
+	}
+	if err := m.executeNativePhase(ctx, w, p.Objects, "mv_rebase", states); err != nil {
+		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化视图增量基线", err))
+	}
+	m.markNativeRowIDValidation(p, states)
 	if err := m.executeNativePhase(ctx, w, p.Objects, "triggers", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("触发器", err))
+	}
+	if err := m.executeNativePhase(ctx, w, p.Objects, "event_create", states); err != nil {
+		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("事件触发器禁用安装", err))
 	}
 	for _, o := range p.Objects {
 		if o.Kind == "trigger" && o.CompileSQL != "" {
@@ -534,8 +574,17 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	if err := m.executeNativePhase(ctx, w, p.Objects, "trigger_restore", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("触发器原始状态", err))
 	}
-	m.collectNativeResults(&report, p, states)
-	issues, err := w.VerifyDamengNative(ctx, p.Snapshot)
+	// Imported event hooks remain disabled throughout every target query and
+	// optional full data comparison. Their original states are restored in Run
+	// only after validateDataContent has finished successfully.
+	verify := *p.Snapshot
+	verify.Objects = append([]damengnative.Object{}, p.Snapshot.Objects...)
+	for i := range verify.Objects {
+		if verify.Objects[i].EventTrigger {
+			verify.Objects[i].Status = "DISABLED"
+		}
+	}
+	issues, err := w.VerifyDamengNative(ctx, &verify)
 	if err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("目标核验", err))
 	}
@@ -543,7 +592,7 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	if ctx.Err() != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("任务", ctx.Err()))
 	}
-	m.logMigrationCompletion("达梦 Schema 原生迁移结束，共 %d 个对象、%d 张数据表", len(p.Objects), len(p.Snapshot.Tables))
+	report.NativeSchema.pendingPlan, report.NativeSchema.pendingStates = p, states
 	return report
 }
 

@@ -12,7 +12,7 @@
 - 只提供整个 Schema 的“全部对象 + 数据”流程。不支持指定表、排除对象、仅结构、仅数据，或通过视图/对象页单独发起达梦同库任务。
 - 保留对象和列的目录大小写、达梦类型、默认值及原生过程体。Schema 改名仅替换 SQL 标识符中的源 Schema；字符串常量及动态 SQL 字符串不改写。预检中出现相关提示时，须核对应用和过程内的字符串引用。
 
-目录盘点结合原生字典与兼容视图，覆盖可提取原生定义的表、表数据、主键/唯一/检查/外键约束、普通及全文索引、分区归属、注释、独立序列、自增列、视图、触发器、函数、过程、包及包体、类型/类及其主体、域、私有同义词、对象/列授权和可处理的物化视图。由父对象创建的内部对象仍保留在清单中，并按父对象结果核对。
+目录盘点结合原生字典与兼容视图，覆盖可提取原生定义的表、表数据、主键/唯一/检查/外键约束、普通及全文索引、分区归属、注释、独立序列、自增列、视图、普通及非 TIMER 事件触发器、函数、过程、包及包体、类型/类及其主体、域、私有同义词、私有 DBLink、对象/列授权和可处理的物化视图。由父对象创建的内部对象仍保留在清单中，并按父对象结果核对。
 
 任务先创建基础对象，再复制数据，随后建立外键、业务触发器和其他依赖对象，恢复可读取的启停状态并编译核对。复制数据期间不运行新迁移的业务触发器。物化视图采用已存储的快照数据，避免用重新查询源基表代替快照迁移。
 
@@ -28,16 +28,27 @@
 
 原生对象修复仅重试原任务冻结的完整 SQL 单元，过程体只读，已成功单元不会重新执行。数据接续先核对冻结表结构和当前数据状态；非空目标必须明确确认仅清空该表后完整重导。执行结果未知时禁止盲目重放，应先核对目标实际状态。
 
+## 物化视图、事件触发器和 DBLink
+
+`COMPLETE` / `NEVER` 物化视图继续直接复制已存储的快照，允许快照陈旧。`FAST` / `FORCE` 先在源端受服务端强制的只读事务中核对“快照数据 = 定义查询结果”的多重集，包括重复行数量。证明为当前快照后，仍先复制快照；目标端再次核对，在冻结账本中执行一次 `COMPLETE` 初始化目标自己的日志基线，并在执行后重新核对全部输出。最后恢复源 `FAST` / `FORCE`、刷新时机和调度配置。源端不会执行刷新。直接投影的 ROWID 会明确记录为目标物理 ROWID 映射，其他列及重复行数量不得改变。
+
+事件触发器保留完整原始定义。非 TIMER 事件通过同一物理连接创建并立即调用 `SP_ENABLE_EVT_TRIGGER` 停用，停用成功后才把安装步骤记为成功；不使用全库停用开关。CHECKPOINT 事件还必须在目标预检和安装连接上证明 `ENABLE_CKPT_EVENT_TRIG=0`，否则同样阻止。整个导入、编译和内容核对期间保持停用。全部核对通过后先恢复物化视图自动刷新策略，再使用最后一个固定连接恢复源事件启停状态，不再执行后续迁移查询或 DDL。恢复自动任务和事件标志着停写导入窗口结束；随后关闭最终会话可能正常触发已恢复的 LOGOUT 逻辑。目标已有的启用事件钩子可能在迁移 DDL 中产生副作用，预检会按其实际事件作用范围阻止执行，包括其他 Schema 所有但针对当前 Schema 的事件钩子。
+
+`ON DATABASE` 保留数据库级作用范围。源端已启用的 LOGIN/LOGOUT 逻辑也可能在建立或关闭源连接时运行；停写安排需要包含这些自动写入路径，现有 Go 接口不能在登录发生前设置会话抑制。不能把 Schema DDL 钩子的测试结果解释为所有数据库事件均无连接副作用。
+
+DBLink 的登录口令只保留在内存中用于原生执行。页面、报告、修复账本与执行错误不保存口令，只展示脱敏定义和冻结源定义的指纹。重启后重试必须能重新连接原源库，读取同一 DBLink 原生定义并核对指纹；定义或凭据变化后拒绝旧计划。目标服务器需要的 DPI/ODBC/OCI 库、DSN 或 MAL 配置仍按外部资源提前准备，不会修改实例配置。
+
+复杂对象和集合支持嵌套对象、数组、NULL、空/非空 BLOB/CLOB，以及高精度负定点数。仓库固定达梦驱动 v1.8.23 的本地副本，仅修复嵌套 LOB 的内容偏移/字符字节长度及负定点数尾数截断，保留上游版权信息；补丁和直接调用驱动编码器/解码器的回归测试见 [third_party/dm/DBGOLD_PATCHES.md](../third_party/dm/DBGOLD_PATCHES.md)。
+
 ## 当前会阻止迁移的具体情况
 
 “盘点到”不等于所有厂商扩展均可自动回放。遇到以下情况会明确报错，而不是跳过对象后宣称全量成功：
 
 - 原始 DDL、对象归属、约束状态、源序列/自增边界无法读取或无法安全解析；目录出现尚无回放实现的对象类型。
 - 无法确认源目标实例身份、版本或语义参数，或者目标缺少外部依赖、表空间、授权主体及必要权限。
-- 需要 `FAST` / `FORCE` 增量刷新的物化视图。新表的 ROWID 和刷新日志不能证明与源快照等价；当前不通过重新全量刷新来替代原快照。无法确认承载表或不认识其辅助表选项的物化视图也会阻止。
-- 私有 DBLink 的定义包含 `IDENTIFIED` / `PASSWORD` 等登录凭据。当前不把这些凭据写入计划或报告，也没有自动目标凭据配置流程。
-- Schema/数据库事件触发器。DM8 创建触发器后立即启用，不能用原子禁用创建来保证迁移期间没有 DDL、登录或定时事件副作用；发现源事件触发器或可能影响写入的目标事件触发器时阻止迁移。普通表 DML 触发器在其他对象及自增状态恢复之后安装。
-- UDT 内含非空 LOB，或含驱动已知无法精确保留的负 38 位、奇数 scale 定点数。复杂类型表会先完整只读扫描并检查编码能力，发现这些情况后不会开始覆盖。
+- 陈旧的 `FAST` / `FORCE` 快照，或不能证明输出多重集相等的快照。完整保留它们同时需要旧增量日志、每视图刷新水位及物理 ROWID 对应关系；当前公开 `REFRESH` 接口不能注册旧水位，不能用刷新后的新数据冒充源快照。由 ROWID 派生的表达式无法安全映射时也会阻止。无法确认承载表或不认识其辅助表选项的物化视图同样会阻止。
+- DBLink 的原生元数据只返回掩码、绑定占位符或未支持的不可移植口令密文，无法建立可回放的完整定义；重试时源定义或凭据与冻结指纹不符。
+- 源 TIMER 事件触发器，以及未能证明后台 CHECKPOINT 事件调度关闭的 CHECKPOINT 触发器。DM8 创建后立即启用，后台事件在随后的禁用前存在执行窗口，目前没有已验证的原子禁用创建接口。目标已有、可能影响本任务的启用事件钩子也会阻止迁移。
 - 单个普通 LOB 超过驱动可安全读取的长度，或 LOB 长度无法核验。
 - 驱动没有明确无损编码器的可写列类型，例如未被识别为可复制对象类型的 `BFILE`、`XMLTYPE` 或厂商扩展类型。复杂对象/集合值需由驱动返回支持的结构/数组表示；无法无损绑定的元素会报错。
 - 数据不是有效 UTF-8、LOB/对象值无法安全读取或绑定，或执行时发现目标定义、状态与计划不符。结构预检不全量扫描每个业务值，因此数据阶段仍可能失败。
@@ -51,7 +62,9 @@
 ```sh
 /Users/kay/sdk/go1.25.5/bin/go test ./datamigrate/... ./api/handler
 /Users/kay/sdk/go1.25.5/bin/go build ./...
-cd frontend
+cd third_party/dm
+/Users/kay/sdk/go1.25.5/bin/go test ./...
+cd ../../frontend
 npm test
 npm run build
 ```
@@ -71,5 +84,16 @@ npm run build
 测试在这两个 Schema 内创建并清理唯一命名的夹具，包含混合大小写、约束/索引/注释、序列、自增进度、函数/过程/包、触发器、对象类型数据、同义词/授权以及故意陈旧的 COMPLETE/ON DEMAND 物化视图。断言 38 位定点数、二进制/NUL、LOB、触发器复制无副作用、后续写入、冲突关闭零变更、覆盖恢复和目标独有对象保留。
 
 缺少任一变量或 DDL 开关时测试显式跳过；启用后目录权限、夹具语法或迁移失败都会使测试失败。仅看到编译和跳过结果不表示已通过真实 DM8 验收。
+
+其他独立实库夹具：
+
+- 物化视图：`TestDamengNativeMaterializedPipelineIntegration` 使用 `DAMENG_NATIVE_SOURCE_DSN/SOURCE_SCHEMA/TARGET_DSN/TARGET_SCHEMA`、`DAMENG_NATIVE_ALLOW_DDL=1`、`DAMENG_NATIVE_ALLOW_MV_DDL=1`；底层 `TestDamengNativeMaterializedBaselineIntegration` 使用 `DAMENG_DM_TEST_TARGET_DSN/TARGET_SCHEMA`、`DAMENG_DM_TEST_ALLOW_DDL=1`、`DAMENG_DM_TEST_ALLOW_MV_DDL=1`。
+- 标量/UDT：`TestDamengNativeIntegrationExactCopy`、`TestDamengNativeIntegrationNestedUDTExactRoundtrip` 使用 `DAMENG_DM_TEST_TARGET_DSN/TARGET_SCHEMA` 和 `DAMENG_DM_TEST_ALLOW_DDL=1`。
+- 事件：`TestDamengNativeEventLifecycleIntegration` 使用 `DAMENG_NATIVE_EVENT_DSN/EVENT_SCHEMA`；`TestDamengNativeEventMigrationIntegration` 使用 `DAMENG_NATIVE_EVENT_SOURCE_DSN/EVENT_SOURCE_SCHEMA/EVENT_TARGET_DSN/EVENT_TARGET_SCHEMA`，均需 `DAMENG_NATIVE_ALLOW_DDL=1`。
+- DBLink：`TestDamengNativeDBLinkIntegration` 使用 `DAMENG_NATIVE_LINK_SOURCE_DSN/SOURCE_SCHEMA/TARGET_DSN/TARGET_SCHEMA/REMOTE_CONNECT/REMOTE_USERNAME/REMOTE_PASSWORD` 及 `DAMENG_NATIVE_ALLOW_DDL=1`。远端必须是从源、目标服务器均可访问的第三个专用 DM 实例，测试只读取远端目录，不创建远端对象。
+
+2026-10-22 已在从本机现有镜像启动的独立临时 DM8 容器中实测：`1-4-6-2024.09.19-243448-20119-ENT`、字典版本 `0x7000c`、`COMPATIBLE_MODE=2`、UTF-8、大小写敏感。上述普通整 Schema 夹具通过同实例异名 Schema 和跨实例两种运行；FAST/FORCE × 主键/ROWID 四种组合通过基线、完整内容核对、用户索引保留与后续实际 FAST 刷新；嵌套 UDT/LOB、标量 NULL/空 LOB、事件 DDL 钩子完整迁移和三实例 DBLink 查询通过。实测同时修复了兼容视图遗漏 MV/列注释、原生授权缺少分隔符/大小写引号、原生包编译语法及驱动集合描述符等问题。
+
+这仍不是“所有对象无例外”的完整验收：陈旧 FAST/FORCE、TIMER、未满足 CHECKPOINT 前提的对象继续在预检阻止；分区、所有表达式索引/约束变体、所有数据库事件、其他 DM8 构建/兼容模式以及生产规模故障恢复尚需进一步实测。临时夹具通过不会撤销这些边界。
 
 夹具语法参考达梦官方 SQL 手册：[包](https://eco.dameng.com/document/dm/zh-cn/pm/package.html)、[自定义类型](https://eco.dameng.com/document/dm/zh-cn/pm/custom-type)、[物化视图](https://eco.dameng.com/document/dm/zh-cn/pm/materialized-view.html)。

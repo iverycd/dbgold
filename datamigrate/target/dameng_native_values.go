@@ -28,6 +28,37 @@ func ValidateDamengNativeValue(column damengnative.Column, value any) error {
 // DamengNativeValueSize traverses source UDT attributes so nested LOBs count
 // against the same batch byte budget as ordinary scalar columns.
 func DamengNativeValueSize(value any) (int, error) { return nativeValueSize(value, 0) }
+
+// DM's Oracle-compatible mode treats an empty scalar LOB bind as NULL. An
+// explicit constructor is the server's distinct non-NULL empty LOB value.
+func nativeEmptyLOBExpression(value any) (string, error) {
+	switch v := value.(type) {
+	case *dm.DmBlob:
+		if v == nil || !v.Valid {
+			return "", nil
+		}
+		n, err := v.GetLength()
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			return "EMPTY_BLOB()", nil
+		}
+	case *dm.DmClob:
+		if v == nil || !v.Valid {
+			return "", nil
+		}
+		n, err := v.GetLength()
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			return "EMPTY_CLOB()", nil
+		}
+	}
+	return "", nil
+}
+
 func nativeValueSize(value any, depth int) (int, error) {
 	if depth > 64 {
 		return 0, fmt.Errorf("达梦对象值嵌套超过 64 层，不能安全复制")

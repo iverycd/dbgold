@@ -36,6 +36,18 @@ func (r *DaMengNativeReader) SnapshotDamengNative(ctx context.Context) (*damengn
 	return damengnative.ReadCatalog(ctx, r.db, r.schema, true)
 }
 
+func (r *DaMengNativeReader) ReadDamengNativeLinkDDL(ctx context.Context, name string) (string, error) {
+	var ddl sql.NullString
+	if err := r.db.QueryRowContext(ctx, `SELECT DBMS_METADATA.GET_DDL('DB_LINK',?,?)`, name, r.schema).Scan(&ddl); err != nil {
+		// Some servers include SQL/password fragments in metadata errors.
+		return "", fmt.Errorf("重新读取源 DBLink 定义失败")
+	}
+	if !ddl.Valid || strings.TrimSpace(ddl.String) == "" {
+		return "", fmt.Errorf("源 DBLink 原生定义为空")
+	}
+	return damengnative.StripClientDelimiter(ddl.String), nil
+}
+
 func (r *DaMengNativeReader) CountRows(ctx context.Context, table string) (int64, error) {
 	var n int64
 	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+damengnative.Qualified(r.schema, table)).Scan(&n)
@@ -110,6 +122,11 @@ func (r *DaMengNativeReader) OpenDamengNativeScan(ctx context.Context, t damengn
 			switch base {
 			case "NUMBER", "NUMERIC", "DEC", "DECIMAL", "FLOAT":
 				q = "CAST(" + q + " AS VARCHAR(256))"
+			case "ROWID":
+				// DM's Go driver returns the physical ROWID payload as int64.
+				// Use the documented server encoding, preserving site/partition
+				// components rather than rebuilding addresses in application code.
+				q = "ROWIDTOCHAR(" + q + ")"
 			}
 		}
 		projection = append(projection, q+" AS "+damengnative.Quote(c.Name))

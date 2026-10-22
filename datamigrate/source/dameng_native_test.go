@@ -43,6 +43,22 @@ func TestDaMengNativeMVScanUsesOriginalSnapshotStorage(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
+func TestDaMengNativeROWIDUsesServerCanonicalEncoding(t *testing.T) {
+	db, m, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	r := &DaMengNativeReader{&DaMengReader{db: db, schema: "App"}}
+	m.ExpectQuery(`SELECT ROWIDTOCHAR\("Rid"\) AS "Rid" FROM "App"."Storage"`).WillReturnRows(sqlmock.NewRows([]string{"Rid"}).AddRow("AAABAAAAACAAAAAAAy"))
+	scan, err := r.OpenDamengNativeScan(context.Background(), damengnative.Table{Name: "Storage", Schema: "App", Columns: []damengnative.Column{{Name: "Rid", DataType: "ROWID", Writable: true}}})
+	require.NoError(t, err)
+	require.True(t, scan.Next())
+	values, err := scan.Values()
+	require.NoError(t, err)
+	require.Equal(t, "AAABAAAAACAAAAAAAy", values[0])
+	require.NoError(t, scan.Close())
+	require.NoError(t, m.ExpectationsWereMet())
+}
+
 func TestDaMengNativeLegacyPageDoesNotCleanNUL(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
