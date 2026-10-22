@@ -263,6 +263,7 @@ func TestDisabledConstraintsAreInactiveBeforeRowsOrFKValidation(t *testing.T) {
 	objects := []Object{{Kind: "table", Name: "T", Schema: "App"}, {Kind: "constraint", Name: "Check", Schema: "App", Table: "T", Status: "DISABLED", ConstraintType: "C", Managed: true}, {Kind: "constraint", Name: "FK", Schema: "App", Table: "T", Status: "DISABLED", ConstraintType: "R"}}
 	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: objects}, constraints: map[string]string{"Check": "C", "FK": "R"}}
 	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("TABLE", "T", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TABLE "App"."T" ("Id" INT,CONSTRAINT "Check" CHECK ("Id">0),CONSTRAINT "FK" FOREIGN KEY ("Id") REFERENCES "App"."P"("Id"))`))
+	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("CONSTRAINT", "FK", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`ALTER TABLE "App"."T" ADD CONSTRAINT "FK" FOREIGN KEY("Id") REFERENCES "App"."P"("Id")`))
 	r.extractDefinitions()
 	require.False(t, HasErrors(r.snapshot.Issues))
 	units := r.snapshot.Objects[0].Units
@@ -297,22 +298,33 @@ func TestEventTriggerSourceFreezesDefinitionAndFinalState(t *testing.T) {
 	m.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs("App", "Event").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("ENABLED"))
 	r.extractDefinitions()
 	require.Empty(t, r.snapshot.Issues)
-	require.Equal(t, []Unit{{SQL: `CREATE TRIGGER "App"."Event" AFTER DDL ON SCHEMA BEGIN NULL; END;`, Phase: "event_create"}, {SQL: EventTriggerStateSQL("App", "Event", true), Phase: "event_activate"}}, r.snapshot.Objects[0].Units)
+	require.Equal(t, []Unit{{SQL: `CREATE TRIGGER "App"."Event" AFTER DDL ON SCHEMA DISABLE BEGIN NULL; END;`, Phase: "event_create"}, {SQL: EventTriggerStateSQL("App", "Event", true), Phase: "event_activate"}}, r.snapshot.Objects[0].Units)
 	require.NoError(t, m.ExpectationsWereMet())
 	require.False(t, nativeTriggerIsEvent(`CREATE TRIGGER "Tr" AFTER UPDATE OF "DATABASE" ON "App"."T" BEGIN NULL; END;`))
 }
 
-func TestTimerTriggerSourceBlocksUnsafeImmediateScheduling(t *testing.T) {
-	db, m, e := sqlmock.New()
-	require.NoError(t, e)
-	defer db.Close()
-	r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "trigger", Name: "Timer", Schema: "App", EventTrigger: true}}}}
-	m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("TRIGGER", "Timer", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TRIGGER "App"."Timer" AFTER TIMER ON DATABASE FOR EACH 1 MINUTE BEGIN NULL; END;`))
-	r.extractDefinitions()
-	require.True(t, HasErrors(r.snapshot.Issues))
-	require.Contains(t, r.snapshot.Issues[0].Reason, "TIMER")
-	require.Empty(t, r.snapshot.Objects[0].Units)
-	require.NoError(t, m.ExpectationsWereMet())
+func TestBackgroundEventSourceFreezesDisabledInstallAndOriginalState(t *testing.T) {
+	for _, event := range []string{"TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE", "CHECKPOINT ON DATABASE"} {
+		for _, state := range []string{"Y", "N"} {
+			t.Run(event+state, func(t *testing.T) {
+				db, m, e := sqlmock.New()
+				require.NoError(t, e)
+				defer db.Close()
+				r := &catalogReader{ctx: context.Background(), db: db, schema: "App", snapshot: &Snapshot{Objects: []Object{{Kind: "trigger", Name: "Event", Schema: "App", EventTrigger: true}}}}
+				ddl := `CREATE TRIGGER "App"."Event" AFTER ` + event + ` WHEN(1=1) DECLARE X INT; BEGIN X=1; END;`
+				m.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("TRIGGER", "Event", "App").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(ddl))
+				m.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs("App", "Event").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(state))
+				r.extractDefinitions()
+				require.Empty(t, r.snapshot.Issues)
+				o := r.snapshot.Objects[0]
+				require.Len(t, o.Units, 2)
+				require.Equal(t, "event_create", o.Units[0].Phase)
+				require.Contains(t, o.Units[0].SQL, "WHEN(1=1) DISABLE DECLARE X INT; BEGIN X=1; END;")
+				require.Equal(t, EventTriggerStateSQL("App", "Event", state == "Y"), o.Units[1].SQL)
+				require.NoError(t, m.ExpectationsWereMet())
+			})
+		}
+	}
 }
 
 func TestTargetDatabaseEventHooksAreCheckedAcrossSchemas(t *testing.T) {

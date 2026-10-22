@@ -2,8 +2,10 @@ package datamigrate
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/repair"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +59,42 @@ func TestNativeRepairFinalizationRechecksSourcePlanAndConfiguredContent(t *testi
 				require.Error(t, err)
 			}
 			require.Len(t, w.statements, writes, "finalization proof must be read-only")
+		})
+	}
+}
+
+func TestNativeRepairFinalizationNormalizesLegacyEventInstallHeaderOnly(t *testing.T) {
+	for _, drift := range []string{"none", "body", "state"} {
+		t.Run(drift, func(t *testing.T) {
+			r, w, objects := nativeFinalizationManifest(t)
+			writes := len(w.statements)
+			for i := range r.snapshot.Objects {
+				hook := &r.snapshot.Objects[i]
+				if !hook.EventTrigger {
+					continue
+				}
+				for j := range hook.Units {
+					if hook.Units[j].Phase != "event_create" {
+						continue
+					}
+					var err error
+					hook.Units[j].SQL, err = damengnative.DisabledEventTriggerDDL(hook.Units[j].SQL)
+					require.NoError(t, err)
+					if drift == "body" {
+						hook.Units[j].SQL = strings.Replace(hook.Units[j].SQL, "NULL;", "PRINT 'changed'; NULL;", 1)
+					}
+				}
+				if drift == "state" {
+					hook.Status = "DISABLED"
+				}
+			}
+			err := VerifyNativeRepairFinalization(context.Background(), r, w, Config{Mode: "all", Content: "both", TargetSchema: "Dst"}, objects)
+			if drift == "none" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Len(t, w.statements, writes)
 		})
 	}
 }

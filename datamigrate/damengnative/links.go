@@ -354,6 +354,14 @@ func PublicLinkSQL(sql string) (string, error) {
 // ExecuteUnit keeps sensitive SQL out of generic writer/observer entry points.
 func ExecuteUnit(ctx context.Context, writer Writer, object Object, unit Unit) error {
 	switch unit.Phase {
+	case "mv_history":
+		writer, ok := writer.(interface {
+			RestoreDamengNativeMaterializedHistory(context.Context, Object, Unit) error
+		})
+		if !ok {
+			return fmt.Errorf("写入器缺少陈旧物化快照与增量日志整体恢复能力")
+		}
+		return writer.RestoreDamengNativeMaterializedHistory(ctx, object, unit)
 	case "mv_rebase":
 		writer, ok := writer.(interface {
 			RebaseDamengNativeMaterialized(context.Context, Object) error

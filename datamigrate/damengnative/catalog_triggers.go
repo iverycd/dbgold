@@ -70,8 +70,8 @@ func nativeTriggerTarget(ddl, owner string) (kind, schema string, err error) {
 	return "", "", fmt.Errorf("无法定位触发器 ON 目标")
 }
 
-// The public DM8 SQL grammar creates triggers enabled. Event hooks require the
-// dedicated pinned-session installer, not the ordinary DML trigger path.
+// Event hooks use the dedicated installer and final state phase rather than
+// the ordinary DML trigger path.
 func nativeTriggerIsEvent(ddl string) bool {
 	kind, _, err := nativeTriggerTarget(ddl, "")
 	return err != nil || kind == "schema" || kind == "database"
@@ -79,6 +79,39 @@ func nativeTriggerIsEvent(ddl string) bool {
 
 func EventTriggerScope(ddl, owner string) (kind, schema string, err error) {
 	return nativeTriggerTarget(ddl, owner)
+}
+
+// DisabledEventTriggerDDL installs the original hook in the disabled state
+// atomically. DM8 accepts DISABLE immediately before DECLARE/BEGIN, after the
+// complete event/schedule/WHEN header. A trailing DISABLE after END does not
+// have this meaning. Keeping the state in CREATE closes the background TIMER
+// and CHECKPOINT window that CREATE followed by SP_ENABLE_EVT_TRIGGER leaves.
+// Only that header clause changes; identifiers, conditions, comments, strings
+// and the complete procedural body retain their original bytes.
+func DisabledEventTriggerDDL(ddl string) (string, error) {
+	ts, err := nativeTokens(ddl)
+	if err != nil {
+		return "", err
+	}
+	if kind, _, err := nativeTriggerTarget(ddl, ""); err != nil || kind != "schema" && kind != "database" {
+		return "", fmt.Errorf("原子禁用安装需要完整的事件触发器定义")
+	}
+	for i, token := range ts {
+		if token.kind != 'i' || !strings.EqualFold(token.value, "DECLARE") && !strings.EqualFold(token.value, "BEGIN") {
+			continue
+		}
+		if i > 0 && ts[i-1].kind == 'i' {
+			previous := ts[i-1]
+			if strings.EqualFold(previous.value, "DISABLE") {
+				return ddl, nil
+			}
+			if strings.EqualFold(previous.value, "ENABLE") {
+				return ddl[:previous.start] + "DISABLE" + ddl[previous.end:], nil
+			}
+		}
+		return ddl[:token.start] + "DISABLE " + ddl[token.start:], nil
+	}
+	return "", fmt.Errorf("事件触发器缺少完整的 DECLARE/BEGIN 执行单元")
 }
 
 // EventTriggerHasTimer detects the event header only; names, comments and

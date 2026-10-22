@@ -149,7 +149,16 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 // Presence alone never proves a failed CREATE completed: read the definition
 // back, and require an exact immutable unit before reconciling success.
 func (w *DaMengNativeWriter) reconcileNativeUnit(ctx context.Context, object damengnative.Object, unit int) (done, retry bool, err error) {
-	snapshot, err := damengnative.ReadCatalog(ctx, w.db, w.schema, true)
+	if unit < 0 || unit >= len(object.Units) {
+		return false, false, fmt.Errorf("原生核验步骤超出冻结清单")
+	}
+	if object.Units[unit].Phase == "mv_history" {
+		return w.ReconcileDamengNativeMaterializedHistory(ctx, object, object.Units[unit])
+	}
+	if object.Units[unit].Phase == "mv_rebase" {
+		return w.ReconcileDamengNativeMaterialized(ctx, object)
+	}
+	snapshot, err := damengnative.ReadCatalogForVerification(ctx, w.db, w.schema)
 	if err != nil {
 		return false, false, err
 	}
@@ -192,7 +201,15 @@ func (w *DaMengNativeWriter) reconcileNativeUnit(ctx context.Context, object dam
 		}
 	}
 	for _, candidate := range found.Units {
-		if strings.TrimSpace(candidate.SQL) == query && (expected.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(expected, candidate)) {
+		matches := strings.TrimSpace(candidate.SQL) == query
+		if object.EventTrigger && object.Units[unit].Phase == "event_create" {
+			disabled, normalizeErr := damengnative.DisabledEventTriggerDDL(query)
+			if normalizeErr != nil {
+				return false, false, normalizeErr
+			}
+			matches = nativeDefinitionsEqual(disabled, candidate.SQL)
+		}
+		if matches && (expected.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(expected, candidate)) {
 			if object.EventTrigger && object.Units[unit].Phase == "event_create" && found.Status != "DISABLED" {
 				return false, false, nil
 			}

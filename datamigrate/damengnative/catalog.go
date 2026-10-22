@@ -157,26 +157,38 @@ type catalogObject struct {
 	info1, info2, info3     int64
 }
 type catalogReader struct {
-	ctx         context.Context
-	db          *sql.DB
-	schema      string
-	snapshot    *Snapshot
-	raw         map[int64]catalogObject
-	byRaw       map[int64][]int
-	index       map[string]int
-	constraints map[string]string
-	definitions bool
+	ctx          context.Context
+	db           *sql.DB
+	schema       string
+	snapshot     *Snapshot
+	raw          map[int64]catalogObject
+	byRaw        map[int64][]int
+	index        map[string]int
+	constraints  map[string]string
+	definitions  bool
+	verification bool
 }
 
 // ReadCatalog inventories every schema-owned dictionary object before extracting
 // definitions. A failed extraction remains an explicit issue, never an omission.
 // definitions=false is the target inventory path and performs no source scans.
 func ReadCatalog(ctx context.Context, db *sql.DB, schema string, definitions bool) (*Snapshot, error) {
+	return readCatalog(ctx, db, schema, definitions, false)
+}
+
+// ReadCatalogForVerification reads native definitions without synthesizing a
+// second source migration plan from already imported MV staging objects.
+func ReadCatalogForVerification(ctx context.Context, db *sql.DB, schema string) (*Snapshot, error) {
+	return readCatalog(ctx, db, schema, true, true)
+}
+
+func readCatalog(ctx context.Context, db *sql.DB, schema string, definitions, verification bool) (*Snapshot, error) {
 	profile, err := ReadProfile(ctx, db, schema)
 	if err != nil {
 		return nil, err
 	}
 	r := &catalogReader{ctx: ctx, db: db, schema: schema, snapshot: &Snapshot{Profile: profile}, raw: map[int64]catalogObject{}, byRaw: map[int64][]int{}, index: map[string]int{}, constraints: map[string]string{}, definitions: definitions}
+	r.verification = verification
 	if err = r.inventory(); err != nil {
 		return nil, err
 	}
@@ -202,10 +214,17 @@ func ReadCatalog(ctx context.Context, db *sql.DB, schema string, definitions boo
 	}
 	if definitions {
 		r.extractDefinitions()
+		if !verification {
+			if err = r.prepareMaterializedHistory(); err != nil {
+				r.issue(nil, err.Error())
+			}
+		}
 	}
 	if err = r.readTables(); err != nil {
 		return nil, err
 	}
+	r.materializedHistoryTables()
+	r.deferMaterializedEmptyIndexes()
 	if err = r.readCommentsAndGrants(); err != nil {
 		return nil, err
 	}
@@ -392,6 +411,21 @@ func (r *catalogReader) inventory() error {
 		raw := r.raw[id]
 		for _, i := range positions {
 			o := &r.snapshot.Objects[i]
+			// DM's identity DROP/ADD creates a native sequence owned by the
+			// table in INFO2; it is deliberately absent from ALL_SEQUENCES.
+			// The dictionary relation, never an SEQ_ name prefix, proves that
+			// replaying the table's identity restores this derived object.
+			if raw.sub == "SEQ" && raw.info2 > 0 {
+				if owner, ok := r.raw[raw.info2]; ok && owner.sub == "UTAB" {
+					if parent := r.base(owner.id); parent != nil {
+						o.Managed = true
+						o.Generated = true
+						o.ParentID = parent.ID
+						o.Table = parent.Name
+						o.Dependencies = appendUnique(o.Dependencies, parent.ID)
+					}
+				}
+			}
 			if raw.pid > 0 {
 				if parent := r.base(raw.pid); parent != nil && parent.ID != o.ID {
 					o.ParentID = parent.ID
@@ -435,14 +469,14 @@ func appendUnique(ss []string, s string) []string {
 }
 
 func (r *catalogReader) readConstraints() error {
-	rows, err := r.db.QueryContext(r.ctx, `SELECT CONSTRAINT_NAME,TABLE_NAME,CONSTRAINT_TYPE,INDEX_NAME,STATUS FROM ALL_CONSTRAINTS WHERE OWNER=? ORDER BY TABLE_NAME,CONSTRAINT_NAME`, r.schema)
+	rows, err := r.db.QueryContext(r.ctx, `SELECT CONSTRAINT_NAME,TABLE_NAME,CONSTRAINT_TYPE,INDEX_NAME,STATUS,VALIDATED FROM ALL_CONSTRAINTS WHERE OWNER=? ORDER BY TABLE_NAME,CONSTRAINT_NAME`, r.schema)
 	if err != nil {
 		return fmt.Errorf("读取达梦约束/内部索引归属: %w", err)
 	}
 	for rows.Next() {
 		var name, table, kind string
-		var idx, status sql.NullString
-		if err = rows.Scan(&name, &table, &kind, &idx, &status); err != nil {
+		var idx, status, validated sql.NullString
+		if err = rows.Scan(&name, &table, &kind, &idx, &status, &validated); err != nil {
 			rows.Close()
 			return err
 		}
@@ -463,6 +497,7 @@ func (r *catalogReader) readConstraints() error {
 		case "Y", "1", "ENABLE", "ENABLED":
 			o.Status = "ENABLED"
 		}
+		o.ConstraintNoValidate = o.Status == "ENABLED" && !strings.EqualFold(validated.String, "VALIDATED")
 		for id, raw := range r.raw {
 			if raw.sub == "CONS" && raw.name == name && id >= 134217728 && id <= 150994943 && name == "CONS"+strconv.FormatInt(id, 10) {
 				o.Generated = true
@@ -497,7 +532,19 @@ func (r *catalogReader) readConstraints() error {
 		if j, ok := r.index["index\x00"+name]; ok {
 			r.snapshot.Objects[j].Managed = true
 			r.snapshot.Objects[j].Generated = flags&1 != 0
-			r.snapshot.Objects[j].ParentID = ObjectID(r.schema, "table", table)
+			if parent := r.namedObject(table); parent != nil {
+				r.snapshot.Objects[j].ParentID = parent.ID
+			} else {
+				for _, parent := range r.snapshot.Objects {
+					if parent.Name == table && (parent.Kind == "table_partition" || parent.Kind == "index_partition") {
+						r.snapshot.Objects[j].ParentID = parent.ID
+						break
+					}
+				}
+				if r.snapshot.Objects[j].ParentID == "" {
+					r.snapshot.Objects[j].ParentID = ObjectID(r.schema, "table", table)
+				}
+			}
 			r.snapshot.Objects[j].Table = table
 		}
 	}
@@ -538,6 +585,9 @@ func (r *catalogReader) readDependencies() error {
 func (r *catalogReader) readTables() error {
 	for _, o := range r.snapshot.Objects {
 		if o.Kind != "table" || o.Managed {
+			continue
+		}
+		if o.Generated && o.Table == "" && (strings.HasPrefix(o.Name, "DBGOLD_MV_RID_") || strings.HasPrefix(o.Name, "DBGOLD_MV_BUF_") || strings.HasPrefix(o.Name, "DBGOLD_MV_LBUF_") || strings.HasPrefix(o.Name, "DBGOLD_MV_REDEF_")) {
 			continue
 		}
 		t := Table{ObjectID: o.ID, Name: o.Name, Schema: r.schema}
@@ -598,7 +648,9 @@ func (r *catalogReader) readTables() error {
 			if err = r.db.QueryRowContext(r.ctx, `SELECT COUNT(*) FROM `+Qualified(r.schema, sourceName)).Scan(&t.Rows); err != nil {
 				r.issue(&o, "源数据行数不可读: "+err.Error())
 			}
-			r.identityRestore(&o, &t)
+			if !r.immutableMaterializedStaging(t.Name) {
+				r.identityRestore(&o, &t)
+			}
 			r.validateLOBLengths(&o, &t, sourceName)
 		} else {
 			t.Rows = -1
@@ -660,7 +712,11 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 		var seed, increment, current sql.NullString
 		q := `SELECT CAST(IDENT_SEED(?) AS VARCHAR(80)),CAST(IDENT_INCR(?) AS VARCHAR(80)),CAST(IDENT_CURRENT(?) AS VARCHAR(80))`
 		name := Qualified(r.schema, t.Name)
-		if err := r.db.QueryRowContext(r.ctx, q, name, name, name).Scan(&seed, &increment, &current); err != nil {
+		sourceName := name
+		if t.SourceName != "" {
+			sourceName = Qualified(r.schema, t.SourceName)
+		}
+		if err := r.db.QueryRowContext(r.ctx, q, sourceName, sourceName, sourceName).Scan(&seed, &increment, &current); err != nil {
 			r.issue(o, "自增列状态读取失败: "+err.Error())
 			return
 		}
@@ -676,12 +732,17 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 			r.issue(o, "自增列下一值溢出 int64")
 			return
 		}
-		if t.Rows == 0 && cur == s {
-			next = s
-		}
 		t.Restore = append(t.Restore, Unit{SQL: "ALTER TABLE " + name + " DROP IDENTITY", Phase: "restore"}, Unit{SQL: fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s IDENTITY(%d, %d)", name, Quote(c.Name), next, step), Phase: "restore"})
 		if next != s {
-			r.snapshot.Issues = append(r.snapshot.Issues, Issue{ObjectID: o.ID, Kind: o.Kind, Name: o.Name, Severity: "warning", Reason: fmt.Sprintf("自增列 %s 保留原种子 %d、步长 %d、当前值 %d 的审计信息；目标用下一值 %d 作为续号种子", c.Name, s, step, cur, next)})
+			reason := fmt.Sprintf("自增列 %s 保留原种子 %d、步长 %d、当前值 %d 的审计信息；目标用下一值 %d 作为续号种子", c.Name, s, step, cur, next)
+			if t.Rows == 0 && cur == s {
+				// IDENT_CURRENT returns the seed both before any allocation
+				// and after that first value has been used and deleted. Public
+				// read-only metadata cannot distinguish these states. Never
+				// guess that a consumed value is safe to allocate again.
+				reason += "；源空表的当前值等于种子，无法只读区分首值是否已消费；采用安全续号边界，可能跳过尚未使用的首值"
+			}
+			r.snapshot.Issues = append(r.snapshot.Issues, Issue{ObjectID: o.ID, Kind: o.Kind, Name: o.Name, Severity: "warning", Reason: reason})
 		}
 	}
 }

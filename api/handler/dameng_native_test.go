@@ -120,3 +120,45 @@ func TestDamengNativeRecoverySynchronizesOnlySuccessfulExactUnits(t *testing.T) 
 	require.False(t, object.Units[1].Selected)
 	require.Equal(t, "succeeded", object.Status)
 }
+
+func TestDamengNativeUnknownRetryRequiresFrozenPlanAndConnectionBinding(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		seedHandlerRepair(t)
+		sql := `CREATE OR REPLACE PROCEDURE "Dst"."P" AS BEGIN NULL; END;`
+		native := damengnative.Object{ID: "table", Kind: "procedure", Name: "P", Schema: "Dst", Units: []damengnative.Unit{{SQL: sql, Phase: "after_data"}}}
+		object := repair.Object{ID: "table", Kind: "procedure", TargetName: "P", Schema: "Dst", Status: "unknown", Native: &native, NativeFingerprint: damengnative.Fingerprint(native), Units: []repair.Unit{{ID: "create", SQL: sql, OriginalSQL: sql, Status: "unknown"}}}
+		if changed {
+			object.Units[0].SQL += " DROP TABLE X"
+		}
+		require.NoError(t, store.DB.Model(&store.DataMigrationJob{}).Where("job_id = ?", "job").Updates(map[string]any{"src_db_type": "dameng", "dst_db_type": "dameng", "dst_schema": "Dst"}).Error)
+		require.NoError(t, store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", "job", "table").Update("object_json", repairJSON(object)).Error)
+		response := repairRequest(t, http.MethodPost, "/jobs/job/repairs/table", `{"version":1,"request_id":"retry","confirmed":true}`, 1, ExecuteMigrationRepair)
+		require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+		if changed {
+			require.Contains(t, response.Body.String(), "不是可执行 DDL 的目标对象", "被修改的原生单元必须在调度前拒绝")
+		} else {
+			require.Contains(t, response.Body.String(), "请绑定有权限的原目标连接", "可信未知计划必须继续核对原连接，不能在 API 层被一律拒绝")
+		}
+		var attempts int64
+		require.NoError(t, store.DB.Model(&store.MigrationRepairAttempt{}).Count(&attempts).Error)
+		require.Zero(t, attempts, "缺少原连接或计划被修改时不能调度 SQL")
+	}
+}
+
+func TestDamengNativeDependencyPolicyRemainsPausedUntilWholeJobProof(t *testing.T) {
+	seedHandlerRepair(t)
+	dependency := nativeRecoveryFixture("MV", "after_data", "mv_history", "mv_restore")
+	dependency.Status = "pending"
+	dependency.Units[0].Status, dependency.Units[1].Status = "succeeded", "succeeded"
+	row := store.MigrationRepairObject{JobID: "job", ObjectID: dependency.ID, ObjectJSON: repairJSON(dependency), Version: 1}
+	require.NoError(t, store.DB.Create(&row).Error)
+	object := nativeRecoveryFixture("Dependent", "after_data")
+	object.Dependencies = []string{dependency.ID}
+	require.NoError(t, validateMigrationRepairDependencies("job", object), "不能要求先恢复自动刷新，才能继续安装依赖对象")
+	dependency.Units[1].Status = "unknown"
+	require.NoError(t, store.DB.Model(&row).Update("object_json", repairJSON(dependency)).Error)
+	require.ErrorContains(t, validateMigrationRepairDependencies("job", object), "依赖尚未成功")
+	dependency.Units[1].Status, dependency.DataStatus = "succeeded", "failed"
+	require.NoError(t, store.DB.Model(&row).Update("object_json", repairJSON(dependency)).Error)
+	require.ErrorContains(t, validateMigrationRepairDependencies("job", object), "数据尚未迁移完成")
+}

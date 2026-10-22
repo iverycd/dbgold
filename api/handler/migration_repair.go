@@ -896,7 +896,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, store.ErrRepairConflict)
 		return
 	}
-	if o.Status == "unknown" {
+	if o.Status == "unknown" && o.Native == nil {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
@@ -914,7 +914,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		return
 	}
 	for _, u := range o.Units {
-		if u.Status == "unknown" || u.Status == "running" {
+		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil {
 			repairError(c, fmt.Errorf("存在未知执行结果，不允许自动重放"))
 			return
 		}

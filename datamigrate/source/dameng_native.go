@@ -134,6 +134,11 @@ func (r *DaMengNativeReader) OpenDamengNativeScan(ctx context.Context, t damengn
 	if len(projection) == 0 {
 		return nil, fmt.Errorf("源表 %s 没有可写入列", name)
 	}
+	if t.CaptureRowID {
+		// This travels with the same continuous cursor as the row itself. A
+		// second scan or value-based join cannot pair duplicate/keyless rows.
+		projection = append(projection, `ROWIDTOCHAR(ROWID) AS "__DBGOLD_SOURCE_ROWID"`)
+	}
 	rows, err := r.db.QueryContext(ctx, "SELECT "+strings.Join(projection, ", ")+" FROM "+damengnative.Qualified(r.schema, name))
 	if err != nil {
 		return nil, err

@@ -58,6 +58,8 @@ func TestDamengNativeIntegration(t *testing.T) {
 	parent, child, audit, ident := prefix+"Mixed", prefix+"Child", prefix+"Audit", prefix+"Identity"
 	seq, view, fn, proc, pkg, trig := prefix+"Seq", prefix+"View", prefix+"Fn", prefix+"Proc", prefix+"Pkg", prefix+"Trigger"
 	typ, typed, mv, syn, marker := prefix+"Type", prefix+"Typed", prefix+"MV", prefix+"Syn", prefix+"TargetOnly"
+	emptyIdent, unusedIdent := prefix+"EmptyIdentity", prefix+"UnusedIdentity"
+	nvParent, nvChild, nvFK := prefix+"NvParent", prefix+"NvChild", prefix+"NvFK"
 	q := damengnative.Quote
 	sq := func(name string) string { return damengnative.Qualified(srcSchema, name) }
 	dq := func(name string) string { return damengnative.Qualified(dstSchema, name) }
@@ -73,6 +75,8 @@ func TestDamengNativeIntegration(t *testing.T) {
 			"DROP TABLE " + qualify(child) + " CASCADE CONSTRAINTS", "DROP TABLE " + qualify(typed) + " CASCADE CONSTRAINTS",
 			"DROP TABLE " + qualify(parent) + " CASCADE CONSTRAINTS", "DROP TABLE " + qualify(audit) + " CASCADE CONSTRAINTS",
 			"DROP TABLE " + qualify(ident) + " CASCADE CONSTRAINTS", "DROP TABLE " + qualify(marker) + " CASCADE CONSTRAINTS",
+			"DROP TABLE " + qualify(emptyIdent) + " CASCADE CONSTRAINTS", "DROP TABLE " + qualify(unusedIdent) + " CASCADE CONSTRAINTS",
+			"DROP TABLE " + qualify(nvChild) + " CASCADE CONSTRAINTS", "DROP TABLE " + qualify(nvParent) + " CASCADE CONSTRAINTS",
 			"DROP TABLE " + qualify(storage) + " CASCADE CONSTRAINTS", "DROP TYPE " + qualify(typ), "DROP SEQUENCE " + qualify(seq),
 		} {
 			_, _ = db.ExecContext(clean, statement)
@@ -103,6 +107,15 @@ func TestDamengNativeIntegration(t *testing.T) {
 	sourceExec("INSERT INTO " + sq(ident) + ` ("Note") VALUES ('keep')`)
 	sourceExec("INSERT INTO " + sq(ident) + ` ("Note") VALUES ('delete highest')`)
 	sourceExec("DELETE FROM " + sq(ident) + ` WHERE "Id"=13`)
+	for _, name := range []string{emptyIdent, unusedIdent} {
+		sourceExec("CREATE TABLE " + sq(name) + ` ("Id" BIGINT IDENTITY(100,2) PRIMARY KEY, "Note" VARCHAR(32))`)
+	}
+	sourceExec("INSERT INTO " + sq(emptyIdent) + ` ("Note") VALUES ('consumed first seed')`)
+	sourceExec("DELETE FROM " + sq(emptyIdent))
+	sourceExec("CREATE TABLE " + sq(nvParent) + ` ("Id" INT PRIMARY KEY)`)
+	sourceExec("CREATE TABLE " + sq(nvChild) + ` ("Id" INT PRIMARY KEY,"ParentId" INT)`)
+	sourceExec("INSERT INTO " + sq(nvChild) + " VALUES(1,999)")
+	sourceExec("ALTER TABLE " + sq(nvChild) + " ADD CONSTRAINT " + q(nvFK) + ` FOREIGN KEY("ParentId") REFERENCES ` + sq(nvParent) + `("Id") ENABLE NOVALIDATE`)
 	sourceExec("CREATE SEQUENCE " + sq(seq) + " START WITH 50 INCREMENT BY 7 NOCACHE NOCYCLE")
 	for i := 0; i < 2; i++ {
 		var value int64
@@ -162,6 +175,15 @@ func TestDamengNativeIntegration(t *testing.T) {
 		require.EqualValues(t, 3, count(dst, dq(audit)), "数据复制不能触发业务触发器产生额外审计行")
 		require.EqualValues(t, 1, count(dst, dq(child)))
 		require.EqualValues(t, 1, count(dst, dq(ident)))
+		require.Zero(t, count(dst, dq(emptyIdent)))
+		require.Zero(t, count(dst, dq(unusedIdent)))
+		require.Zero(t, count(dst, dq(nvParent)))
+		require.EqualValues(t, 1, count(dst, dq(nvChild)), "源 NOVALIDATE 允许的原有行必须保留")
+		var sourceValidated, targetValidated, targetStatus string
+		require.NoError(t, src.QueryRowContext(ctx, `SELECT VALIDATED FROM ALL_CONSTRAINTS WHERE OWNER=? AND CONSTRAINT_NAME=?`, srcSchema, nvFK).Scan(&sourceValidated))
+		require.NoError(t, dst.QueryRowContext(ctx, `SELECT VALIDATED,STATUS FROM ALL_CONSTRAINTS WHERE OWNER=? AND CONSTRAINT_NAME=?`, dstSchema, nvFK).Scan(&targetValidated, &targetStatus))
+		require.Equal(t, sourceValidated, targetValidated)
+		require.Equal(t, "ENABLED", targetStatus)
 		require.EqualValues(t, 2, count(dst, dq(mv)), "必须保留旧物化视图快照")
 		var text, amount, memo, stamp string
 		var payload, raw []byte
@@ -194,6 +216,13 @@ func TestDamengNativeIntegration(t *testing.T) {
 	var identity int64
 	require.NoError(t, dst.QueryRowContext(ctx, "SELECT \"Id\" FROM "+dq(ident)+` WHERE "Note"='target next'`).Scan(&identity))
 	require.EqualValues(t, 16, identity, "删除源最大 ID 后仍保留实际自增进度")
+	for _, name := range []string{emptyIdent, unusedIdent} {
+		exec(dst, "INSERT INTO "+dq(name)+` ("Note") VALUES ('safe continuation')`)
+		require.NoError(t, dst.QueryRowContext(ctx, "SELECT \"Id\" FROM "+dq(name)).Scan(&identity))
+		require.EqualValues(t, 102, identity, "公开只读状态无法区分未使用首值与已消费后删除，续号必须避免复用已消费的首值")
+		require.NoError(t, src.QueryRowContext(ctx, "SELECT IDENT_CURRENT(?) FROM DUAL", sq(name)).Scan(&identity))
+		require.EqualValues(t, 100, identity, "冻结续号不能消费源自增值")
+	}
 	exec(dst, "INSERT INTO "+dq(parent)+` ("Id","MixedText") VALUES (4,'target write after migration')`)
 	require.EqualValues(t, 4, count(dst, dq(audit)), "迁移完成后触发器应可执行")
 

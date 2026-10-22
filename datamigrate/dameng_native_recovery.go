@@ -100,6 +100,9 @@ func previewDamengNativeRecovery(ctx context.Context, r source.Reader, w target.
 	if damengnative.Fingerprint(table.Columns) != damengnative.Fingerprint(obj.NativeTable.Columns) {
 		return p, fmt.Errorf("源列定义偏离冻结原生计划")
 	}
+	if table.CaptureRowID != obj.NativeTable.CaptureRowID || table.RowIDMapping != obj.NativeTable.RowIDMapping {
+		return p, fmt.Errorf("源物理 ROWID 映射偏离冻结原生计划")
+	}
 	var targetTable *damengnative.Table
 	for _, t := range dst.Tables {
 		if t.Name == p.TargetTable {
@@ -245,6 +248,17 @@ func runDamengNativeRecovery(ctx context.Context, r source.Reader, w target.Writ
 			return finish(e)
 		}
 		res.TargetRows = 0
+	}
+	if p.NativeTable.CaptureRowID && res.TargetRows == 0 {
+		// This map is owned by the frozen table import. A previous batch stores
+		// rows and mappings atomically; whole-table recovery clears both before
+		// acquiring new target ROWIDs, never appending to an old physical map.
+		if p.NativeTable.RowIDMapping == "" || p.NativeTable.RowIDMapping == p.TargetTable {
+			return finish(fmt.Errorf("冻结物理 ROWID 映射表无效"))
+		}
+		if e = nw.ExecuteDamengNative(ctx, "TRUNCATE TABLE "+damengnative.Qualified(cfg.TargetSchema, p.NativeTable.RowIDMapping)); e != nil {
+			return finish(e)
+		}
 	}
 	n, e := copyDamengNativeTable(ctx, nr, nw, *p.NativeTable, cfg.TargetSchema, cfg.PageSize, func(n int64) error {
 		res.CommittedRows = n

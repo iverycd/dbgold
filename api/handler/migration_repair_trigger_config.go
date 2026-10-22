@@ -165,7 +165,11 @@ func validateMigrationRepairDependencies(jobID string, object repair.Object) err
 	}
 	for _, id := range object.Dependencies {
 		dependency, ok := objects[id]
-		if !ok || dependency.Status != "succeeded" {
+		// Native automatic policies remain pending until the entire job passes
+		// verification. A dependent installation needs their ordinary DDL/data,
+		// and must not force another MV or event to resume prematurely.
+		installed := ok && (dependency.Status == "succeeded" || dependency.Native != nil && nativeRecoveryInstallationComplete(dependency))
+		if !installed {
 			return fmt.Errorf("原生对象依赖尚未成功: %s", id)
 		}
 		if dependency.DataStatus != "" && dependency.DataStatus != "succeeded" && dependency.DataStatus != "not_required" {

@@ -115,6 +115,17 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 				issue(o.Kind, o.Name, err.Error())
 			}
 			mapped.Materialized = &materialized
+			if materialized.History != nil {
+				mapped.Materialized.History, err = damengnative.RewriteMaterializedHistory(materialized.History, p.Source.Schema, p.Target.Schema)
+				if err != nil {
+					issue(o.Kind, o.Name, err.Error())
+				}
+				if _, ok := w.(interface {
+					RestoreDamengNativeMaterializedHistory(context.Context, damengnative.Object, damengnative.Unit) error
+				}); !ok {
+					issue(o.Kind, o.Name, "目标写入器缺少陈旧快照及增量日志整体恢复能力")
+				}
+			}
 			if materialized.Baseline {
 				if _, ok := w.(interface {
 					RebaseDamengNativeMaterialized(context.Context, damengnative.Object) error
@@ -124,6 +135,10 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			}
 		}
 		for i, u := range mapped.Units {
+			if u.Phase == "mv_history" && mapped.Materialized != nil && mapped.Materialized.History != nil {
+				mapped.Units[i] = damengnative.Unit{SQL: damengnative.MaterializedHistorySQL(p.Target.Schema, o.Name, mapped.Materialized.History), Phase: u.Phase}
+				continue
+			}
 			if o.EventTrigger && u.Phase == "event_activate" {
 				mapped.Units[i] = damengnative.Unit{SQL: damengnative.EventTriggerStateSQL(p.Target.Schema, o.Name, o.Status == "ENABLED"), Phase: u.Phase}
 				continue
@@ -300,7 +315,11 @@ func preflightDamengNativeValues(ctx context.Context, r damengnative.Reader, sna
 				if err != nil {
 					break
 				}
-				if len(values) != len(columns) {
+				expectedWidth := len(columns)
+				if table.CaptureRowID {
+					expectedWidth++
+				}
+				if len(values) != expectedWidth {
 					err = fmt.Errorf("原生数据扫描的可写列数量不符")
 					break
 				}
@@ -430,11 +449,17 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	}
 	tables := make([]string, 0, len(p.Snapshot.Tables))
 	for _, t := range p.Snapshot.Tables {
+		if t.Shadow {
+			continue
+		}
 		tables = append(tables, nativeSourceTable(t))
 	}
 	m.freezeDataValidation(ctx, tables)
 	for i := range m.validationTables {
 		for _, t := range p.Snapshot.Tables {
+			if t.Shadow {
+				continue
+			}
 			if m.validationTables[i].name == nativeSourceTable(t) {
 				m.validationTables[i].target = t.Name
 			}
@@ -557,6 +582,25 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	if err := m.executeNativePhase(ctx, w, p.Objects, "mv_rebase", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化视图增量基线", err))
 	}
+	// History recovery is one frozen group: every base table, snapshot staging
+	// table and log staging table must be loaded before any baseline is changed.
+	// A failed group keeps all business hooks and automatic refreshes paused.
+	if nativeHasMaterializedHistory(p.Objects) {
+		if len(states) > 0 || damengnative.HasErrors(report.NativeSchema.Verification) {
+			m.collectNativeResults(&report, p, states)
+			return report
+		}
+		if err := m.executeNativePhase(ctx, w, p.Objects, "mv_history", states); err != nil {
+			report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("陈旧物化快照与增量日志", err))
+			m.collectNativeResults(&report, p, states)
+			return report
+		}
+	}
+	if err := m.executeNativePhase(ctx, w, p.Objects, "after_history", states); err != nil {
+		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化承载表索引", err))
+		m.collectNativeResults(&report, p, states)
+		return report
+	}
 	m.markNativeRowIDValidation(p, states)
 	if err := m.executeNativePhase(ctx, w, p.Objects, "triggers", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("触发器", err))
@@ -594,6 +638,15 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	}
 	report.NativeSchema.pendingPlan, report.NativeSchema.pendingStates = p, states
 	return report
+}
+
+func nativeHasMaterializedHistory(objects []damengnative.Object) bool {
+	for _, object := range objects {
+		if object.Materialized != nil && object.Materialized.History != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeFailure(name string, err error) damengnative.Issue {

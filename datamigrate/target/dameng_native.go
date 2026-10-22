@@ -642,6 +642,9 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 	if table.Schema != "" && table.Schema != w.schema {
 		return fmt.Errorf("原生数据写入 schema 与目标不一致")
 	}
+	if table.CaptureRowID != (table.RowIDMapping != "") || table.RowIDMapping == table.Name || strings.ContainsRune(table.RowIDMapping, 0) {
+		return fmt.Errorf("原生 ROWID 映射计划不完整或目标表无效")
+	}
 	var columns []damengnative.Column
 	var names, placeholders []string
 	hasIdentity := false
@@ -662,13 +665,26 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 		return fmt.Errorf("表 %s 没有可写列", table.Name)
 	}
 	converted := make([][]any, len(rows))
+	sourceRowIDs := make([]string, len(rows))
 	bytes := 0
 	for i, row := range rows {
-		if len(row) != len(columns) {
+		width := len(columns)
+		if table.CaptureRowID {
+			width++
+		}
+		if len(row) != width {
 			return fmt.Errorf("表 %s 行列数不匹配", table.Name)
 		}
-		converted[i] = make([]any, len(row))
-		for j, value := range row {
+		if table.CaptureRowID {
+			sourceRID, e := nativeCanonicalRowID(row[len(columns)])
+			if e != nil {
+				return fmt.Errorf("表 %s 的源 ROWID 无效: %w", table.Name, e)
+			}
+			sourceRowIDs[i] = sourceRID
+			bytes += len(sourceRowIDs[i])
+		}
+		converted[i] = make([]any, len(columns))
+		for j, value := range row[:len(columns)] {
 			v, size, err := nativeCopyValue(columns[j], value, w.schema)
 			if err != nil {
 				return fmt.Errorf("%s.%s: %w", table.Name, columns[j].Name, err)
@@ -716,7 +732,15 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 			_ = stmt.Close()
 		}
 	}()
-	for _, row := range converted {
+	var mappingStmt *sql.Stmt
+	if table.CaptureRowID {
+		mappingStmt, err = tx.PrepareContext(ctx, "INSERT INTO "+damengnative.Qualified(w.schema, table.RowIDMapping)+` ("SourceRID", "TargetRID") VALUES (?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer mappingStmt.Close()
+	}
+	for rowIndex, row := range converted {
 		rowPlaceholders := append([]string{}, placeholders...)
 		bind := make([]any, 0, len(row))
 		for j, value := range row {
@@ -731,6 +755,9 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 			}
 		}
 		statement := "INSERT INTO " + qualified + " (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(rowPlaceholders, ", ") + ")"
+		if table.CaptureRowID {
+			statement += " RETURNING ROWIDTOCHAR(ROWID) INTO ?"
+		}
 		stmt := prepared[statement]
 		if stmt == nil {
 			// A table with many LOB columns can produce many empty/NULL
@@ -748,8 +775,20 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 			}
 			prepared[statement] = stmt
 		}
+		var targetRowID string
+		if table.CaptureRowID {
+			bind = append(bind, sql.Out{Dest: &targetRowID})
+		}
 		if _, err = stmt.ExecContext(ctx, bind...); err != nil {
 			return err
+		}
+		if table.CaptureRowID {
+			if _, err = nativeCanonicalRowID(targetRowID); err != nil {
+				return fmt.Errorf("表 %s 未返回有效目标 ROWID: %w", table.Name, err)
+			}
+			if _, err = mappingStmt.ExecContext(ctx, sourceRowIDs[rowIndex], targetRowID); err != nil {
+				return fmt.Errorf("表 %s 的 ROWID 映射写入失败: %w", table.Name, err)
+			}
 		}
 	}
 	if hasIdentity {
@@ -761,12 +800,48 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 	return tx.Commit()
 }
 
+func nativeCanonicalRowID(value any) (string, error) {
+	var text string
+	switch v := value.(type) {
+	case string:
+		text = v
+	case []byte:
+		text = string(v)
+	default:
+		return "", fmt.Errorf("需要 ROWIDTOCHAR 返回的字符串")
+	}
+	if len(text) != 18 {
+		return "", fmt.Errorf("ROWIDTOCHAR 长度无效")
+	}
+	for _, r := range text {
+		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '+' || r == '/') {
+			return "", fmt.Errorf("ROWIDTOCHAR 编码无效")
+		}
+	}
+	return text, nil
+}
+
 func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *damengnative.Snapshot) ([]damengnative.Issue, error) {
-	actual, err := damengnative.ReadCatalog(ctx, w.db, w.schema, true)
+	actual, err := damengnative.ReadCatalogForVerification(ctx, w.db, w.schema)
 	if err != nil {
 		return nil, err
 	}
 	issues := []damengnative.Issue{}
+	expectedObjects := map[string]damengnative.Object{}
+	for _, object := range expected.Objects {
+		expectedObjects[object.Kind+"\x00"+object.Name] = object
+	}
+	for _, issue := range actual.Issues {
+		if issue.Severity != "error" {
+			continue
+		}
+		if object, included := expectedObjects[issue.Kind+"\x00"+issue.Name]; included {
+			issue.ObjectID = object.ID
+			issues = append(issues, issue)
+		} else if issue.ObjectID == "" {
+			issues = append(issues, issue)
+		}
+	}
 	objects := map[string]damengnative.Object{}
 	for _, o := range actual.Objects {
 		objects[o.Kind+"\x00"+o.Name] = o
@@ -797,17 +872,37 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 		if (strings.EqualFold(want.Status, "DISABLED") || strings.EqualFold(want.Status, "ENABLED")) && got.Status != want.Status {
 			issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标对象启停状态与源端不同"})
 		}
+		if want.Kind == "constraint" && want.ConstraintNoValidate != got.ConstraintNoValidate {
+			issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标约束 VALIDATE/NOVALIDATE 状态与源端不同"})
+		}
 		if !want.Managed {
+			candidates := got.Units
+			if want.Kind == "table" && want.Generated {
+				// A frozen exchange buffer also owns explicit indexes required by
+				// EXCHANGE. ReadCatalog inventories their definitions separately.
+				candidates = append([]damengnative.Unit{}, candidates...)
+				for _, object := range actual.Objects {
+					if object.Kind == "index" && object.Table == want.Name {
+						candidates = append(candidates, object.Units...)
+					}
+				}
+			}
 			for _, unit := range want.Units {
-				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" {
+				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_history" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" {
 					continue
 				}
 				mappedUnit, _, rewriteErr := damengnative.RewriteUnit(unit, expected.Profile.Schema, w.schema)
 				if rewriteErr != nil {
 					return issues, rewriteErr
 				}
+				if want.EventTrigger && unit.Phase == "event_create" {
+					mappedUnit.SQL, rewriteErr = damengnative.DisabledEventTriggerDDL(mappedUnit.SQL)
+					if rewriteErr != nil {
+						return issues, rewriteErr
+					}
+				}
 				match := false
-				for _, candidate := range got.Units {
+				for _, candidate := range candidates {
 					if nativeDefinitionsEqual(mappedUnit.SQL, candidate.SQL) && (unit.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(mappedUnit, candidate)) {
 						match = true
 						break
@@ -856,6 +951,17 @@ func nativeDefinitionsEqual(a, b string) bool {
 			tokens = tokens[:len(tokens)-1]
 		}
 		for i, token := range tokens {
+			if len(token) > 2 && token[0] == '"' && token[len(token)-1] == '"' {
+				name := nativeTokenName(token)
+				plain := name == strings.ToUpper(name)
+				for j, c := range name {
+					plain = plain && (c >= 'A' && c <= 'Z' || c == '_' || c == '$' || c == '#' || j > 0 && c >= '0' && c <= '9')
+				}
+				if plain {
+					tokens[i] = name
+				}
+				continue
+			}
 			if !strings.HasPrefix(token, "'") && !strings.HasPrefix(token, `"`) && !strings.HasPrefix(strings.ToUpper(token), "Q'") && !strings.HasPrefix(strings.ToUpper(token), "NQ'") {
 				tokens[i] = strings.ToUpper(token)
 			}
@@ -872,6 +978,7 @@ func nativeDefinitionsEqual(a, b string) bool {
 				}
 			}
 		}
+		tokens = nativeNormalizeInheritedPartitionStorage(tokens)
 		return strings.Join(tokens, "\x00"), nil
 	}
 	x, err := canonical(a)
@@ -880,6 +987,58 @@ func nativeDefinitionsEqual(a, b string) bool {
 	}
 	y, err := canonical(b)
 	return err == nil && x == y
+}
+
+// GET_DDL makes an inherited partition storage clause explicit. Removing an
+// exact repetition of the table-level clause preserves every physical option;
+// a different tablespace or storage option must still fail definition proof.
+func nativeNormalizeInheritedPartitionStorage(tokens []string) []string {
+	if len(tokens) < 3 || tokens[0] != "CREATE" || tokens[1] != "TABLE" {
+		return tokens
+	}
+	type clause struct{ start, end, depth int }
+	var storage []clause
+	depth, partitioned := 0, false
+	for i := 0; i < len(tokens); i++ {
+		if tokens[i] == "PARTITION" && i+1 < len(tokens) && tokens[i+1] == "BY" && depth == 0 {
+			partitioned = true
+		}
+		if tokens[i] == "STORAGE" && i+1 < len(tokens) && tokens[i+1] == "(" {
+			nested, end := 1, i+2
+			for ; end < len(tokens) && nested > 0; end++ {
+				if tokens[end] == "(" {
+					nested++
+				}
+				if tokens[end] == ")" {
+					nested--
+				}
+			}
+			if nested == 0 {
+				storage = append(storage, clause{i, end, depth})
+			}
+		}
+		if tokens[i] == "(" {
+			depth++
+		}
+		if tokens[i] == ")" {
+			depth--
+		}
+	}
+	if !partitioned || len(storage) < 2 {
+		return tokens
+	}
+	parent := storage[len(storage)-1]
+	if parent.depth != 0 {
+		return tokens
+	}
+	definition := strings.Join(tokens[parent.start:parent.end], "\x00")
+	for i := len(storage) - 2; i >= 0; i-- {
+		child := storage[i]
+		if child.depth == 1 && strings.Join(tokens[child.start:child.end], "\x00") == definition {
+			tokens = append(tokens[:child.start], tokens[child.end:]...)
+		}
+	}
+	return tokens
 }
 
 func nativeColumnsEqual(a, b []damengnative.Column) bool {

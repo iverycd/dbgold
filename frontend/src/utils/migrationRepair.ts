@@ -91,7 +91,7 @@ export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
   return object.units?.length === 2 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(unit.status))
 }
 export function canRetryNative(object: RepairObject): boolean {
-  return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['unknown', 'running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql && !['unknown', 'running'].includes(unit.status))
+  return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql)
 }
 export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryNative(object)
 

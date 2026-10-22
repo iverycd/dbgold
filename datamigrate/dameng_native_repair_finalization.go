@@ -99,6 +99,13 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 		}
 		for _, unit := range object.Units {
 			mapped, _, rewriteErr := damengnative.RewriteUnit(unit, snapshot.Profile.Schema, destination.Profile.Schema)
+			if unit.Phase == "mv_history" && object.Materialized != nil && object.Materialized.History != nil {
+				plan, mapErr := damengnative.RewriteMaterializedHistory(object.Materialized.History, snapshot.Profile.Schema, destination.Profile.Schema)
+				rewriteErr = mapErr
+				if mapErr == nil {
+					mapped = damengnative.Unit{SQL: damengnative.MaterializedHistorySQL(destination.Profile.Schema, object.Name, plan), Phase: unit.Phase}
+				}
+			}
 			if unit.Phase == "event_activate" {
 				mapped = damengnative.Unit{SQL: damengnative.EventTriggerStateSQL(destination.Profile.Schema, object.Name, object.Status == "ENABLED"), Phase: unit.Phase}
 				rewriteErr = nil
@@ -106,9 +113,22 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 			if rewriteErr != nil {
 				return rewriteErr
 			}
+			if object.EventTrigger && unit.Phase == "event_create" {
+				mapped.SQL, rewriteErr = damengnative.DisabledEventTriggerDDL(mapped.SQL)
+				if rewriteErr != nil {
+					return rewriteErr
+				}
+			}
 			matched := false
 			for _, expected := range original.Native.Units {
-				if expected.SQL == mapped.SQL && expected.SourceSQLHash == mapped.SourceSQLHash {
+				expectedSQL := expected.SQL
+				if object.EventTrigger && unit.Phase == "event_create" && expected.Phase == "event_create" {
+					expectedSQL, rewriteErr = damengnative.DisabledEventTriggerDDL(expectedSQL)
+					if rewriteErr != nil {
+						return rewriteErr
+					}
+				}
+				if expectedSQL == mapped.SQL && expected.SourceSQLHash == mapped.SourceSQLHash {
 					matched = true
 					break
 				}
@@ -151,11 +171,17 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 	m.repairs = &repairRecorder{objects: objects}
 	var tables []string
 	for _, table := range snapshot.Tables {
+		if table.Shadow {
+			continue
+		}
 		tables = append(tables, nativeSourceTable(table))
 	}
 	m.freezeDataValidation(ctx, tables)
 	for i := range m.validationTables {
 		for _, table := range snapshot.Tables {
+			if table.Shadow {
+				continue
+			}
 			if m.validationTables[i].name == nativeSourceTable(table) {
 				m.validationTables[i].target = table.Name
 				m.markDataValidationCopied(m.validationTables[i].name)

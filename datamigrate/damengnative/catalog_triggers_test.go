@@ -33,6 +33,31 @@ func TestNativeTriggerScopeUsesTargetInsteadOfOwner(t *testing.T) {
 	require.True(t, triggerOnDatabase(`CREATE TRIGGER T AFTER DDL`))
 }
 
+func TestDisabledEventTriggerDDLChangesOnlyNativeHeaderState(t *testing.T) {
+	for _, tc := range []struct{ ddl, want string }{
+		{`CREATE TRIGGER "App"."BEGIN" AFTER CHECKPOINT ON DATABASE BEGIN NULL; END;`, `CREATE TRIGGER "App"."BEGIN" AFTER CHECKPOINT ON DATABASE DISABLE BEGIN NULL; END;`},
+		{`CREATE OR REPLACE TRIGGER "App"."Timer" AFTER TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE WHEN(1=1) DECLARE X VARCHAR(30); BEGIN X='DISABLE BEGIN;'; END;`, `CREATE OR REPLACE TRIGGER "App"."Timer" AFTER TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE WHEN(1=1) DISABLE DECLARE X VARCHAR(30); BEGIN X='DISABLE BEGIN;'; END;`},
+		{"CREATE TRIGGER T AFTER DDL ON SCHEMA -- BEGIN\n/* DECLARE */ BEGIN PRINT q'[BEGIN DISABLE]'; END;", "CREATE TRIGGER T AFTER DDL ON SCHEMA -- BEGIN\n/* DECLARE */ DISABLE BEGIN PRINT q'[BEGIN DISABLE]'; END;"},
+		{`CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE ENABLE /* original */ BEGIN NULL; END;`, `CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE DISABLE /* original */ BEGIN NULL; END;`},
+		{`CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE disable /* original */ BEGIN NULL; END;`, `CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE disable /* original */ BEGIN NULL; END;`},
+	} {
+		got, err := DisabledEventTriggerDDL(tc.ddl)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got)
+		again, err := DisabledEventTriggerDDL(got)
+		require.NoError(t, err)
+		require.Equal(t, got, again, "catalog reload must not duplicate the state clause")
+	}
+	for _, ddl := range []string{
+		`CREATE TRIGGER T AFTER INSERT ON "App"."T" BEGIN NULL; END;`,
+		`CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE`,
+		`CREATE TRIGGER T AFTER CHECKPOINT ON DATABASE BEGIN PRINT 'unfinished`,
+	} {
+		_, err := DisabledEventTriggerDDL(ddl)
+		require.Error(t, err)
+	}
+}
+
 func TestTargetCrossSchemaEventHookBlocksBeforeMutation(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

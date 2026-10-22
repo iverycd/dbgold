@@ -3,7 +3,10 @@ package datamigrate
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,4 +172,169 @@ func TestDamengNativeEventMigrationIntegration(t *testing.T) {
 	require.Equal(t, 1, count)
 	require.NoError(t, src.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+sq("EventAudit")).Scan(&count))
 	require.Zero(t, count, "整个迁移不能执行源端 DDL")
+}
+
+// Background hooks are installed disabled atomically even while the target
+// checkpoint dispatcher is enabled. This test never changes instance settings;
+// its dedicated fixture must be configured with ENABLE_CKPT_EVENT_TRIG=1.
+func TestDamengNativeBackgroundEventMigrationIntegration(t *testing.T) {
+	srcDSN, srcSchema := os.Getenv("DAMENG_NATIVE_EVENT_SOURCE_DSN"), os.Getenv("DAMENG_NATIVE_EVENT_SOURCE_SCHEMA")
+	dstDSN, dstSchema := os.Getenv("DAMENG_NATIVE_EVENT_TARGET_DSN"), os.Getenv("DAMENG_NATIVE_EVENT_TARGET_SCHEMA")
+	if os.Getenv("DAMENG_NATIVE_ALLOW_DDL") != "1" || srcDSN == "" || srcSchema == "" || dstDSN == "" || dstSchema == "" {
+		t.Skip("后台事件完整迁移验收需要专用、预建且为空的 EVENT_SOURCE/TARGET Schema、DSN 和 DAMENG_NATIVE_ALLOW_DDL=1；目标 CHECKPOINT 调度必须预先开启")
+	}
+	src, srcSchema := nativeEventIntegrationDB(t, srcDSN, srcSchema)
+	dst, dstSchema := nativeEventIntegrationDB(t, dstDSN, dstSchema)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var checkpointDispatch string
+	require.NoError(t, dst.QueryRowContext(ctx, `SELECT PARA_VALUE FROM V$DM_INI WHERE PARA_NAME='ENABLE_CKPT_EVENT_TRIG'`).Scan(&checkpointDispatch))
+	require.Equal(t, "1", strings.TrimSpace(checkpointDispatch), "专用目标实例必须在测试前开启 CHECKPOINT 调度；测试不会修改实例参数")
+	names := []string{"TimerOn", "TimerOff", "CheckpointOn", "CheckpointOff"}
+	for _, fixture := range []struct {
+		db     *sql.DB
+		schema string
+	}{{src, srcSchema}, {dst, dstSchema}} {
+		fixture := fixture
+		t.Cleanup(func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+			defer stop()
+			for _, name := range names {
+				_, _ = fixture.db.ExecContext(cleanup, damengnative.EventTriggerStateSQL(fixture.schema, name, false))
+				_, _ = fixture.db.ExecContext(cleanup, "DROP TRIGGER "+damengnative.Qualified(fixture.schema, name))
+			}
+			for _, name := range []string{"Rows", "EventAudit", "Control"} {
+				_, _ = fixture.db.ExecContext(cleanup, "DROP TABLE "+damengnative.Qualified(fixture.schema, name))
+			}
+		})
+	}
+	sq := func(name string) string { return damengnative.Qualified(srcSchema, name) }
+	dq := func(name string) string { return damengnative.Qualified(dstSchema, name) }
+	exec := func(db *sql.DB, statement string) { _, err := db.ExecContext(ctx, statement); require.NoError(t, err) }
+	exec(src, "CREATE TABLE "+sq("Control")+`("Flag" INT)`)
+	exec(src, "INSERT INTO "+sq("Control")+" VALUES(0)")
+	exec(src, "CREATE TABLE "+sq("EventAudit")+`("Kind" VARCHAR(30))`)
+	exec(src, "CREATE TABLE "+sq("Rows")+`("Id" INT,"Text" VARCHAR(100))`)
+	exec(src, "INSERT INTO "+sq("Rows")+` VALUES(1,'原始快照'||CHR(0)||'Mixed')`)
+	for _, name := range names {
+		header := "CHECKPOINT ON DATABASE"
+		if strings.HasPrefix(name, "Timer") {
+			header = "TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE"
+		}
+		state := ""
+		if strings.HasSuffix(name, "Off") {
+			state = "DISABLE "
+		}
+		exec(src, "CREATE TRIGGER "+sq(name)+" AFTER "+header+" WHEN(1=1) "+state+`DECLARE RUN_FLAG INT; BEGIN SELECT "Flag" INTO RUN_FLAG FROM `+sq("Control")+`; IF RUN_FLAG=1 THEN INSERT INTO `+sq("EventAudit")+` VALUES('`+name+`'); END IF; END;`)
+	}
+	r, err := source.NewDaMengNative(srcDSN, srcSchema, source.ConnPoolConfig{})
+	require.NoError(t, err)
+	defer r.Close()
+	w, err := target.NewDaMengNative(dstDSN, dstSchema, target.ConnPoolConfig{})
+	require.NoError(t, err)
+	defer w.Close()
+	var saved RepairManifest
+	cfg := Config{Mode: "all", Content: "both", TargetDBType: "dameng", TargetSchema: dstSchema, CaptureRepair: true, MigrateTriggers: true, ValidateData: true, RepairSink: func(manifest RepairManifest) error { saved = manifest; return nil }}
+	proofCalls := 0
+	checked := &eventFinalizationProofWriter{DaMengNativeWriter: w, proof: func(proof context.Context) error {
+		proofCalls++
+		for _, name := range names {
+			var state string
+			if err := dst.QueryRowContext(proof, `SELECT STATUS FROM ALL_TRIGGERS WHERE OWNER=? AND TRIGGER_NAME=?`, dstSchema, name).Scan(&state); err != nil {
+				return err
+			}
+			if state != "N" {
+				return fmt.Errorf("后台事件 %s 在最终切换前已启用: %s", name, state)
+			}
+		}
+		// An older durable plan did not include the atomic DISABLE header.
+		// An uncertain result must reconcile the server's disabled definition
+		// and automatic OR REPLACE prefix, without replaying CREATE.
+		legacyObjects := slices.Clone(saved.Objects)
+		for index, object := range legacyObjects {
+			if object.Name != "TimerOn" {
+				continue
+			}
+			legacy := object
+			native := *object.Native
+			native.Units = slices.Clone(native.Units)
+			native.Units[0].SQL = strings.Replace(native.Units[0].SQL, "DISABLE DECLARE", "DECLARE", 1)
+			legacy.Native = &native
+			legacy.NativeFingerprint = damengnative.Fingerprint(native)
+			legacy.Units = slices.Clone(object.Units)
+			for i := range legacy.Units {
+				legacy.Units[i].Selected = false
+			}
+			legacy.Units[0].SQL, legacy.Units[0].OriginalSQL = native.Units[0].SQL, native.Units[0].SQL
+			legacy.Units[0].Status, legacy.Units[0].Selected = "unknown", true
+			out, err := target.ExecuteRepair(proof, w, legacy, legacy.Units, nil)
+			if err != nil {
+				return err
+			}
+			if out[0].Status != "succeeded" {
+				return fmt.Errorf("旧事件计划的未知 CREATE 结果未被目录对账: %s", out[0].Status)
+			}
+			legacy.Units = out
+			legacyObjects[index] = legacy
+		}
+		if err := NativeRepairFinalizationReady(legacyObjects, ""); err != nil {
+			return err
+		}
+		return VerifyNativeRepairFinalization(proof, r, w, cfg, legacyObjects)
+	}}
+	m := NewMigrator(r, checked, &Job{LogCh: make(chan string, 4096)}, cfg)
+	preflight := m.PreflightDamengNative(ctx)
+	require.True(t, preflight.Ready, "%+v", preflight.Issues)
+	report := m.Run(ctx)
+	require.False(t, report.HasFailures(), "native=%+v data=%+v logs=%v", report.NativeSchema.Verification, report.DataValidation, drainLogs(m.job))
+	require.NotNil(t, report.DataValidation)
+	require.Equal(t, validation.StatusPassed, report.DataValidation.Status)
+	require.Equal(t, 1, proofCalls)
+	for _, name := range names {
+		var state string
+		require.NoError(t, dst.QueryRowContext(ctx, `SELECT STATUS FROM ALL_TRIGGERS WHERE OWNER=? AND TRIGGER_NAME=?`, dstSchema, name).Scan(&state))
+		want := "Y"
+		if strings.HasSuffix(name, "Off") {
+			want = "N"
+		}
+		require.Equal(t, want, state, name)
+	}
+	var audit int
+	require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq("EventAudit")).Scan(&audit))
+	require.Zero(t, audit)
+	// Cutover is complete. Subsequent business events must use the restored
+	// original hook bodies, and the originally disabled hooks must stay inert.
+	exec(dst, "UPDATE "+dq("Control")+` SET "Flag"=1`)
+	exec(dst, "CALL CHECKPOINT(100)")
+	// CHECKPOINT returns before its asynchronous event worker commits.
+	require.Eventually(t, func() bool {
+		err := dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq("EventAudit")+` WHERE "Kind"='CheckpointOn'`).Scan(&audit)
+		return err == nil && audit > 0
+	}, 10*time.Second, 100*time.Millisecond, "原启用 CHECKPOINT 在切换后必须执行原业务体")
+	require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq("EventAudit")+` WHERE "Kind" IN ('CheckpointOff','TimerOff')`).Scan(&audit))
+	require.Zero(t, audit)
+	if os.Getenv("DAMENG_NATIVE_BACKGROUND_WAIT_TIMER") == "1" {
+		deadline := time.NewTimer(130 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(500 * time.Millisecond)
+		defer tick.Stop()
+	wait:
+		for {
+			select {
+			case <-tick.C:
+				require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq("EventAudit")+` WHERE "Kind"='TimerOn'`).Scan(&audit))
+				if audit > 0 {
+					break wait
+				}
+			case <-deadline.C:
+				t.Fatal("原启用 TIMER 在切换后未按原调度执行")
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq("EventAudit")+` WHERE "Kind"='TimerOff'`).Scan(&audit))
+		require.Zero(t, audit)
+	}
+	require.NoError(t, src.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+sq("EventAudit")).Scan(&audit))
+	require.Zero(t, audit, "源快照与停写数据不得在验收中被后台事件改写")
 }

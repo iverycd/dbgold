@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -18,7 +19,7 @@ func (r *catalogReader) materializedSnapshot(position int, ddl string) error {
 	if err != nil {
 		return fmt.Errorf("物化视图 %s: %w", mv.Name, err)
 	}
-	if state.RefreshMethod == "FAST" || state.RefreshMethod == "FORCE" {
+	if !r.verification && (state.RefreshMethod == "FAST" || state.RefreshMethod == "FORCE") {
 		if err = r.proveMaterializedCurrent(mv.Name, state); err != nil {
 			return err
 		}
@@ -153,7 +154,9 @@ func (r *catalogReader) materializedSnapshot(position int, ddl string) error {
 		if len(state.RowIDColumns) > 0 {
 			reason += "；仅直接 ROWID 输出会映射为目标物理 ROWID，普通列值和重复行数量保持不变"
 		}
-		r.snapshot.Issues = append(r.snapshot.Issues, Issue{ObjectID: mv.ID, Kind: mv.Kind, Name: mv.Name, Severity: "warning", Reason: reason})
+		if state.Staleness == "PROVEN_CURRENT" {
+			r.snapshot.Issues = append(r.snapshot.Issues, Issue{ObjectID: mv.ID, Kind: mv.Kind, Name: mv.Name, Severity: "warning", Reason: reason})
+		}
 	}
 	r.snapshot.Objects[position].Units = append(r.snapshot.Objects[position].Units, Unit{SQL: "ALTER MATERIALIZED VIEW " + Qualified(r.schema, mv.Name) + " " + refresh, Phase: "mv_restore"})
 	return nil
@@ -205,11 +208,11 @@ func materializedOptions(ddl string) (*MaterializedState, string, error) {
 	as, refresh, depth := -1, -1, 0
 	state := &MaterializedState{RefreshMethod: "FORCE", RefreshRule: "PRIMARY KEY"}
 	for i, t := range ts {
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			depth++
 			continue
 		}
-		if t.value == ")" {
+		if t.kind == 'p' && t.value == ")" {
 			depth--
 			continue
 		}
@@ -267,11 +270,11 @@ func materializedWithoutRefresh(ddl string) (string, error) {
 	}
 	as, start, depth := -1, -1, 0
 	for i, t := range ts {
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			depth++
 			continue
 		}
-		if t.value == ")" {
+		if t.kind == 'p' && t.value == ")" {
 			depth--
 			continue
 		}
@@ -355,10 +358,23 @@ func (r *catalogReader) proveMaterializedCurrent(name string, state *Materialize
 		}
 	}
 	if err = CheckMaterializedBag(r.ctx, tx, r.schema, name, state.Query, state.SnapshotColumns, nil); err != nil {
-		return fmt.Errorf("物化视图 %s 的 %s 快照不能建立无损增量基线: %w；陈旧快照必须同时保留原变化日志及每视图刷新水位，DM8 公开 REFRESH/COMPILE 接口不能注册旧水位；请先由业务确认快照可刷新，或使用保留物理状态的数据库备份还原", name, state.RefreshMethod, err)
+		var mismatch *MaterializedBagMismatch
+		if !errors.As(err, &mismatch) {
+			return fmt.Errorf("物化视图 %s 原始存储快照只读核验失败: %w", name, err)
+		}
+		// A difference is source data, not an extraction failure. The history
+		// planner will preserve the original bag and the native pending logs.
+		state.Staleness = "STALE"
+		return nil
 	}
 	state.Staleness = "PROVEN_CURRENT"
 	return nil
+}
+
+type MaterializedBagMismatch struct{ Differences int64 }
+
+func (e *MaterializedBagMismatch) Error() string {
+	return fmt.Sprintf("存储快照与定义查询的多重集不同（%d 组差异）", e.Differences)
 }
 
 // MaterializedBagSQL uses an ordinal derived-column list so explicit MV column
@@ -376,7 +392,7 @@ func MaterializedBagSQL(schema, name, query string, columns []string, ignore []i
 		return "", fmt.Errorf("物化视图核验只允许完整 SELECT 查询")
 	}
 	for _, t := range ts {
-		if t.value == ";" {
+		if t.kind == 'p' && t.value == ";" {
 			return "", fmt.Errorf("物化视图查询不能包含多条语句")
 		}
 	}
@@ -426,7 +442,7 @@ func CheckMaterializedBag(ctx context.Context, db materializedQuerier, schema, n
 		return fmt.Errorf("多重集一致性查询失败: %w", err)
 	}
 	if differences != 0 {
-		return fmt.Errorf("存储快照与定义查询的多重集不同（%d 组差异）", differences)
+		return &MaterializedBagMismatch{Differences: differences}
 	}
 	return nil
 }
@@ -438,10 +454,10 @@ func materializedDirectRowIDs(query string, columnCount int) ([]int, error) {
 	}
 	start, depth := 0, 0
 	for start < len(ts) {
-		if ts[start].value == "(" {
+		if ts[start].kind == 'p' && ts[start].value == "(" {
 			depth++
 		}
-		if ts[start].value == ")" {
+		if ts[start].kind == 'p' && ts[start].value == ")" {
 			depth--
 		}
 		if depth == 0 && ts[start].kind == 'i' && strings.EqualFold(ts[start].value, "SELECT") {
@@ -460,13 +476,13 @@ func materializedDirectRowIDs(query string, columnCount int) ([]int, error) {
 	last := start
 	for i := start; i < len(ts); i++ {
 		t := ts[i]
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			depth++
 		}
-		if t.value == ")" {
+		if t.kind == 'p' && t.value == ")" {
 			depth--
 		}
-		if depth == 0 && (t.value == "," || t.kind == 'i' && strings.EqualFold(t.value, "FROM")) {
+		if depth == 0 && (t.kind == 'p' && t.value == "," || t.kind == 'i' && strings.EqualFold(t.value, "FROM")) {
 			items = append(items, ts[last:i])
 			last = i + 1
 			if strings.EqualFold(t.value, "FROM") {
@@ -733,10 +749,43 @@ func renameDDLHead(ddl, kind, schema, name string) (string, error) {
 			if j+2 < len(ts) && ts[j+1].value == "." {
 				end = ts[j+2].end
 			}
-			return ddl[:ts[j].start] + Qualified(schema, name) + ddl[end:], nil
+			out := ddl[:ts[j].start] + Qualified(schema, name) + ddl[end:]
+			if strings.EqualFold(kind, "TABLE") {
+				return renameSyntheticTableConstraints(out, schema, name)
+			}
+			return out, nil
 		}
 	}
 	return "", fmt.Errorf("原生 DDL 缺少 %s 对象头", kind)
+}
+
+func renameSyntheticTableConstraints(ddl, schema, table string) (string, error) {
+	ts, err := nativeTokens(ddl)
+	if err != nil {
+		return "", err
+	}
+	type replacement struct {
+		start, end int
+		value      string
+	}
+	var replacements []replacement
+	depth, ordinal := 0, 0
+	for i, t := range ts {
+		if t.kind == 'p' && t.value == "(" {
+			depth++
+		} else if t.kind == 'p' && t.value == ")" {
+			depth--
+		} else if depth == 1 && t.kind == 'i' && strings.EqualFold(t.value, "CONSTRAINT") && i+1 < len(ts) && (ts[i+1].kind == 'i' || ts[i+1].kind == 'q') {
+			name := "DBGOLD_C_" + Fingerprint([]string{schema, table, strconv.Itoa(ordinal)})[:20]
+			ordinal++
+			replacements = append(replacements, replacement{ts[i+1].start, ts[i+1].end, Quote(name)})
+		}
+	}
+	for i := len(replacements) - 1; i >= 0; i-- {
+		x := replacements[i]
+		ddl = ddl[:x.start] + x.value + ddl[x.end:]
+	}
+	return ddl, nil
 }
 
 func bindPrebuiltMV(ddl, schema, storage string) (string, error) {
@@ -777,10 +826,10 @@ func bindPrebuiltMV(ddl, schema, storage string) (string, error) {
 	depth := 0
 	for j := i; j < len(ts); j++ {
 		t := ts[j]
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			depth++
 		}
-		if t.value == ")" {
+		if t.kind == 'p' && t.value == ")" {
 			depth--
 		}
 		if depth != 0 || t.kind != 'i' {
@@ -856,10 +905,10 @@ func bindPrebuiltMV(ddl, schema, storage string) (string, error) {
 func matchingParen(ts []sqlToken, open int) (int, error) {
 	depth := 0
 	for i := open; i < len(ts); i++ {
-		if ts[i].value == "(" {
+		if ts[i].kind == 'p' && ts[i].value == "(" {
 			depth++
 		}
-		if ts[i].value == ")" {
+		if ts[i].kind == 'p' && ts[i].value == ")" {
 			depth--
 			if depth == 0 {
 				return i, nil

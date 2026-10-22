@@ -70,6 +70,11 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 		if o.Managed {
 			continue
 		}
+		if o.Materialized != nil && o.Materialized.History != nil {
+			if err := w.validateHistoryRedefinition(ctx, o.Materialized.History.Views, objects); err != nil {
+				add(o, err.Error())
+			}
+		}
 		kind := damengnative.NormalizeKind(o.Kind)
 		priv := ""
 		switch kind {
@@ -98,11 +103,6 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 			if err := validateNativeObjectUnit(w.schema, o, u); err != nil {
 				add(o, err.Error())
 				continue
-			}
-			if u.Phase == "event_create" && damengnative.EventTriggerHasCheckpoint(u.SQL) {
-				if err := nativeCheckpointEventsDisabled(ctx, w.db); err != nil {
-					add(o, err.Error())
-				}
 			}
 			if u.Phase == "event_create" && username != "SYSDBA" && username != "SYS" {
 				scope, _, scopeErr := damengnative.EventTriggerScope(u.SQL, o.Schema)

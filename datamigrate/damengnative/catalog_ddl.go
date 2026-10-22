@@ -99,6 +99,11 @@ func (r *catalogReader) extractDefinitions() {
 			}
 			base = r.stripGeneratedConstraintNames(o.Name, base)
 			o.Units = append(o.Units, Unit{SQL: base, Phase: phase})
+			deferred, err = r.freezeTableForeignKeys(o.Name, len(deferred))
+			if err != nil {
+				r.issue(o, err.Error())
+				continue
+			}
 			for _, unit := range deferred {
 				unit = r.stripGeneratedConstraintNames(o.Name, unit)
 				o.Units = append(o.Units, Unit{SQL: unit, Phase: "after_data"})
@@ -125,8 +130,9 @@ func (r *catalogReader) extractDefinitions() {
 				} else if scopeKind == "schema" && scope != r.schema {
 					o.External = append(o.External, Reference{Kind: "schema", Schema: scope, Name: scope})
 				}
-				if EventTriggerHasTimer(ddl) {
-					r.issue(o, "TIMER 触发器创建后可能立即被后台调度；当前驱动缺少可验证的原子禁用安装机制")
+				ddl, err = DisabledEventTriggerDDL(ddl)
+				if err != nil {
+					r.issue(o, err.Error())
 					continue
 				}
 				phase = "event_create"
@@ -278,6 +284,9 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 		if c.Kind != "constraint" || c.Table != table.Name || c.Status != "DISABLED" {
 			continue
 		}
+		if c.ConstraintType == "R" {
+			continue
+		} // FKs carry their complete frozen state atomically in their ADD unit.
 		if c.Generated {
 			ts, _ := nativeTokens(ddl)
 			preserved := false
@@ -319,7 +328,7 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 func (r *catalogReader) disableConstraintDefinitions(table, ddl string) string {
 	states := map[string]Object{}
 	for _, o := range r.snapshot.Objects {
-		if o.Kind == "constraint" && o.Table == table && o.Status == "DISABLED" {
+		if o.Kind == "constraint" && o.Table == table && o.Status == "DISABLED" && o.ConstraintType != "R" {
 			states[o.Name] = o
 		}
 	}

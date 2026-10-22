@@ -5,7 +5,6 @@ import (
 	"errors"
 	"regexp"
 	"testing"
-	"time"
 
 	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/repair"
@@ -15,7 +14,7 @@ import (
 
 func nativeEventFixture() (damengnative.Object, damengnative.Unit) {
 	o := damengnative.Object{Kind: "trigger", Schema: "MixedOwner", Name: "Event", EventTrigger: true, Status: "ENABLED"}
-	u := damengnative.Unit{SQL: `CREATE TRIGGER "MixedOwner"."Event" AFTER DDL ON SCHEMA BEGIN NULL; END;`, Phase: "event_create"}
+	u := damengnative.Unit{SQL: `CREATE TRIGGER "MixedOwner"."Event" AFTER DDL ON SCHEMA DISABLE BEGIN NULL; END;`, Phase: "event_create"}
 	return o, u
 }
 
@@ -24,7 +23,7 @@ func TestNativeEventInstallDisablesBeforeSuccessOrSessionRelease(t *testing.T) {
 	o, u := nativeEventFixture()
 	mock.ExpectExec(regexp.QuoteMeta(`SET SCHEMA "MixedOwner"`)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs(o.Schema, o.Name).WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("N"))
 	var states []string
 	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error {
 		require.Equal(t, u.SQL, e.SQL)
@@ -41,7 +40,7 @@ func TestNativeEventInstallStillDisablesWhenResultPersistenceFails(t *testing.T)
 	o, u := nativeEventFixture()
 	mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs(o.Schema, o.Name).WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("N"))
 	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error {
 		if e.Status == "succeeded" {
 			return errors.New("ledger unavailable")
@@ -52,38 +51,50 @@ func TestNativeEventInstallStillDisablesWhenResultPersistenceFails(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestNativeEventInstallDisablesDespiteCreateCancellation(t *testing.T) {
+func TestNativeEventInstallCancelledCreateCannotBeSuccessful(t *testing.T) {
 	w, mock := mockNativeDM(t)
 	o, u := nativeEventFixture()
 	mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillDelayFor(50 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnResult(sqlmock.NewResult(0, 0))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-	require.Error(t, w.InstallDamengNativeEvent(ctx, o, u))
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestNativeEventInstallDisableFailureCannotBeSuccessful(t *testing.T) {
-	w, mock := mockNativeDM(t)
-	o, u := nativeEventFixture()
-	mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnError(errors.New("connection lost"))
+	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnError(context.Canceled)
 	var states []string
 	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { states = append(states, e.Status); return nil })
-	require.ErrorContains(t, w.InstallDamengNativeEvent(ctx, o, u), "目标启用状态待核验")
+	require.ErrorIs(t, w.InstallDamengNativeEvent(ctx, o, u), context.Canceled)
 	require.Equal(t, []string{"running", "unknown"}, states)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestNativeEventInstallRequiresFrozenNonTimerIdentity(t *testing.T) {
+func TestNativeEventInstallStateProofFailureCannotBeSuccessful(t *testing.T) {
+	w, mock := mockNativeDM(t)
+	o, u := nativeEventFixture()
+	mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs(o.Schema, o.Name).WillReturnError(errors.New("connection lost"))
+	var states []string
+	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { states = append(states, e.Status); return nil })
+	require.ErrorContains(t, w.InstallDamengNativeEvent(ctx, o, u), "目标状态待核验")
+	require.Equal(t, []string{"running", "unknown"}, states)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNativeEventInstallUnexpectedEnabledStateIsDisabledAndUnknown(t *testing.T) {
+	w, mock := mockNativeDM(t)
+	o, u := nativeEventFixture()
+	mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs(o.Schema, o.Name).WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("Y"))
+	mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnResult(sqlmock.NewResult(0, 0))
+	var states []string
+	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { states = append(states, e.Status); return nil })
+	require.ErrorContains(t, w.InstallDamengNativeEvent(ctx, o, u), "未按冻结计划原子禁用")
+	require.Equal(t, []string{"running", "unknown"}, states)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNativeEventInstallRequiresFrozenIdentity(t *testing.T) {
 	w, mock := mockNativeDM(t)
 	o, u := nativeEventFixture()
 	u.SQL = `CREATE TRIGGER "MixedOwner"."Different" AFTER DDL ON SCHEMA BEGIN NULL; END;`
 	require.ErrorContains(t, w.InstallDamengNativeEvent(context.Background(), o, u), "名称与冻结清单不一致")
-	u.SQL = `CREATE TRIGGER "MixedOwner"."Event" AFTER TIMER ON DATABASE FOR EACH 1 MINUTE BEGIN NULL; END;`
-	require.ErrorContains(t, w.InstallDamengNativeEvent(context.Background(), o, u), "TIMER")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -122,21 +133,18 @@ func TestNativeEventStateCannotChangeOtherObjectOrDesiredState(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestNativeCheckpointInstallRequiresReadOnlyDispatchOffProof(t *testing.T) {
-	for _, value := range []string{"0", "1"} {
-		t.Run(value, func(t *testing.T) {
+func TestNativeBackgroundEventsInstallDisabledWithoutChangingInstance(t *testing.T) {
+	for _, header := range []string{"CHECKPOINT ON DATABASE", "TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE"} {
+		t.Run(header, func(t *testing.T) {
 			w, mock := mockNativeDM(t)
 			o, u := nativeEventFixture()
-			u.SQL = `CREATE TRIGGER "MixedOwner"."Event" AFTER CHECKPOINT ON DATABASE BEGIN NULL; END;`
+			u.SQL = `CREATE TRIGGER "MixedOwner"."Event" AFTER ` + header + ` BEGIN NULL; END;`
+			disabled, err := damengnative.DisabledEventTriggerDDL(u.SQL)
+			require.NoError(t, err)
 			mock.ExpectExec(`SET SCHEMA`).WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectQuery(regexp.QuoteMeta(`SELECT PARA_VALUE FROM V$DM_INI WHERE PARA_NAME='ENABLE_CKPT_EVENT_TRIG'`)).WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(value))
-			if value == "0" {
-				mock.ExpectExec(regexp.QuoteMeta(u.SQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-				mock.ExpectExec(regexp.QuoteMeta(damengnative.EventTriggerStateSQL(o.Schema, o.Name, false))).WillReturnResult(sqlmock.NewResult(0, 0))
-				require.NoError(t, w.InstallDamengNativeEvent(context.Background(), o, u))
-			} else {
-				require.ErrorContains(t, w.InstallDamengNativeEvent(context.Background(), o, u), "CHECKPOINT 事件调度当前启用")
-			}
+			mock.ExpectExec(regexp.QuoteMeta(disabled)).WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectQuery(`SELECT STATUS FROM ALL_TRIGGERS`).WithArgs(o.Schema, o.Name).WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("N"))
+			require.NoError(t, w.InstallDamengNativeEvent(context.Background(), o, u))
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

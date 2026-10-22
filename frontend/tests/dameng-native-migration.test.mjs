@@ -71,6 +71,10 @@ test('native procedural retry is read-only, refuses changed units and selects on
   assert.equal(utils.canEditRepairDDL(object), false)
   assert.equal(utils.canExecuteRepairDDL(object), true)
   assert.deepEqual([...utils.cloneRepairExecutionUnits(object).map(unit => unit.selected)], [false, true])
+  object.status = 'unknown'
+  object.units[1].status = 'unknown'
+  assert.equal(utils.canExecuteRepairDDL(object), true, '可信原生计划由服务端先目录对账，再决定是否可重试')
+  assert.deepEqual([...utils.cloneRepairExecutionUnits(object).map(unit => unit.selected)], [false, true])
   object.units[1].sql += ' changed'
   assert.equal(utils.canExecuteRepairDDL(object), false)
 })

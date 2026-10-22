@@ -62,13 +62,28 @@ func (m *Migrator) markNativeRowIDValidation(p *damengnative.Preflight, states m
 	if !m.dataValidationEnabled() || m.repairs == nil {
 		return
 	}
+	historyVerified := map[string]bool{}
+	m.repairs.mu.Lock()
+	for _, object := range m.repairs.objects {
+		if object.Native == nil || object.Native.Materialized == nil || object.Native.Materialized.History == nil {
+			continue
+		}
+		for i, unit := range object.Units {
+			if i < len(object.Native.Units) && object.Native.Units[i].Phase == "mv_history" && unit.Status == "succeeded" {
+				for _, view := range object.Native.Materialized.History.Views {
+					historyVerified[view.ObjectID] = true
+				}
+			}
+		}
+	}
+	m.repairs.mu.Unlock()
 	for _, o := range p.Objects {
 		state := o.Materialized
 		if state == nil || !state.Baseline || len(state.RowIDColumns) == 0 || states[o.ID] != nil {
 			continue
 		}
 		baseline := damengnative.MaterializedBaselineSQL(o.Schema, o.Name)
-		verified := false
+		verified := historyVerified[o.ID]
 		m.repairs.mu.Lock()
 		for _, object := range m.repairs.objects {
 			if object.ID != o.ID {
@@ -98,6 +113,9 @@ func (m *Migrator) markNativeRowIDValidation(p *damengnative.Preflight, states m
 				}
 			}
 			frozen.note = "直接 ROWID 已通过源端全列、目标基线前普通列及基线后全列多重集核验，映射为目标物理地址；本次内容校验比较全部普通列与重复行数量，不比较源目标物理 ROWID 字节。"
+			if historyVerified[o.ID] {
+				frozen.note = "陈旧快照及待处理日志的直接 ROWID 已通过同一物理地址映射及完整多重集核验，包含源端已删除行；本次内容校验比较全部普通列与重复行数量，不比较源目标物理 ROWID 字节。"
+			}
 		}
 	}
 }

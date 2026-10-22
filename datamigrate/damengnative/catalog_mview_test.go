@@ -82,7 +82,7 @@ func TestMaterializedDefaultForceAlsoRequiresSnapshotProof(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
-func TestMaterializedStaleFastBlocksBeforeAnyTargetPlan(t *testing.T) {
+func TestMaterializedStaleFastRetainsSnapshotForHistoryPlanner(t *testing.T) {
 	db, m, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
@@ -90,9 +90,9 @@ func TestMaterializedStaleFastBlocksBeforeAnyTargetPlan(t *testing.T) {
 	query := `SELECT "Id" FROM "App"."T"`
 	expectNativeMVProof(t, m, query, []string{"Id"}, 2)
 	err = r.materializedSnapshot(0, `CREATE MATERIALIZED VIEW "App"."Mv" REFRESH FAST AS `+query)
-	require.ErrorContains(t, err, "陈旧快照必须同时保留原变化日志及每视图刷新水位")
-	require.Empty(t, r.snapshot.Objects[0].Units)
-	require.Nil(t, r.snapshot.Objects[0].Materialized)
+	require.NoError(t, err)
+	require.Equal(t, "STALE", r.snapshot.Objects[0].Materialized.Staleness)
+	require.Contains(t, r.snapshot.Objects[0].Units[0].SQL, "NEVER REFRESH AS")
 	require.NoError(t, m.ExpectationsWereMet())
 }
 

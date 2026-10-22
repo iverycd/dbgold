@@ -37,22 +37,21 @@ func nativeEventIdentity(schema string, object damengnative.Object, unit damengn
 	if err != nil || end == 0 || nativeTokenName(tokens[end-1]) != object.Name {
 		return fmt.Errorf("事件触发器名称与冻结清单不一致")
 	}
-	if damengnative.EventTriggerHasTimer(unit.SQL) {
-		return fmt.Errorf("TIMER 触发器的 CREATE 与禁用之间存在后台调度窗口，不能使用普通事件安装器")
-	}
-	return nil
+	_, err = damengnative.DisabledEventTriggerDDL(unit.SQL)
+	return err
 }
 
-// InstallDamengNativeEvent installs one non-TIMER hook and disables it before
-// releasing the physical session. DM8 does not fire an event trigger when the
-// trigger itself is the event target; SP_ENABLE_EVT_TRIGGER is a routine, not
-// an ALTER event. LOGIN has already occurred and LOGOUT is still disabled when
-// this session is discarded. The observer sees one logical install operation,
-// succeeded only after both CREATE and the required disable have succeeded.
-// https://eco.dameng.com/document/dm/zh-cn/pm/trigger
-// https://eco.dameng.com/document/dm/zh-cn/pm/sql-appendix
+// InstallDamengNativeEvent creates every event hook, including TIMER and
+// CHECKPOINT, with its native DISABLE header clause. It never publishes an
+// enabled hook during import. The original final state is a separate frozen
+// event_activate unit. Legacy frozen units without DISABLE are normalized here
+// too, without changing their body or weakening the generic SQL executor.
 func (w *DaMengNativeWriter) InstallDamengNativeEvent(ctx context.Context, object damengnative.Object, unit damengnative.Unit) error {
 	if err := nativeEventIdentity(w.schema, object, unit); err != nil {
+		return err
+	}
+	ddl, err := damengnative.DisabledEventTriggerDDL(unit.SQL)
+	if err != nil {
 		return err
 	}
 	conn, err := w.db.Conn(ctx)
@@ -63,29 +62,31 @@ func (w *DaMengNativeWriter) InstallDamengNativeEvent(ctx context.Context, objec
 	if _, err = conn.ExecContext(ctx, "SET SCHEMA "+damengnative.Quote(w.schema)); err != nil {
 		return err
 	}
-	if damengnative.EventTriggerHasCheckpoint(unit.SQL) {
-		if err = nativeCheckpointEventsDisabled(ctx, conn); err != nil {
-			return err
-		}
-	}
 	if err = repair.Observe(ctx, unit.SQL, "running", nil); err != nil {
 		return fmt.Errorf("保存事件触发器安装前状态: %w", err)
 	}
-	_, createErr := conn.ExecContext(ctx, unit.SQL)
-	// A cancelled request or failed persistence callback must never skip the
-	// immediate disable of a hook that CREATE may already have committed.
+	_, createErr := conn.ExecContext(ctx, ddl)
+	if createErr != nil {
+		return errors.Join(createErr, repair.Observe(ctx, unit.SQL, repairErrorStatus(createErr), createErr))
+	}
+	// Confirm the native state before reporting success. Cancellation or a
+	// failed ledger callback cannot turn this CREATE into an enabled object.
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	_, disableErr := conn.ExecContext(cleanup, damengnative.EventTriggerStateSQL(w.schema, object.Name, false))
-	if disableErr != nil {
-		err = errors.Join(createErr, fmt.Errorf("禁用新事件触发器失败，目标启用状态待核验: %w", disableErr))
+	var status string
+	err = conn.QueryRowContext(cleanup, `SELECT STATUS FROM ALL_TRIGGERS WHERE OWNER=? AND TRIGGER_NAME=?`, w.schema, object.Name).Scan(&status)
+	if err != nil {
+		err = fmt.Errorf("读取新事件触发器禁用状态失败，目标状态待核验: %w", err)
 		return errors.Join(err, repair.Observe(ctx, unit.SQL, "unknown", err))
 	}
-	status := "succeeded"
-	if createErr != nil {
-		status = repairErrorStatus(createErr)
+	if state := strings.ToUpper(strings.TrimSpace(status)); state != "N" && state != "0" && state != "DISABLED" && state != "DISABLE" {
+		// Defensive cleanup for an incompatible server or unexpected catalog
+		// state; this is never the mechanism used to install disabled hooks.
+		_, disableErr := conn.ExecContext(cleanup, damengnative.EventTriggerStateSQL(w.schema, object.Name, false))
+		err = errors.Join(fmt.Errorf("新事件触发器未按冻结计划原子禁用，目标状态待核验: %s", status), disableErr)
+		return errors.Join(err, repair.Observe(ctx, unit.SQL, "unknown", err))
 	}
-	return errors.Join(createErr, repair.Observe(ctx, unit.SQL, status, createErr))
+	return repair.Observe(ctx, unit.SQL, "succeeded", nil)
 }
 
 func discardNativeEventConnection(conn *sql.Conn) {
@@ -156,17 +157,4 @@ func validateNativeObjectUnit(schema string, object damengnative.Object, unit da
 		return nativeEventIdentity(schema, object, unit)
 	}
 	return validateDamengNativeSQL(schema, unit.SQL)
-}
-
-func nativeCheckpointEventsDisabled(ctx context.Context, query interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) error {
-	var value string
-	if err := query.QueryRowContext(ctx, `SELECT PARA_VALUE FROM V$DM_INI WHERE PARA_NAME='ENABLE_CKPT_EVENT_TRIG'`).Scan(&value); err != nil {
-		return fmt.Errorf("无法只读确认 CHECKPOINT 事件调度已关闭: %w", err)
-	}
-	if strings.TrimSpace(value) != "0" {
-		return fmt.Errorf("CHECKPOINT 事件调度当前启用；CREATE 与禁用之间存在后台触发窗口，已阻止安装")
-	}
-	return nil
 }
