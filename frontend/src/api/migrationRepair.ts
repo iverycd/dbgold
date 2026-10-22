@@ -22,6 +22,8 @@ export interface RepairColumn {
 export interface RepairVerification { status: string; message: string }
 export interface ManualVerification { confirmed_by: number; confirmed_at: string; evidence: string; fingerprint: string }
 export interface RepairObject {
+  native?: { id: string; kind: string; name: string; schema: string; managed?: boolean; units: { sql: string; phase: string }[] }
+  native_fingerprint?: string
   mysql_pg_trigger?: Record<string, unknown>
   verification?: RepairVerification
   manual_verification?: ManualVerification

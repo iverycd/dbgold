@@ -4,6 +4,7 @@ package repair
 import (
 	"context"
 	"crypto/sha256"
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/source"
 	"encoding/hex"
@@ -23,7 +24,10 @@ type Unit struct {
 }
 
 type Object struct {
-	MySQLPGTrigger *mysqltrigger.Plan `json:"mysql_pg_trigger,omitempty"`
+	Native            *damengnative.Object `json:"native,omitempty"`
+	NativeFingerprint string               `json:"native_fingerprint,omitempty"`
+	NativeTable       *damengnative.Table  `json:"native_table,omitempty"`
+	MySQLPGTrigger    *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -100,6 +104,9 @@ func (o *Object) NormalizeLegacyExecution() bool {
 
 // CanEditDDL requires an object identity, not just a report category label.
 func (o Object) CanEditDDL() bool {
+	if o.Native != nil {
+		return false
+	}
 	if o.DiagnosticOnly || strings.TrimSpace(o.Schema) == "" || strings.TrimSpace(o.TargetName) == "" {
 		return false
 	}
@@ -116,23 +123,45 @@ func (o Object) CanEditDDL() bool {
 // Generated MySQL trigger programs can be retried as a complete immutable
 // transaction, while remaining unavailable to the general SQL draft editor.
 func (o Object) CanExecuteDDL() bool {
+	if o.Native != nil {
+		return o.TrustedNative()
+	}
 	return o.CanEditDDL() || (!o.DiagnosticOnly && o.Kind == "trigger" && o.MySQLPGTrigger != nil && o.Schema != "" && o.TargetName != "")
 }
 
+// TrustedNative binds the immutable server-side plan and every physical unit.
+// A generic SQL draft can never acquire native execution authority.
+func (o Object) TrustedNative() bool {
+	if o.DiagnosticOnly || o.Native == nil || o.Native.Managed || o.Schema == "" || o.Schema != o.Native.Schema || o.TargetName != o.Native.Name || o.NativeFingerprint == "" || o.NativeFingerprint != damengnative.Fingerprint(o.Native) || len(o.Units) != len(o.Native.Units) {
+		return false
+	}
+	for i, u := range o.Units {
+		if u.SQL == "" || u.SQL != u.OriginalSQL || u.SQL != o.Native.Units[i].SQL {
+			return false
+		}
+	}
+	return len(o.Units) > 0
+}
+
 type RecoveryPreview struct {
-	ObjectID        string              `json:"object_id"`
-	SourceTable     string              `json:"source_table"`
-	TargetTable     string              `json:"target_table"`
-	QualifiedTarget string              `json:"qualified_target"`
-	SourceRows      int64               `json:"source_rows"`
-	TargetRows      int64               `json:"target_rows"`
-	ColumnMapping   map[string]string   `json:"column_mapping"`
-	SourceColumns   []source.ColumnInfo `json:"source_columns"`
-	TargetColumns   []source.ColumnInfo `json:"target_columns"`
-	Related         []Object            `json:"related"`
-	DataRequired    bool                `json:"data_required"`
-	Fingerprint     string              `json:"fingerprint"`
-	Warnings        []string            `json:"warnings"`
+	NativeTable     *damengnative.Table  `json:"native_table,omitempty"`
+	NativeObject    *damengnative.Object `json:"native_object,omitempty"`
+	NativeUnits     []Unit               `json:"native_units,omitempty"`
+	NativeDisable   []damengnative.Unit  `json:"native_disable,omitempty"`
+	NativeRestore   []damengnative.Unit  `json:"native_restore,omitempty"`
+	ObjectID        string               `json:"object_id"`
+	SourceTable     string               `json:"source_table"`
+	TargetTable     string               `json:"target_table"`
+	QualifiedTarget string               `json:"qualified_target"`
+	SourceRows      int64                `json:"source_rows"`
+	TargetRows      int64                `json:"target_rows"`
+	ColumnMapping   map[string]string    `json:"column_mapping"`
+	SourceColumns   []source.ColumnInfo  `json:"source_columns"`
+	TargetColumns   []source.ColumnInfo  `json:"target_columns"`
+	Related         []Object             `json:"related"`
+	DataRequired    bool                 `json:"data_required"`
+	Fingerprint     string               `json:"fingerprint"`
+	Warnings        []string             `json:"warnings"`
 }
 
 type RecoveryResult struct {

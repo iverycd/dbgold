@@ -18,7 +18,7 @@ function page({ start, preflight, objectStart } = {}) {
   const compiled = ts.transpileModule(`${descriptor.scriptSetup.content}
     export { connections, dataMigrate, canStartMigration, requestDataMigration, confirmDataMigration,
       dataMigrationConfirmVisible, dataMigrationStarting, dataMigrationContentLabel,
-      dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration };`, {
+      dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration, isDamengNative };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
   const context = {
@@ -120,6 +120,29 @@ test('invalid configuration is rejected before showing confirmation', () => {
     assert.equal(p.dataMigrationConfirmVisible.value, true, 'Oracle permits its default schema')
     assert.equal(starts.length, 0)
     assert.equal(checks.length, 0)
+  } finally { scope.stop() }
+})
+
+test('Dameng native confirmation explains default conflict blocking and optional overwrite', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const { p } = scope.run(() => page())
+    p.connections.value[0].db_type = 'dameng'
+    p.connections.value[1].db_type = 'dameng'
+    p.dataMigrate.srcDatabase = 'MixedOwner'
+    await Vue.nextTick()
+    p.requestDataMigration()
+    const blocked = await renderConfirmation(p)
+    assert.match(blocked.html, /Schema 全部对象 \+ 数据/)
+    assert.match(blocked.html, /整个 Schema：MixedOwner/)
+    assert.match(blocked.html, /发现冲突将阻止迁移/)
+    assert.doesNotMatch(blocked.html, /现有数据会丢失/)
+    assert.equal(blocked.modalProps.okButtonProps.status, 'normal')
+    p.dataMigrate.overwriteExisting = true
+    const overwrite = await renderConfirmation(p)
+    assert.match(overwrite.html, /计划内的目标同名对象/)
+    assert.match(overwrite.html, /删除后重建/)
+    assert.equal(overwrite.modalProps.okButtonProps.status, 'danger')
   } finally { scope.stop() }
 })
 

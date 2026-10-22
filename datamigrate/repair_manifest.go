@@ -854,6 +854,10 @@ func (m *Migrator) repairPlanned(ctx context.Context, v PlannedObject) error {
 }
 
 func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
+	if report.NativeSchema != nil {
+		m.finishDamengNativeRepair(report)
+		return
+	}
 	if m.repairs == nil {
 		return
 	}

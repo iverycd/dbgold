@@ -275,6 +275,7 @@ func ValidateBatch(c *gin.Context) {
 // batchOptions 是整批共用的迁移选项，对齐单任务前端默认值（MigrationView.vue）。
 // 这些选项应用到批次内所有迁移对。
 type batchOptions struct {
+	OverwriteExisting  bool
 	ValidateData       bool
 	MigrateTriggers    bool
 	ExcludedObjects    map[int][]datamigrate.ObjectRef
@@ -330,6 +331,7 @@ func parseBatchOptions(c *gin.Context) batchOptions {
 		content = "both"
 	}
 	return batchOptions{
+		OverwriteExisting:  boolOr("overwrite_existing", false),
 		ValidateData:       boolOr("validate_data", false),
 		MigrateTriggers:    boolOr("migrate_triggers", false),
 		MigrateContent:     content,
@@ -398,6 +400,15 @@ func StartBatch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "仅迁移数据时不能启用触发器迁移"})
 		return
 	}
+	for _, row := range valid {
+		if isDamengNativePair(row.SrcDBType, row.DstDBType) {
+			nativeRequest := startDataMigrationRequest{MigrateMode: "all", MigrateContent: opts.MigrateContent, ExcludedObjects: excludedObjects[row.RowNum]}
+			if err := normalizeDamengNativeRequest(&nativeRequest); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Excel 第 %d 行: %v", row.RowNum, err)})
+				return
+			}
+		}
+	}
 	ownerID := middleware.GetCurrentUserID(c)
 	batchID := uuid.New().String()
 	batch := &store.BatchMigration{
@@ -421,6 +432,14 @@ func StartBatch(c *gin.Context) {
 // runBatch 串行执行一个批次内的所有迁移对，一个完成后再执行下一个。
 func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) {
 	for _, r := range rows {
+		rowOpts := opts
+		if isDamengNativePair(r.SrcDBType, r.DstDBType) {
+			rowOpts.LowerCaseNames, rowOpts.CharInLength, rowOpts.UseNvarchar2, rowOpts.Distributed = false, false, false, false
+			disabled := false
+			rowOpts.ChangeOwner = &disabled
+			rowOpts.StripViewSchemas = ""
+			rowOpts.MigrateTriggers = true
+		}
 		// 批次被取消时，剩余子任务直接标记为 cancelled，不再执行
 		if b, err := store.GetBatchMigration(batchID); err == nil && b.Status == "cancelled" {
 			break
@@ -441,22 +460,22 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		job := datamigrate.Registry.Register(jobID, cancel)
 
 		dbJob := &store.DataMigrationJob{
-			ValidateData:       opts.ValidateData,
-			MigrateTriggers:    opts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
-			ExcludedObjects:    encodeExcludedObjects(opts.ExcludedObjects[r.RowNum]),
+			ValidateData:       rowOpts.ValidateData,
+			MigrateTriggers:    rowOpts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			ExcludedObjects:    encodeExcludedObjects(rowOpts.ExcludedObjects[r.RowNum]),
 			OwnerID:            ownerID,
 			JobID:              jobID,
 			BatchID:            batchID,
 			SrcDBType:          r.SrcDBType,
 			DstDBType:          r.DstDBType,
 			MigrateMode:        "all",
-			PageSize:           opts.PageSize,
-			MaxParallel:        opts.MaxParallel,
-			IntraTableParallel: opts.IntraTableParallel,
-			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
-			CharInLength:       (opts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
-			UseNvarchar2:       opts.UseNvarchar2 && r.DstDBType != "sqlserver",
-			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
+			PageSize:           rowOpts.PageSize,
+			MaxParallel:        rowOpts.MaxParallel,
+			IntraTableParallel: rowOpts.IntraTableParallel,
+			LowerCaseNames:     rowOpts.LowerCaseNames && r.DstDBType != "oracle",
+			CharInLength:       (rowOpts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
+			UseNvarchar2:       rowOpts.UseNvarchar2 && r.DstDBType != "sqlserver",
+			ChangeOwner:        rowOpts.changeOwnerFor(r.DstDBType),
 			DstSchema:          r.TargetSchema,
 			Status:             "running",
 			SrcConnName:        fmt.Sprintf("%s:%d/%s", r.SrcHost, r.SrcPort, r.SrcDatabase),
@@ -481,22 +500,23 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			sourceSchema = r.SrcSchema
 		}
 		p := migrationParams{
-			ValidateData:       opts.ValidateData,
-			MigrateTriggers:    opts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
-			ExcludedObjects:    opts.ExcludedObjects[r.RowNum],
+			OverwriteExisting:  rowOpts.OverwriteExisting,
+			ValidateData:       rowOpts.ValidateData,
+			MigrateTriggers:    rowOpts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			ExcludedObjects:    rowOpts.ExcludedObjects[r.RowNum],
 			SrcDatabase:        sourceSchema,
 			MigrateMode:        "all",
-			MigrateContent:     opts.MigrateContent,
+			MigrateContent:     rowOpts.MigrateContent,
 			TargetSchema:       r.TargetSchema,
-			StripViewSchemas:   opts.StripViewSchemas,
-			PageSize:           opts.PageSize,
-			MaxParallel:        opts.MaxParallel,
-			IntraTableParallel: opts.IntraTableParallel,
-			LowerCaseNames:     opts.LowerCaseNames && r.DstDBType != "oracle",
-			CharInLength:       (opts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
-			UseNvarchar2:       opts.UseNvarchar2 && r.DstDBType != "sqlserver",
-			Distributed:        opts.Distributed && r.DstDBType != "oracle" && r.DstDBType != "sqlserver",
-			ChangeOwner:        opts.changeOwnerFor(r.DstDBType),
+			StripViewSchemas:   rowOpts.StripViewSchemas,
+			PageSize:           rowOpts.PageSize,
+			MaxParallel:        rowOpts.MaxParallel,
+			IntraTableParallel: rowOpts.IntraTableParallel,
+			LowerCaseNames:     rowOpts.LowerCaseNames && r.DstDBType != "oracle",
+			CharInLength:       (rowOpts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
+			UseNvarchar2:       rowOpts.UseNvarchar2 && r.DstDBType != "sqlserver",
+			Distributed:        rowOpts.Distributed && r.DstDBType != "oracle" && r.DstDBType != "sqlserver",
+			ChangeOwner:        rowOpts.changeOwnerFor(r.DstDBType),
 		}
 
 		// 后台 drain 日志，避免 LogCh 满后阻塞迁移（无 SSE 订阅者时仍能推进）

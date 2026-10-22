@@ -15,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var newMigrationSequencePlanWriter = buildDstWriter
+var newMigrationSequencePlanWriter = func(conn *store.Connection, schema string, pool target.ConnPoolConfig) (target.Writer, error) {
+	return buildDstWriter(conn, schema, pool)
+}
 
 // RefreshMigrationSequencePlan returns a review candidate. Opening a plan must
 // not seed a legacy ledger, save a draft, claim an attempt, or execute target SQL.

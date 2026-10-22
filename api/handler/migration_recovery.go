@@ -37,7 +37,7 @@ func openRecovery(src, dst *store.Connection, b *store.MigrationRepairBinding) (
 	if e != nil {
 		return nil, nil, e
 	}
-	w, e := buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
+	w, e := buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{}, src.DBType)
 	if e != nil {
 		r.Close()
 		return nil, nil, e
@@ -278,9 +278,11 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			repairError(c, scopeErr)
 			return
 		}
-		if e = validateRepairUnits(related.Units); e != nil {
-			repairError(c, fmt.Errorf("关联对象 %s: %w", related.Name, e))
-			return
+		if related.Native == nil {
+			if e = validateRepairUnits(related.Units); e != nil {
+				repairError(c, fmt.Errorf("关联对象 %s: %w", related.Name, e))
+				return
+			}
 		}
 	}
 	cfg, e := recoveryConfig(b)
@@ -346,6 +348,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 		if e == nil || result.DataStatus == "succeeded" {
 			o.ColumnMapping = fresh.ColumnMapping
 		}
+		syncNativeRecoveryUnits(&o, executedUnits)
 		if syncErr := persistRecoveryData(j.JobID, o); syncErr != nil {
 			a.Status = "unknown"
 			finishRepair(a, o, syncErr)
@@ -555,4 +558,26 @@ func orderedRecoveryObjects(items []repair.Object) []repair.Object {
 		visit(o)
 	}
 	return out
+}
+
+// A recovery attempt records physical native state changes under the same SQL
+// identity as the original plan. Preserve that evidence before related retries.
+func syncNativeRecoveryUnits(object *repair.Object, executed []repair.Unit) {
+	if object.Native == nil {
+		return
+	}
+	for _, observed := range executed {
+		if observed.Status != "succeeded" {
+			continue
+		}
+		for i := range object.Units {
+			unit := &object.Units[i]
+			if unit.SQL == observed.SQL && unit.SQL == unit.OriginalSQL {
+				unit.Status, unit.Error, unit.Selected = "succeeded", "", false
+			}
+		}
+	}
+	if object.AllUnitsSucceeded() && (object.DataStatus == "succeeded" || object.DataStatus == "not_required") {
+		object.Status, object.Error = "succeeded", ""
+	}
 }

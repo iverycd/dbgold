@@ -1,6 +1,7 @@
 package datamigrate
 
 import (
+	"dbgold/datamigrate/damengnative"
 	"errors"
 
 	"dbgold/datamigrate/dialect"
@@ -69,6 +70,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	NativeSchema            *NativeSchemaReport                  `json:"native_schema,omitempty"`
 	DataValidation          *validation.Report                   `json:"dataValidation,omitempty"`
 	TriggerMigrationEnabled bool                                 `json:"trigger_migration_enabled,omitempty"`
 	CompatibilityFunctions  *target.CompatibilityFunctionsReport `json:"compatibility_functions,omitempty"`
@@ -87,6 +89,19 @@ type MigrationReport struct {
 	Comments                CategoryReport                       `json:"comments"`
 	Triggers                CategoryReport                       `json:"triggers"`
 	RowCounts               []TableRowCount                      `json:"rowCounts"`
+}
+
+type NativeCategoryReport struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+	CategoryReport
+}
+
+type NativeSchemaReport struct {
+	Preflight    *damengnative.Preflight `json:"preflight"`
+	Inventory    []damengnative.Object   `json:"inventory"`
+	Categories   []NativeCategoryReport  `json:"categories"`
+	Verification []damengnative.Issue    `json:"verification"`
 }
 
 // AutoRepair is emitted only after successful CREATE or existing-column validation.
@@ -129,6 +144,16 @@ func newMigrationReport() MigrationReport {
 
 // HasFailures is shared by all job entrypoints; read/validation failures count.
 func (r MigrationReport) HasFailures() bool {
+	if r.NativeSchema != nil {
+		if r.NativeSchema.Preflight == nil || !r.NativeSchema.Preflight.Ready || damengnative.HasErrors(r.NativeSchema.Verification) {
+			return true
+		}
+		for _, c := range r.NativeSchema.Categories {
+			if c.Failed > 0 || c.Success < c.Total {
+				return true
+			}
+		}
+	}
 	if r.DataValidation != nil && r.DataValidation.HasFailures() {
 		return true
 	}

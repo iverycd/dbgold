@@ -98,7 +98,9 @@ func migrationSourceLocation(j *store.DataMigrationJob, c *store.Connection, ove
 			j.SourceSchema = override
 		}
 		// Match the effective owner used by the existing Reader constructors.
-		j.SourceSchema = strings.ToUpper(j.SourceSchema)
+		if c.DBType == "oracle" || !isDamengNativePair(c.DBType, j.DstDBType) {
+			j.SourceSchema = strings.ToUpper(j.SourceSchema)
+		}
 	} else if override != "" {
 		j.SourceDatabase = override
 	}
@@ -700,7 +702,9 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	c.JSON(200, gin.H{"object": o, "version": req.Version + 1})
 }
 
-var newMigrationRepairWriter = buildDstWriter
+var newMigrationRepairWriter = func(conn *store.Connection, schema string, pool target.ConnPoolConfig) (target.Writer, error) {
+	return buildDstWriter(conn, schema, pool)
+}
 
 var repairCancels sync.Map
 
@@ -895,7 +899,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
-	if o.MySQLPGTrigger != nil {
+	if o.MySQLPGTrigger != nil || o.Native != nil {
 		// The read-only retry action always requests the whole frozen transaction;
 		// it does not expose or depend on persisted per-unit selection controls.
 		for i := range o.Units {
@@ -904,7 +908,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			}
 		}
 	}
-	if o.RequiresReview && o.MySQLPGTrigger == nil {
+	if o.RequiresReview && o.MySQLPGTrigger == nil && o.Native == nil {
 		repairError(c, fmt.Errorf("请先审阅并保存执行单元"))
 		return
 	}
@@ -914,15 +918,20 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			return
 		}
 	}
-	if e := validateRepairUnits(o.Units); e != nil {
-		repairError(c, e)
+	if o.Native == nil {
+		if e := validateRepairUnits(o.Units); e != nil {
+			repairError(c, e)
+			return
+		}
+	} else if !o.TrustedNative() {
+		repairError(c, fmt.Errorf("达梦原生执行计划已变化，禁止重放"))
 		return
 	}
 	if e := validateRepairObjectScope(o, o.Units, j.DstDBType); e != nil {
 		repairError(c, e)
 		return
 	}
-	if e := validateMySQLPGTriggerDependencies(j.JobID, o); e != nil {
+	if e := validateMigrationRepairDependencies(j.JobID, o); e != nil {
 		repairError(c, e)
 		return
 	}
@@ -945,11 +954,17 @@ func ExecuteMigrationRepair(c *gin.Context) {
 	}
 	response := attemptResponse(a)
 	startRepairWorker(a, func(ctx context.Context) {
-		if e := validateMySQLPGTriggerDependencies(j.JobID, o); e != nil {
+		if e := validateMigrationRepairDependencies(j.JobID, o); e != nil {
 			finishRepair(a, o, e)
 			return
 		}
-		w, e := newMigrationRepairWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
+		var w target.Writer
+		var e error
+		if o.Native != nil {
+			w, e = buildDstWriter(dst, b.TargetSchema, target.ConnPoolConfig{}, j.SrcDBType)
+		} else {
+			w, e = newMigrationRepairWriter(dst, b.TargetSchema, target.ConnPoolConfig{})
+		}
 		if e != nil {
 			finishRepair(a, o, e)
 			return

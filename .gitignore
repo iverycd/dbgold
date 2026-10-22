@@ -5,6 +5,10 @@ dbgold.db
 .env
 .idea
 docs
+# Keep the native migration runbook while ignoring the local vendor manuals.
+!/docs/
+/docs/*
+!/docs/dameng-dameng.md
 .claude
 log
 uploads

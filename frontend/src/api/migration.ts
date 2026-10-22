@@ -3,12 +3,14 @@ import api from './index'
 // ===== 数据迁移 =====
 
 export interface SupportedPair {
+  supports_full_schema?: boolean
   supports_triggers?: boolean
   source: string
   target: string
 }
 
 export interface StartDataMigrationRequest {
+  overwrite_existing?: boolean
   validate_data?: boolean
   migrate_triggers?: boolean
   excluded_objects?: MigrationObjectRef[]
@@ -223,6 +225,7 @@ export interface DataValidationReport {
 }
 
 export interface MigrationReport {
+  native_schema?: { preflight?: DamengNativePreflight; categories: (CategoryReport & { kind: string; label: string })[]; verification: DamengNativeIssue[]; inventory: DamengNativeObject[] }
   dataValidation?: DataValidationReport
   trigger_migration_enabled?: boolean
   trigger_adaptation?: TriggerAdaptationReport
@@ -591,6 +594,7 @@ export const validateBatch = (file: File) => {
 
 // 批量迁移整批共用的迁移选项（对齐单任务默认值）
 export interface BatchOptions {
+  overwrite_existing?: boolean
   validate_data?: boolean
   migrate_triggers?: boolean
   excluded_objects_by_row?: Record<number, MigrationObjectRef[]>
@@ -614,6 +618,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   if (excludeRows.length) fd.append('exclude_rows', excludeRows.join(','))
   if (opts.excluded_objects_by_row) fd.append('excluded_objects_by_row', JSON.stringify(opts.excluded_objects_by_row))
   fd.append('migrate_content', opts.migrate_content)
+  fd.append('overwrite_existing', String(!!opts.overwrite_existing))
   fd.append('validate_data', String(!!opts.validate_data))
   fd.append('migrate_triggers', String(!!opts.migrate_triggers))
   fd.append('page_size', String(opts.page_size))
@@ -681,3 +686,16 @@ export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
 }
 export const preflightDataMigration = (data: PGMySQLPreflightRequest, signal?: AbortSignal) =>
   api.post<PGMySQLPreflight>('/migration/data/preflight', data, { timeout: 0, signal })
+
+export interface DamengNativeIssue { object_id?: string; kind?: string; name?: string; severity: string; reason: string }
+export interface DamengNativeObject {
+  id: string; kind: string; name: string; schema: string; table?: string; status?: string; managed?: boolean
+  dependencies: string[]; units: { sql: string; phase: string }[]; drop_sql?: string
+}
+export interface DamengNativeProfile { version: string; instance: string; schema: string; settings: Record<string, string> }
+export interface DamengNativePreflight {
+  kind: 'dameng_native'; ready: boolean; source: DamengNativeProfile; target: DamengNativeProfile
+  objects: DamengNativeObject[]; conflicts: DamengNativeObject[]; drops: DamengNativeObject[]; issues: DamengNativeIssue[]; fingerprint: string
+}
+export const preflightDamengNative = (data: StartDataMigrationRequest, signal?: AbortSignal) =>
+  api.post<DamengNativePreflight>('/migration/data/preflight', data, { timeout: 0, signal })

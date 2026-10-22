@@ -23,13 +23,15 @@ import (
 
 // SupportedPair 表示一个支持的迁移组合
 type SupportedPair struct {
-	Source           string `json:"source"`
-	Target           string `json:"target"`
-	SupportsTriggers bool   `json:"supports_triggers"`
+	Source             string `json:"source"`
+	Target             string `json:"target"`
+	SupportsTriggers   bool   `json:"supports_triggers"`
+	SupportsFullSchema bool   `json:"supports_full_schema"`
 }
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
+	{Source: "dameng", Target: "dameng", SupportsFullSchema: true},
 	{Source: "oracle", Target: "dameng"},
 	{Source: "sqlserver", Target: "dameng"},
 	{Source: "mysql", Target: "sqlserver"},
@@ -97,14 +99,18 @@ func GetSupportedPairs(c *gin.Context) {
 	c.JSON(http.StatusOK, pairs)
 }
 
-func supportsTriggerMigration(src, dst string) bool { return src == "mysql" && source.IsPGFamily(dst) }
+func isDamengNativePair(src, dst string) bool { return src == "dameng" && dst == "dameng" }
+
+func supportsTriggerMigration(src, dst string) bool {
+	return src == "mysql" && source.IsPGFamily(dst) || isDamengNativePair(src, dst)
+}
 
 func validateTriggerMigration(src, dst, content string, enabled bool) error {
 	if !enabled {
 		return nil
 	}
 	if !supportsTriggerMigration(src, dst) {
-		return fmt.Errorf("触发器迁移仅支持 MySQL → PG 内核目标")
+		return fmt.Errorf("触发器迁移仅支持 MySQL → PG 内核目标或达梦 → 达梦")
 	}
 	if content == "data_only" {
 		return fmt.Errorf("仅迁移数据时不能启用触发器迁移")
@@ -121,6 +127,7 @@ func validateDataValidationMode(content string, enabled bool) error {
 }
 
 type startDataMigrationRequest struct {
+	OverwriteExisting  bool                    `json:"overwrite_existing"`
 	ValidateData       bool                    `json:"validate_data"`
 	MigrateTriggers    bool                    `json:"migrate_triggers"`
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
@@ -188,6 +195,12 @@ func StartDataMigration(c *gin.Context) {
 		req.CharInLength = true
 		req.Distributed = false
 	}
+	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
+		if err := normalizeDamengNativeRequest(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
 
 	// 校验迁移组合是否支持
@@ -251,6 +264,7 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	p := migrationParams{
+		OverwriteExisting:  req.OverwriteExisting,
 		ValidateData:       req.ValidateData,
 		MigrateTriggers:    req.MigrateTriggers,
 		ExcludedObjects:    req.ExcludedObjects,
@@ -289,15 +303,16 @@ func StartDataMigration(c *gin.Context) {
 
 // migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
 type migrationParams struct {
-	ValidateData     bool
-	MigrateTriggers  bool
-	ExcludedObjects  []datamigrate.ObjectRef
-	MigrateMode      string
-	TableFilter      string
-	MigrateContent   string
-	TargetSchema     string
-	StripViewSchemas string
-	SrcDatabase      string // 可选，覆盖连接默认库
+	OverwriteExisting bool
+	ValidateData      bool
+	MigrateTriggers   bool
+	ExcludedObjects   []datamigrate.ObjectRef
+	MigrateMode       string
+	TableFilter       string
+	MigrateContent    string
+	TargetSchema      string
+	StripViewSchemas  string
+	SrcDatabase       string // 可选，覆盖连接默认库
 
 	PageSize           int
 	MaxParallel        int
@@ -353,7 +368,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		MaxIdleConns:    p.DstMaxIdleConns,
 		ConnMaxLifetime: time.Duration(p.DstConnMaxLifetime) * time.Second,
 	}
-	writer, writerErr := buildDstWriter(dstConn, p.TargetSchema, dstPool)
+	writer, writerErr := buildDstWriter(dstConn, p.TargetSchema, dstPool, srcConn.DBType)
 	if writerErr == nil {
 		defer writer.Close()
 	}
@@ -385,6 +400,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
+		OverwriteExisting:    p.OverwriteExisting,
 		ValidateData:         p.ValidateData,
 		MigrateTriggers:      p.MigrateTriggers,
 		PreparationStartedAt: startup.startedAt,
@@ -408,7 +424,13 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 	if !proceed {
 		return
 	}
-	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, p.SrcDatabase, &cfg, writer)
+	sourceSchema := p.SrcDatabase
+	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
+		if scoped, ok := reader.(interface{ MigrationSchema() string }); ok {
+			sourceSchema = scoped.MigrationSchema()
+		}
+	}
+	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, sourceSchema, &cfg, writer)
 	if releaseRepair != nil {
 		defer releaseRepair()
 	}
@@ -487,6 +509,11 @@ func StartObjectMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "目标库连接不存在"})
 		return
 	}
+	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "达梦同库迁移请使用 Schema 全对象迁移，不支持仅迁移指定对象"})
+		return
+	}
+
 	if dstConn.DBType == "oracle" {
 		req.LowerCaseNames = false
 		req.Distributed = false
@@ -719,6 +746,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 		}
 		return source.NewSQLServer(dsn, db, pool)
 	case "dameng":
+		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
+			return source.NewDaMengNative(dsn, db, pool)
+		}
 		return source.NewDaMeng(dsn, db, pool)
 	case "oracle":
 		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
@@ -738,7 +768,7 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 }
 
 // buildDstWriter 根据目标连接类型构造对应的 Writer(消除多处重复的初始化 switch)
-func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.ConnPoolConfig) (target.Writer, error) {
+func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.ConnPoolConfig, sourceTypes ...string) (target.Writer, error) {
 	dstDSN := buildDSN(dstConn)
 	switch dstConn.DBType {
 	case "sqlserver":
@@ -748,6 +778,9 @@ func buildDstWriter(dstConn *store.Connection, targetSchema string, pool target.
 	case "gaussdb":
 		return target.NewGaussDB(dstDSN, targetSchema, pool)
 	case "dameng":
+		if len(sourceTypes) > 0 && sourceTypes[0] == "dameng" {
+			return target.NewDaMengNative(dstDSN, targetSchema, pool)
+		}
 		return target.NewDaMeng(dstDSN, targetSchema, pool)
 	case "highgo":
 		return target.NewHighGo(dstDSN, targetSchema, pool)
@@ -877,6 +910,11 @@ func MigrateViews(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
 		})
+		return
+	}
+
+	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "达梦同库迁移请使用 Schema 全对象迁移，不支持仅迁移视图"})
 		return
 	}
 

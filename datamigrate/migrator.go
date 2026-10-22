@@ -18,6 +18,7 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
+	OverwriteExisting bool `json:"OverwriteExisting,omitempty"`
 	// ValidateData opts ordinary data jobs into full content validation.
 	ValidateData bool `json:"ValidateData,omitempty"`
 	// PreparationStartedAt includes connection setup in the preparation duration.
@@ -92,6 +93,13 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if reader.DBType() == "dameng" && writer.DBType() == "dameng" {
+		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed = "dameng", false, false, false
+		cfg.CharInLength, cfg.UseNvarchar2, cfg.StripViewSchemas = false, false, nil
+		if s, ok := writer.(interface{ EffectiveSchema() string }); ok {
+			cfg.TargetSchema = s.EffectiveSchema()
+		}
+	}
 	if reader.DBType() == "oracle" && writer.DBType() == "dameng" {
 		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed = "dameng", false, false, false
 		if r, ok := reader.(*source.OracleReader); ok {
@@ -244,6 +252,9 @@ func (m *Migrator) logPreparationComplete(ctx context.Context) {
 }
 
 func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
+	if m.isDamengNative() {
+		return m.runDamengNative(ctx)
+	}
 	m.compatibilityFunctions = nil
 	m.dmSequenceBoundsLogged = nil
 	m.resetSourceTableDDLCache()

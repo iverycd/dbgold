@@ -19,7 +19,9 @@ import (
 )
 
 var newMigrationTriggerPlanReader = buildSrcReader
-var newMigrationTriggerPlanWriter = buildDstWriter
+var newMigrationTriggerPlanWriter = func(conn *store.Connection, schema string, pool target.ConnPoolConfig) (target.Writer, error) {
+	return buildDstWriter(conn, schema, pool)
+}
 
 type triggerPlanRequest struct {
 	Version        int    `json:"version"`
@@ -148,7 +150,7 @@ func migrationTriggerPlanRequest(c *gin.Context, save bool) {
 }
 
 func validateTriggerPlanOrigin(job *store.DataMigrationJob, binding *store.MigrationRepairBinding, object repair.Object) error {
-	if !supportsTriggerMigration(job.SrcDBType, job.DstDBType) || object.Kind != "trigger" || object.MySQLPGTrigger != nil || !object.DiagnosticOnly {
+	if job.SrcDBType != "mysql" || !source.IsPGFamily(job.DstDBType) || object.Kind != "trigger" || object.MySQLPGTrigger != nil || !object.DiagnosticOnly {
 		return fmt.Errorf("仅支持原报告中尚未生成执行方案的 MySQL → PG 触发器转换失败记录")
 	}
 	if !binding.Configured || binding.ConfigJSON == "" || object.Schema == "" || object.Schema != binding.TargetSchema {

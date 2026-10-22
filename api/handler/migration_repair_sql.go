@@ -133,6 +133,21 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.Native != nil {
+		if dbType != "dameng" || !obj.TrustedNative() || obj.Native.Kind != obj.Kind {
+			return fmt.Errorf("达梦原生修复对象身份与冻结计划不一致")
+		}
+		if len(units) != len(obj.Units) {
+			return fmt.Errorf("达梦原生修复必须执行冻结的完整单元")
+		}
+		for i, unit := range units {
+			if unit.ID != obj.Units[i].ID || unit.SQL != obj.Units[i].SQL || unit.OriginalSQL == "" || unit.SQL != unit.OriginalSQL {
+				return fmt.Errorf("达梦原生执行单元不可编辑")
+			}
+		}
+		return nil
+	}
+
 	if obj.Kind == "trigger" && obj.MySQLPGTrigger == nil {
 		return fmt.Errorf("触发器修复缺少可信原生成计划")
 	}

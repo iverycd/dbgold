@@ -146,3 +146,31 @@ func validateMySQLPGTriggerDependencyObjects(o repair.Object, objects []repair.O
 	}
 	return nil
 }
+
+func validateMigrationRepairDependencies(jobID string, object repair.Object) error {
+	if object.Native == nil {
+		return validateMySQLPGTriggerDependencies(jobID, object)
+	}
+	rows, err := store.ListMigrationRepairObjects(jobID)
+	if err != nil {
+		return err
+	}
+	objects := map[string]repair.Object{}
+	for _, row := range rows {
+		var item repair.Object
+		if err := json.Unmarshal([]byte(row.ObjectJSON), &item); err != nil {
+			return err
+		}
+		objects[item.ID] = item
+	}
+	for _, id := range object.Dependencies {
+		dependency, ok := objects[id]
+		if !ok || dependency.Status != "succeeded" {
+			return fmt.Errorf("原生对象依赖尚未成功: %s", id)
+		}
+		if dependency.DataStatus != "" && dependency.DataStatus != "succeeded" && dependency.DataStatus != "not_required" {
+			return fmt.Errorf("原生对象依赖表的数据尚未迁移完成: %s", dependency.TargetName)
+		}
+	}
+	return nil
+}

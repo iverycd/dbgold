@@ -34,10 +34,10 @@ func TestMySQLPGTriggerCapabilityAndValidation(t *testing.T) {
 	for _, pair := range pairs {
 		if pair.SupportsTriggers {
 			enabled++
-			require.Equal(t, "mysql", pair.Source)
+			require.True(t, pair.Source == "mysql" || isDamengNativePair(pair.Source, pair.Target))
 		}
 	}
-	require.Equal(t, 7, enabled)
+	require.Equal(t, 8, enabled)
 }
 
 func TestMySQLPGTriggerRequestsAndBatchDefaultOff(t *testing.T) {

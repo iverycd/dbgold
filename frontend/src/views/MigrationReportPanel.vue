@@ -32,6 +32,7 @@
         </template>
       </div>
       <a-alert v-if="dataValidationNeedsAttention(report.dataValidation)" type="warning" style="margin-bottom: 12px">数据内容校验未全部通过，请在“数据内容校验”中核查差异与失败原因。</a-alert>
+      <a-alert v-if="nativeSchemaNeedsAttention(report)" type="error" style="margin-bottom:12px">达梦 Schema 预检或对象完整性核对未通过，请查看下方全对象清单和问题明细。</a-alert>
       <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
       <a-tabs v-model:active-key="activeTab" :lazy-load="false" :destroy-on-hide="false">
         <!-- ===== 迁移概览 ===== -->
@@ -222,6 +223,7 @@
           </a-table>
         </a-tab-pane>
       </a-tabs>
+      <DamengNativePreflightPanel v-if="report.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
       <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
         <a-collapse v-model:active-key="preflightActiveKeys">
           <a-collapse-item key="preflight" :header="`迁移前预检记录（${report.preflight.ready ? '已通过' : '未通过'}）`">
@@ -239,9 +241,10 @@ import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPane
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, formatReportCategories, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
+import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
@@ -283,6 +286,7 @@ function updateRepairSummary(summary: RepairSummary) {
   if (summary.jobID === props.jobID) repairSummary.value = summary
 }
 async function goToRepair(kind: string, item: Omit<RepairFocusTarget, 'kind'>) {
+  kind = kind.startsWith('native:') ? kind.slice(7) : kind
   const jobID = props.jobID
   activeTab.value = 'repair'
   await nextTick()
@@ -360,6 +364,7 @@ async function exportReport() {
     lines.push('')
   }
   lines.push(...formatReportCategories(r))
+  if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
 
   if (r.rowCounts && r.rowCounts.length > 0) {
     lines.push('=== 行数对比 ===')

@@ -158,7 +158,7 @@
 
           <section class="migration-surface migration-settings"><div class="migration-section-heading"><h3>迁移设置</h3><span>选择范围与执行选项</span></div>
           <!-- 迁移范围 -->
-          <a-form-item label="迁移范围" style="margin-bottom: 16px">
+          <a-form-item v-if="!isDamengNative" label="迁移范围" style="margin-bottom: 16px">
             <a-radio-group v-model="dataMigrate.mode">
               <a-radio value="all">全库迁移</a-radio>
               <a-radio value="exclude">排除指定表</a-radio>
@@ -178,12 +178,17 @@
           </a-form-item>
 
           <!-- 迁移内容 -->
-          <a-form-item label="迁移内容" style="margin-bottom: 16px">
+          <a-form-item v-if="!isDamengNative" label="迁移内容" style="margin-bottom: 16px">
             <a-radio-group v-model="dataMigrate.content">
               <a-radio value="both">表结构 + 数据行</a-radio>
               <a-radio value="schema_only">仅创建表结构</a-radio>
               <a-radio value="data_only">仅迁移数据行</a-radio>
             </a-radio-group>
+          </a-form-item>
+
+          <a-alert v-if="isDamengNative" type="info" style="margin-bottom:16px">整个 Schema 的全部对象和数据一并迁移，包含触发器、函数、存储过程和包。对象定义保持达梦原生语法。</a-alert>
+          <a-form-item v-if="isDamengNative" label="目标对象冲突">
+            <a-checkbox v-model="dataMigrate.overwriteExisting">覆盖目标同名对象（删除后重建，默认关闭）</a-checkbox>
           </a-form-item>
 
           <!-- 高级设置 -->
@@ -222,35 +227,35 @@
                     <a-col v-if="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle'" :span="12">
                       <span class="adv-check">{{ selectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                     </a-col>
-                    <a-col :span="12">
+                    <a-col v-if="!isDamengNative" :span="12">
                       <a-checkbox v-model="dataMigrate.changeOwner" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                     </a-col>
-                    <a-col :span="12">
+                    <a-col v-if="!isDamengNative" :span="12">
                       <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
                     </a-col>
-                    <a-col :span="12">
+                    <a-col v-if="!isDamengNative" :span="12">
                       <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">{{ selectedSrc?.db_type === 'oracle' && selectedDst?.db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 nvarchar2' }}</a-checkbox>
                     </a-col>
-                    <a-col :span="12">
+                    <a-col v-if="!isDamengNative" :span="12">
                       <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
                     </a-col>
                     <a-col :span="24">
                       <a-checkbox v-model="dataMigrate.validateData" :disabled="dataMigrate.content === 'schema_only'" class="adv-check">迁移后校验数据内容</a-checkbox>
                       <div v-if="dataMigrate.validateData" class="adv-hint">全量读取源库与目标库，比对数据内容并记录差异，会增加耗时。请停止两端业务写入，直至迁移与校验结束。</div>
                     </a-col>
-                    <a-col v-if="dataSupportsTriggers" :span="24">
+                    <a-col v-if="dataSupportsTriggers && !isDamengNative" :span="24">
                       <a-checkbox v-model="dataMigrate.migrateTriggers" :disabled="dataMigrate.content === 'data_only'" class="adv-check">迁移所选表的触发器</a-checkbox>
                       <div v-if="dataMigrate.migrateTriggers" class="adv-hint">转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</div>
                     </a-col>
                   </a-row>
 
-                  <div class="adv-section-title">视图剥离模式名</div>
+                  <template v-if="!isDamengNative"><div class="adv-section-title">视图剥离模式名</div>
                   <a-input
                     v-model="dataMigrate.stripViewSchemas"
                     placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
                     allow-clear
                   />
-                  <div class="adv-hint">迁移视图时，从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。</div>
+                  <div class="adv-hint">迁移视图时，从视图定义中去除这些模式名前缀（忽略大小写）。用于跨库引用导致目标库找不到 schema 的场景。</div></template>
                 </a-col>
 
                 <!-- 右列：连接池配置 -->
@@ -299,6 +304,7 @@
 
           </section>
 
+          <DamengNativePreflightPanel v-if="isDamengNative" :result="nativeCheck" :busy="nativeCheckBusy" :disabled="dataMigrate.running || databaseSelectionBlocked('data')" @check="runNativeCheck" />
           <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')"
             :result="pgTaskSummaries.data ? (pgTaskSummaries.data.preflight ?? pgTaskSummaries.data.preview) : pgChecks.data"
             :compact="!!pgTaskSummaries.data" :summary-source="pgTaskSummaries.data?.preflight ? 'report' : 'page'"
@@ -918,7 +924,7 @@
       :esc-to-close="true"
       ok-text="确认并开始"
       cancel-text="取消"
-      :ok-button-props="{ status: dataMigrate.content === 'data_only' ? 'normal' : 'danger' }"
+      :ok-button-props="{ status: isDamengNative ? (dataMigrate.overwriteExisting ? 'danger' : 'normal') : dataMigrate.content === 'data_only' ? 'normal' : 'danger' }"
       @ok="confirmDataMigration"
     >
       <dl class="migration-confirm-summary">
@@ -927,9 +933,14 @@
         <div v-if="selectedDst?.db_type !== 'mysql'"><dt>目标 Schema</dt><dd>{{ dataMigrate.dstSchema || '默认 Schema' }}</dd></div>
         <div><dt>迁移内容</dt><dd>{{ dataMigrationContentLabel }}</dd></div>
         <div><dt>迁移范围</dt><dd>{{ dataMigrationScopeLabel }}</dd></div>
+        <div v-if="isDamengNative"><dt>同名对象覆盖</dt><dd>{{ dataMigrate.overwriteExisting ? '已启用：删除后重建' : '关闭：发现冲突将阻止迁移' }}</dd></div>
       </dl>
       <a-alert :type="dataMigrate.content === 'data_only' ? 'info' : 'warning'">
-        <template v-if="dataMigrate.content === 'data_only'">
+        <template v-if="isDamengNative">
+          <template v-if="dataMigrate.overwriteExisting">计划内的目标同名对象将<strong>删除后重建</strong>，相关已有数据会被替换。请核对预检删除清单。</template>
+          <template v-else>同名对象覆盖已关闭。发现冲突会在目标写入前阻止本次任务，请保持源库停写至迁移和核对完成。</template>
+        </template>
+        <template v-else-if="dataMigrate.content === 'data_only'">
           本次迁移将向目标表写入数据，请确认目标表结构和数据符合迁移要求。
         </template>
         <template v-else>
@@ -952,6 +963,7 @@ import MigrationReportPanel from './MigrationReportPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import { compatibilityReportGroups } from '@/utils/migrationReport'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
+import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
 import { createConnectionDatabaseEditors, CONNECTION_DATABASE_EDITORS_KEY } from '@/composables/connectionDatabaseEditors'
@@ -961,6 +973,8 @@ import { downloadRoutines } from '@/api/schema'
 import {
   getSupportedPairs,
   preflightDataMigration,
+  preflightDamengNative,
+  type DamengNativePreflight,
   type PGMySQLPreflight,
   type PGMySQLPreflightRequest,
   type MigrationObjectRef,
@@ -998,6 +1012,7 @@ const dataMigrate = reactive({
   filter: '',
   content: 'both' as 'both' | 'schema_only' | 'data_only',
   migrateTriggers: false,
+  overwriteExisting: false,
   validateData: false,
   pageSize: 20000,
   maxParallel: 10,
@@ -1031,12 +1046,13 @@ const dataExecutionRoute = ref<{
   srcSchema: string
   dstSchema: string
 } | null>(null)
-const dataMigrationContentLabel = computed(() => ({
+const dataMigrationContentLabel = computed(() => isDamengNative.value ? 'Schema 全部对象 + 数据' : ({
   both: '表结构 + 数据行',
   schema_only: '仅创建表结构',
   data_only: '仅迁移数据行',
 }[dataMigrate.content]))
 const dataMigrationScopeLabel = computed(() => {
+  if (isDamengNative.value) return `整个 Schema：${dataMigrate.srcDatabase}`
   if (dataMigrate.mode === 'all') return '全库迁移'
   const label = dataMigrate.mode === 'include' ? '仅迁移指定表' : '排除指定表'
   return `${label}：${dataMigrate.filter || '未指定表名'}`
@@ -1119,6 +1135,11 @@ function sourceUsesSchema(connection?: Connection): boolean {
   return !!connection && connection.db_type !== 'mysql' && connection.db_type !== 'sqlserver'
 }
 
+const isDamengNative = computed(() => selectedSrc.value?.db_type === 'dameng' && selectedDst.value?.db_type === 'dameng')
+watch(isDamengNative, enabled => {
+  if (!enabled) return
+  Object.assign(dataMigrate, { mode: 'all', filter: '', content: 'both', migrateTriggers: true, lowerCaseNames: false, charInLength: false, useNvarchar2: false, distributed: false, changeOwner: false, stripViewSchemas: '' })
+})
 const dataSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === selectedSrc.value?.db_type && pair.target === selectedDst.value?.db_type && pair.supports_triggers))
 watch(() => dataMigrate.content, content => { if (content === 'schema_only') dataMigrate.validateData = false })
 watch([dataSupportsTriggers, () => dataMigrate.content], ([supported, content]) => { if (!supported || content === 'data_only') dataMigrate.migrateTriggers = false })
@@ -1213,6 +1234,11 @@ async function startDataMigration() {
         return
       }
     }
+    if (isDamengNative.value && !(await runNativeCheck())?.ready) {
+      dataMigrate.logs.push('[WARN] 达梦全对象预检未通过，尚未启动任务')
+      dataMigrate.running = false
+      return
+    }
     const submitted = preparePGSubmission('data')
     if (selectedSrc.value && selectedDst.value) {
       dataExecutionRoute.value = {
@@ -1276,6 +1302,10 @@ function resetDataMigration() {
   dataMigrate.currentJobId = ''
   dataExecutionRoute.value = null
   clearPGCheck('data', true)
+  nativeCheckAbort?.abort()
+  nativeCheckAbort = null
+  nativeCheckBusy.value = false
+  nativeCheck.value = null
 }
 
 function copyLogs() {
@@ -1345,6 +1375,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  nativeCheckAbort?.abort()
   window.removeEventListener('beforeunload', handleBeforeUnload)
   currentEventSource?.close()
   currentEventSource = null
@@ -1414,7 +1445,7 @@ function vmCheckPairSupport() {
   const dst = connections.value.find((c) => c.id === viewMigrate.dstConnId)
   if (!src || !dst) return
   const supported = supportedPairs.value.some((p) => p.source === src.db_type && p.target === dst.db_type)
-  viewMigrate.unsupportedMsg = supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的视图迁移`
+  viewMigrate.unsupportedMsg = src.db_type === 'dameng' && dst.db_type === 'dameng' ? '达梦同库迁移请使用 Schema 全对象迁移' : supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的视图迁移`
 }
 
 async function vmLoadSrcDatabases(connId: number) {
@@ -1579,7 +1610,7 @@ function omCheckPairSupport() {
   const dst = connections.value.find((c) => c.id === objMigrate.dstConnId)
   if (!src || !dst) return
   const supported = supportedPairs.value.some((p) => p.source === src.db_type && p.target === dst.db_type)
-  objMigrate.unsupportedMsg = supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的对象迁移`
+  objMigrate.unsupportedMsg = src.db_type === 'dameng' && dst.db_type === 'dameng' ? '达梦同库迁移请使用 Schema 全对象迁移' : supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的对象迁移`
 }
 
 async function omLoadSrcDatabases(connId: number) {
@@ -1914,29 +1945,58 @@ function dataMigrationRequest(): PGMySQLPreflightRequest {
 return {
       src_conn_id: dataMigrate.srcConnId!,
       dst_conn_id: dataMigrate.dstConnId!,
-      migrate_mode: dataMigrate.mode,
-      table_filter: dataMigrate.filter,
-      migrate_content: dataMigrate.content,
-      migrate_triggers: dataMigrate.migrateTriggers,
+      migrate_mode: isDamengNative.value ? 'all' : dataMigrate.mode,
+      overwrite_existing: isDamengNative.value && dataMigrate.overwriteExisting,
+      table_filter: isDamengNative.value ? '' : dataMigrate.filter,
+      migrate_content: isDamengNative.value ? 'both' : dataMigrate.content,
+      migrate_triggers: isDamengNative.value || dataMigrate.migrateTriggers,
       validate_data: dataMigrate.validateData,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       intra_table_parallel: dataMigrate.intraTableParallel,
-      lower_case_names: dataMigrate.lowerCaseNames,
-      char_in_length: dataMigrate.charInLength,
-      use_nvarchar2: dataMigrate.useNvarchar2,
-      distributed: dataMigrate.distributed,
-      change_owner: dataMigrate.changeOwner,
+      lower_case_names: !isDamengNative.value && dataMigrate.lowerCaseNames,
+      char_in_length: !isDamengNative.value && dataMigrate.charInLength,
+      use_nvarchar2: !isDamengNative.value && dataMigrate.useNvarchar2,
+      distributed: !isDamengNative.value && dataMigrate.distributed,
+      change_owner: !isDamengNative.value && dataMigrate.changeOwner,
       src_database: dataMigrate.srcDatabase,
       target_schema: dataMigrate.dstSchema || undefined,
-      strip_view_schemas: dataMigrate.stripViewSchemas || undefined,
+      strip_view_schemas: isDamengNative.value ? undefined : dataMigrate.stripViewSchemas || undefined,
       src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
       src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
       src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,
       dst_max_open_conns: dataMigrate.dstMaxOpenConns || undefined,
       dst_max_idle_conns: dataMigrate.dstMaxIdleConns || undefined,
       dst_conn_max_lifetime: dataMigrate.dstConnMaxLifetime || undefined,
-      excluded_objects: pgExclusions.data,
+      excluded_objects: isDamengNative.value ? [] : pgExclusions.data,
+  }
+}
+const nativeCheck = ref<DamengNativePreflight | null>(null)
+const nativeCheckBusy = ref(false)
+let nativeCheckAbort: AbortController | null = null
+watch(() => JSON.stringify(dataMigrationRequest()), () => {
+  nativeCheckAbort?.abort()
+  nativeCheckAbort = null
+  nativeCheckBusy.value = false
+  nativeCheck.value = null
+})
+async function runNativeCheck() {
+  if (!isDamengNative.value || databaseSelectionBlocked('data')) return
+  nativeCheckAbort?.abort()
+  const controller = new AbortController()
+  nativeCheckAbort = controller
+  nativeCheckBusy.value = true
+  const request = dataMigrationRequest()
+  const key = JSON.stringify(request)
+  try {
+    const result = await preflightDamengNative(request, controller.signal)
+    if (controller.signal.aborted || key !== JSON.stringify(dataMigrationRequest())) return
+    nativeCheck.value = result.data
+    return result.data
+  } catch (error: any) {
+    if (!controller.signal.aborted) Message.error(`达梦预检失败：${error?.response?.data?.error ?? error.message}`)
+  } finally {
+    if (nativeCheckAbort === controller) { nativeCheckAbort = null; nativeCheckBusy.value = false }
   }
 }
 function pgRequest(kind: PGCheckKind): PGMySQLPreflightRequest {

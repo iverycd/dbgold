@@ -13,6 +13,7 @@ import (
 // adopt a new source selection or column set after migration has finished.
 type frozenValidationTable struct {
 	name     string
+	target   string // optional native materialized-view storage mapping
 	metadata validation.Table
 	err      error
 }
@@ -85,7 +86,11 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 	src, srcOK := validationSource(m.reader)
 	dst, dstOK := m.writer.(validation.Scanner)
 	for _, frozen := range m.validationTables {
-		table := validation.TableResult{SourceTable: frozen.name, TargetTable: m.objName(frozen.name)}
+		targetName := frozen.target
+		if targetName == "" {
+			targetName = m.objName(frozen.name)
+		}
+		table := validation.TableResult{SourceTable: frozen.name, TargetTable: targetName}
 		switch {
 		case ctx.Err() != nil:
 			table.Status, table.Error = validation.StatusCancelled, "任务已取消，内容校验未完成"
@@ -122,7 +127,11 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 }
 
 func (m *Migrator) dataValidationPlan(ctx context.Context, dst validation.Scanner, frozen frozenValidationTable) (validation.Plan, error) {
-	plan := validation.Plan{SourceTable: frozen.name, TargetTable: m.objName(frozen.name), SourceColumns: frozen.metadata.Columns, PrimaryKey: frozen.metadata.PrimaryKey}
+	targetName := frozen.target
+	if targetName == "" {
+		targetName = m.objName(frozen.name)
+	}
+	plan := validation.Plan{SourceTable: frozen.name, TargetTable: targetName, SourceColumns: frozen.metadata.Columns, PrimaryKey: frozen.metadata.PrimaryKey}
 	if len(plan.SourceColumns) == 0 {
 		return plan, fmt.Errorf("冻结源表定义没有可校验列")
 	}

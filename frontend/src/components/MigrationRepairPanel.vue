@@ -114,7 +114,7 @@
         </a-table-column>
         <a-table-column title="操作" :width="220"><template #cell="{ record }"><div class="repair-row-actions">
           <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ hasRepairDDL(record.object) ? '编辑 DDL' : '编写 DDL' }}</a-button>
-          <a-button v-else-if="isMySQLPGTrigger(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">查看 / 重试触发器</a-button>
+          <a-button v-else-if="isMySQLPGTrigger(record.object) || record.object.native" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">查看 / 重试</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(primaryRecord(record))">查看诊断</a-button>
           <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(primaryRecord(record))">接续迁移</a-button>
           <a-button type="text" size="mini" @click="openHistory(record.object.id)">历史</a-button>
@@ -168,12 +168,13 @@
       <template v-if="editing">
         <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
         <a-alert v-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。只重新创建或修复此对象；表数据及关联对象按需单独接续。</a-alert>
+        <a-alert v-else-if="editing.object.native" type="info">达梦原生 SQL 为只读，仅重试原任务冻结的完整执行单元；已成功步骤不会再次执行。</a-alert>
         <a-alert v-else-if="isMySQLPGTrigger(editing.object)" type="info">触发器 SQL 为只读。重试会在一个事务中一起执行原生成函数和触发器；不支持编辑 SQL 或单独勾选步骤。</a-alert>
         <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
         <a-alert v-if="editing.object.status === 'unknown'" type="warning">上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
-        <a-alert v-if="editing.object.requires_review" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
+        <a-alert v-if="editing.object.requires_review && !editing.object.native" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
         <a-alert v-if="sequencePlanMessage" type="info">{{ sequencePlanMessage }}</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
@@ -201,7 +202,7 @@
           <a-space wrap><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="editing.object.units?.some(unit => unit.original_sql)" size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" :disabled="busy || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 打开执行确认</span>
         </div>
-        <div v-for="(unit, index) in isMySQLPGTrigger(editing.object) ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
+        <div v-for="(unit, index) in isMySQLPGTrigger(editing.object) || editing.object.native ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
           <div class="unit-heading"><strong>执行步骤 {{ index + 1 }} · 与另一单元一起执行</strong><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p><pre class="sql-preview">{{ unit.sql }}</pre>
         </div>
@@ -383,7 +384,7 @@ const canRefreshSequencePlan = computed(() => {
   return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && unit.sql === object.units[index].sql)
 })
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
-const canExecute = computed(() => !busy.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isMySQLPGTrigger(editing.value.object) || reviewed.value))
+const canExecute = computed(() => !busy.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && editing.value.object.status !== 'unknown' && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isMySQLPGTrigger(editing.value.object) || !!editing.value.object.native || reviewed.value))
 const displayRecords = computed(() => groupRepairRecords(records.value))
 const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
 const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
@@ -497,7 +498,7 @@ async function confirmBatch() {
       return { list: data.data, jobRunning: detail.data.status === 'running' }
     },
     save: async (objectID, record) => {
-      if (isMySQLPGTrigger(record.object)) return record
+      if (isMySQLPGTrigger(record.object) || record.object.native) return record
       const saved = (await saveRepairDraft(id, objectID, { version: record.version, units: cloneRepairUnits(record.object.units), reviewed: true })).data
       if (valid()) replaceRecord(saved)
       return saved
@@ -703,6 +704,9 @@ async function prepareExecute() {
   if (isMySQLPGTrigger(editing.value.object)) {
     if (!canRetryMySQLPGTrigger(editing.value.object)) return
     draftUnits.value = editing.value.object.units.map(unit => ({ ...unit, selected: true }))
+  } else if (editing.value.object.native) {
+    if (!canExecuteRepairDDL(editing.value.object)) return
+    draftUnits.value = cloneRepairExecutionUnits(editing.value.object)
   } else if (!await saveDraft() || !editing.value) return
   executionSnapshot.value = draftUnits.value.filter(unit => unit.selected && !unitCommitted(unit.status) && !unit.destructive).map(unit => ({ ...unit }))
   executeVersion.value = editing.value.version

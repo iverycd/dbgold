@@ -149,8 +149,13 @@ export function reportCategories(report: MigrationReport) {
   ] as const
   const sources = [
     ...categories.map(([key, label]) => ({
-      key, label: key === 'triggers' && adaptation ? '源端触发器' : label,
+      key, label: key === 'triggers' && adaptation ? '源端触发器' : key === 'constraints' && report.native_schema ? '约束' : label,
       category: report[key] ?? { total: 0, success: 0, failed: 0, items: [] },
+      compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
+      compatibilityKind: undefined as 'function' | 'procedure' | undefined,
+    })),
+    ...(report.native_schema?.categories ?? []).map(category => ({
+      key: `native:${category.kind}`, label: category.label, category,
       compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
       compatibilityKind: undefined as 'function' | 'procedure' | undefined,
     })),
@@ -186,6 +191,7 @@ export function reportCategories(report: MigrationReport) {
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
         ...item, ...describeFailure(item, key),
+        repairKind: key.startsWith('native:') ? key.slice(7) : key,
         nameLabel: key === 'indexes' && failureStage(item) !== 'metadata' ? '索引名称：' : '',
         targetNameLabel: failureStage(item) === 'unsupported' ? '目标索引名称（计划）：' : '目标索引名称：',
         targetTableLabel: item.target_table ? [item.target_schema, item.target_table].filter(Boolean).join('.') : '',
@@ -308,4 +314,8 @@ export function formatDataValidation(report?: DataValidationReport, enabled = fa
     }
   }
   return lines
+}
+
+export function nativeSchemaNeedsAttention(report?: MigrationReport | null): boolean {
+  return report?.native_schema?.preflight?.ready === false || !!report?.native_schema?.verification?.some(issue => issue.severity !== 'warning')
 }

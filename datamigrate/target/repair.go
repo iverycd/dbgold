@@ -39,6 +39,8 @@ func repairAccess(w Writer) (repairTarget, error) {
 		return repairTarget{v.db, v.schema, "mysql"}, nil
 	case *DaMengWriter:
 		return repairTarget{v.db, v.schema, "dameng"}, nil
+	case *DaMengNativeWriter:
+		return repairTarget{v.db, v.schema, "dameng"}, nil
 	case *OracleWriter:
 		return repairTarget{v.db, v.schema, "oracle"}, nil
 	case *SQLServerWriter:
@@ -102,6 +104,8 @@ func setRepairSchema(w Writer, schema string) {
 		v.schema = schema
 	case *DaMengWriter:
 		v.schema = schema
+	case *DaMengNativeWriter:
+		v.schema = schema
 	case *SQLServerWriter:
 		v.schema = schema
 	case *OscarWriter:
@@ -137,6 +141,9 @@ func repairErrorStatus(err error) string {
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error) ([]repair.Unit, error) {
+	if native, ok := w.(*DaMengNativeWriter); ok {
+		return native.executeNativeRepair(ctx, obj, units, onStep)
+	}
 	if obj.Kind == "trigger" && obj.MySQLPGTrigger != nil {
 		return executeMySQLPGTriggerRepair(ctx, w, obj, units, onStep)
 	}

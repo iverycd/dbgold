@@ -78,22 +78,25 @@ export function repairObjectStatuses(object: RepairObject): { label: string; sta
   return statuses
 }
 export function repairKind(value: string) {
-  return ({ table: '表', tables: '表', data: '数据', primary_key: '主键', primary_keys: '主键', primaryKeys: '主键', index: '索引', indexes: '索引', unique: '唯一约束', foreign_key: '外键', foreign_keys: '外键', constraints: '外键', sequence: '序列 / 自增', sequences: '序列 / 自增', view: '视图', views: '视图', comment: '表 / 列注释', comments: '表 / 列注释', trigger: '触发器', triggers: '触发器', owner: 'Owner', distribution: '分布属性' } as Record<string, string>)[value] || value
+  return ({ table: '表', tables: '表', data: '数据', primary_key: '主键', primary_keys: '主键', primaryKeys: '主键', index: '索引', indexes: '索引', unique: '唯一约束', foreign_key: '外键', foreign_keys: '外键', constraints: '外键', sequence: '序列 / 自增', sequences: '序列 / 自增', view: '视图', views: '视图', comment: '表 / 列注释', comments: '表 / 列注释', trigger: '触发器', triggers: '触发器', function: '函数', procedure: '存储过程', package: '包', package_body: '包体', type: '自定义类型', type_body: '类型体', synonym: '同义词', materialized_view: '物化视图', grant: '对象授权', check: '检查约束', owner: 'Owner', distribution: '分布属性' } as Record<string, string>)[value] || value
 }
 export const attemptRunning = (status: string) => ['running', 'queued', 'cancelling'].includes(status)
 export const unitCommitted = (status: string) => ['succeeded', 'success', 'repaired'].includes(status)
 export const isTableRepair = (object: RepairObject) => ['table', 'tables', 'data'].includes(object.kind)
 export const hasRepairDDL = (object: RepairObject) => !!(object.ddl || object.units?.length || object.suggested_ddl)
 export const isMySQLPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_pg_trigger
-export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
+export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !object.native && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
 export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
   if (!isMySQLPGTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back'].includes(object.status)) return false
   return object.units?.length === 2 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(unit.status))
 }
-export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object)
+export function canRetryNative(object: RepairObject): boolean {
+  return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['unknown', 'running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql && !['unknown', 'running'].includes(unit.status))
+}
+export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryNative(object)
 
 export function canEditRepairDDL(object: RepairObject): boolean {
-  if (object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
+  if (object.native || object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
   if (['table', 'tables', 'view', 'views', 'sequence', 'sequences', 'owner', 'distribution'].includes(object.kind)) return true
   return ['index', 'indexes', 'primary_key', 'primary_keys', 'primaryKeys', 'unique', 'foreign_key', 'foreign_keys', 'constraints', 'comment', 'comments'].includes(object.kind) && !!(object.table || object.ddl || object.units?.length)
 }
@@ -115,6 +118,7 @@ export function cloneRepairUnits(units: RepairUnit[] | null | undefined): Repair
   return (units || []).map(unit => ({ ...unit, selected: unitCommitted(unit.status) || unit.destructive ? false : !!unit.selected }))
 }
 export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
+  if (object.native) return (object.units || []).map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   const units = cloneRepairUnits(object.units)
   if (canRetryMySQLPGTrigger(object)) units.forEach(unit => { unit.selected = true })
   return units

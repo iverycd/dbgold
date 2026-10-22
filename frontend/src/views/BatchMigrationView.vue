@@ -107,8 +107,8 @@
                     <a-form-item label="迁移内容">
                       <a-radio-group v-model="options.migrate_content">
                         <a-radio value="both">结构+数据</a-radio>
-                        <a-radio value="schema_only">仅结构</a-radio>
-                        <a-radio value="data_only">仅数据</a-radio>
+                        <a-radio value="schema_only" :disabled="nativeDamengRows.length > 0">仅结构</a-radio>
+                        <a-radio value="data_only" :disabled="nativeDamengRows.length > 0">仅数据</a-radio>
                       </a-radio-group>
                     </a-form-item>
                   </a-col>
@@ -134,6 +134,7 @@
                   </a-col>
                 </a-row>
                 <a-space wrap>
+                  <a-checkbox v-if="nativeDamengRows.length" v-model="options.overwrite_existing">达梦同库：覆盖目标同名对象（删除重建，默认关闭）</a-checkbox>
                   <a-checkbox v-model="options.validate_data" :disabled="options.migrate_content === 'schema_only'">迁移后校验数据内容</a-checkbox>
                   <a-checkbox v-model="options.migrate_triggers" :disabled="options.migrate_content === 'data_only'">迁移触发器（仅应用于 MySQL → PG 内核行）</a-checkbox>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
@@ -148,6 +149,7 @@
             </a-collapse-item>
           </a-collapse>
 
+          <a-alert v-if="nativeDamengRows.length" type="info">达梦同库行执行整个 Schema 的全部对象与数据迁移，自动保留原生定义与大小写。共享转换选项对这些行不生效；每行执行前重新预检，阻止项会记录到任务报告。源库需停写，目标 Schema 需提前创建。</a-alert>
           <a-card v-if="pgMySQLRows.length" title="PG → MySQL 对象排除（按 Excel 行生效）" size="small">
             <a-alert type="info">上面的校验只检查迁移组合。每行启动时都会执行完整兼容预检，阻止项会保存在任务报告中。可根据报告明确排除独立对象或整表后重新提交；排除后仍会重新检查依赖。源 schema 可使用 Excel 可选列 source_schema 指定，未填时为 public。</a-alert>
             <a-space wrap style="margin: 12px 0">
@@ -292,6 +294,7 @@ const validateResult = ref<BatchValidateResult | null>(null)
 // 整批共用的迁移选项，默认值对齐单任务（MigrationView.vue）
 const options = reactive<BatchOptions>({
   migrate_content: 'both',
+  overwrite_existing: false,
   migrate_triggers: false,
   validate_data: false,
   page_size: 20000,
@@ -311,6 +314,8 @@ const exclusionKinds = [
   { value: 'foreign_key', label: '外键' }, { value: 'check', label: 'CHECK' }, { value: 'constraint', label: '排除约束' },
   { value: 'view', label: '视图' }, { value: 'routine', label: '函数/过程' }, { value: 'trigger', label: '触发器' }, { value: 'sequence', label: '独立序列' },
 ]
+const nativeDamengRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.supported && row.src_db_type === 'dameng' && row.dst_db_type === 'dameng'))
+watch(nativeDamengRows, rows => { if (rows.length) options.migrate_content = 'both' })
 const pgMySQLRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.dst_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(row.src_db_type)))
 const batchObjectDraft = reactive({ row: undefined as number | undefined, kind: 'table', table: '', name: '' })
 watch(() => options.migrate_content, content => {

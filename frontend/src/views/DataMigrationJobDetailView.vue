@@ -104,6 +104,7 @@
       <MigrationRepairPanel ref="repairPanel" :jobID="jobID" />
 
       <section class="detail-tabs-surface">
+        <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
         <AutoRepairPanel v-if="report?.auto_repairs?.length" :repairs="report.auto_repairs" />
         <a-alert v-if="reportError" type="warning" class="report-alert">
           {{ reportError }}
@@ -251,8 +252,9 @@
 
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
+import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
-import { reportCategories, formatReportCategories, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
@@ -335,7 +337,7 @@ const pendingTriggerCount = computed(() => report.value?.trigger_migration_enabl
   ? Math.max(0, report.value.triggers.total - report.value.triggers.success - report.value.triggers.failed) : 0)
 const reportHealthText = computed(() => {
   if (!report.value) return job.value?.status === 'running' ? '生成中' : '暂无报告'
-  if (failedObjectCount.value || mismatchedRows.value.length || contentValidationAttention.value) return '需要处理'
+  if (nativeSchemaNeedsAttention(report.value) || failedObjectCount.value || mismatchedRows.value.length || contentValidationAttention.value) return '需要处理'
   if (pendingTriggerCount.value) return '尚未完成'
   return '全部通过'
 })
@@ -419,6 +421,7 @@ async function exportReport() {
   const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   lines.push(...formatAutoRepairs(report.value.auto_repairs))
   lines.push(...formatReportCategories(report.value))
+  if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
   if (allRowCounts.value.length) {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)

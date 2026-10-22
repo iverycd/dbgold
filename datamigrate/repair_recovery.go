@@ -30,6 +30,9 @@ func defaultRecoveryOps() recoveryOps {
 // PreviewRecovery is read-only. It validates everything needed before a destructive
 // empty-and-reload operation and binds the exact metadata/counts to its fingerprint.
 func PreviewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, obj repair.Object, related []repair.Object, mapping map[string]string) (repair.RecoveryPreview, error) {
+	if r.DBType() == "dameng" && w.DBType() == "dameng" {
+		return previewDamengNativeRecovery(ctx, r, w, cfg, obj, related, mapping)
+	}
 	return previewRecovery(ctx, r, w, cfg, obj, related, mapping, defaultRecoveryOps())
 }
 func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, obj repair.Object, related []repair.Object, mapping map[string]string, ops recoveryOps) (repair.RecoveryPreview, error) {
@@ -242,6 +245,9 @@ func validateRecoveryColumns(sourceCols, targetCols []source.ColumnInfo, mapping
 // RunRecovery never appends after a failed run. Recheck the preview before TRUNCATE;
 // retain committed pages and stop immediately on the first uncertain/failed page.
 func RunRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error) (res repair.RecoveryResult, err error) {
+	if r.DBType() == "dameng" && w.DBType() == "dameng" {
+		return runDamengNativeRecovery(ctx, r, w, cfg, p, truncate, progress)
+	}
 	return runRecovery(ctx, r, w, cfg, p, truncate, progress, defaultRecoveryOps())
 }
 func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error, ops recoveryOps) (res repair.RecoveryResult, err error) {
