@@ -1,5 +1,19 @@
 # AGENTS.md — 开发注意事项
 
+## 列表分页：每页固定 10 条
+
+以后新增的列表必须分页，每页固定显示 **10 条**，不提供超过 10 条的分页选项。
+
+Arco Design Vue 的 `a-table` 必须显式配置分页条数：
+
+```vue
+<a-table :data="records" :pagination="{ pageSize: 10 }" />
+```
+
+使用独立分页组件或服务端分页时，同样保持每页 10 条。
+
+---
+
 ## Arco Design Vue：`a-table` 展开行
 
 ### 问题描述

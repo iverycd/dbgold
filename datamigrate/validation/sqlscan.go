@@ -48,7 +48,7 @@ func (s *SQLScanner) catalogFor(ctx context.Context) (string, error) {
 	var last error
 	for _, candidate := range []string{"pg_catalog", "sys_catalog"} {
 		cat := QuoteValidationIdent("postgres", candidate)
-		query := `SELECT c.relname,a.attname FROM ` + cat + `.pg_attribute a JOIN ` + cat + `.pg_class c ON c.oid=a.attrelid JOIN ` + cat + `.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND a.attnum>0 AND NOT a.attisdropped AND c.relname IN ('pg_class','pg_namespace','pg_constraint')`
+		query := `SELECT c.relname,a.attname FROM ` + cat + `.pg_attribute a JOIN ` + cat + `.pg_class c ON c.oid=a.attrelid JOIN ` + cat + `.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND a.attnum>0 AND NOT a.attisdropped AND c.relname IN ('pg_class','pg_namespace','pg_constraint','pg_attribute','pg_type')`
 		rows, err := s.db.QueryContext(ctx, query, candidate)
 		if err != nil {
 			last = err
@@ -72,7 +72,7 @@ func (s *SQLScanner) catalogFor(ctx context.Context) (string, error) {
 			last = err
 			continue
 		}
-		for _, field := range []string{"pg_class.oid", "pg_class.relname", "pg_class.relnamespace", "pg_namespace.oid", "pg_namespace.nspname", "pg_constraint.conrelid", "pg_constraint.contype", "pg_constraint.conkey"} {
+		for _, field := range []string{"pg_class.oid", "pg_class.relname", "pg_class.relnamespace", "pg_namespace.oid", "pg_namespace.nspname", "pg_constraint.conrelid", "pg_constraint.contype", "pg_constraint.conkey", "pg_attribute.attrelid", "pg_attribute.attname", "pg_attribute.attnum", "pg_attribute.attisdropped", "pg_attribute.atttypid", "pg_type.oid", "pg_type.typname", "pg_type.typbasetype"} {
 			if !fields[field] {
 				err = unsupported("目录 %s 缺少必要元数据 %s", candidate, field)
 				break
@@ -151,7 +151,19 @@ func (s *SQLScanner) DescribeValidationTable(ctx context.Context, table string) 
 			return Table{}, err
 		}
 		cat := QuoteValidationIdent("postgres", catalog)
-		query = `SELECT column_name, CASE WHEN data_type IN ('USER-DEFINED','ARRAY') THEN udt_name ELSE data_type END, COALESCE(numeric_precision,0), COALESCE(numeric_scale,0), COALESCE(datetime_precision,0), COALESCE(character_maximum_length,0), ordinal_position FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`
+		// Kingbase's MySQL-compatible information_schema.columns has no
+		// udt_name. Resolve native type names through the detected catalog,
+		// including a domain's base type, while retaining standard type names
+		// and precision from the visible-column view. attnum keeps dropped-column
+		// gaps aligned with conkey even if the view renumbers visible columns.
+		query = `SELECT c.column_name, CASE WHEN c.data_type IN ('USER-DEFINED','ARRAY') THEN COALESCE(bt.typname,t.typname) ELSE c.data_type END, COALESCE(c.numeric_precision,0), COALESCE(c.numeric_scale,0), COALESCE(c.datetime_precision,0), COALESCE(c.character_maximum_length,0), a.attnum
+ FROM information_schema.columns c
+ JOIN ` + cat + `.pg_namespace n ON n.nspname=c.table_schema
+ JOIN ` + cat + `.pg_class r ON r.relnamespace=n.oid AND r.relname=c.table_name
+ JOIN ` + cat + `.pg_attribute a ON a.attrelid=r.oid AND a.attname=c.column_name AND a.attnum>0 AND NOT a.attisdropped
+ JOIN ` + cat + `.pg_type t ON t.oid=a.atttypid
+ LEFT JOIN ` + cat + `.pg_type bt ON bt.oid=t.typbasetype
+ WHERE c.table_schema=$1 AND c.table_name=$2 ORDER BY a.attnum`
 		// conkey contains primary-key columns only, unlike indkey on newer
 		// servers which can additionally contain INCLUDE columns. Decode the
 		// ordered vector in Go so old compatible kernels need no LATERAL,
@@ -358,7 +370,22 @@ func ValidationProjection(family string, c Column) (string, error) {
 		}
 	case "postgres":
 		switch c.Kind {
-		case Number, Date, Time, Timestamp, TimestampTZ, Bits, UUID, JSON:
+		case Bits:
+			// Kingbase can render BIT as escaped characters or hex. Read each
+			// native bit instead of using its text output or a bounded integer.
+			// Avoid capturing the outer column with either inner identifier.
+			tableAlias, indexAlias := "__dbgold_bits", "__dbgold_bit_index"
+			if c.Name == tableAlias {
+				tableAlias += "_"
+			}
+			if c.Name == indexAlias {
+				indexAlias += "_"
+			}
+			tableAlias = QuoteValidationIdent(family, tableAlias)
+			indexAlias = QuoteValidationIdent(family, indexAlias)
+			index := tableAlias + "." + indexAlias
+			return "CASE WHEN " + q + " IS NULL THEN NULL ELSE (SELECT COALESCE(string_agg(get_bit(" + q + "," + index + ")::text,'' ORDER BY " + index + "),'') FROM generate_series(0,bit_length(" + q + ")-1) AS " + tableAlias + "(" + indexAlias + ")) END", nil
+		case Number, Date, Time, Timestamp, TimestampTZ, UUID, JSON:
 			return q + "::text", nil
 		}
 	case "oracle":

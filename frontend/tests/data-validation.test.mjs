@@ -126,28 +126,112 @@ for (const name of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
   })
 }
 
-test('shared content panel renders bounded field values safely and only expands details', async () => {
+function contentPanel(report) {
   const { descriptor } = parse(readFileSync(new URL('../src/components/DataValidationPanel.vue', import.meta.url), 'utf8'))
   const render = vm.runInNewContext(`(function() { ${compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code} })()`, { Vue })
-  const report = { status: 'mismatch', tables: [{ source_table: 'Orders', target_table: 'orders', status: 'mismatch', samples: [{ type: 'changed', key: { id: { text: '1' } }, columns: ['text'], fields: [{ column: 'text', source: { text: '<script>bad()</script>' }, target: { text: '', null: true } }] }] }, { source_table: 'Passed', target_table: 'passed', status: 'passed' }] }
-  const props = { report }
+  const props = Vue.reactive({ report })
   const context = { exports: {}, defineProps: () => props, require: id => id === 'vue' ? Vue : utils }
-  vm.runInNewContext(ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { passedTables, sortedTables, differenceLabel };`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
-  const app = Vue.createSSRApp({ setup: () => ({ ...props, ...utils, ...context.exports }), render })
-  const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-alert', 'a-tag', 'a-table-column']) app.component(name, passthrough)
-  app.component('a-table', {
-    props: ['data', 'expandable'],
-    setup: (props, { slots }) => () => Vue.h('div', props.data.flatMap(record => {
-      const expected = record.error || record.samples?.length ? undefined : null
-      assert.equal(props.expandable.icon(false, record), expected)
-      return expected === null ? [] : slots['expand-row']({ record })
-    })),
-  })
-  const html = await renderToString(app)
-  assert.match(html, /内容不一致/)
-  assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/)
-  assert.doesNotMatch(html, /<script>/)
-  assert.match(html, /目标：NULL/)
-  assert.match(html, /id=&quot;1&quot;/)
+  vm.runInNewContext(ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { passedTables, sortedTables, differenceLabel, formatSampleKey, sampleFieldCount, valueSides, samplePageSize, samplePage, pagedSamples, setSamplePage };`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
+  const page = context.exports
+  const pagination = []
+  function renderPanel() {
+    const app = Vue.createSSRApp({ setup: () => ({ ...Vue.toRefs(props), ...utils, ...page }), render })
+    const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
+    for (const name of ['a-alert', 'a-tag', 'a-table-column', 'a-tooltip', 'a-button', 'icon-question-circle']) app.component(name, passthrough)
+    app.component('a-pagination', {
+      props: ['current', 'pageSize', 'total', 'showPageSize'],
+      setup: (props, { attrs }) => () => {
+        pagination.push({ ...props, change: attrs.onChange })
+        return Vue.h('nav', { 'aria-label': '差异样例分页' })
+      },
+    })
+    app.component('a-table', {
+      props: ['data', 'expandable', 'pagination'],
+      setup: (props, { slots }) => () => Vue.h('div', props.data.flatMap(record => {
+        assert.equal(props.pagination.pageSize, 10)
+        const expected = record.error || record.note || record.samples?.length ? undefined : null
+        assert.equal(props.expandable.icon(false, record), expected)
+        return expected === null ? [] : slots['expand-row']({ record })
+      })),
+    })
+    return renderToString(app)
+  }
+  return { props, page, render: renderPanel, pagination }
+}
+
+test('shared content panel safely compares values and keeps diagnostic-only rows expandable', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const report = { status: 'mismatch', tables: [
+      { source_table: 'Orders', target_table: 'orders', status: 'mismatch', samples: [
+        { type: 'changed', key: { id: { text: '1' }, tenant: { text: 'east' } }, columns: ['text', 'payload'], key_hash: 'key-fingerprint', row_hash: 'row-fingerprint', fields: [
+          { column: 'text', source: { text: '<script>bad()</script>' }, target: { text: '', null: true } },
+          { column: 'payload', source: { text: '', length: 12, sha256: 'binary-digest' } },
+          { column: 'long_text', source: { text: 'saved-text', truncated: true, length: 1000 }, target: { text: '' } },
+        ] },
+        { type: 'missing', row_hash: 'keyless-missing-fingerprint' },
+        { type: 'extra', row_hash: 'keyless-extra-fingerprint' },
+        { type: 'duplicate_key', key_hash: 'duplicate-fingerprint' },
+      ] },
+      { source_table: 'Failed', target_table: 'failed', status: 'error', error: '读取失败原因' },
+      { source_table: 'Noted', target_table: 'noted', status: 'unsupported', note: '仅说明的校验结果' },
+      { source_table: 'Passed', target_table: 'passed', status: 'passed' },
+    ] }
+    const { render } = scope.run(() => contentPanel(report))
+    const html = await render()
+    assert.match(html, /内容不一致/)
+    assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/)
+    assert.doesNotMatch(html, /<script>/)
+    assert.match(html, /目标：NULL/)
+    assert.match(html, /目标：不存在/)
+    assert.match(html, /12 字节.*binary-digest/)
+    assert.match(html, /已截断.*1000/)
+    assert.match(html, /id=&quot;1&quot;.*tenant=&quot;east&quot;/)
+    for (const label of ['目标缺失', '目标多余', '重复主键', '读取失败原因', '仅说明的校验结果', 'key-fingerprint', 'row-fingerprint', 'keyless-missing-fingerprint', 'keyless-extra-fingerprint', 'duplicate-fingerprint']) assert.ok(html.includes(label), label)
+    const details = html.match(/<details\b[^>]*>/g) || []
+    assert.ok(details.length > 0, 'saved fingerprints remain available')
+    assert.ok(details.every(tag => !/\sopen(?:\s|=|>)/.test(tag)), 'technical information starts collapsed')
+  } finally { scope.stop() }
+})
+
+test('difference sample pagination fixes ten rows per page, isolates tables and resets for a new report', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const samples = prefix => Array.from({ length: 20 }, (_, index) => ({ type: 'changed', key: { id: { text: `${prefix}-${index + 1}` } }, fields: [{ column: 'value', source: { text: '0' }, target: { text: '1' } }] }))
+    const report = { status: 'mismatch', tables: [
+      { source_table: 'Orders', target_table: 'orders', status: 'mismatch', samples: samples('order') },
+      { source_table: 'Customers', target_table: 'customers', status: 'mismatch', samples: samples('customer') },
+    ] }
+    const { props, page, render, pagination } = scope.run(() => contentPanel(report))
+    const [orders, customers] = props.report.tables
+    assert.equal(page.samplePageSize, 10)
+    let html = await render()
+    assert.equal(pagination.length, 2)
+    for (const pager of pagination) {
+      assert.equal(pager.pageSize, 10)
+      assert.equal(pager.total, 20)
+      assert.notEqual(pager.showPageSize, true)
+    }
+    assert.match(html, /order-10/)
+    assert.doesNotMatch(html, /order-11/)
+    pagination[0].change(2)
+    await Vue.nextTick()
+    assert.equal(page.samplePage(orders), 2)
+    assert.equal(page.samplePage(customers), 1)
+    assert.equal(page.pagedSamples(orders).length, 10)
+    assert.equal(page.pagedSamples(orders)[0].key.id.text, 'order-11')
+    html = await render()
+    assert.doesNotMatch(html, /order-10/)
+    assert.match(html, /order-20/)
+    assert.match(html, /customer-1&quot;/)
+    assert.doesNotMatch(html, /customer-11/)
+    page.setSamplePage(customers, 2)
+    assert.equal(page.samplePage(orders), 2)
+    props.report = { status: 'mismatch', tables: [{ ...orders, samples: samples('new-order') }, { ...customers, samples: [] }] }
+    await Vue.nextTick()
+    assert.equal(page.samplePage(props.report.tables[0]), 1)
+    assert.equal(page.samplePage(props.report.tables[1]), 1)
+    assert.equal(page.pagedSamples(props.report.tables[0])[0].key.id.text, 'new-order-1')
+    assert.equal(page.pagedSamples(props.report.tables[1]).length, 0)
+  } finally { scope.stop() }
 })
