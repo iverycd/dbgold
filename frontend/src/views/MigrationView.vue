@@ -186,14 +186,12 @@
             </a-radio-group>
           </a-form-item>
 
-          <a-form-item v-if="dataSupportsTriggers" label="触发器迁移">
-            <a-checkbox v-model="dataMigrate.migrateTriggers" :disabled="dataMigrate.content === 'data_only'">迁移所选表的触发器</a-checkbox>
-            <p class="muted">转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</p>
-          </a-form-item>
-
           <!-- 高级设置 -->
           <a-collapse class="migration-advanced">
-            <a-collapse-item key="advanced" header="高级设置">
+            <a-collapse-item key="advanced">
+              <template #header>
+                高级设置<span v-if="dataSupportsTriggers && dataMigrate.migrateTriggers && dataMigrate.content !== 'data_only'" class="adv-section-note">· 已启用触发器迁移</span>
+              </template>
               <a-row :gutter="24" class="migration-advanced-grid">
                 <!-- 左列：迁移参数与选项 -->
                 <a-col :xs="24" :lg="12">
@@ -235,6 +233,14 @@
                     </a-col>
                     <a-col :span="12">
                       <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                    </a-col>
+                    <a-col :span="24">
+                      <a-checkbox v-model="dataMigrate.validateData" :disabled="dataMigrate.content === 'schema_only'" class="adv-check">迁移后校验数据内容</a-checkbox>
+                      <div v-if="dataMigrate.validateData" class="adv-hint">全量读取源库与目标库，比对数据内容并记录差异，会增加耗时。请停止两端业务写入，直至迁移与校验结束。</div>
+                    </a-col>
+                    <a-col v-if="dataSupportsTriggers" :span="24">
+                      <a-checkbox v-model="dataMigrate.migrateTriggers" :disabled="dataMigrate.content === 'data_only'" class="adv-check">迁移所选表的触发器</a-checkbox>
+                      <div v-if="dataMigrate.migrateTriggers" class="adv-hint">转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</div>
                     </a-col>
                   </a-row>
 
@@ -992,6 +998,7 @@ const dataMigrate = reactive({
   filter: '',
   content: 'both' as 'both' | 'schema_only' | 'data_only',
   migrateTriggers: false,
+  validateData: false,
   pageSize: 20000,
   maxParallel: 10,
   intraTableParallel: 8,
@@ -1113,6 +1120,7 @@ function sourceUsesSchema(connection?: Connection): boolean {
 }
 
 const dataSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === selectedSrc.value?.db_type && pair.target === selectedDst.value?.db_type && pair.supports_triggers))
+watch(() => dataMigrate.content, content => { if (content === 'schema_only') dataMigrate.validateData = false })
 watch([dataSupportsTriggers, () => dataMigrate.content], ([supported, content]) => { if (!supported || content === 'data_only') dataMigrate.migrateTriggers = false })
 
 watch(() => dataMigrate.dstConnId, (newId) => {
@@ -1910,6 +1918,7 @@ return {
       table_filter: dataMigrate.filter,
       migrate_content: dataMigrate.content,
       migrate_triggers: dataMigrate.migrateTriggers,
+      validate_data: dataMigrate.validateData,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       intra_table_parallel: dataMigrate.intraTableParallel,

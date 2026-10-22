@@ -5,6 +5,7 @@ import (
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/target"
+	"dbgold/datamigrate/validation"
 	"dbgold/datamigrate/valueconv"
 )
 
@@ -68,6 +69,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	DataValidation          *validation.Report                   `json:"dataValidation,omitempty"`
 	TriggerMigrationEnabled bool                                 `json:"trigger_migration_enabled,omitempty"`
 	CompatibilityFunctions  *target.CompatibilityFunctionsReport `json:"compatibility_functions,omitempty"`
 	RepairManifest          *RepairManifest                      `json:"repair_manifest,omitempty"`
@@ -127,6 +129,9 @@ func newMigrationReport() MigrationReport {
 
 // HasFailures is shared by all job entrypoints; read/validation failures count.
 func (r MigrationReport) HasFailures() bool {
+	if r.DataValidation != nil && r.DataValidation.HasFailures() {
+		return true
+	}
 	if r.CompatibilityFunctions != nil && r.CompatibilityFunctions.Failed > 0 {
 		return true
 	}

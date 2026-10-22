@@ -19,6 +19,7 @@
         <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
         <div><span>原始失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
+        <div><span>数据内容校验</span><strong :class="{ 'report-danger': dataValidationNeedsAttention(report.dataValidation) }">{{ dataValidationLabel(report.dataValidation) }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
       </div>
       <div class="report-repair-summary" aria-live="polite">
@@ -30,6 +31,7 @@
           <span>{{ repairSummary.attention ? `当前待处理 ${repairSummary.attention} 个对象` : '当前无待处理对象' }}</span>
         </template>
       </div>
+      <a-alert v-if="dataValidationNeedsAttention(report.dataValidation)" type="warning" style="margin-bottom: 12px">数据内容校验未全部通过，请在“数据内容校验”中核查差异与失败原因。</a-alert>
       <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
       <a-tabs v-model:active-key="activeTab" :lazy-load="false" :destroy-on-hide="false">
         <!-- ===== 迁移概览 ===== -->
@@ -198,6 +200,9 @@
           </a-table>
 
         </a-tab-pane>
+        <a-tab-pane key="validation" title="数据内容校验">
+          <DataValidationPanel :report="report.dataValidation" />
+        </a-tab-pane>
         <a-tab-pane key="repair">
           <template #title>
             对象修复
@@ -231,9 +236,10 @@
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
+import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, formatReportCategories } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
@@ -370,6 +376,7 @@ async function exportReport() {
     }
   }
 
+  lines.push(...formatDataValidation(r.dataValidation))
   if (repairPanel.value) {
     try { lines.push(...await repairPanel.value.exportHistory()) }
     catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
@@ -459,7 +466,7 @@ onUnmounted(() => { reportRequest++ })
 .report-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
 .report-heading h3 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
 .report-heading span { color: var(--color-text-3); font-size: 12px; overflow-wrap: anywhere; }
-.report-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.report-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
 .report-stats > div { padding: 16px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
 .report-stats span { display: block; color: var(--color-text-3); font-size: 12px; margin-bottom: 8px; }
 .report-stats strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }

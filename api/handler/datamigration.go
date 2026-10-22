@@ -112,7 +112,16 @@ func validateTriggerMigration(src, dst, content string, enabled bool) error {
 	return nil
 }
 
+// validateDataValidationMode prevents content checks on tasks that never copy data.
+func validateDataValidationMode(content string, enabled bool) error {
+	if enabled && content != "" && content != "both" && content != "data_only" {
+		return fmt.Errorf("数据内容校验仅适用于包含数据的迁移")
+	}
+	return nil
+}
+
 type startDataMigrationRequest struct {
+	ValidateData       bool                    `json:"validate_data"`
 	MigrateTriggers    bool                    `json:"migrate_triggers"`
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
@@ -159,6 +168,10 @@ func StartDataMigration(c *gin.Context) {
 	if req.MigrateContent == "" {
 		req.MigrateContent = "both"
 	}
+	if err := validateDataValidationMode(req.MigrateContent, req.ValidateData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	srcConn, err := store.GetConnectionOwned(req.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "源库连接不存在"})
@@ -200,6 +213,7 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
+		ValidateData:       req.ValidateData,
 		MigrateTriggers:    req.MigrateTriggers,
 		ExcludedObjects:    encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:            middleware.GetCurrentUserID(c),
@@ -237,6 +251,7 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	p := migrationParams{
+		ValidateData:       req.ValidateData,
 		MigrateTriggers:    req.MigrateTriggers,
 		ExcludedObjects:    req.ExcludedObjects,
 		MigrateMode:        req.MigrateMode,
@@ -274,6 +289,7 @@ func StartDataMigration(c *gin.Context) {
 
 // migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
 type migrationParams struct {
+	ValidateData     bool
 	MigrateTriggers  bool
 	ExcludedObjects  []datamigrate.ObjectRef
 	MigrateMode      string
@@ -369,6 +385,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
+		ValidateData:         p.ValidateData,
 		MigrateTriggers:      p.MigrateTriggers,
 		PreparationStartedAt: startup.startedAt,
 		ExcludedObjects:      p.ExcludedObjects,
@@ -429,6 +446,7 @@ func updateJobStatus(job *store.DataMigrationJob, status, summary string) {
 }
 
 type startObjectMigrationRequest struct {
+	ValidateData       bool                    `json:"validate_data"`
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
@@ -452,6 +470,10 @@ type startObjectMigrationRequest struct {
 func StartObjectMigration(c *gin.Context) {
 	var req startObjectMigrationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateDataValidationMode("schema_only", req.ValidateData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -817,6 +839,7 @@ func ListConnectionTables(c *gin.Context) {
 }
 
 type migrateViewsRequest struct {
+	ValidateData     bool                    `json:"validate_data"`
 	ExcludedObjects  []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID        uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID        uint                    `json:"dst_conn_id" binding:"required"`
@@ -832,6 +855,10 @@ type migrateViewsRequest struct {
 func MigrateViews(c *gin.Context) {
 	var req migrateViewsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateDataValidationMode("schema_only", req.ValidateData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

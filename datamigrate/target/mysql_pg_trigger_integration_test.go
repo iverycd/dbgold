@@ -48,6 +48,8 @@ func TestMySQLPGTriggerSQLIntegration(t *testing.T) {
 			for _, tr := range []struct{ name, timing, event, body string }{{"bi", "BEFORE", "INSERT", "SET NEW.Value = NEW.Value + 1"}, {"ai", "AFTER", "INSERT", "INSERT INTO Audit (Event,Value) VALUES (1,NEW.Value)"}, {"bu", "BEFORE", "UPDATE", "SET NEW.Value = NEW.Value + 1"}, {"au", "AFTER", "UPDATE", "BEGIN INSERT INTO Audit (Event,Value) VALUES (2,NEW.Value); INSERT INTO Audit (Event,Value) VALUES (3,OLD.Value); END"}, {"bd", "BEFORE", "DELETE", "INSERT INTO Audit (Event,Value) VALUES (4,OLD.Value)"}, {"ad", "AFTER", "DELETE", "INSERT INTO Audit (Event,Value) VALUES (5,OLD.Value)"}} {
 				p, err := mysqltrigger.Convert(source.TriggerInfo{Schema: "Source", TableName: "Orders", Name: tr.name, Timing: tr.timing, Event: tr.event, Body: tr.body}, tables, mysqltrigger.Options{Schema: schema})
 				require.NoError(t, err)
+				require.Equal(t, 3, p.Version)
+				require.Equal(t, tr.name+"_fn", p.FunctionName)
 				for _, src := range p.SourceTables {
 					target := src
 					target.Columns = append([]source.ColumnInfo(nil), src.Columns...)
@@ -56,7 +58,25 @@ func TestMySQLPGTriggerSQLIntegration(t *testing.T) {
 					}
 					p.Tables = append(p.Tables, target)
 				}
+				if tr.name == "bi" {
+					const conflictBody = `BEGIN NEW."Value" := 999; RETURN NEW; END;`
+					_, err = db.ExecContext(ctx, "CREATE FUNCTION "+q(p.FunctionName)+"() RETURNS trigger LANGUAGE plpgsql AS $conflict$"+conflictBody+"$conflict$;")
+					require.NoError(t, err)
+					require.ErrorContains(t, CreateMySQLPGTrigger(ctx, w, p, ""), "已存在")
+					var actualBody string
+					require.NoError(t, db.QueryRowContext(ctx, `SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2`, schema, p.FunctionName).Scan(&actualBody))
+					require.Equal(t, conflictBody, actualBody, "a readable-name collision must not replace an existing function")
+					var triggers int
+					require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND g.tgname=$2`, schema, p.Name).Scan(&triggers))
+					require.Zero(t, triggers)
+					_, err = db.ExecContext(ctx, "DROP FUNCTION "+q(p.FunctionName)+"()")
+					require.NoError(t, err)
+				}
 				require.NoError(t, CreateMySQLPGTrigger(ctx, w, p, ""))
+				var functionSchema, functionName string
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT fn.nspname,p.proname FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=g.tgfoid JOIN pg_namespace fn ON fn.oid=p.pronamespace WHERE n.nspname=$1 AND t.relname=$2 AND g.tgname=$3 AND NOT g.tgisinternal`, schema, p.Table, p.Name).Scan(&functionSchema, &functionName))
+				require.Equal(t, p.Schema, functionSchema)
+				require.Equal(t, tr.name+"_fn", functionName, "trigger binding must point at the new readable function name")
 				if tr.name == "bi" {
 					require.Error(t, CreateMySQLPGTrigger(ctx, w, p, ""))
 					o := recordedTriggerFixture(p)

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"dbgold/datamigrate/source"
 	"github.com/pingcap/tidb/pkg/parser"
@@ -37,8 +38,8 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 	return convertVersion(info, tables, opt, CurrentVersion)
 }
 
-// Version one remains the byte-for-byte generator for plans saved before v2.
-// New syntax and collation rules must only be added behind the v2 branch.
+// Legacy versions retain their exact SQL for saved-plan retries. Version three
+// changes only the auxiliary function name and marker, inheriting v2 semantics.
 func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, opt Options, version int) (Plan, error) {
 	var empty Plan
 	if info.MetadataError != "" {
@@ -102,13 +103,34 @@ func convertVersion(info source.TriggerInfo, tables map[string]*source.TableDDLI
 	}
 	sum := sha256.Sum256([]byte(info.Schema + "\x00" + info.TableName + "\x00" + info.Name + "\x00" + p.Schema + "\x00" + p.Table + "\x00" + p.Name))
 	p.FunctionName = fmt.Sprintf("dbgold_trg_%x", sum[:16])
+	if version >= 3 {
+		if !utf8.ValidString(p.Name) {
+			return empty, fmt.Errorf("触发器名称不是合法 UTF8，无法生成辅助函数名")
+		}
+		p.FunctionName = p.Name + "_fn"
+		if len(p.FunctionName) > 63 {
+			// The suffix is 16 ASCII bytes: '_' + 12 hex digits + '_fn'.
+			// Keep whole UTF8 characters within the remaining 47 bytes.
+			prefix := 47
+			for !utf8.RuneStart(p.Name[prefix]) {
+				prefix--
+			}
+			p.FunctionName = fmt.Sprintf("%s_%x_fn", p.Name[:prefix], sum[:6])
+		}
+		if !validIdent(p.FunctionName) {
+			return empty, fmt.Errorf("辅助函数名称无效或超过 63 字节")
+		}
+	}
 	ret := "NEW"
 	if info.Event == "DELETE" {
 		ret = "OLD"
 	}
 	marker := ToolMarker
-	if version == 1 {
+	switch version {
+	case 1:
 		marker = legacyToolMarker
+	case 2:
+		marker = v2ToolMarker
 	}
 	p.FunctionBody = "\n-- " + marker + "\nBEGIN\n" + body + "RETURN " + ret + ";\nEND;\n"
 	p.FunctionSQL = functionSQL(p)
@@ -155,7 +177,7 @@ func ValidatePlan(p Plan) error {
 	if version == 0 {
 		version = 1
 	}
-	if version != 1 && version != CurrentVersion {
+	if version != 1 && version != 2 && version != 3 {
 		return fmt.Errorf("不支持触发器计划版本 %d", p.Version)
 	}
 	if version == 1 && p.CharacterMetadata != nil {

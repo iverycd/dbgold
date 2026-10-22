@@ -275,6 +275,7 @@ func ValidateBatch(c *gin.Context) {
 // batchOptions 是整批共用的迁移选项，对齐单任务前端默认值（MigrationView.vue）。
 // 这些选项应用到批次内所有迁移对。
 type batchOptions struct {
+	ValidateData       bool
 	MigrateTriggers    bool
 	ExcludedObjects    map[int][]datamigrate.ObjectRef
 	MigrateContent     string // both / schema_only / data_only
@@ -329,6 +330,7 @@ func parseBatchOptions(c *gin.Context) batchOptions {
 		content = "both"
 	}
 	return batchOptions{
+		ValidateData:       boolOr("validate_data", false),
 		MigrateTriggers:    boolOr("migrate_triggers", false),
 		MigrateContent:     content,
 		PageSize:           intOr("page_size", 20000),
@@ -388,6 +390,10 @@ func StartBatch(c *gin.Context) {
 		}
 	}
 	opts := parseBatchOptions(c)
+	if err := validateDataValidationMode(opts.MigrateContent, opts.ValidateData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if opts.MigrateTriggers && opts.MigrateContent == "data_only" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "仅迁移数据时不能启用触发器迁移"})
 		return
@@ -435,6 +441,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		job := datamigrate.Registry.Register(jobID, cancel)
 
 		dbJob := &store.DataMigrationJob{
+			ValidateData:       opts.ValidateData,
 			MigrateTriggers:    opts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
 			ExcludedObjects:    encodeExcludedObjects(opts.ExcludedObjects[r.RowNum]),
 			OwnerID:            ownerID,
@@ -474,6 +481,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			sourceSchema = r.SrcSchema
 		}
 		p := migrationParams{
+			ValidateData:       opts.ValidateData,
 			MigrateTriggers:    opts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
 			ExcludedObjects:    opts.ExcludedObjects[r.RowNum],
 			SrcDatabase:        sourceSchema,

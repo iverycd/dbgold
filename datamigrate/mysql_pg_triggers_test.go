@@ -3,6 +3,7 @@ package datamigrate
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/mysqltrigger"
@@ -229,6 +230,46 @@ func TestMySQLPGTriggerSameEventGroupNeverInstalled(t *testing.T) {
 	report := m.Run(context.Background())
 	require.Equal(t, 2, report.Triggers.Failed)
 	require.Empty(t, w.plans)
+}
+
+func TestMySQLPGTriggerHelperNameCollisionsBlockWholeGroup(t *testing.T) {
+	for _, shortened := range []bool{false, true} {
+		t.Run(map[bool]string{false: "case folding across tables", true: "shortened versus ordinary name"}[shortened], func(t *testing.T) {
+			m, r, w := triggerFixture(t)
+			m.cfg.LowerCaseNames = true
+			m.cfg.Content = "schema_only"
+			r.tables = append(r.tables, "OtherOrders")
+			r.ddl["OtherOrders"] = &source.TableDDLInfo{TableName: "OtherOrders", Columns: append([]source.ColumnInfo(nil), r.ddl["OrderData"].Columns...)}
+			second := r.triggers[0]
+			second.TableName = "OtherOrders"
+			second.Name = strings.ToLower(second.Name)
+			if shortened {
+				r.triggers[0].Name = strings.Repeat("a", 61)
+				longPlan, err := mysqltrigger.Convert(r.triggers[0], r.ddl, mysqltrigger.Options{Schema: m.cfg.TargetSchema, Name: m.objName})
+				require.NoError(t, err)
+				second.Name = strings.TrimSuffix(longPlan.FunctionName, "_fn")
+				require.Len(t, second.Name, 60, "an ordinary source name can match a shortened function name")
+			}
+			unrelated := r.triggers[0]
+			unrelated.Name, unrelated.Event = "Unrelated", "UPDATE"
+			r.triggers = append(r.triggers, second, unrelated)
+			m.prepareMySQLPGTriggers(context.Background())
+			require.Nil(t, m.mysqlPGTriggerError)
+			require.Len(t, m.mysqlPGTriggers, 3)
+			for i := 0; i < 2; i++ {
+				require.ErrorContains(t, m.mysqlPGTriggers[i].err, "辅助函数")
+				require.ErrorContains(t, m.mysqlPGTriggers[i].err, "名称冲突")
+			}
+			require.NoError(t, m.mysqlPGTriggers[2].err)
+			require.Empty(t, w.plans, "preparation must not execute target DDL")
+			m.mysqlPGTriggers = nil
+			report := m.Run(context.Background())
+			require.Equal(t, 2, report.Triggers.Failed)
+			require.Equal(t, 1, report.Triggers.Success)
+			require.Len(t, w.plans, 1)
+			require.Equal(t, "unrelated_fn", w.plans[0].FunctionName)
+		})
+	}
 }
 
 func TestMySQLPGTriggerFailedTableBlocksInstallation(t *testing.T) {

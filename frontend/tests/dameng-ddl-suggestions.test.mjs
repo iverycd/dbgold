@@ -39,9 +39,9 @@ function harness() {
   vm.runInNewContext(script, context)
   const p = context.exports
   const render = vm.runInNewContext(`(function() { ${renderCode} })()`, { Vue })
-  const app = Vue.createSSRApp({ setup: () => ({ ...p, jobID: 'job-manual-ddl' }), render })
+  const app = Vue.createSSRApp({ setup: () => ({ ...migrationReportUtils, ...p, jobID: 'job-manual-ddl' }), render })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-alert', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel', 'AutoRepairPanel']) app.component(name, passthrough)
+  for (const name of ['a-alert', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel', 'AutoRepairPanel', 'DataValidationPanel']) app.component(name, passthrough)
   app.component('a-tabs', {
     props: ['activeKey', 'lazyLoad', 'destroyOnHide'],
     setup: (props, { slots }) => () => {
@@ -293,7 +293,7 @@ test('report renders overview first and mounts repair in an inactive persistent 
     h.p.report.value.warnings = [{ table: 'Orders', column: 'Name', reason: 'warning', count: 1 }]
     const html = await renderToString(h.app)
     assert.equal(h.p.activeTab.value, 'overview')
-    assert.deepEqual(Array.from(h.tabStates[0].keys), ['overview', 'rowcount', 'repair', 'warnings'])
+    assert.deepEqual(Array.from(h.tabStates[0].keys), ['overview', 'rowcount', 'validation', 'repair', 'warnings'])
     assert.equal(h.tabStates[0].lazyLoad, false)
     assert.equal(h.tabStates[0].destroyOnHide, false)
     assert.deepEqual(h.repairInstances, ['job-manual-ddl'], 'repair loads before its tab is opened')

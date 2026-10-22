@@ -46,6 +46,11 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 		}
 		return report
 	}
+	validationTables := make([]string, 0, len(plan.tables))
+	for _, table := range plan.tables {
+		validationTables = append(validationTables, table.Info.TableName)
+	}
+	m.freezeDataValidation(ctx, validationTables)
 	if err := m.recheckPGMySQLText(ctx, plan, m.writer.(mysqlInspector).InspectionDB()); err != nil {
 		plan.add(ObjectRef{Kind: "target", Name: plan.Target.Database}, err.Error(), false)
 		plan.finish()
@@ -177,6 +182,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 				return report
 			}
 			report.Data.Success++
+			m.markDataValidationCopied(t.Info.TableName)
 		}
 	}
 	for _, obj := range plan.Objects {
@@ -215,7 +221,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			}
 		}
 	}
-	m.log.Donef("PG → MySQL 迁移结束，表 %d，数据 %d", report.Tables.Success, report.Data.Success)
+	m.logMigrationCompletion("PG → MySQL 迁移结束，表 %d，数据 %d", report.Tables.Success, report.Data.Success)
 	return report
 }
 

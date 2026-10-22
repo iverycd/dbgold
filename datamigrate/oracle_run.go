@@ -76,6 +76,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		}
 	}
 	sort.Strings(tables)
+	m.freezeDataValidation(ctx, tables)
 	p := &oraclePlan{tables: tables, info: map[string]*source.TableDDLInfo{}, ddl: map[string][]dialect.Statement{}}
 	selected := map[string]bool{}
 	names := map[string]string{}
@@ -418,6 +419,9 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				mu.Lock()
 				defer mu.Unlock()
 				dataOK[t] = ok
+				if ok {
+					m.markDataValidationCopied(t)
+				}
 				m.recordOracleResult(&report.Data, m.objName(t), "", e)
 			}(table)
 		}
@@ -536,7 +540,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		}
 		report.RowCounts = append(report.RowCounts, TableRowCount{Table: m.objName(t), Src: src, Dst: dst, Match: src == dst})
 	}
-	m.log.Donef("MySQL → Oracle 迁移结束，耗时 %s", time.Since(start).Round(time.Second))
+	m.logMigrationCompletion("MySQL → Oracle 迁移结束，耗时 %s", time.Since(start).Round(time.Second))
 	return report
 }
 func (m *Migrator) recordOracleResult(c *CategoryReport, name, ddl string, err error) {

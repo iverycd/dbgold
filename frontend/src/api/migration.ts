@@ -9,6 +9,7 @@ export interface SupportedPair {
 }
 
 export interface StartDataMigrationRequest {
+  validate_data?: boolean
   migrate_triggers?: boolean
   excluded_objects?: MigrationObjectRef[]
   src_conn_id: number
@@ -45,6 +46,7 @@ export interface ConnSnapshot {
 }
 
 export interface DataMigrationJob {
+  validate_data?: boolean
   migrate_triggers?: boolean
   id: number
   job_id: string
@@ -182,7 +184,46 @@ export interface TriggerAdaptationReport {
   unknown: number
 }
 
+export type DataValidationStatus = 'passed' | 'mismatch' | 'error' | 'unsupported' | 'cancelled' | 'incomplete'
+
+export interface DataValidationValue {
+  text: string
+  null?: boolean
+  truncated?: boolean
+  length?: number
+  sha256?: string
+}
+
+export interface DataValidationDifference {
+  type: 'missing' | 'extra' | 'changed' | 'duplicate_key'
+  key?: Record<string, DataValidationValue>
+  fields?: { column: string; source?: DataValidationValue; target?: DataValidationValue }[]
+  key_hash?: string
+  row_hash?: string
+  columns?: string[]
+}
+
+export interface DataValidationTable {
+  source_table: string
+  target_table: string
+  status: DataValidationStatus
+  source_rows: number
+  target_rows: number
+  missing_rows: number
+  extra_rows: number
+  changed_rows: number
+  duplicate_keys: number
+  samples?: DataValidationDifference[]
+  error?: string
+}
+
+export interface DataValidationReport {
+  status: DataValidationStatus
+  tables: DataValidationTable[]
+}
+
 export interface MigrationReport {
+  dataValidation?: DataValidationReport
   trigger_migration_enabled?: boolean
   trigger_adaptation?: TriggerAdaptationReport
  compatibility_functions?: CompatibilityFunctionsReport
@@ -550,6 +591,7 @@ export const validateBatch = (file: File) => {
 
 // 批量迁移整批共用的迁移选项（对齐单任务默认值）
 export interface BatchOptions {
+  validate_data?: boolean
   migrate_triggers?: boolean
   excluded_objects_by_row?: Record<number, MigrationObjectRef[]>
   migrate_content: 'both' | 'schema_only' | 'data_only'
@@ -572,6 +614,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   if (excludeRows.length) fd.append('exclude_rows', excludeRows.join(','))
   if (opts.excluded_objects_by_row) fd.append('excluded_objects_by_row', JSON.stringify(opts.excluded_objects_by_row))
   fd.append('migrate_content', opts.migrate_content)
+  fd.append('validate_data', String(!!opts.validate_data))
   fd.append('migrate_triggers', String(!!opts.migrate_triggers))
   fd.append('page_size', String(opts.page_size))
   fd.append('max_parallel', String(opts.max_parallel))

@@ -73,6 +73,11 @@
           <span class="metric-note">不一致 {{ mismatchedRows.length }} 张表</span>
         </div>
         <div class="metric-item">
+          <span class="metric-label">数据内容校验</span>
+          <strong>{{ contentValidationLabel }}</strong>
+          <span class="metric-note">{{ report?.dataValidation ? '全量内容比对结果' : job.validate_data ? '等待完整校验结果' : '未检查字段内容' }}</span>
+        </div>
+        <div class="metric-item">
           <span class="metric-label">并行配置</span>
           <strong>{{ job.max_parallel || 0 }} / {{ job.intra_table_parallel || 0 }}</strong>
           <span class="metric-note">任务 / 表内并行 · 每页 {{ job.page_size || 0 }}</span>
@@ -198,6 +203,10 @@
             </div>
           </a-tab-pane>
 
+          <a-tab-pane v-if="report" key="validation" title="数据内容校验">
+            <div class="tab-content"><DataValidationPanel :report="report.dataValidation" :enabled="job.validate_data" /></div>
+          </a-tab-pane>
+
           <a-tab-pane key="config" title="任务配置">
             <div class="tab-content config-grid">
               <section class="config-section">
@@ -216,6 +225,7 @@
                   <div><dt>分页大小</dt><dd>{{ job.page_size || '—' }}</dd></div>
                   <div><dt>最大并行</dt><dd>{{ job.max_parallel || '—' }}</dd></div>
                   <div><dt>表内并行</dt><dd>{{ job.intra_table_parallel || '—' }}</dd></div>
+                  <div><dt>数据内容校验</dt><dd>{{ yesNo(job.validate_data) }}</dd></div>
                   <div><dt>触发器迁移</dt><dd>{{ yesNo(job.migrate_triggers) }}</dd></div>
                   <div><dt>名称转小写</dt><dd>{{ yesNo(job.lower_case_names) }}</dd></div>
                   <div><dt>字符按长度映射</dt><dd>{{ yesNo(job.char_in_length) }}</dd></div>
@@ -242,7 +252,8 @@
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
-import { reportCategories, formatReportCategories } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
+import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -318,15 +329,17 @@ const durationText = computed(() => {
   const remainder = seconds % 60
   return hours ? `${hours} 小时 ${minutes} 分` : minutes ? `${minutes} 分 ${remainder} 秒` : `${remainder} 秒`
 })
+const contentValidationLabel = computed(() => dataValidationLabel(report.value?.dataValidation, job.value?.validate_data))
+const contentValidationAttention = computed(() => dataValidationNeedsAttention(report.value?.dataValidation, job.value?.validate_data))
 const pendingTriggerCount = computed(() => report.value?.trigger_migration_enabled
   ? Math.max(0, report.value.triggers.total - report.value.triggers.success - report.value.triggers.failed) : 0)
 const reportHealthText = computed(() => {
   if (!report.value) return job.value?.status === 'running' ? '生成中' : '暂无报告'
-  if (failedObjectCount.value || mismatchedRows.value.length) return '需要处理'
+  if (failedObjectCount.value || mismatchedRows.value.length || contentValidationAttention.value) return '需要处理'
   if (pendingTriggerCount.value) return '尚未完成'
   return '全部通过'
 })
-const summaryText = computed(() => job.value?.summary || (job.value?.status === 'running' ? '迁移正在执行，完成后将在此生成对象与行数校验报告。' : reportHealthText.value === '全部通过' ? '迁移对象与行数校验均已通过。' : pendingTriggerCount.value ? '迁移已结束，部分触发器尚未执行，请核对迁移概览。' : '迁移已结束，请核对失败对象和行数差异。'))
+const summaryText = computed(() => job.value?.summary || (job.value?.status === 'running' ? '迁移正在执行，完成后将在此生成对象与行数校验报告。' : reportHealthText.value === '全部通过' ? (report.value?.dataValidation ? '迁移对象、行数与数据内容校验均已通过。' : '迁移对象与行数校验均已通过；数据内容校验未启用。') : pendingTriggerCount.value ? '迁移已结束，部分触发器尚未执行，请核对迁移概览。' : '迁移已结束，请核对失败对象、行数及数据内容校验结果。'))
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
   if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
@@ -336,6 +349,7 @@ const risks = computed<RiskItem[]>(() => {
   if (failedBusinessObjectCount.value > 0) items.push({ key: 'objects', level: 'danger', title: `${failedBusinessObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
   if (pendingTriggerCount.value) items.push({ key: 'pending-triggers', level: 'warning', title: `${pendingTriggerCount.value} 个触发器尚未执行`, description: '原任务结束前未完成这些触发器，请核对对象修复记录后重试原生成 SQL。', tab: 'overview', action: '查看迁移概览' })
   if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
+  if (report.value && contentValidationAttention.value) items.push({ key: 'content-validation', level: 'danger', title: `数据内容校验：${contentValidationLabel.value}`, description: '请核查未通过的表、数据差异与失败原因；只有全量校验完整通过才表示本次内容比对通过。', tab: 'validation', action: '查看内容校验' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items
 })
@@ -409,6 +423,7 @@ async function exportReport() {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)
   }
+  lines.push(...formatDataValidation(report.value.dataValidation, job.value.validate_data))
   if (repairPanel.value) {
     try { lines.push(...await repairPanel.value.exportHistory()) }
     catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -134,6 +135,14 @@ func TestMySQLPGTriggerIntegration(t *testing.T) {
 		if object.Kind == "trigger" {
 			require.Equal(t, "succeeded", object.Status)
 			require.Len(t, object.Units, 2)
+			require.NotNil(t, object.MySQLPGTrigger)
+			plan := object.MySQLPGTrigger
+			require.Equal(t, mysqltrigger.CurrentVersion, plan.Version)
+			require.Equal(t, strings.ToLower(plan.Source.Name), plan.Name)
+			require.Equal(t, plan.Name+"_fn", plan.FunctionName)
+			var installedFunction string
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT p.proname FROM pg_trigger g JOIN pg_proc p ON p.oid=g.tgfoid JOIN pg_class t ON t.oid=g.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND t.relname=$2 AND g.tgname=$3 AND NOT g.tgisinternal`, plan.Schema, plan.Table, plan.Name).Scan(&installedFunction))
+			require.Equal(t, plan.FunctionName, installedFunction)
 		}
 	}
 	query := func(db *sql.DB, q string) [][]string {

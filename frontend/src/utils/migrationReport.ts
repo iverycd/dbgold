@@ -1,4 +1,4 @@
-import type { CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
+import type { DataValidationValue, DataValidationReport, CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
 
 const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
 
@@ -258,4 +258,54 @@ export function formatReportCategories(report: MigrationReport): string[] {
     }
   }
   return [...lines, '']
+}
+
+// A missing validation block means no content check was recorded, never a pass.
+export function dataValidationStatus(status?: string): { label: string; color: string } {
+  const states: Record<string, { label: string; color: string }> = {
+    passed: { label: '全量校验通过', color: 'green' },
+    mismatch: { label: '内容不一致', color: 'orange' },
+    error: { label: '校验失败', color: 'red' },
+    unsupported: { label: '无法校验', color: 'orange' },
+    cancelled: { label: '校验已取消', color: 'gray' },
+    incomplete: { label: '校验未完成', color: 'orange' },
+  }
+  return states[status || ''] || { label: '未完成', color: 'orange' }
+}
+
+export function dataValidationNeedsAttention(report?: DataValidationReport, enabled = false): boolean {
+  if (!report) return enabled
+  return report.status !== 'passed' || report.tables.some(table => table.status !== 'passed')
+}
+
+export function dataValidationLabel(report?: DataValidationReport, enabled = false): string {
+  if (!report) return enabled ? '未完成' : '未启用'
+  if (report.status === 'passed' && report.tables.some(table => table.status !== 'passed')) return '校验未全部通过'
+  return dataValidationStatus(report.status).label
+}
+
+export function formatDataValidationValue(value?: DataValidationValue): string {
+  if (!value) return '不存在'
+  if (value.null) return 'NULL'
+  if (value.sha256) return `二进制（${value.length ?? 0} 字节，SHA256 ${value.sha256}）`
+  return `${JSON.stringify(value.text)}${value.truncated ? `（已截断，原长度 ${value.length ?? '未知'}）` : ''}`
+}
+
+export function formatDataValidation(report?: DataValidationReport, enabled = false): string[] {
+  const lines = ['', '=== 数据内容校验 ===', dataValidationLabel(report, enabled)]
+  if (!report) {
+    lines.push(enabled ? '任务启用了内容校验，但未记录完整结果。' : '本任务未记录数据内容校验结果，行数相同不代表内容一致。')
+    return lines
+  }
+  for (const table of report.tables) {
+    lines.push(`${table.source_table} → ${table.target_table}：${dataValidationStatus(table.status).label}；源 ${table.source_rows} / 目标 ${table.target_rows}，缺失 ${table.missing_rows}，多余 ${table.extra_rows}，字段变化 ${table.changed_rows}，重复主键 ${table.duplicate_keys}`)
+    if (table.error) lines.push(`  原因：${table.error}`)
+    for (const sample of table.samples || []) {
+      const type = ({ missing: '目标缺失', extra: '目标多余', changed: '字段变化', duplicate_key: '重复主键' } as Record<string, string>)[sample.type] || sample.type
+      if (sample.key) lines.push(`  主键：${Object.entries(sample.key).map(([column, value]) => `${column}=${formatDataValidationValue(value)}`).join('，')}`)
+      for (const field of sample.fields || []) lines.push(`  ${field.column}：源 ${formatDataValidationValue(field.source)} / 目标 ${formatDataValidationValue(field.target)}`)
+      lines.push(`  ${type}：主键指纹 ${sample.key_hash || '—'}；行指纹 ${sample.row_hash || '—'}${sample.columns?.length ? `；字段 ${sample.columns.join('、')}` : ''}`)
+    }
+  }
+  return lines
 }

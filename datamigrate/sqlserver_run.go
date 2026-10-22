@@ -72,6 +72,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		}
 	}
 	sort.Strings(tables)
+	m.freezeDataValidation(ctx, tables)
 	names := []string{}
 	for _, t := range tables {
 		names = append(names, m.objName(t))
@@ -211,6 +212,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				}
 			}
 			if r.err == nil {
+				m.markDataValidationCopied(t)
 				r.src, r.err = m.reader.CountRows(ctx, t)
 			}
 			if r.err == nil {
@@ -391,7 +393,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		}
 		m.sqlServerViews(ctx, selectedViews, &report.Views, failed, sourceInfo)
 	}
-	m.log.Donef("SQL Server 迁移完成：数据成功 %d 张，失败 %d 张；失败对象请查看报告", report.Data.Success, report.Data.Failed)
+	m.logMigrationCompletion("SQL Server 迁移完成：数据成功 %d 张，失败 %d 张；失败对象请查看报告", report.Data.Success, report.Data.Failed)
 	return report
 }
 

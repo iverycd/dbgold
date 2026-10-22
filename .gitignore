@@ -1,4 +1,5 @@
-dbgold
+# Root Go binary; Java package directories named dbgold contain source files.
+/dbgold
 dbgold.db
 *.db
 .env

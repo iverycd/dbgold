@@ -13,10 +13,13 @@ import (
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
+	"dbgold/datamigrate/validation"
 )
 
 // Config 迁移任务配置
 type Config struct {
+	// ValidateData opts ordinary data jobs into full content validation.
+	ValidateData bool `json:"ValidateData,omitempty"`
 	// PreparationStartedAt includes connection setup in the preparation duration.
 	// Zero falls back to the start of Run; the timestamp is never persisted.
 	PreparationStartedAt time.Time                  `json:"-"`
@@ -61,6 +64,9 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	validationTables       []frozenValidationTable
+	validationScopeFrozen  bool
+	validationCopied       sync.Map
 	preparationStartedAt   time.Time
 	compatibilityFunctions *target.CompatibilityFunctionsReport
 	mysqlPGTriggers        []preparedMySQLPGTrigger
@@ -197,6 +203,12 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.validationTables, m.validationScopeFrozen = nil, false
+	m.validationCopied = sync.Map{}
+	var dataValidation *validation.Report
+	if m.dataValidationEnabled() {
+		dataValidation = &validation.Report{Status: "incomplete"}
+	}
 	m.preparationStartedAt = m.cfg.PreparationStartedAt
 	if m.preparationStartedAt.IsZero() {
 		m.preparationStartedAt = time.Now()
@@ -211,6 +223,10 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.dmPlans = nil
 	}
 	report := m.runWithRepair(ctx)
+	if dataValidation != nil {
+		report.DataValidation = dataValidation
+		m.validateDataContent(ctx, &report)
+	}
 	m.recordOracleDamengTaskFailure(ctx, &report)
 	if m.cfg.CaptureRepair {
 		m.finishRepair(ctx, &report)
@@ -354,6 +370,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			}
 		}
 	}
+	m.freezeDataValidation(ctx, tables)
 
 	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
 	if m.cfg.objectMode() {
@@ -467,6 +484,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				ok, firstErr := m.migrateTableData(ctx, tbl)
 				mu.Lock()
 				if ok {
+					m.markDataValidationCopied(tbl)
 					report.Data.Success++
 				} else if !m.isOracleDameng() || ctx.Err() == nil {
 					report.Data.Failed++
@@ -583,7 +601,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	// Install business triggers after historical data and row-count validation.
 	m.createMySQLPGTriggers(ctx, &report)
 	elapsed := time.Since(start).Round(time.Second)
-	m.log.Donef("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",
+	m.logMigrationCompletion("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",
 		report.Data.Success, report.Tables.Failed+report.Data.Failed, elapsed)
 	return report
 }

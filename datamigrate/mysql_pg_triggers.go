@@ -141,6 +141,21 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 		}
 		m.mysqlPGTriggers = append(m.mysqlPGTriggers, p)
 	}
+	// Helper functions share the target schema namespace across all base tables.
+	// Mark every colliding plan before DDL so installation order cannot choose a
+	// winner, including collisions introduced by name folding or shortening.
+	functionNames := map[string]int{}
+	for _, p := range m.mysqlPGTriggers {
+		if p.err == nil {
+			functionNames[p.plan.Schema+"\x00"+p.plan.FunctionName]++
+		}
+	}
+	for i := range m.mysqlPGTriggers {
+		p := &m.mysqlPGTriggers[i]
+		if p.err == nil && functionNames[p.plan.Schema+"\x00"+p.plan.FunctionName] > 1 {
+			p.err = fmt.Errorf("目标辅助函数 %s.%s 名称冲突，相关触发器均未安装", p.plan.Schema, p.plan.FunctionName)
+		}
+	}
 	if len(m.mysqlPGTriggers) > 0 {
 		m.log.Info("触发器使用 SECURITY INVOKER，不映射源 DEFINER；时间函数使用目标业务会话时区，请保持两端一致")
 	}

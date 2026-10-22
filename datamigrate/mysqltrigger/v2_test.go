@@ -75,7 +75,7 @@ func TestV2ConcatPreservesNullAndSupportedFormats(t *testing.T) {
 					t.Fatalf("missing %q in %s", want, p.FunctionBody)
 				}
 			}
-			if p.Version != 2 || p.CharacterMetadata != nil && len(p.CharacterMetadata.Profiles) != 0 {
+			if p.Version != CurrentVersion || p.CharacterMetadata != nil && len(p.CharacterMetadata.Profiles) != 0 {
 				t.Fatal("CONCAT must not need a collation profile")
 			}
 			if !p.RequiresTextSemantics {
@@ -377,7 +377,7 @@ func TestVersionedPlanPreservesLegacySQLAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newPlan.Version != 2 || newPlan.FunctionBody == p.FunctionBody {
+	if newPlan.Version != CurrentVersion || newPlan.FunctionBody == p.FunctionBody {
 		t.Fatal("new generator version not frozen")
 	}
 	if err = ValidatePlan(newPlan); err != nil {

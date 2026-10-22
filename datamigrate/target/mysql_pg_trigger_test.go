@@ -2,6 +2,7 @@ package target
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -23,6 +24,28 @@ func triggerPlanFixture(t *testing.T) mysqltrigger.Plan {
 	require.NoError(t, err)
 	p.Tables = []source.TableDDLInfo{{TableName: "Orders", Columns: []source.ColumnInfo{{Name: "Value", DataType: "INTEGER"}}}}
 	return p
+}
+
+// This saved plan is independent of the current converter: old ledger rows
+// must retain their hash-based function identity when the default advances.
+func legacyTriggerPlanFixture(version int) mysqltrigger.Plan {
+	markerVersion := version
+	if markerVersion == 0 {
+		markerVersion = 1
+	}
+	const functionName = "dbgold_trg_6f9a645b2bee48811d0e90743e9c06fa"
+	body := fmt.Sprintf("\n-- dbgold:mysql-trigger:v%d\nBEGIN\nNEW.\"Value\" := (NEW.\"Value\" + 1);\nRETURN NEW;\nEND;\n", markerVersion)
+	return mysqltrigger.Plan{
+		Version: version,
+		Source:  source.TriggerInfo{Schema: "Source", TableName: "Orders", Name: "BeforeInsert", Timing: "BEFORE", Event: "INSERT", Body: "SET NEW.Value = NEW.Value + 1", SourceDDL: "CREATE TRIGGER BeforeInsert BEFORE INSERT ON Orders FOR EACH ROW SET NEW.Value = NEW.Value + 1", SQLMode: "STRICT_TRANS_TABLES"},
+		Schema:  "Target", Table: "Orders", Name: "BeforeInsert", FunctionName: functionName,
+		FunctionBody: body,
+		FunctionSQL:  `CREATE FUNCTION "Target"."` + functionName + `"() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER AS $dbgold$` + body + "$dbgold$;",
+		TriggerSQL:   `CREATE TRIGGER "BeforeInsert" BEFORE INSERT ON "Target"."Orders" FOR EACH ROW EXECUTE PROCEDURE "Target"."` + functionName + `"();`,
+		Dependencies: []string{"Orders"},
+		SourceTables: []source.TableDDLInfo{{TableName: "Orders", Columns: []source.ColumnInfo{{Name: "Value", DataType: "int"}}}},
+		Tables:       []source.TableDDLInfo{{TableName: "Orders", Columns: []source.ColumnInfo{{Name: "Value", DataType: "INTEGER"}}}},
+	}
 }
 
 func triggerWriterFixture(t *testing.T) (*PostgresWriter, sqlmock.Sqlmock) {
@@ -166,6 +189,42 @@ func TestMySQLPGTriggerReadOnlyRepair(t *testing.T) {
 		candidate.Units = append([]repair.Unit(nil), o.Units...)
 		change(&candidate)
 		require.Error(t, ValidateMySQLPGTriggerRepair(candidate, candidate.Units))
+	}
+}
+
+func TestLegacyMySQLPGTriggerReadOnlyRetryPreservesNames(t *testing.T) {
+	for _, version := range []int{0, 1, 2} {
+		for _, mode := range []string{"install", "reuse"} {
+			t.Run(fmt.Sprintf("v%d/%s", version, mode), func(t *testing.T) {
+				saved, err := json.Marshal(legacyTriggerPlanFixture(version))
+				require.NoError(t, err)
+				var p mysqltrigger.Plan
+				require.NoError(t, json.Unmarshal(saved, &p))
+				require.NoError(t, mysqltrigger.ValidatePlan(p))
+				w, m := triggerWriterFixture(t)
+				if mode == "reuse" {
+					fn := sqlmock.NewRows([]string{"oid", "body", "security", "trigger", "args", "language", "config", "owner", "plain"}).AddRow(42, p.FunctionBody, false, true, 0, "plpgsql", nil, "postgres", true)
+					tr := sqlmock.NewRows([]string{"name", "type", "enabled", "fn", "args", "noWhen", "constraint"}).AddRow(p.Name, 7, "O", 42, 0, true, 0)
+					expectTriggerPreflight(m, p, fn, tr)
+				} else {
+					expectTriggerPreflight(m, p, nil, nil)
+					for _, statement := range p.Statements() {
+						m.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 0))
+					}
+				}
+				m.ExpectCommit()
+				o := recordedTriggerFixture(p)
+				units, err := ExecuteRepair(context.Background(), w, o, o.Units, nil)
+				require.NoError(t, err)
+				require.Len(t, units, 2)
+				for i, unit := range units {
+					require.Equal(t, "succeeded", unit.Status)
+					require.Equal(t, p.Statements()[i], unit.SQL)
+					require.Equal(t, p.Statements()[i], unit.OriginalSQL)
+				}
+				require.NoError(t, m.ExpectationsWereMet())
+			})
+		}
 	}
 }
 

@@ -4,9 +4,10 @@ package mysqltrigger
 import "dbgold/datamigrate/source"
 
 const (
-	ToolMarker       = "dbgold:mysql-trigger:v2"
+	ToolMarker       = "dbgold:mysql-trigger:v3"
 	legacyToolMarker = "dbgold:mysql-trigger:v1"
-	CurrentVersion   = 2
+	v2ToolMarker     = "dbgold:mysql-trigger:v2"
+	CurrentVersion   = 3
 )
 
 type Plan struct {

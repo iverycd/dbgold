@@ -29,6 +29,10 @@ const (
 	opCloseSession
 	opCancel
 	opShutdown
+	opDescribeTable
+	opCursorOpen
+	opCursorFetch
+	opCursorClose
 )
 
 const (
