@@ -166,6 +166,12 @@ class LocalDeploymentTests(DeployFixture):
                              b"fresh bridge\n")
             self.assertIn("lib/OSCAR-JDBC-NOTICE.md", files)
             self.assertIn("lib/OSCAR-JDBC-LICENSE", files)
+            license_body = archive.extractfile(files["lib/OSCAR-JDBC-LICENSE"]).read()
+            self.assertEqual(license_body, (self.repo / "third_party/oscar/LICENSE").read_bytes())
+            manifest = archive.extractfile(files["SHA256SUMS"]).read().decode()
+            manifest_hashes = {filename.removeprefix("./"): digest
+                               for digest, filename in (line.split(None, 1) for line in manifest.splitlines())}
+            self.assertEqual(manifest_hashes["lib/OSCAR-JDBC-LICENSE"], hashlib.sha256(license_body).hexdigest())
         calls = self.remote_calls()
         preflight = next(i for i, call in enumerate(calls)
                          if "preflight" in call["text"] or "preflight" in call["stdin"])
@@ -192,12 +198,15 @@ class LocalDeploymentTests(DeployFixture):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.remote_calls(), [])
 
-    def test_missing_jdbc_license_is_rejected_before_ssh(self):
+    def test_missing_jdbc_license_does_not_block_deployment_or_enter_manifest(self):
         (self.repo / "third_party/oscar/LICENSE").unlink()
         result = self.run_deploy()
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("LICENSE", result.stdout)
-        self.assertEqual(self.remote_calls(), [])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("✅ 部署完成", result.stdout)
+        with tarfile.open(self.captures / "bundle.tar.gz") as archive:
+            files = {member.name.removeprefix("./"): member for member in archive.getmembers()}
+            self.assertNotIn("lib/OSCAR-JDBC-LICENSE", files)
+            self.assertNotIn("OSCAR-JDBC-LICENSE", archive.extractfile(files["SHA256SUMS"]).read().decode())
 
     def test_bridge_compilation_failure_does_not_touch_remote(self):
         result = self.run_deploy(FAIL_JAVAC="1")
@@ -330,6 +339,16 @@ timeout() { shift; "$@"; }
         self.assertEqual(arguments.read_text().splitlines(), [
             "-cp", str(stage / "lib/dbgold-oscar-bridge.jar") + ":" + str(stage / "lib/oscarJDBC8.jar"),
             "com.dbgold.oscar.BridgeMain"])
+
+    def test_preflight_accepts_bundle_without_optional_license(self):
+        stage = self.make_stage()
+        (stage / "lib/OSCAR-JDBC-LICENSE").unlink()
+        self.write_checksums(stage)
+        self.make_java("bin/java")
+        result = self.run_helper(self.linux_preflight_mocks() +
+                                 'preflight "$STAGE" ""', STAGE=str(stage))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("OSCAR-JDBC-LICENSE", (stage / "SHA256SUMS").read_text())
 
     def test_corrupt_upload_fails_before_old_service_is_stopped(self):
         stage = self.make_stage()
@@ -527,8 +546,18 @@ verify_ready "$TEST_DEPLOY_DIR" 12345 18089
         self.assertNotIn("已就绪", result.stdout)
 
     def test_activate_overrides_stale_paths_and_preserves_runtime_data(self):
+        self.assert_activation_preserves_data(with_license=True)
+
+    def test_activate_without_license_keeps_existing_remote_license(self):
+        self.assert_activation_preserves_data(with_license=False)
+
+    def assert_activation_preserves_data(self, with_license):
         stage = self.make_stage()
-        for relative in [".env", "dbgold.db", "uploads/user-file", "log/existing.log", "lib/other-driver.jar"]:
+        if not with_license:
+            (stage / "lib/OSCAR-JDBC-LICENSE").unlink()
+            self.write_checksums(stage)
+        for relative in [".env", "dbgold.db", "uploads/user-file", "log/existing.log", "lib/other-driver.jar",
+                         "lib/OSCAR-JDBC-LICENSE"]:
             path = self.remote / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("preserve " + relative + "\n")
@@ -554,6 +583,8 @@ activate "$STAGE" "" 18123
         for relative in ["dbgold.db", "uploads/user-file", "log/existing.log", "lib/other-driver.jar"]:
             self.assertEqual((self.remote / relative).read_text(), "preserve " + relative + "\n")
         self.assertIn("/old/bridge.jar", (self.remote / ".env").read_text())
+        expected_license = ("test artifact " if with_license else "preserve ") + "lib/OSCAR-JDBC-LICENSE\n"
+        self.assertEqual((self.remote / "lib/OSCAR-JDBC-LICENSE").read_text(), expected_license)
 
 
 if __name__ == "__main__":

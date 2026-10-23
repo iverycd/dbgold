@@ -26,7 +26,7 @@ preflight() {
   for tool in sha256sum readlink pgrep nohup timeout; do
     command -v "$tool" >/dev/null 2>&1 || { error "远程服务器缺少工具: $tool"; return 1; }
   done
-  for file in dbgold dist/index.html lib/dbgold-oscar-bridge.jar lib/oscarJDBC8.jar lib/OSCAR-JDBC-NOTICE.md lib/OSCAR-JDBC-LICENSE SHA256SUMS; do
+  for file in dbgold dist/index.html lib/dbgold-oscar-bridge.jar lib/oscarJDBC8.jar lib/OSCAR-JDBC-NOTICE.md SHA256SUMS; do
     [[ -s "$stage/$file" ]] || { error "部署产物缺失或为空: $file"; return 1; }
   done
   (cd -- "$stage" && sha256sum -c SHA256SUMS) || return 1
@@ -160,9 +160,12 @@ activate() {
   chmod +x "$stage/dbgold" || return 1
   mkdir -p "$deploy_dir/lib" || return 1
   # 所有网络传输已完成；按文件替换 lib，保留其他驱动和运行数据。
-  for file in dbgold-oscar-bridge.jar oscarJDBC8.jar OSCAR-JDBC-NOTICE.md OSCAR-JDBC-LICENSE; do
+  for file in dbgold-oscar-bridge.jar oscarJDBC8.jar OSCAR-JDBC-NOTICE.md; do
     mv -f -- "$stage/lib/$file" "$deploy_dir/lib/$file" || return 1
   done
+  if [[ -f "$stage/lib/OSCAR-JDBC-LICENSE" ]]; then
+    mv -f -- "$stage/lib/OSCAR-JDBC-LICENSE" "$deploy_dir/lib/OSCAR-JDBC-LICENSE" || return 1
+  fi
   rm -rf -- "$deploy_dir/dist" || return 1
   mv -- "$stage/dist" "$deploy_dir/dist" || return 1
   mv -f -- "$stage/dbgold" "$deploy_dir/dbgold" || return 1

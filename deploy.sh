@@ -66,7 +66,7 @@ for tool in sshpass ssh npm javac jar tar shasum; do
   command -v "$tool" >/dev/null 2>&1 || fail "未找到本机构建工具: $tool"
 done
 command -v "$GO_BIN" >/dev/null 2>&1 || fail "未找到 Go 可执行文件: $GO_BIN"
-for file in jdbcbridge/java/build.sh deploy/remote-deploy.sh third_party/oscar/oscarJDBC8.jar third_party/oscar/README.md third_party/oscar/LICENSE; do
+for file in jdbcbridge/java/build.sh deploy/remote-deploy.sh third_party/oscar/oscarJDBC8.jar third_party/oscar/README.md; do
   [[ -s "$SCRIPT_DIR/$file" ]] || fail "缺少或为空的构建依赖: $file"
 done
 
@@ -119,7 +119,9 @@ sh "$SCRIPT_DIR/jdbcbridge/java/build.sh"
 cp "$SCRIPT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.jar" "$BUNDLE_DIR/lib/"
 cp "$SCRIPT_DIR/third_party/oscar/oscarJDBC8.jar" "$BUNDLE_DIR/lib/"
 cp "$SCRIPT_DIR/third_party/oscar/README.md" "$BUNDLE_DIR/lib/OSCAR-JDBC-NOTICE.md"
-cp "$SCRIPT_DIR/third_party/oscar/LICENSE" "$BUNDLE_DIR/lib/OSCAR-JDBC-LICENSE"
+if [[ -f "$SCRIPT_DIR/third_party/oscar/LICENSE" ]]; then
+  cp "$SCRIPT_DIR/third_party/oscar/LICENSE" "$BUNDLE_DIR/lib/OSCAR-JDBC-LICENSE"
+fi
 cp "$SCRIPT_DIR/deploy/remote-deploy.sh" "$BUNDLE_DIR/remote-deploy.sh"
 (
   cd "$BUNDLE_DIR"

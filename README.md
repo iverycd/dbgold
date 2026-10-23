@@ -35,9 +35,9 @@ VITE_API_TARGET=http://localhost:18089
 
 ## 测试/开发服务器一键部署
 
-`deploy.sh` 用于把当前工作区快速部署到可直接运行 Linux/amd64 二进制的测试或开发服务器。每次部署都会构建后端、前端和 Oscar Java 桥接程序，并一起发布 JDBC 驱动及许可文件，避免新后端仍加载旧桥接 JAR。
+`deploy.sh` 用于把当前工作区快速部署到可直接运行 Linux/amd64 二进制的测试或开发服务器。每次部署都会构建后端、前端和 Oscar Java 桥接程序，并一起发布 JDBC 驱动及存在的许可文件，避免新后端仍加载旧桥接 JAR。
 
-本机需要 Go 1.25.5、Node/npm、`sshpass`（macOS：`brew install sshpass`）及包含 `javac`、`jar` 的 JDK 9 或更高版本，前端依赖需提前安装。`GO_BIN` 默认为 `/Users/kay/sdk/go1.25.5/bin/go`，可通过环境变量覆盖。本机还必须有 `third_party/oscar/oscarJDBC8.jar`、`third_party/oscar/README.md` 和 `third_party/oscar/LICENSE`。
+本机需要 Go 1.25.5、Node/npm、`sshpass`（macOS：`brew install sshpass`）及包含 `javac`、`jar` 的 JDK 9 或更高版本，前端依赖需提前安装。`GO_BIN` 默认为 `/Users/kay/sdk/go1.25.5/bin/go`，可通过环境变量覆盖。本机还必须有 `third_party/oscar/oscarJDBC8.jar` 和 `third_party/oscar/README.md`。`third_party/oscar/LICENSE` 为可选文件：存在时随包上传并校验，缺失不影响测试环境部署，也不会删除远程已有的许可文件。
 
 远程服务器需要允许密码 SSH 登录，提供 Java 8 或更高版本及 `sha256sum`、`readlink`、`pgrep`、`nohup`、`timeout` 等 Linux 工具。使用 `-j` 指定远程 Java 的绝对路径；未指定时依次查找 `<部署目录>/runtime/bin/java` 和远程 `PATH` 中的 `java`。脚本不会自动安装 Java。
 
