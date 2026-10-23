@@ -27,6 +27,7 @@ func (r *catalogReader) freezeTableForeignKeys(table string, count int) ([]strin
 		if err != nil {
 			return nil, fmt.Errorf("外键 %s 的完整原生定义不可读取: %w", object.Name, err)
 		}
+		ddl = repairGeneratedConstraintIdentity(ddl, object)
 		ddl, err = constraintFrozenState(ddl, object)
 		if err != nil {
 			return nil, err
@@ -37,10 +38,25 @@ func (r *catalogReader) freezeTableForeignKeys(table string, count int) ([]strin
 }
 
 func constraintFrozenState(ddl string, object Object) (string, error) {
-	ddl = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ddl), ";"))
 	if object.Status != "ENABLED" && object.Status != "DISABLED" {
-		return ddl, nil
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ddl), ";")), nil
 	}
+	ddl, err := constraintWithoutState(ddl)
+	if err != nil {
+		return "", err
+	}
+	state := " ENABLE"
+	if object.Status == "DISABLED" {
+		state = " DISABLE"
+	} else if object.ConstraintNoValidate {
+		state += " NOVALIDATE"
+	}
+	return strings.TrimSpace(ddl) + state, nil
+}
+
+// Remove only state tokens outside expressions, identifiers and literals.
+func constraintWithoutState(ddl string) (string, error) {
+	ddl = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ddl), ";"))
 	ts, err := nativeTokens(ddl)
 	if err != nil {
 		return "", err
@@ -60,11 +76,5 @@ func constraintFrozenState(ddl string, object Object) (string, error) {
 	for i := len(removes) - 1; i >= 0; i-- {
 		ddl = ddl[:removes[i].start] + ddl[removes[i].end:]
 	}
-	state := " ENABLE"
-	if object.Status == "DISABLED" {
-		state = " DISABLE"
-	} else if object.ConstraintNoValidate {
-		state += " NOVALIDATE"
-	}
-	return strings.TrimSpace(ddl) + state, nil
+	return strings.TrimSpace(ddl), nil
 }

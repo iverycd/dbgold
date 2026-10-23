@@ -47,8 +47,11 @@ func OracleToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 		}
 		return "decimal"
 
-	case "FLOAT", "BINARY_DOUBLE", "DOUBLE PRECISION":
+	case "FLOAT", "DOUBLE PRECISION":
 		return "decimal"
+
+	case "BINARY_DOUBLE":
+		return "double precision"
 
 	case "BINARY_FLOAT", "REAL":
 		return "real"

@@ -38,10 +38,12 @@ func MySQLToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 		return "INTEGER"
 	case "bigint":
 		return "BIGINT"
-	case "decimal", "numeric", "float", "double":
+	case "decimal", "numeric":
 		return decimalType(col)
-	case "real":
+	case "float":
 		return "REAL"
+	case "double", "double precision", "real":
+		return "DOUBLE PRECISION"
 	case "char":
 		if useNvarchar2 {
 			return sized("NVARCHAR2", col.Length, 1)
@@ -95,7 +97,10 @@ func SQLServerToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 	case "real":
 		return "REAL"
 	case "float":
-		return "DECIMAL"
+		if singlePrecisionFloat(col.Precision) {
+			return "REAL"
+		}
+		return "DOUBLE PRECISION"
 	case "char", "nchar":
 		if useNvarchar2 || dt == "nchar" {
 			return sized("NVARCHAR2", col.Length, 1)
@@ -152,8 +157,10 @@ func OracleToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 			}
 		}
 		return decimalType(col)
-	case "FLOAT", "BINARY_DOUBLE", "DOUBLE PRECISION":
+	case "FLOAT", "DOUBLE PRECISION":
 		return "DECIMAL"
+	case "BINARY_DOUBLE":
+		return "DOUBLE PRECISION"
 	case "BINARY_FLOAT", "REAL":
 		return "REAL"
 	case "SMALLINT":
@@ -192,9 +199,17 @@ func DaMengToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 		return "INTEGER"
 	case "bigint":
 		return "BIGINT"
-	case "numeric", "number", "decimal", "float", "double", "double precision":
+	case "numeric", "number", "decimal":
+		return decimalType(col)
+	case "float", "double", "double precision":
+		if mapped, ok := damengBinaryFloatType(col, "REAL", "DOUBLE PRECISION"); ok {
+			return mapped
+		}
 		return decimalType(col)
 	case "real":
+		if mapped, ok := damengBinaryFloatType(col, "REAL", "DOUBLE PRECISION"); ok {
+			return mapped
+		}
 		return "REAL"
 	case "char", "character", "nchar":
 		if useNvarchar2 || dt == "nchar" {

@@ -293,6 +293,47 @@ func TestOracleDMFloatProfilesUseActualMetadata(t *testing.T) {
 
 func strconvInt(p int64) string { return fmt.Sprintf("%d", p) }
 
+func TestOracleDMBinaryFloatProbesTargetReal(t *testing.T) {
+	for _, tc := range []struct {
+		name, dbType, want string
+		decimal            bool
+		fail               bool
+	}{
+		{name: "binary32", dbType: "REAL", want: "real"},
+		{name: "float_descriptor", dbType: "FLOAT", want: "real"},
+		{name: "NUMBER_MODE_1", dbType: "REAL", decimal: true, want: "decimal"},
+		{name: "unknown", dbType: "UNSUPPORTED", fail: true},
+		{name: "wrong_width", dbType: "DOUBLE", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, m := mockDM(t)
+			definition := sqlmock.NewColumn("F").OfType(tc.dbType, float64(0))
+			if tc.decimal {
+				definition.WithPrecisionAndScale(38, -1)
+			}
+			m.ExpectQuery(regexp.QuoteMeta("SELECT CAST(NULL AS REAL) FROM DUAL")).WillReturnRows(sqlmock.NewRowsWithColumnDefinition(definition)).RowsWillBeClosed()
+			info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "F", DataType: "BINARY_FLOAT"}}}
+			err := w.PrepareOracleDameng(context.Background(), []*source.TableDDLInfo{info}, dialect.TypeOpt{})
+			if tc.fail {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			got, err := w.OracleDamengColumnFloatKind(context.Background(), "T", "F")
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			// Subsequent preparation shares the read-only probe result.
+			require.NoError(t, w.PrepareOracleDameng(context.Background(), []*source.TableDDLInfo{info}, dialect.TypeOpt{}))
+			// Existing target metadata remains authoritative for data-only loads.
+			w.cacheOracleDMFloatColumn("T", "F", "decimal")
+			require.NoError(t, w.PrepareOracleDameng(context.Background(), []*source.TableDDLInfo{info}, dialect.TypeOpt{}))
+			got, err = w.OracleDamengColumnFloatKind(context.Background(), "T", "F")
+			require.NoError(t, err)
+			require.Equal(t, "decimal", got)
+		})
+	}
+}
+
 func TestOracleDMExistingFloatFamilySurvivesLaterPreparation(t *testing.T) {
 	w, m := mockDM(t)
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT "F" FROM "APP"."T" WHERE 1=0`)).WillReturnRows(sqlmock.NewRowsWithColumnDefinition(sqlmock.NewColumn("F").OfType("NUMBER", "").WithPrecisionAndScale(38, -1)))

@@ -31,7 +31,7 @@ func PGToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "money":
 		return "NUMBER(19,4)"
 	case "float4", "real":
-		return "FLOAT"
+		return "REAL"
 	case "float8", "double precision":
 		return "DOUBLE"
 	case "bool", "boolean":

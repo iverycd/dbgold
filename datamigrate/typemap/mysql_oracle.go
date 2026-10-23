@@ -68,7 +68,7 @@ func OracleType(c source.ColumnInfo, national bool, charBytes, ncharBytes int) (
 		return fmt.Sprintf("NUMBER(%d,%d)", c.Precision, c.Scale), nil
 	case "float":
 		return "BINARY_FLOAT", nil
-	case "double", "real":
+	case "double", "double precision", "real":
 		return "BINARY_DOUBLE", nil
 	case "char":
 		return textType(true)

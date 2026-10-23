@@ -13,7 +13,7 @@ func MySQLToSQLServer(c source.ColumnInfo, _, _ bool) string { t, _ := SQLServer
 // not raw source type names or silently downgraded text.
 func SQLServerType(c source.ColumnInfo) (string, error) {
 	unsigned := strings.Contains(strings.ToLower(c.FormattedType), "unsigned")
-	switch strings.ToLower(c.DataType) {
+	switch strings.ToLower(strings.TrimSpace(c.DataType)) {
 	case "tinyint":
 		if unsigned {
 			return "TINYINT", nil
@@ -53,7 +53,7 @@ func SQLServerType(c source.ColumnInfo) (string, error) {
 		}
 	case "float":
 		return "REAL", nil
-	case "double", "real":
+	case "double", "double precision", "real":
 		return "FLOAT(53)", nil
 	case "char", "varchar":
 		if c.Length > 0 {

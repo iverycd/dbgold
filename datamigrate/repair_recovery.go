@@ -82,7 +82,7 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		return p, fmt.Errorf("源表无可用列元数据")
 	}
 	p.SourceColumns = slices.Clone(info.Columns)
-	if len(obj.SourceColumns) > 0 && repair.Hash(obj.SourceColumns) != repair.Hash(info.Columns) {
+	if len(obj.SourceColumns) > 0 && !recoverySourceColumnsMatch(r.DBType(), obj.SourceColumns, info.Columns) {
 		return p, fmt.Errorf("源表结构已偏离迁移快照，请重新核对并创建迁移任务")
 	}
 	p.TargetColumns, err = ops.inspect(ctx, w, p.TargetTable)
@@ -158,6 +158,22 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	p.Fingerprint = recoveryFingerprint(cfg, p)
 	return p, nil
 }
+
+// Older MySQL snapshots predate COLUMN_TYPE collection. Compare every field
+// they did record, then retain the freshly collected declaration in the preview.
+// New snapshots still require an exact declaration match.
+func recoverySourceColumnsMatch(srcType string, saved, current []source.ColumnInfo) bool {
+	if srcType == "mysql" && len(saved) == len(current) {
+		current = slices.Clone(current)
+		for i := range saved {
+			if saved[i].FormattedType == "" {
+				current[i].FormattedType = ""
+			}
+		}
+	}
+	return repair.Hash(saved) == repair.Hash(current)
+}
+
 func recoveryName(cfg Config, dst, src, s string) string {
 	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) {
 		return strings.ToUpper(s)
@@ -290,6 +306,9 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	if fresh.SourceRows != p.SourceRows || fresh.TargetRows != p.TargetRows || repair.Hash(fresh.SourceColumns) != repair.Hash(p.SourceColumns) || repair.Hash(fresh.TargetColumns) != repair.Hash(p.TargetColumns) {
 		return finish(fmt.Errorf("源／目标结构或行数已变化，请重新预览并确认"))
 	}
+	// Runtime source metadata (such as DM's actual floating storage family) is
+	// deliberately not serialized in the preview. Use the freshly read copy.
+	p.SourceColumns = fresh.SourceColumns
 	if !p.DataRequired {
 		res.DataStatus = obj.DataStatus
 		return finish(nil)

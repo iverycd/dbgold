@@ -20,7 +20,7 @@ func init() {
 // SQLServerToPG 将 SQL Server 列的数据类型转换为 PostgreSQL 类型字符串。
 // charInLength=true 时 char/varchar 长度单位使用 CHAR，useNvarchar2=true 时转为 nvarchar2（优先级更高）。
 func SQLServerToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
-	dt := strings.ToLower(col.DataType)
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 	switch dt {
 	case "tinyint", "smallint", "mediumint", "int":
 		return "int"
@@ -75,7 +75,10 @@ func SQLServerToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "real":
 		return "real"
 	case "float":
-		return "decimal"
+		if singlePrecisionFloat(col.Precision) {
+			return "real"
+		}
+		return "double precision"
 	case "xml":
 		return "text"
 	case "geography", "geometry":

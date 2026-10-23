@@ -13,7 +13,20 @@ func (r *catalogReader) freezeMaterializedEmptyTouch(t Table) (*MaterializedEmpt
 	if t.Rows != 0 || t.SourceName != "" {
 		return nil, fmt.Errorf("空基表状态恢复只能使用冻结的真实空基表")
 	}
+	return r.freezeTargetEmptyTouch(t, true)
+}
+
+// Interval preparation runs before data import against a newly created empty
+// target. Its source may contain rows; only native definitions are read here.
+func (r *catalogReader) freezeTargetEmptyTouch(t Table, sourceEmpty bool) (*MaterializedEmptyTouch, error) {
+	if t.SourceName != "" {
+		return nil, fmt.Errorf("临时行计划必须属于真实基表")
+	}
 	ddl, err := r.getDDL("TABLE", t.Name)
+	if err != nil {
+		return nil, err
+	}
+	ddl, err = RestoreNativeXMLTableDDL(ddl, t.Columns)
 	if err != nil {
 		return nil, err
 	}
@@ -127,9 +140,19 @@ func (r *catalogReader) freezeMaterializedEmptyTouch(t Table) (*MaterializedEmpt
 			return nil, iteration
 		}
 	}
+	definition := p.DefinitionSQL
+	if !sourceEmpty {
+		// Cluster-key constants still come from native key types/history, but
+		// the interval planner supplies its own proved route for each leaf.
+		p.DefinitionSQL, _, err = MaterializedUnpartitionedBufferDDL(definition, r.schema, t.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err = r.populateMaterializedEmptyCluster(t, p); err != nil {
 		return nil, err
 	}
+	p.DefinitionSQL = definition
 	return p, nil
 }
 

@@ -81,6 +81,10 @@ func (r *catalogReader) prepareMaterializedHistory() error {
 		if err != nil {
 			return err
 		}
+		ddl, err = RestoreNativeXMLTableDDL(ddl, columns)
+		if err != nil {
+			return fmt.Errorf("物化快照 %s 的XMLTYPE存储属性不可完整恢复: %w", o.Name, err)
+		}
 		staging := "DBGOLD_MV_HIST_" + Fingerprint([]string{r.schema, o.Name})[:16]
 		stagingDDL, err := renameDDLHead(ddl, "TABLE", r.schema, staging)
 		if err != nil {
@@ -172,6 +176,10 @@ func (r *catalogReader) prepareMaterializedHistory() error {
 		columns, err := r.historyColumns(physical)
 		if err != nil {
 			return err
+		}
+		ddl, err = RestoreNativeXMLTableDDL(ddl, columns)
+		if err != nil {
+			return fmt.Errorf("物化日志 %s 的XMLTYPE存储属性不可完整恢复: %w", o.Name, err)
 		}
 		staging := "DBGOLD_MV_LOG_" + Fingerprint([]string{r.schema, o.Table})[:16]
 		stagingDDL, err := renameDDLHead(ddl, "TABLE", r.schema, staging)
@@ -311,8 +319,12 @@ func (r *catalogReader) materializedHistoryTables() {
 	}
 	byID := map[string]Object{}
 	tables := map[string]Table{}
+	protectedStorage := map[string]bool{}
 	for _, o := range r.snapshot.Objects {
 		byID[o.ID] = o
+		if o.Materialized != nil && o.Table != "" {
+			protectedStorage[o.Table] = true
+		}
 	}
 	for _, t := range r.snapshot.Tables {
 		tables[t.Name] = t
@@ -340,7 +352,7 @@ func (r *catalogReader) materializedHistoryTables() {
 				if !ok {
 					return
 				}
-				if t, exists := tables[o.Name]; exists && o.Kind == "table" && t.SourceName == "" {
+				if t, exists := tables[o.Name]; exists && o.Kind == "table" && !o.Generated && !protectedStorage[o.Name] && t.SourceName == "" {
 					if t.Rows > 0 {
 						candidates = append(candidates, t)
 					} else {
@@ -660,7 +672,11 @@ func MaterializedUnpartitionedBufferDDL(ddl, schema, name string) (string, bool,
 // MaterializedPartitionBufferDDL adds one catch-all partition to a native table
 // declaration. The column and storage clauses remain byte-for-byte native.
 func MaterializedPartitionBufferDDL(ddl, schema, name, partition string, columns []Column) (string, error) {
-	ddl, err := renameDDLHead(ddl, "TABLE", schema, name)
+	ddl, err := RestoreNativeXMLTableDDL(ddl, columns)
+	if err != nil {
+		return "", err
+	}
+	ddl, err = renameDDLHead(ddl, "TABLE", schema, name)
 	if err != nil {
 		return "", err
 	}

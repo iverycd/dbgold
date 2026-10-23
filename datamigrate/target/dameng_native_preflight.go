@@ -12,6 +12,8 @@ func (w *DaMengNativeWriter) CheckDamengNativeReference(ctx context.Context, ref
 	var query string
 	var args []any
 	switch damengnative.NormalizeKind(ref.Kind) {
+	case "bfile":
+		return damengnative.CheckBFileResource(ctx, w.db, ref.Name)
 	case "tablespace":
 		query, args = `SELECT COUNT(*) FROM DBA_TABLESPACES WHERE TABLESPACE_NAME=?`, []any{ref.Name}
 	case "user", "grantee":
@@ -47,6 +49,17 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 	if err := w.db.QueryRowContext(ctx, `SELECT USER FROM DUAL`).Scan(&username); err != nil {
 		return []damengnative.Issue{{Severity: "error", Reason: "无法读取目标执行用户: " + err.Error()}}
 	}
+	// A user can own an explicitly named schema that differs from its login.
+	// Schema spelling is not an ownership test: AUTHORIZATION is catalogued in
+	// the SCH object's PID, which references its user object.
+	ownsSchema := username == w.schema
+	if !ownsSchema && username != "SYSDBA" && username != "SYS" {
+		var owned int
+		if err := w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM SYS.SYSOBJECTS s JOIN SYS.SYSOBJECTS u ON u.ID=s.PID WHERE s.TYPE$='SCH' AND s.NAME=? AND u.TYPE$='UR' AND u.NAME=?`, w.schema, username).Scan(&owned); err != nil {
+			return []damengnative.Issue{{Severity: "error", Reason: "无法确认目标 Schema 的真实所有者，未执行目标 DDL: " + err.Error()}}
+		}
+		ownsSchema = owned == 1
+	}
 	rows, err := w.db.QueryContext(ctx, `SELECT PRIVILEGE FROM SESSION_PRIVS`)
 	if err != nil {
 		return []damengnative.Issue{{Severity: "error", Reason: "无法确认目标创建权限，未执行目标 DDL: " + err.Error()}}
@@ -75,19 +88,42 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 				add(o, err.Error())
 			}
 		}
+		if o.Interval != nil {
+			spaces := map[string]bool{}
+			for _, partition := range o.Interval.Partitions {
+				if partition.Tablespace == "" || spaces[partition.Tablespace] {
+					continue
+				}
+				spaces[partition.Tablespace] = true
+				if err := w.CheckDamengNativeReference(ctx, damengnative.Reference{Kind: "tablespace", Name: partition.Tablespace}); err != nil {
+					add(o, err.Error())
+				}
+			}
+			if !ownsSchema && username != "SYSDBA" && username != "SYS" {
+				for _, privilege := range []string{"ALTER ANY TABLE", "INSERT ANY TABLE", "DELETE ANY TABLE"} {
+					if !grants[privilege] {
+						add(o, "跨 Schema 恢复既有间隔分区需要 "+privilege+" 权限")
+					}
+				}
+			}
+		}
 		kind := damengnative.NormalizeKind(o.Kind)
 		priv := ""
 		switch kind {
 		case "table", "view", "sequence", "trigger", "synonym", "domain", "context":
 			priv = "CREATE " + strings.ToUpper(kind)
-		case "materialized_view", "materialized_view_log":
+		case "materialized_view":
 			priv = "CREATE MATERIALIZED VIEW"
+		case "materialized_view_log":
+			// A log is created on its base table; DM requires CREATE TABLE
+			// (CREATE ANY TABLE across schemas), not CREATE MATERIALIZED VIEW.
+			priv = "CREATE TABLE"
 		case "function", "procedure", "package", "package_body", "jclass":
 			priv = "CREATE PROCEDURE"
 		case "type", "type_body", "class", "class_body":
 			priv = "CREATE TYPE"
 		case "index", "context_index":
-			if username != w.schema {
+			if !ownsSchema {
 				priv = "CREATE INDEX"
 			}
 		case "db_link":
@@ -95,7 +131,7 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 		}
 		if priv != "" && username != "SYSDBA" && username != "SYS" {
 			anyPriv := strings.Replace(priv, "CREATE ", "CREATE ANY ", 1)
-			if !grants[anyPriv] && (username != w.schema || !grants[priv]) {
+			if !grants[anyPriv] && (!ownsSchema || !grants[priv]) {
 				add(o, "目标账号缺少 "+priv+" 权限")
 			}
 		}
@@ -104,6 +140,11 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 				add(o, err.Error())
 				continue
 			}
+			if kind == "table" && u.Phase == "before_data" && !ownsSchema && username != "SYSDBA" && username != "SYS" && !grants["ALTER ANY TABLE"] {
+				if defaults, e := damengnative.NativeDefaultOnNullColumns(u.SQL); e == nil && len(defaults) > 0 {
+					add(o, "跨 Schema 原样复制 DEFAULT ON NULL 列需要 ALTER ANY TABLE 权限")
+				}
+			}
 			if u.Phase == "event_create" && username != "SYSDBA" && username != "SYS" {
 				scope, _, scopeErr := damengnative.EventTriggerScope(u.SQL, o.Schema)
 				if scopeErr != nil {
@@ -111,7 +152,7 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 				} else if scope == "database" && !grants["CREATE ANY TRIGGER"] {
 					add(o, "数据库级事件触发器需要 CREATE ANY TRIGGER 权限")
 				}
-				if username != w.schema && !grants["ALTER ANY TRIGGER"] {
+				if !ownsSchema && !grants["ALTER ANY TRIGGER"] {
 					add(o, "跨 Schema 禁用与恢复事件触发器需要 ALTER ANY TRIGGER 权限")
 				}
 			}
@@ -120,12 +161,18 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 				add(o, err.Error())
 				continue
 			}
+			// Some native table recipes also own an explicit index required by
+			// PRIMARY KEY USING INDEX. Check the mutating unit, not only the
+			// enclosing table category, before any overwrite can begin.
+			if indexPriv := nativeCreateIndexPrivilege(tokens); indexPriv != "" && priv != indexPriv && !ownsSchema && username != "SYSDBA" && username != "SYS" && !grants[strings.Replace(indexPriv, "CREATE ", "CREATE ANY ", 1)] {
+				add(o, "目标账号缺少 "+strings.Replace(indexPriv, "CREATE ", "CREATE ANY ", 1)+" 权限")
+			}
 			if len(tokens) > 0 && strings.EqualFold(tokens[0], "DROP") {
 				for _, reason := range w.nativeExternalDropDependencies(ctx, o) {
 					add(o, reason)
 				}
 			}
-			if username != w.schema && username != "SYSDBA" && username != "SYS" && len(tokens) > 0 && (strings.EqualFold(tokens[0], "DROP") || u.Phase == "drop") {
+			if !ownsSchema && username != "SYSDBA" && username != "SYS" && len(tokens) > 0 && (strings.EqualFold(tokens[0], "DROP") || u.Phase == "drop") {
 				priv := nativeDropPrivilege(kind, tokens[0])
 				if priv == "" {
 					add(o, "无法证明目标账号具备跨 Schema 删除该对象的权限")
@@ -133,7 +180,7 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 					add(o, "目标账号缺少 "+priv+" 权限")
 				}
 			}
-			if (kind == "grant" || kind == "object_grant") && username != w.schema && username != "SYSDBA" && username != "SYS" && !grants["GRANT ANY OBJECT PRIVILEGE"] {
+			if (kind == "grant" || kind == "object_grant") && !ownsSchema && username != "SYSDBA" && username != "SYS" && !grants["GRANT ANY OBJECT PRIVILEGE"] {
 				add(o, "目标账号缺少 GRANT ANY OBJECT PRIVILEGE 权限")
 			}
 			for _, name := range nativeTablespaces(tokens) {
@@ -160,6 +207,31 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 		}
 	}
 	return issues
+}
+
+func nativeCreateIndexPrivilege(tokens []string) string {
+	if len(tokens) == 0 || !strings.EqualFold(tokens[0], "CREATE") {
+		return ""
+	}
+	i := 1
+	if i+1 < len(tokens) && strings.EqualFold(tokens[i], "OR") && strings.EqualFold(tokens[i+1], "REPLACE") {
+		i += 2
+	}
+	for i < len(tokens) {
+		switch strings.ToUpper(tokens[i]) {
+		case "UNIQUE", "BITMAP", "CLUSTER", "NOT", "PARTIAL", "CLUSTERED", "NONCLUSTERED", "GLOBAL", "LOCAL", "SPATIAL":
+			i++
+		default:
+			if strings.EqualFold(tokens[i], "INDEX") {
+				return "CREATE INDEX"
+			}
+			if strings.EqualFold(tokens[i], "CONTEXT") && i+1 < len(tokens) && strings.EqualFold(tokens[i+1], "INDEX") {
+				return "CREATE CONTEXT INDEX"
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 func nativeDropPrivilege(kind, verb string) string {

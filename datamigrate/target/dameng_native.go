@@ -186,6 +186,7 @@ func ValidateDamengNativeColumn(c damengnative.Column) error {
 		"DECIMAL", "DEC", "NUMERIC", "NUMBER", "REAL", "DOUBLE", "DOUBLE PRECISION", "FLOAT",
 		"CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "CHAR VARYING", "CHARACTER VARYING", "NCHAR", "NVARCHAR", "NVARCHAR2",
 		"CLOB", "NCLOB", "TEXT", "LONG", "LONGVARCHAR", "BINARY", "VARBINARY", "RAW", "LONG RAW", "BLOB", "IMAGE", "LONGVARBINARY",
+		"BFILE",
 		"DATE", "DATETIME", "TIMESTAMP", "TIME", "TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE", "DATETIME WITH TIME ZONE",
 		"INTERVAL YEAR TO MONTH", "INTERVAL DAY TO SECOND", "ROWID", "UROWID":
 		return nil
@@ -332,7 +333,7 @@ func nativeCopyValue(c damengnative.Column, value any, schema string) (any, int,
 	case "DECIMAL", "DEC", "NUMERIC", "NUMBER":
 		v, err := nativeDecimalText(value)
 		return v, len(v), err
-	case "CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "CHAR VARYING", "CHARACTER VARYING", "NCHAR", "NVARCHAR", "NVARCHAR2", "CLOB", "NCLOB", "TEXT", "LONG", "LONGVARCHAR", "ROWID", "UROWID":
+	case "CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "CHAR VARYING", "CHARACTER VARYING", "NCHAR", "NVARCHAR", "NVARCHAR2", "CLOB", "NCLOB", "TEXT", "LONG", "LONGVARCHAR", "ROWID", "UROWID", "BFILE":
 		var text string
 		switch v := value.(type) {
 		case string:
@@ -344,6 +345,11 @@ func nativeCopyValue(c damengnative.Column, value any, schema string) (any, int,
 		}
 		if !utf8.ValidString(text) {
 			return nil, 0, fmt.Errorf("文本不是有效 UTF-8")
+		}
+		if kind == "BFILE" {
+			if _, _, err := damengnative.ParseBFileLocator(text); err != nil {
+				return nil, 0, err
+			}
 		}
 		if kind == "CLOB" || kind == "NCLOB" || kind == "TEXT" || kind == "LONG" || kind == "LONGVARCHAR" {
 			return dm.NewClob(text), len(text), nil
@@ -636,11 +642,27 @@ func nativeComplexTypeName(sourceOwner, schema, name string) string {
 }
 
 func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table damengnative.Table, rows [][]any) (retErr error) {
-	if len(rows) == 0 {
-		return nil
-	}
 	if table.Schema != "" && table.Schema != w.schema {
 		return fmt.Errorf("原生数据写入 schema 与目标不一致")
+	}
+	if len(rows) == 0 {
+		needsRestore := false
+		for _, c := range table.Columns {
+			needsRestore = needsRestore || c.Writable && c.DefaultOnNull
+		}
+		if !needsRestore {
+			return nil
+		}
+		conn, err := w.db.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		defaults, err := prepareNativeCopyDefaults(ctx, conn, w.schema, table, false)
+		if err != nil {
+			return err
+		}
+		return defaults.restore(ctx)
 	}
 	if table.CaptureRowID != (table.RowIDMapping != "") || table.RowIDMapping == table.Name || strings.ContainsRune(table.RowIDMapping, 0) {
 		return fmt.Errorf("原生 ROWID 映射计划不完整或目标表无效")
@@ -701,6 +723,27 @@ func (w *DaMengNativeWriter) CopyDamengNativeBatch(ctx context.Context, table da
 		return err
 	}
 	defer conn.Close()
+	defaults, err := suspendNativeCopyDefaults(ctx, conn, w.schema, table)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if defaults == nil {
+			return
+		}
+		if retErr != nil {
+			// A failed Commit/Rollback acknowledgement is not proof that the
+			// server transaction ended. Never let restoring DDL commit its rows.
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if _, e := conn.ExecContext(cleanup, "ROLLBACK"); e != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				retErr = errors.Join(retErr, fmt.Errorf("数据事务结束状态未确认，已丢弃连接；默认值需随整表补迁恢复: %w", e))
+				return
+			}
+		}
+		retErr = errors.Join(retErr, defaults.restore(ctx))
+	}()
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -846,11 +889,41 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 	for _, o := range actual.Objects {
 		objects[o.Kind+"\x00"+o.Name] = o
 	}
+	actualByID := map[string]damengnative.Object{}
+	for _, o := range actual.Objects {
+		actualByID[o.ID] = o
+	}
 	expectedByID := map[string]damengnative.Object{}
 	for _, o := range expected.Objects {
 		expectedByID[o.ID] = o
 	}
+	bfiles := map[string]error{}
 	for _, want := range expected.Objects {
+		for _, reference := range want.External {
+			if damengnative.NormalizeKind(reference.Kind) != "bfile" {
+				continue
+			}
+			resourceErr, checked := bfiles[reference.Name]
+			if !checked {
+				resourceErr = w.CheckDamengNativeReference(ctx, reference)
+				bfiles[reference.Name] = resourceErr
+			}
+			if resourceErr != nil {
+				issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: resourceErr.Error()})
+			}
+		}
+		if handled, proofErr := nativePartitionConstraintProof(want, expectedByID, actualByID, objects); handled {
+			if proofErr != nil {
+				issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: proofErr.Error()})
+			}
+			continue
+		}
+		if handled, proofErr := nativeLogicalGeneratedConstraintProof(want, expectedByID, actualByID, objects); handled {
+			if proofErr != nil {
+				issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: proofErr.Error()})
+			}
+			continue
+		}
 		got, ok := objects[want.Kind+"\x00"+want.Name]
 		if !ok {
 			if want.Managed && (damengnative.NormalizeKind(want.Kind) != "constraint" || want.Generated) {
@@ -872,6 +945,20 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 		if (strings.EqualFold(want.Status, "DISABLED") || strings.EqualFold(want.Status, "ENABLED")) && got.Status != want.Status {
 			issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标对象启停状态与源端不同"})
 		}
+		if err := w.verifyNativeDeferredMaterialized(ctx, want); err != nil {
+			issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: err.Error()})
+		}
+		if want.Interval != nil {
+			mapped := want
+			mapped.Schema = w.schema
+			mapped.Interval, err = damengnative.RewriteIntervalPartitions(want.Interval, expected.Profile.Schema, w.schema)
+			if err != nil {
+				return issues, err
+			}
+			if err := w.VerifyDamengNativeIntervalPartitions(ctx, mapped); err != nil {
+				issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: err.Error()})
+			}
+		}
 		if want.Kind == "constraint" && want.ConstraintNoValidate != got.ConstraintNoValidate {
 			issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标约束 VALIDATE/NOVALIDATE 状态与源端不同"})
 		}
@@ -887,8 +974,9 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 					}
 				}
 			}
+			used := make([]bool, len(candidates))
 			for _, unit := range want.Units {
-				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_history" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" {
+				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_history" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" || unit.Phase == "interval_prepare" {
 					continue
 				}
 				mappedUnit, _, rewriteErr := damengnative.RewriteUnit(unit, expected.Profile.Schema, w.schema)
@@ -901,13 +989,7 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 						return issues, rewriteErr
 					}
 				}
-				match := false
-				for _, candidate := range candidates {
-					if nativeDefinitionsEqual(mappedUnit.SQL, candidate.SQL) && (unit.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(mappedUnit, candidate)) {
-						match = true
-						break
-					}
-				}
+				match := nativeConsumeDefinitionCandidate(mappedUnit, candidates, used)
 				if !match {
 					issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标原生定义与冻结源定义不同"})
 					break
@@ -939,6 +1021,18 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 		}
 	}
 	return issues, nil
+}
+
+// Equal unnamed constraints are separate catalog objects. A single actual
+// unit cannot prove two frozen ADDs merely because their SQL is equivalent.
+func nativeConsumeDefinitionCandidate(unit damengnative.Unit, candidates []damengnative.Unit, used []bool) bool {
+	for i, candidate := range candidates {
+		if !used[i] && nativeDefinitionsEqual(unit.SQL, candidate.SQL) && (unit.SourceSQLHash == "" || damengnative.LinkUnitsEquivalent(unit, candidate)) {
+			used[i] = true
+			return true
+		}
+	}
+	return false
 }
 
 func nativeDefinitionsEqual(a, b string) bool {

@@ -23,8 +23,14 @@ func DaMengToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "bigint":
 		return "bigint"
 	case "real":
+		if mapped, ok := damengBinaryFloatType(col, "float", "double"); ok {
+			return mapped
+		}
 		return "float"
 	case "float", "double", "double precision":
+		if mapped, ok := damengBinaryFloatType(col, "float", "double"); ok {
+			return mapped
+		}
 		if col.Precision > 0 {
 			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)
 		}

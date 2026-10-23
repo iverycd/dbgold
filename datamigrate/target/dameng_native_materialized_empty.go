@@ -48,6 +48,30 @@ func historyEmptyDefinition(sqlText string, p *damengnative.MaterializedEmptyTou
 	if err != nil {
 		return "", err
 	}
+	identityColumn := ""
+	if len(p.IdentityRestore) == 2 {
+		identityTokens, e := nativeSQLTokens(p.IdentityRestore[1])
+		if e != nil {
+			return "", e
+		}
+		for i := 0; i+3 < len(identityTokens); i++ {
+			if strings.EqualFold(identityTokens[i], "ADD") && strings.EqualFold(identityTokens[i+1], "COLUMN") && nativeIdentifierToken(identityTokens[i+2]) && strings.EqualFold(identityTokens[i+3], "IDENTITY") {
+				identityColumn = nativeTokenName(identityTokens[i+2])
+				break
+			}
+		}
+	}
+	mutableNotNull := map[string]bool{}
+	if identityColumn != "" {
+		mutableNotNull[identityColumn] = true
+	}
+	for _, constraint := range p.Constraints {
+		if constraint.Table == p.Table && constraint.Kind == "P" && constraint.Enabled && !constraint.Clustered {
+			for _, column := range constraint.Columns {
+				mutableNotNull[column] = true
+			}
+		}
+	}
 	columns := map[string]damengnative.MaterializedEmptyColumn{}
 	for _, c := range p.Columns {
 		columns[c.Name] = c
@@ -73,11 +97,11 @@ func historyEmptyDefinition(sqlText string, p *damengnative.MaterializedEmptyTou
 				for j := 0; j < len(part); j++ {
 					t := strings.ToUpper(part[j])
 					if inner == 0 && isColumn {
-						if c.NotNull && c.ValueSQL == "" && t == "NOT" && j+1 < len(part) && strings.EqualFold(part[j+1], "NULL") {
+						if c.NotNull && (c.ValueSQL == "" || mutableNotNull[c.Name]) && t == "NOT" && j+1 < len(part) && strings.EqualFold(part[j+1], "NULL") {
 							j++
 							continue
 						}
-						if len(p.IdentityRestore) > 0 && t == "IDENTITY" && j+1 < len(part) && part[j+1] == "(" {
+						if identityColumn == c.Name && t == "IDENTITY" && j+1 < len(part) && part[j+1] == "(" {
 							j += 2
 							for j < len(part) && part[j] != ")" {
 								j++
@@ -240,7 +264,10 @@ func historyResolveEmptyConstraints(actual []historyEmptyConstraint, p *damengna
 func historyEmptyReadDDL(ctx context.Context, conn *sql.Conn, schema, table string) (string, error) {
 	var ddl string
 	err := conn.QueryRowContext(ctx, `SELECT DBMS_METADATA.GET_DDL('TABLE',?,?) FROM DUAL`, table, schema).Scan(&ddl)
-	return ddl, err
+	if err != nil {
+		return "", err
+	}
+	return nativeRestoreXMLDefinition(ctx, conn, schema, table, ddl)
 }
 
 // nativeHistoryEmptyTouch uses NULLs and frozen native scalar constants in a
@@ -345,7 +372,7 @@ func nativeHistoryEmptyTouch(ctx context.Context, conn *sql.Conn, schema string,
 		if identity != nil {
 			present, e := nativeHistoryIdentityPresent(cleanup, conn, schema, *identity)
 			if e == nil && !present {
-				_, e = conn.ExecContext(cleanup, identity.restore)
+				e = nativeHistoryRestoreIdentity(cleanup, conn, schema, *identity)
 			}
 			if e == nil {
 				e = nativeHistoryIdentityMatches(cleanup, conn, schema, *identity)

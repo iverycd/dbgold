@@ -12,6 +12,7 @@ import (
 	"dbgold/datamigrate/failure"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/typemap"
+	"dbgold/internal/dmmeta"
 	"gitee.com/chunanyong/dm"
 )
 
@@ -24,12 +25,13 @@ type OracleDamengProfile struct {
 }
 
 type oracleDMCapabilityCache struct {
-	profile      OracleDamengProfile
-	dateChecked  bool
-	features     map[string]error
-	floatColumns map[string]string
-	floatActual  map[string]bool
-	load         *oracleDMLoadCache
+	profile         OracleDamengProfile
+	dateChecked     bool
+	features        map[string]error
+	floatColumns    map[string]string
+	floatActual     map[string]bool
+	binaryFloatKind string
+	load            *oracleDMLoadCache
 }
 
 // OracleDamengCapabilityError distinguishes a column-specific unsupported path
@@ -158,6 +160,27 @@ func (w *DaMengWriter) PrepareOracleDameng(ctx context.Context, infos []*source.
 				}
 			}
 			if oracleDMFloatingSource(base) {
+				if base == "BINARY_FLOAT" {
+					// Probe the actual target spelling. Oracle REAL means FLOAT(63),
+					// whereas native DM REAL is binary32 (or decimal in NUMBER_MODE=1).
+					if err := check("float:real", func() error {
+						kind, err := w.probeOracleDMFloatType(ctx, "REAL", 24)
+						if err == nil && kind == "double" {
+							return fmt.Errorf("目标 REAL 实际为双精度，无法保持 BINARY_FLOAT 单精度")
+						}
+						if err == nil {
+							c.binaryFloatKind = kind
+						}
+						return err
+					}); err != nil {
+						return fail(err)
+					}
+					key := oracleDMColumnKey(info.TableName, col.Name)
+					if !c.floatActual[key] {
+						c.floatColumns[key] = c.binaryFloatKind
+					}
+					continue
+				}
 				p := OracleDamengFloatPrecision(mapped, 0)
 				// BINARY_DOUBLE maps to the native DOUBLE name, unaffected by NUMBER_MODE.
 				if base == "BINARY_DOUBLE" {
@@ -366,44 +389,31 @@ func oracleDMFloatingSource(base string) bool {
 	return false
 }
 
-func oracleDMDecimalMetadata(c *sql.ColumnType) bool {
-	_, _, ok := c.DecimalSize()
-	return ok || dmBaseType(c.DatabaseTypeName()) == "NUMBER"
-}
-
 func (w *DaMengWriter) probeOracleDMFloat(ctx context.Context, p int64) (string, error) {
 	if p < 1 || p > 126 {
 		return "", fmt.Errorf("FLOAT 精度 %d 不在 1 到 126 之间", p)
 	}
-	rows, err := w.db.QueryContext(ctx, fmt.Sprintf("SELECT CAST(NULL AS FLOAT(%d)) FROM DUAL", p))
+	return w.probeOracleDMFloatType(ctx, fmt.Sprintf("FLOAT(%d)", p), p)
+}
+
+// dataType is generated internally, never supplied by an external SQL expression.
+func (w *DaMengWriter) probeOracleDMFloatType(ctx context.Context, dataType string, precision int64) (string, error) {
+	rows, err := w.db.QueryContext(ctx, "SELECT CAST(NULL AS "+dataType+") FROM DUAL")
 	if err != nil {
-		return "", fmt.Errorf("无法探测 FLOAT(%d) 实际存储类型: %w", p, err)
+		return "", fmt.Errorf("无法探测 %s 实际存储类型: %w", dataType, err)
 	}
-	defer rows.Close()
 	cols, err := rows.ColumnTypes()
+	closeErr := rows.Close()
 	if err != nil {
-		return "", fmt.Errorf("无法描述 FLOAT(%d) 实际存储类型: %w", p, err)
+		return "", fmt.Errorf("无法描述 %s 实际存储类型: %w", dataType, err)
 	}
 	if len(cols) != 1 {
-		return "", fmt.Errorf("无法描述 FLOAT(%d) 实际存储类型：返回列数为 %d", p, len(cols))
+		return "", fmt.Errorf("无法描述 %s 实际存储类型：返回列数为 %d", dataType, len(cols))
 	}
-	if oracleDMDecimalMetadata(cols[0]) {
-		return "decimal", nil
+	if closeErr != nil {
+		return "", closeErr
 	}
-	switch dmBaseType(cols[0].DatabaseTypeName()) {
-	case "REAL":
-		return "real", nil
-	case "DOUBLE":
-		return "double", nil
-	case "FLOAT":
-		// The DM driver misreports FLOAT-backed DOUBLE ScanType as float32.
-		// Native FLOAT's declared binary precision is the reliable discriminator.
-		if p <= 24 {
-			return "real", nil
-		}
-		return "double", nil
-	}
-	return "", fmt.Errorf("FLOAT(%d) 返回未知实际类型 %q", p, cols[0].DatabaseTypeName())
+	return dmmeta.FloatStorage(cols[0], precision)
 }
 
 func (w *DaMengWriter) probeOracleDMXML(ctx context.Context) error {
@@ -502,23 +512,12 @@ func (w *DaMengWriter) inspectOracleDMColumnFloat(ctx context.Context, table, co
 	if closeErr != nil {
 		return "", closeErr
 	}
-	if oracleDMDecimalMetadata(cols[0]) {
-		return "decimal", nil
-	}
-	switch dmBaseType(cols[0].DatabaseTypeName()) {
-	case "REAL":
-		return "real", nil
-	case "DOUBLE":
-		return "double", nil
-	case "FLOAT":
-		var precision int64
+	var precision int64
+	_, _, decimal := cols[0].DecimalSize()
+	if !decimal && dmBaseType(cols[0].DatabaseTypeName()) == "FLOAT" {
 		if err := w.db.QueryRowContext(ctx, `SELECT NVL(DATA_PRECISION,0) FROM ALL_TAB_COLUMNS WHERE OWNER=? AND TABLE_NAME=? AND COLUMN_NAME=?`, w.schema, strings.ToUpper(table), strings.ToUpper(column)).Scan(&precision); err != nil {
 			return "", err
 		}
-		if precision > 0 && precision <= 24 {
-			return "real", nil
-		}
-		return "double", nil
 	}
-	return "", fmt.Errorf("目标列 %s.%s 实际类型 %s 不是可支持的数值类型", table, column, cols[0].DatabaseTypeName())
+	return dmmeta.FloatStorage(cols[0], precision)
 }

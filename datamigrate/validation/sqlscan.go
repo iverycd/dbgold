@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"dbgold/internal/dmmeta"
 )
 
 // SQLScanner owns read-only, explicitly projected queries. It deliberately
@@ -220,6 +222,11 @@ func (s *SQLScanner) DescribeValidationTable(ctx context.Context, table string) 
 	if len(out.Columns) == 0 {
 		return Table{}, fmt.Errorf("no visible columns for %s.%s", schema, table)
 	}
+	if s.family == "dameng" {
+		if err := s.describeDamengFloatStorage(ctx, schema, table, out.Columns); err != nil {
+			return Table{}, err
+		}
+	}
 	rows, e = s.db.QueryContext(ctx, pk, args...)
 	if e != nil {
 		return Table{}, e
@@ -283,6 +290,12 @@ func ClassifyColumn(family string, c *Column) {
 	switch t {
 	case "char", "character", "nchar", "varchar", "nvarchar", "varchar2", "nvarchar2", "character varying", "national character varying", "national character", "text", "ntext", "tinytext", "mediumtext", "longtext", "clob", "nclob", "bpchar", "enum", "set":
 		c.Kind = Text
+	case "bfile":
+		// DM's existing driver returns the exact directory:filename locator.
+		// File resources are checked separately by the native migration plan.
+		if family == "dameng" {
+			c.Kind = Text
+		}
 	case "binary", "varbinary", "raw", "long raw", "bytea", "blob", "tinyblob", "mediumblob", "longblob", "image", "rowversion":
 		c.Kind = Binary
 	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "int2", "int4", "int8", "number", "numeric", "decimal", "dec", "money", "smallmoney", "year":
@@ -290,14 +303,14 @@ func ClassifyColumn(family string, c *Column) {
 	case "real", "float", "double", "double precision", "binary_float", "binary_double", "float4", "float8":
 		c.Kind = Float
 		c.FloatBits = 64
-		if t == "float4" || t == "binary_float" || t == "real" && family != "mysql" || t == "float" && (family == "mysql" || family == "sqlserver" && c.Precision <= 24) {
+		if t == "float4" || t == "binary_float" || t == "real" && family != "mysql" || t == "float" && (family == "mysql" || family == "sqlserver" && c.Precision > 0 && c.Precision <= 24) {
 			c.FloatBits = 32
 		}
 		if family == "oracle" && (t == "float" || t == "real" || t == "double precision") {
 			c.Kind = Number
 			c.FloatBits = 0
 		}
-		if family == "dameng" && (t == "float" || t == "double" || t == "double precision") {
+		if family == "dameng" && dmmeta.IsFloatType(t) {
 			c.Kind = Unsupported
 			c.FloatBits = 0
 		}

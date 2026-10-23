@@ -193,6 +193,18 @@ func validateDamengNativeSQL(schema, statement string) error {
 		for upper(i) == "FORCE" || upper(i) == "UNIQUE" || upper(i) == "BITMAP" || upper(i) == "CLUSTERED" || upper(i) == "NONCLUSTERED" || upper(i) == "GLOBAL" || upper(i) == "LOCAL" || upper(i) == "SPATIAL" {
 			i++
 		}
+		// DM's native index metadata spells these modifiers CLUSTER and
+		// NOT CLUSTER / NOT PARTIAL. Bind their INDEX identity through the
+		// same schema and ON-table checks as every other immutable index.
+		if upper(0) == "CREATE" {
+			if upper(i) == "NOT" && (upper(i+1) == "CLUSTER" || upper(i+1) == "PARTIAL") && upper(i+2) == "INDEX" {
+				i += 2
+			} else if upper(i) == "CLUSTER" && upper(i+1) == "UNIQUE" && upper(i+2) == "INDEX" {
+				i += 2
+			} else if upper(i) == "CLUSTER" && upper(i+1) == "INDEX" {
+				i++
+			}
+		}
 		kind = upper(i)
 		i++
 		if upper(0) == "TRUNCATE" && kind != "TABLE" {

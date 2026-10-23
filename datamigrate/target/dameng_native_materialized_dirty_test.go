@@ -21,6 +21,9 @@ func expectNativeTouchIdentity(mock sqlmock.Sqlmock, present bool) {
 		flag = 1
 	}
 	mock.ExpectQuery(`SELECT c.INFO2 FROM SYS.SYSCOLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"flags"}).AddRow(flag))
+	if !present {
+		mock.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("Base", "MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TABLE "MixedOwner"."Base"("Id" BIGINT NOT NULL)`))
+	}
 }
 
 func expectNativeTouchCounter(mock sqlmock.Sqlmock) {
@@ -46,6 +49,7 @@ func TestNativeHistoryTouchIdentityRestoresExactFrozenSeedAfterSuccess(t *testin
 	mock.ExpectExec(regexp.QuoteMeta(units[0])).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(units[1])).WillReturnResult(sqlmock.NewResult(0, 1))
 	expectNativeTouchIdentity(mock, false)
+	mock.ExpectQuery(`SELECT NULLABLE FROM ALL_TAB_COLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"nullable"}).AddRow("N"))
 	mock.ExpectExec(regexp.QuoteMeta(units[2])).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectNativeTouchCounter(mock)
 	require.NoError(t, nativeHistoryTouch(context.Background(), conn, "MixedOwner", units))
@@ -58,6 +62,7 @@ func TestNativeHistoryTouchIdentityInterruptedDropIsNotRepeated(t *testing.T) {
 	expectNativeTouchIdentity(mock, false)
 	mock.ExpectExec(regexp.QuoteMeta(units[1])).WillReturnResult(sqlmock.NewResult(0, 1))
 	expectNativeTouchIdentity(mock, false)
+	mock.ExpectQuery(`SELECT NULLABLE FROM ALL_TAB_COLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"nullable"}).AddRow("N"))
 	mock.ExpectExec(regexp.QuoteMeta(units[2])).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectNativeTouchCounter(mock)
 	require.NoError(t, nativeHistoryTouch(context.Background(), conn, "MixedOwner", units))
@@ -72,6 +77,7 @@ func TestNativeHistoryTouchCancelledUpdateStillRestoresIdentity(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(units[0])).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta(units[1])).WillReturnError(context.Canceled)
 	expectNativeTouchIdentity(mock, false)
+	mock.ExpectQuery(`SELECT NULLABLE FROM ALL_TAB_COLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"nullable"}).AddRow("N"))
 	mock.ExpectExec(regexp.QuoteMeta(units[2])).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectNativeTouchCounter(mock)
 	require.ErrorIs(t, nativeHistoryTouch(context.Background(), conn, "MixedOwner", units), context.Canceled)
@@ -84,6 +90,7 @@ func TestNativeHistoryTouchRestoreFailureIsNotSuccess(t *testing.T) {
 	expectNativeTouchIdentity(mock, false)
 	mock.ExpectExec(regexp.QuoteMeta(units[1])).WillReturnResult(sqlmock.NewResult(0, 1))
 	expectNativeTouchIdentity(mock, false)
+	mock.ExpectQuery(`SELECT NULLABLE FROM ALL_TAB_COLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"nullable"}).AddRow("N"))
 	mock.ExpectExec(regexp.QuoteMeta(units[2])).WillReturnError(errors.New("connection lost"))
 	require.ErrorContains(t, nativeHistoryTouch(context.Background(), conn, "MixedOwner", units), "恢复冻结的自增续号失败")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -114,4 +121,25 @@ func TestNativeHistoryTouchRecipeCannotBecomeGeneralDMLOrAlterAnotherIdentity(t 
 		_, err := parseNativeHistoryTouch("MixedOwner", change(nativeTouchFixture()))
 		require.Error(t, err)
 	}
+}
+
+func TestNativeTouchPartitionIdentityUsesNativeDeclarationWhenParentFlagIsZero(t *testing.T) {
+	conn, mock := nativeTouchConnection(t)
+	mock.ExpectQuery(`SELECT c.INFO2 FROM SYS.SYSCOLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"flags"}).AddRow(0))
+	mock.ExpectQuery(`SELECT DBMS_METADATA.GET_DDL`).WithArgs("Base", "MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"ddl"}).AddRow(`CREATE TABLE "MixedOwner"."Base"("Id" BIGINT IDENTITY(-9,-2) NOT NULL) PARTITION BY RANGE("Id")(PARTITION "P" VALUES LESS THAN(MAXVALUE))`))
+	present, err := nativeHistoryIdentityPresent(context.Background(), conn, "MixedOwner", nativeHistoryTouchRecipe{table: "Base", column: "Id"})
+	require.NoError(t, err)
+	require.True(t, present)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNativeHistoryIdentityRestoresImplicitNotNullBeforeAttribute(t *testing.T) {
+	conn, mock := nativeTouchConnection(t)
+	mock.ExpectQuery(`SELECT NULLABLE FROM ALL_TAB_COLUMNS`).WithArgs("MixedOwner", "Base", "Id").WillReturnRows(sqlmock.NewRows([]string{"nullable"}).AddRow("Y"))
+	mock.ExpectExec(`ALTER TABLE "MixedOwner"\."Base" ALTER COLUMN "Id" SET NOT NULL`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER TABLE "MixedOwner"\."Base" ADD COLUMN "Id" IDENTITY`).WillReturnResult(sqlmock.NewResult(0, 0))
+	recipe, err := parseNativeHistoryTouch("MixedOwner", nativeTouchFixture())
+	require.NoError(t, err)
+	require.NoError(t, nativeHistoryRestoreIdentity(context.Background(), conn, "MixedOwner", recipe))
+	require.NoError(t, mock.ExpectationsWereMet())
 }

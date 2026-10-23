@@ -30,10 +30,8 @@ func previewDamengNativeRecovery(ctx context.Context, r source.Reader, w target.
 	}
 	p.NativeObject = obj.Native
 	p.NativeUnits = append([]repair.Unit{}, obj.Units...)
-	for _, u := range p.NativeUnits {
-		if u.Status == "unknown" || u.Status == "running" {
-			return p, fmt.Errorf("原生表包含执行结果未知的 DDL，请先核验后再恢复数据")
-		}
+	if err := validateNativeRecoveryFoundations(p.NativeObject, p.NativeUnits); err != nil {
+		return p, err
 	}
 	nr, ok := r.(damengnative.Reader)
 	if !ok {
@@ -306,22 +304,36 @@ func runDamengNativeRecovery(ctx context.Context, r source.Reader, w target.Writ
 }
 
 func executePendingNativeTable(ctx context.Context, w damengnative.Writer, p repair.RecoveryPreview, alreadyExecuted map[string]bool) error {
-	if p.NativeObject == nil || len(p.NativeObject.Units) != len(p.NativeUnits) {
-		return fmt.Errorf("原生表接续缺少冻结执行单元")
+	if err := validateNativeRecoveryFoundations(p.NativeObject, p.NativeUnits); err != nil {
+		return err
 	}
-	for i, u := range p.NativeUnits {
+	for _, u := range p.NativeUnits {
 		if u.Status == "succeeded" || alreadyExecuted[u.SQL] {
 			continue
 		}
-		if u.Status == "unknown" || u.Status == "running" {
-			return fmt.Errorf("原生表单元执行结果未知，先核验后再补迁")
-		}
-		phase := p.NativeObject.Units[i].Phase
-		if phase == "before_data" || phase == "drop" {
-			return fmt.Errorf("表基础 DDL 尚未恢复，请先完成结构补迁")
-		}
 		if err := w.ExecuteDamengNative(ctx, u.SQL); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// Foundational units belong to the frozen DDL repair entry point. In
+// particular, interval_prepare is a typed operation rather than executable
+// SQL, and must finish before a recovery can clear or populate the base table.
+func validateNativeRecoveryFoundations(object *damengnative.Object, units []repair.Unit) error {
+	if object == nil || len(object.Units) != len(units) {
+		return fmt.Errorf("原生表接续缺少冻结执行单元")
+	}
+	for i, unit := range units {
+		switch object.Units[i].Phase {
+		case "before_data", "drop", "interval_prepare":
+			if unit.Status != "succeeded" {
+				return fmt.Errorf("表基础步骤 %s 尚未确认完成，请先通过冻结 DDL 修复入口完成或核验结构补迁", object.Units[i].Phase)
+			}
+		}
+		if unit.Status == "unknown" || unit.Status == "running" {
+			return fmt.Errorf("原生表包含执行结果未知的 DDL，请先核验后再恢复数据")
 		}
 	}
 	return nil

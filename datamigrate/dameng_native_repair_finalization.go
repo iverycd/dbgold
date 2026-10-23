@@ -99,6 +99,13 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 		}
 		for _, unit := range object.Units {
 			mapped, _, rewriteErr := damengnative.RewriteUnit(unit, snapshot.Profile.Schema, destination.Profile.Schema)
+			if unit.Phase == "interval_prepare" && object.Interval != nil {
+				plan, mapErr := damengnative.RewriteIntervalPartitions(object.Interval, snapshot.Profile.Schema, destination.Profile.Schema)
+				rewriteErr = mapErr
+				if mapErr == nil {
+					mapped = damengnative.Unit{SQL: damengnative.IntervalPartitionSQL(destination.Profile.Schema, object.Name, plan), Phase: unit.Phase}
+				}
+			}
 			if unit.Phase == "mv_history" && object.Materialized != nil && object.Materialized.History != nil {
 				plan, mapErr := damengnative.RewriteMaterializedHistory(object.Materialized.History, snapshot.Profile.Schema, destination.Profile.Schema)
 				rewriteErr = mapErr

@@ -106,6 +106,17 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		mapped.Schema = p.Target.Schema
 		mapped.Units = append([]damengnative.Unit{}, o.Units...)
 		mapped.External = append([]damengnative.Reference{}, o.External...)
+		if o.Interval != nil {
+			mapped.Interval, err = damengnative.RewriteIntervalPartitions(o.Interval, p.Source.Schema, p.Target.Schema)
+			if err != nil {
+				issue(o.Kind, o.Name, err.Error())
+			}
+			if _, ok := w.(interface {
+				RestoreDamengNativeIntervalPartitions(context.Context, damengnative.Object, damengnative.Unit) error
+			}); !ok {
+				issue(o.Kind, o.Name, "目标写入器缺少既有间隔分区恢复能力")
+			}
+		}
 		if o.Materialized != nil {
 			materialized := *o.Materialized
 			materialized.SnapshotColumns = append([]string{}, o.Materialized.SnapshotColumns...)
@@ -135,6 +146,10 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			}
 		}
 		for i, u := range mapped.Units {
+			if u.Phase == "interval_prepare" && mapped.Interval != nil {
+				mapped.Units[i] = damengnative.Unit{SQL: damengnative.IntervalPartitionSQL(p.Target.Schema, o.Name, mapped.Interval), Phase: u.Phase}
+				continue
+			}
 			if u.Phase == "mv_history" && mapped.Materialized != nil && mapped.Materialized.History != nil {
 				mapped.Units[i] = damengnative.Unit{SQL: damengnative.MaterializedHistorySQL(p.Target.Schema, o.Name, mapped.Materialized.History), Phase: u.Phase}
 				continue
@@ -223,13 +238,28 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			}
 		}
 	}
+	declaredChildren := damengnative.DeclaredTableChildren(p.Objects)
+	childConflicts, childIssues := nativeOwnedNameConflicts(append(append([]damengnative.Object{}, p.Objects...), declaredChildren...), dst.Objects, plannedDrops)
+	for _, conflict := range childConflicts {
+		found := false
+		for _, existing := range p.Conflicts {
+			found = found || existing.ID == conflict.ID
+		}
+		if !found {
+			p.Conflicts = append(p.Conflicts, conflict)
+		}
+	}
+	p.Issues = append(p.Issues, childIssues...)
 	// Do not invalidate target-only dependants while replacing selected objects.
 	plannedNames := map[string]bool{}
 	for _, o := range p.Objects {
 		plannedNames[nativeCollisionKey(o)] = true
 	}
+	for _, o := range declaredChildren {
+		plannedNames[nativeCollisionKey(o)] = true
+	}
 	for _, o := range dst.Objects {
-		if o.Managed || plannedNames[nativeCollisionKey(o)] {
+		if o.Managed && !nativeNamedOwnedObject(o) || plannedNames[nativeCollisionKey(o)] {
 			continue
 		}
 		for _, dep := range o.Dependencies {
@@ -479,6 +509,11 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		m.collectNativeResults(&report, p, states)
 		return report
 	}
+	if err := m.executeNativePhase(ctx, w, p.Objects, "interval_prepare", states); err != nil {
+		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("既有间隔分区", err))
+		m.collectNativeResults(&report, p, states)
+		return report
+	}
 	m.log.Info("=== 达梦原生迁移：复制原始数据 ===")
 	type result struct {
 		table damengnative.Table
@@ -716,14 +751,7 @@ func nativeSourceTable(t damengnative.Table) string {
 }
 
 func copyDamengNativeTable(ctx context.Context, r damengnative.Reader, w damengnative.Writer, t damengnative.Table, targetSchema string, pageSize int, progress func(int64) error) (int64, error) {
-	if t.Rows == 0 {
-		return 0, nil
-	}
-	scan, err := r.OpenDamengNativeScan(ctx, t)
-	if err != nil {
-		return 0, err
-	}
-	defer scan.Close()
+	var err error
 	targetTable := t
 	targetTable.Schema = targetSchema
 	targetTable.Columns = append([]damengnative.Column{}, t.Columns...)
@@ -735,7 +763,27 @@ func copyDamengNativeTable(ctx context.Context, r damengnative.Reader, w damengn
 		if err != nil {
 			return 0, err
 		}
+		targetTable.Columns[i].DefaultSQL, _, err = damengnative.RewriteSchema(c.DefaultSQL, t.Schema, targetSchema)
+		if err != nil {
+			return 0, err
+		}
 	}
+	restoreEmptyDefaults := func() error {
+		for _, c := range targetTable.Columns {
+			if c.Writable && c.DefaultOnNull {
+				return w.CopyDamengNativeBatch(ctx, targetTable, nil)
+			}
+		}
+		return nil
+	}
+	if t.Rows == 0 {
+		return 0, restoreEmptyDefaults()
+	}
+	scan, err := r.OpenDamengNativeScan(ctx, t)
+	if err != nil {
+		return 0, err
+	}
+	defer scan.Close()
 	if pageSize <= 0 || pageSize > 2000 {
 		pageSize = 1000
 	}
@@ -789,6 +837,9 @@ func copyDamengNativeTable(ctx context.Context, r damengnative.Reader, w damengn
 	}
 	if err = flush(); err != nil {
 		return count, err
+	}
+	if count == 0 {
+		return 0, restoreEmptyDefaults()
 	}
 	return count, nil
 }

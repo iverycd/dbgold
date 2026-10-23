@@ -33,6 +33,10 @@ type ColumnInfo struct {
 	Identity          string
 	Generated         string
 	Comment           string
+
+	// DamengFloatStorage is refreshed from actual DM descriptors; persisted
+	// recovery plans must re-read it before choosing the target floating type.
+	DamengFloatStorage string `json:"-"`
 }
 
 // TableDDLInfo 包含建表所需的完整元数据

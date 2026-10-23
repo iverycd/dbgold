@@ -50,10 +50,10 @@ func TestReadCatalogExtractsNativeDefinitionsAndBlocksUnknown(t *testing.T) {
 	require.NoError(t, e)
 	defer db.Close()
 	profileMock(m)
-	m.ExpectQuery(`SELECT o.ID,o.NAME,o.TYPE\$`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "main", "sub", "pid", "valid", "i1", "i2", "i3"}).AddRow(1, "MixedTable", "SCHOBJ", "UTAB", -1, "Y", 0, 0, 0).AddRow(2, "INDEX1", "TABOBJ", "INDEX", 1, "Y", 0, 0, 0).AddRow(3, "MixedPkg", "SCHOBJ", "PKG", -1, "Y", 0, 0, 0).AddRow(4, "CustomOp", "SCHOBJ", "OPERATOR", -1, "Y", 0, 0, 0))
-	m.ExpectQuery(`SELECT OBJECT_ID,OBJECT_NAME,OBJECT_TYPE,STATUS FROM ALL_OBJECTS`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kind", "status"}).AddRow(1, "MixedTable", "TABLE", "VALID").AddRow(2, "INDEX1", "INDEX", "VALID").AddRow(3, "MixedPkg", "PACKAGE", "VALID").AddRow(3, "MixedPkg", "PACKAGE BODY", "VALID").AddRow(4, "CustomOp", "OPERATOR", "VALID"))
+	m.ExpectQuery(`SELECT o.ID,o.NAME,o.TYPE\$`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "main", "sub", "pid", "valid", "i1", "i2", "i3"}).AddRow(1, "MixedTable", "SCHOBJ", "UTAB", -1, "Y", 0, 0, 0).AddRow(33554434, "INDEX33554434", "TABOBJ", "INDEX", 1, "Y", 0, 0, 0).AddRow(3, "MixedPkg", "SCHOBJ", "PKG", -1, "Y", 0, 0, 0).AddRow(4, "CustomOp", "SCHOBJ", "OPERATOR", -1, "Y", 0, 0, 0))
+	m.ExpectQuery(`SELECT OBJECT_ID,OBJECT_NAME,OBJECT_TYPE,STATUS FROM ALL_OBJECTS`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kind", "status"}).AddRow(1, "MixedTable", "TABLE", "VALID").AddRow(33554434, "INDEX33554434", "INDEX", "VALID").AddRow(3, "MixedPkg", "PACKAGE", "VALID").AddRow(3, "MixedPkg", "PACKAGE BODY", "VALID").AddRow(4, "CustomOp", "OPERATOR", "VALID"))
 	m.ExpectQuery(`SELECT CONSTRAINT_NAME,TABLE_NAME`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"name", "table", "type", "index", "status"}))
-	m.ExpectQuery(`SELECT i.NAME,t.NAME,x.FLAG,x.XTYPE FROM SYS.SYSINDEXES`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"index", "table", "flags", "xtype"}).AddRow("INDEX1", "MixedTable", 1, 0))
+	m.ExpectQuery(`SELECT i.NAME,t.NAME,x.FLAG,x.XTYPE FROM SYS.SYSINDEXES`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"index", "table", "flags", "xtype"}).AddRow("INDEX33554434", "MixedTable", 1, 0))
 	m.ExpectQuery(`SELECT MASTER,LOG_TABLE FROM ALL_MVIEW_LOGS`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"master", "log"}))
 	m.ExpectQuery(`SELECT d.ID,d.TYPE\$`).WithArgs("MixedOwner").WillReturnRows(sqlmock.NewRows([]string{"id", "kind", "refid", "refkind", "schema", "name"}).AddRow(3, "PACKAGE_BODY", 1, "TABLE", "MixedOwner", "MixedTable"))
 	tableDDL := `CREATE TABLE "MixedOwner"."MixedTable" ("MixedCol" VARCHAR(12) DEFAULT 'KeepMiXeD', "Amount" DECIMAL(38,4)) STORAGE(ON "MAIN", CLUSTERBTR);`
@@ -75,7 +75,7 @@ func TestReadCatalogExtractsNativeDefinitionsAndBlocksUnknown(t *testing.T) {
 		objects[o.Kind+":"+o.Name] = o
 	}
 	require.Equal(t, tableDDL, objects["table:MixedTable"].Units[0].SQL)
-	require.True(t, objects["index:INDEX1"].Managed)
+	require.True(t, objects["index:INDEX33554434"].Managed)
 	require.NotContains(t, objects["package_body:MixedPkg"].Units[0].SQL, "\n/")
 	require.Contains(t, objects["package_body:MixedPkg"].Dependencies, objects["table:MixedTable"].ID)
 	require.Contains(t, objects["comment:MixedTable"].Units[0].SQL, "KeepMiXeD注释")

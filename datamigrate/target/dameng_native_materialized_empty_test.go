@@ -149,3 +149,24 @@ func TestMaterializedEmptyGeneratedChecksPreserveEnabledMultiplicity(t *testing.
 	require.Equal(t, "C2", resolved[0].name)
 	require.Equal(t, "C1", resolved[1].name)
 }
+
+func TestMaterializedEmptyIdentityNormalizesOnlyFrozenImplicitNullability(t *testing.T) {
+	p := &damengnative.MaterializedEmptyTouch{Table: "Base", Columns: []damengnative.MaterializedEmptyColumn{{Name: "Id", NotNull: true, ValueSQL: "CAST(0 AS INT)"}, {Name: "A", NotNull: true, ValueSQL: "CAST(5 AS INT)"}}, IdentityRestore: []string{`ALTER TABLE "Dst"."Base" DROP IDENTITY`, `ALTER TABLE "Dst"."Base" ADD COLUMN "Id" IDENTITY(10,3)`}}
+	want, err := historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT IDENTITY(10,3) NOT NULL,"A" INT NOT NULL)`, p)
+	require.NoError(t, err)
+	pending, err := historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT,"A" INT NOT NULL)`, p)
+	require.NoError(t, err)
+	require.True(t, nativeDefinitionsEqual(want, pending))
+	changed, err := historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT,"A" INT)`, p)
+	require.NoError(t, err)
+	require.False(t, nativeDefinitionsEqual(want, changed), "其它typed列不能被泛化为可变状态")
+	changed, err = historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT,"A" INT IDENTITY(10,3) NOT NULL)`, p)
+	require.NoError(t, err)
+	require.False(t, nativeDefinitionsEqual(want, changed), "不能把identity移到另一列当作临时状态")
+	p.Constraints = []damengnative.MaterializedEmptyConstraint{{Table: "Base", Kind: "P", Enabled: true, Columns: []string{"Id", "A"}}}
+	want, err = historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT IDENTITY(10,3) NOT NULL,"A" INT NOT NULL)`, p)
+	require.NoError(t, err)
+	changed, err = historyEmptyDefinition(`CREATE TABLE "Dst"."Base"("Id" INT,"A" INT)`, p)
+	require.NoError(t, err)
+	require.True(t, nativeDefinitionsEqual(want, changed), "仅冻结会DISABLE的复合非聚集PK列可处于临时nullable状态")
+}

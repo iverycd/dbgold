@@ -482,6 +482,9 @@ func (r *catalogReader) readConstraints() error {
 		}
 		r.constraints[name] = kind
 		parent := ObjectID(r.schema, "table", table)
+		if owner := r.namedObject(table); owner != nil {
+			parent = owner.ID
+		}
 		i, ok := r.index["constraint\x00"+name]
 		if !ok {
 			i = r.add(0, Object{Kind: "constraint", Name: name, Schema: r.schema, Table: table, ParentID: parent, Status: status.String})
@@ -491,6 +494,7 @@ func (r *catalogReader) readConstraints() error {
 		o.Dependencies = appendUnique(o.Dependencies, parent)
 		o.Managed = kind != "R"
 		o.ConstraintType = kind
+		o.ConstraintIndex = idx.String
 		switch strings.ToUpper(status.String) {
 		case "N", "0", "DISABLE", "DISABLED":
 			o.Status = "DISABLED"
@@ -516,8 +520,9 @@ func (r *catalogReader) readConstraints() error {
 	if err != nil {
 		return err
 	}
-	// A clustered index is always generated with its table. Dictionary evidence,
-	// rather than a name-prefix guess, is required before skipping it.
+	// Clustered physical indexes belong to the table recipe. Their names are
+	// disposable only when the native catalog proves a generated identity; a
+	// user-created clustered index still needs its original definition.
 	rows, err = r.db.QueryContext(r.ctx, `SELECT i.NAME,t.NAME,x.FLAG,x.XTYPE FROM SYS.SYSINDEXES x JOIN SYS.SYSOBJECTS i ON i.ID=x.ID JOIN SYS.SYSOBJECTS t ON t.ID=i.PID JOIN SYS.SYSOBJECTS s ON s.ID=t.SCHID WHERE s.NAME=? AND ((x.FLAG & 1)=1 OR x.XTYPE=0)`, r.schema)
 	if err != nil {
 		return fmt.Errorf("无法确认系统/聚集索引的父对象: %w", err)
@@ -531,7 +536,17 @@ func (r *catalogReader) readConstraints() error {
 		}
 		if j, ok := r.index["index\x00"+name]; ok {
 			r.snapshot.Objects[j].Managed = true
-			r.snapshot.Objects[j].Generated = flags&1 != 0
+			// FLAG's low bit is also set when a user-created index is
+			// attached to a primary key. Only its exact dictionary-assigned
+			// name and native object-ID range prove a disposable name.
+			generated := false
+			for id, raw := range r.raw {
+				if raw.sub == "INDEX" && raw.name == name && id >= 33554432 && id <= 50331647 && name == "INDEX"+strconv.FormatInt(id, 10) {
+					generated = true
+					break
+				}
+			}
+			r.snapshot.Objects[j].Generated = generated
 			if parent := r.namedObject(table); parent != nil {
 				r.snapshot.Objects[j].ParentID = parent.ID
 			} else {
@@ -550,7 +565,13 @@ func (r *catalogReader) readConstraints() error {
 	}
 	err = rows.Err()
 	rows.Close()
-	return err
+	if err != nil {
+		return err
+	}
+	if err := r.markPartitionDerivedIndexes(); err != nil {
+		return err
+	}
+	return r.markPartitionDerivedConstraints()
 }
 
 func (r *catalogReader) readDependencies() error {
@@ -615,7 +636,7 @@ func (r *catalogReader) readTables() error {
 				break
 			}
 			c.Writable = extra.Int64&1 == 0
-			c.Identity = flags.Int64&1 != 0
+			c.Identity = flags.Int64&1 != 0 || declaredNativeIdentity(o, c.Name)
 			c.SQLType = columnSQLType(c)
 			if owner.Valid && owner.String != "" && owner.String != "SYS" {
 				c.TypeSchema = owner.String
@@ -644,6 +665,14 @@ func (r *catalogReader) readTables() error {
 			r.issue(&o, "没有可见列元数据")
 			continue
 		}
+		if i, ok := r.index[o.Kind+"\x00"+o.Name]; ok {
+			if err = restoreNativeXMLAttributes(&r.snapshot.Objects[i], &t); err != nil {
+				r.issue(&r.snapshot.Objects[i], "XMLTYPE 原生列属性恢复失败: "+err.Error())
+			}
+		}
+		if err = r.freezeNativeCopyDefaults(o, &t, sourceName); err != nil {
+			r.issue(&o, "原生复制默认值读取失败: "+err.Error())
+		}
 		if r.definitions {
 			if err = r.db.QueryRowContext(r.ctx, `SELECT COUNT(*) FROM `+Qualified(r.schema, sourceName)).Scan(&t.Rows); err != nil {
 				r.issue(&o, "源数据行数不可读: "+err.Error())
@@ -652,8 +681,20 @@ func (r *catalogReader) readTables() error {
 				r.identityRestore(&o, &t)
 			}
 			r.validateLOBLengths(&o, &t, sourceName)
+			if i, ok := r.index[o.Kind+"\x00"+o.Name]; ok && !r.verification {
+				if err = r.freezeNativeBFiles(&r.snapshot.Objects[i], t, sourceName); err != nil {
+					r.issue(&r.snapshot.Objects[i], "BFILE 外部资源读取失败: "+err.Error())
+				}
+			}
 		} else {
 			t.Rows = -1
+		}
+		if r.definitions && !r.verification && t.SourceName == "" && !o.Generated {
+			if i, ok := r.index["table\x00"+o.Name]; ok {
+				if err = r.freezeIntervalPartitions(&r.snapshot.Objects[i], t); err != nil {
+					r.issue(&r.snapshot.Objects[i], "间隔分区恢复计划提取失败: "+err.Error())
+				}
+			}
 		}
 		r.snapshot.Tables = append(r.snapshot.Tables, t)
 	}
@@ -683,6 +724,9 @@ func (r *catalogReader) validateLOBLengths(o *Object, t *Table, sourceName strin
 }
 
 func columnSQLType(c Column) string {
+	if nativeXMLColumn(c) {
+		return "XMLTYPE"
+	}
 	base := strings.ToUpper(strings.TrimSpace(c.DataType))
 	if strings.Contains(base, "(") {
 		return c.DataType
@@ -727,6 +771,16 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 			r.issue(o, "自增列种子/步长/当前值不可精确读取")
 			return
 		}
+		reportedCurrent := cur
+		allocatorTable := t.Name
+		if t.SourceName != "" {
+			allocatorTable = t.SourceName
+		}
+		cur, err := r.partitionIdentityCurrent(allocatorTable, c.Name, cur, step)
+		if err != nil {
+			r.issue(o, "分区自增列活动序列读取失败: "+err.Error())
+			return
+		}
 		next := cur + step
 		if (step > 0 && next < cur) || (step < 0 && next > cur) {
 			r.issue(o, "自增列下一值溢出 int64")
@@ -734,7 +788,10 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 		}
 		t.Restore = append(t.Restore, Unit{SQL: "ALTER TABLE " + name + " DROP IDENTITY", Phase: "restore"}, Unit{SQL: fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s IDENTITY(%d, %d)", name, Quote(c.Name), next, step), Phase: "restore"})
 		if next != s {
-			reason := fmt.Sprintf("自增列 %s 保留原种子 %d、步长 %d、当前值 %d 的审计信息；目标用下一值 %d 作为续号种子", c.Name, s, step, cur, next)
+			reason := fmt.Sprintf("自增列 %s 保留原种子 %d、步长 %d、当前值 %d 的审计信息；目标用下一值 %d 作为续号种子", c.Name, s, step, reportedCurrent, next)
+			if reportedCurrent != cur {
+				reason += "；已按唯一原生活动序列及已有值对齐原步长级数，可能保守跳号"
+			}
 			if t.Rows == 0 && cur == s {
 				// IDENT_CURRENT returns the seed both before any allocation
 				// and after that first value has been used and deleted. Public

@@ -80,6 +80,9 @@ func SQLServerToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) st
 	case "real":
 		return "float"
 	case "float":
+		if singlePrecisionFloat(col.Precision) {
+			return "float"
+		}
 		return "double"
 	case "xml":
 		return "longtext"

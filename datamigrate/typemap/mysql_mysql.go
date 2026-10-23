@@ -20,14 +20,8 @@ func MySQLToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) string
 			return "int"
 		}
 		return dt
-	case "float", "double", "double precision":
-		if dt == "double precision" {
-			return "double"
-		}
-		if col.Precision > 0 {
-			return fmt.Sprintf("%s(%d,%d)", dt, col.Precision, col.Scale)
-		}
-		return dt
+	case "float", "double", "double precision", "real":
+		return mysqlFloatingDeclaration(col)
 	case "decimal", "numeric":
 		if col.Precision > 0 {
 			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)

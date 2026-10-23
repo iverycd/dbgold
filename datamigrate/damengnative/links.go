@@ -354,6 +354,14 @@ func PublicLinkSQL(sql string) (string, error) {
 // ExecuteUnit keeps sensitive SQL out of generic writer/observer entry points.
 func ExecuteUnit(ctx context.Context, writer Writer, object Object, unit Unit) error {
 	switch unit.Phase {
+	case "interval_prepare":
+		writer, ok := writer.(interface {
+			RestoreDamengNativeIntervalPartitions(context.Context, Object, Unit) error
+		})
+		if !ok {
+			return fmt.Errorf("写入器缺少既有间隔分区恢复能力")
+		}
+		return writer.RestoreDamengNativeIntervalPartitions(ctx, object, unit)
 	case "mv_history":
 		writer, ok := writer.(interface {
 			RestoreDamengNativeMaterializedHistory(context.Context, Object, Unit) error

@@ -20,7 +20,7 @@ func TestOracleDamengDocumentedTypes(t *testing.T) {
 		{source.ColumnInfo{DataType: "DOUBLE PRECISION"}, "FLOAT"},
 		{source.ColumnInfo{DataType: "FLOAT(24)"}, "FLOAT(24)"},
 		{source.ColumnInfo{DataType: "FLOAT", Precision: 127}, "FLOAT"},
-		{source.ColumnInfo{DataType: "BINARY_FLOAT"}, "FLOAT"},
+		{source.ColumnInfo{DataType: "BINARY_FLOAT"}, "REAL"},
 		{source.ColumnInfo{DataType: "BINARY_DOUBLE"}, "DOUBLE"},
 		{source.ColumnInfo{DataType: "INTEGER"}, "NUMBER(38,0)"},
 		{source.ColumnInfo{DataType: "VARCHAR2", Length: 10, DataLength: 40, CharUsed: "C"}, "VARCHAR2(10 CHAR)"},

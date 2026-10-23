@@ -36,24 +36,26 @@ type Unit struct {
 }
 
 type Object struct {
-	ID                   string             `json:"id"`
-	Kind                 string             `json:"kind"`
-	Name                 string             `json:"name"`
-	Schema               string             `json:"schema"`
-	Table                string             `json:"table,omitempty"`
-	ParentID             string             `json:"parent_id,omitempty"`
-	Managed              bool               `json:"managed,omitempty"`         // recreated with its parent
-	Generated            bool               `json:"generated,omitempty"`       // catalog proves generated name
-	ConstraintType       string             `json:"constraint_type,omitempty"` // original P/U/R/C kind
-	ConstraintNoValidate bool               `json:"constraint_no_validate,omitempty"`
-	EventTrigger         bool               `json:"event_trigger,omitempty"` // schema/database event trigger
-	Materialized         *MaterializedState `json:"materialized,omitempty"`
-	Status               string             `json:"status,omitempty"`
-	Dependencies         []string           `json:"dependencies"`
-	External             []Reference        `json:"external,omitempty"`
-	Units                []Unit             `json:"units"`
-	DropSQL              string             `json:"drop_sql,omitempty"`
-	CompileSQL           string             `json:"compile_sql,omitempty"`
+	ID                   string                 `json:"id"`
+	Kind                 string                 `json:"kind"`
+	Name                 string                 `json:"name"`
+	Schema               string                 `json:"schema"`
+	Table                string                 `json:"table,omitempty"`
+	ParentID             string                 `json:"parent_id,omitempty"`
+	Managed              bool                   `json:"managed,omitempty"`          // recreated with its parent
+	Generated            bool                   `json:"generated,omitempty"`        // catalog proves generated name
+	ConstraintType       string                 `json:"constraint_type,omitempty"`  // original P/U/R/C kind
+	ConstraintIndex      string                 `json:"constraint_index,omitempty"` // catalog-proved PK/UK backing index
+	ConstraintNoValidate bool                   `json:"constraint_no_validate,omitempty"`
+	EventTrigger         bool                   `json:"event_trigger,omitempty"` // schema/database event trigger
+	Materialized         *MaterializedState     `json:"materialized,omitempty"`
+	Interval             *IntervalPartitionPlan `json:"interval,omitempty"`
+	Status               string                 `json:"status,omitempty"`
+	Dependencies         []string               `json:"dependencies"`
+	External             []Reference            `json:"external,omitempty"`
+	Units                []Unit                 `json:"units"`
+	DropSQL              string                 `json:"drop_sql,omitempty"`
+	CompileSQL           string                 `json:"compile_sql,omitempty"`
 }
 
 // MaterializedState records the explicit logical baseline action. A physical
@@ -148,15 +150,17 @@ type Reference struct {
 }
 
 type Column struct {
-	Name       string `json:"name"`
-	DataType   string `json:"data_type"`
-	SQLType    string `json:"sql_type"`
-	TypeSchema string `json:"type_schema,omitempty"`
-	TypeName   string `json:"type_name,omitempty"`
-	Writable   bool   `json:"writable"`
-	Identity   bool   `json:"identity,omitempty"`
-	Precision  int64  `json:"precision,omitempty"`
-	Scale      int64  `json:"scale,omitempty"`
+	Name          string `json:"name"`
+	DataType      string `json:"data_type"`
+	SQLType       string `json:"sql_type"`
+	TypeSchema    string `json:"type_schema,omitempty"`
+	TypeName      string `json:"type_name,omitempty"`
+	Writable      bool   `json:"writable"`
+	Identity      bool   `json:"identity,omitempty"`
+	DefaultOnNull bool   `json:"default_on_null,omitempty"`
+	DefaultSQL    string `json:"default_sql,omitempty"`
+	Precision     int64  `json:"precision,omitempty"`
+	Scale         int64  `json:"scale,omitempty"`
 }
 
 type Table struct {

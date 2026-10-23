@@ -27,10 +27,10 @@ func TestMySQLTableInfoPreservesTemporalPrecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE", "CHARACTER_MAXIMUM_LENGTH", "NUMERIC_PRECISION", "NUMERIC_SCALE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA", "DATETIME_PRECISION"}).
-		AddRow("OccurredAt", "datetime", nil, nil, nil, "NO", nil, "", 6).
-		AddRow("UpdatedAt", "timestamp", nil, nil, nil, "YES", "CURRENT_TIMESTAMP", "DEFAULT_GENERATED", 0).
-		AddRow("Label", "varchar", 80, nil, nil, "YES", nil, "", nil)
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE", "CHARACTER_MAXIMUM_LENGTH", "NUMERIC_PRECISION", "NUMERIC_SCALE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA", "DATETIME_PRECISION", "COLUMN_TYPE"}).
+		AddRow("OccurredAt", "datetime", nil, nil, nil, "NO", nil, "", 6, "datetime(6)").
+		AddRow("UpdatedAt", "timestamp", nil, nil, nil, "YES", "CURRENT_TIMESTAMP", "DEFAULT_GENERATED", 0, "timestamp").
+		AddRow("Label", "varchar", 80, nil, nil, "YES", nil, "", nil, "varchar(80)")
 	mock.ExpectQuery(`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, DATETIME_PRECISION`).WithArgs("SourceDB", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
 	r := &MySQLReader{db: db, dbName: "SourceDB"}
 	got, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
@@ -39,6 +39,33 @@ func TestMySQLTableInfoPreservesTemporalPrecision(t *testing.T) {
 	}
 	if got.TableName != "MixedTable" || len(got.Columns) != 3 || got.Columns[0].Name != "OccurredAt" || got.Columns[0].DateTimePrecision != 6 || got.Columns[1].DateTimePrecision != 0 || got.Columns[2].DateTimePrecision != 0 {
 		t.Fatalf("metadata: %+v", got)
+	}
+	if err = mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLTableInfoPreservesFloatingDeclarations(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE", "CHARACTER_MAXIMUM_LENGTH", "NUMERIC_PRECISION", "NUMERIC_SCALE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA", "DATETIME_PRECISION", "COLUMN_TYPE"}).
+		AddRow("SingleValue", "float", nil, 12, nil, "YES", nil, "", nil, "float").
+		AddRow("DoubleValue", "double", nil, 22, nil, "YES", nil, "", nil, "double").
+		AddRow("RoundedSingle", "float", nil, 8, 2, "YES", nil, "", nil, "float(8,2)").
+		AddRow("RoundedDouble", "double", nil, 20, 0, "YES", nil, "", nil, "double(20,0)")
+	mock.ExpectQuery(`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,.*COLUMN_TYPE`).WithArgs("SourceDB", "MixedTable").WillReturnRows(rows).RowsWillBeClosed()
+	r := &MySQLReader{db: db, dbName: "SourceDB"}
+	got, err := r.GetTableDDLInfo(context.Background(), "MixedTable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"float", "double", "float(8,2)", "double(20,0)"} {
+		if got.Columns[i].FormattedType != want {
+			t.Fatalf("column %s declaration = %q; want %q", got.Columns[i].Name, got.Columns[i].FormattedType, want)
+		}
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

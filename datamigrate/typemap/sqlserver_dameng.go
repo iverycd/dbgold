@@ -11,7 +11,7 @@ func init() { Register("sqlserver", "dameng", SQLServerToDameng) }
 // SQLServerToDameng is paired with ValidateSQLServerDamengColumn. Unknown types
 // deliberately return no SQL; callers must validate before executing any DDL.
 func SQLServerToDameng(c source.ColumnInfo, charLength, national bool) string {
-	switch strings.ToLower(c.DataType) {
+	switch strings.ToLower(strings.TrimSpace(c.DataType)) {
 	case "tinyint", "smallint":
 		if c.IdentityInfo != nil {
 			return "INT"
@@ -32,7 +32,7 @@ func SQLServerToDameng(c source.ColumnInfo, charLength, national bool) string {
 	case "real":
 		return "REAL"
 	case "float":
-		if c.Precision <= 24 {
+		if singlePrecisionFloat(c.Precision) {
 			return "REAL"
 		}
 		return "DOUBLE"
@@ -86,7 +86,7 @@ func ValidateSQLServerDamengColumn(c source.ColumnInfo) error {
 	if SQLServerToDameng(c, false, false) == "" {
 		return fail("不支持转换到达梦，禁止自动降级")
 	}
-	switch strings.ToLower(c.DataType) {
+	switch strings.ToLower(strings.TrimSpace(c.DataType)) {
 	case "decimal", "numeric":
 		if c.Precision < 1 || c.Precision > 38 || c.Scale < 0 || c.Scale > c.Precision {
 			return fail("数值精度或标度超出范围")
@@ -104,7 +104,7 @@ func ValidateSQLServerDamengColumn(c source.ColumnInfo) error {
 		return fail("缺少自增种子/步长元数据")
 	}
 	if c.IdentityInfo != nil {
-		switch strings.ToLower(c.DataType) {
+		switch strings.ToLower(strings.TrimSpace(c.DataType)) {
 		case "tinyint", "smallint", "int", "bigint":
 		default:
 			return fail("自增列仅支持整数类型")

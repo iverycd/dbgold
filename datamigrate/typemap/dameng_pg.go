@@ -20,7 +20,7 @@ func init() {
 // DaMengToPG 将达梦列的数据类型转换为 PostgreSQL 类型字符串。
 // charInLength=true 时 char/varchar 长度单位使用 CHAR，useNvarchar2=true 时转为 nvarchar2（优先级更高）。
 func DaMengToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
-	dt := strings.ToLower(col.DataType)
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 	switch dt {
 	case "tinyint", "byte":
 		return "smallint"
@@ -31,8 +31,14 @@ func DaMengToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
 	case "bigint":
 		return "bigint"
 	case "real":
+		if mapped, ok := damengBinaryFloatType(col, "real", "double precision"); ok {
+			return mapped
+		}
 		return "real"
 	case "float", "double", "double precision":
+		if mapped, ok := damengBinaryFloatType(col, "real", "double precision"); ok {
+			return mapped
+		}
 		if col.Precision > 0 {
 			return fmt.Sprintf("decimal(%d,%d)", col.Precision, col.Scale)
 		}

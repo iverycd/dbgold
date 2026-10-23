@@ -84,7 +84,34 @@ func nativeHistoryIdentityPresent(ctx context.Context, conn *sql.Conn, schema st
 	if err != nil {
 		return false, fmt.Errorf("无法核对物化状态恢复的自增列身份: %w", err)
 	}
-	return flags&1 != 0, nil
+	if flags&1 != 0 {
+		return true, nil
+	}
+	ddl, err := historyEmptyReadDDL(ctx, conn, schema, p.table)
+	if err != nil {
+		return false, fmt.Errorf("无法读取分区自增列原生声明: %w", err)
+	}
+	return damengnative.NativeColumnIdentity(ddl, p.column)
+}
+
+// Disabling an ordinary PK can remove its identity column's implicit NOT
+// NULL. Restore that mandatory original attribute before ADD IDENTITY; the
+// fixed recipe never chooses a new column, seed or step.
+func nativeHistoryRestoreIdentity(ctx context.Context, conn *sql.Conn, schema string, p nativeHistoryTouchRecipe) error {
+	var nullable string
+	if err := conn.QueryRowContext(ctx, `SELECT NULLABLE FROM ALL_TAB_COLUMNS WHERE OWNER=? AND TABLE_NAME=? AND COLUMN_NAME=?`, schema, p.table, p.column).Scan(&nullable); err != nil {
+		return err
+	}
+	if nullable != "N" && nullable != "Y" {
+		return fmt.Errorf("自增列非空状态不可识别")
+	}
+	if nullable == "Y" {
+		if _, err := conn.ExecContext(ctx, "ALTER TABLE "+damengnative.Qualified(schema, p.table)+" ALTER COLUMN "+damengnative.Quote(p.column)+" SET NOT NULL"); err != nil {
+			return err
+		}
+	}
+	_, err := conn.ExecContext(ctx, p.restore)
+	return err
 }
 
 func nativeHistoryIdentityMatches(ctx context.Context, conn *sql.Conn, schema string, p nativeHistoryTouchRecipe) error {
@@ -128,7 +155,7 @@ func nativeHistoryTouch(ctx context.Context, conn *sql.Conn, schema string, stat
 			defer cancel()
 			present, err := nativeHistoryIdentityPresent(cleanup, conn, schema, p)
 			if err == nil && !present {
-				_, err = conn.ExecContext(cleanup, p.restore)
+				err = nativeHistoryRestoreIdentity(cleanup, conn, schema, p)
 			}
 			if err == nil {
 				err = nativeHistoryIdentityMatches(cleanup, conn, schema, p)

@@ -67,7 +67,7 @@ func OracleToDameng(c source.ColumnInfo, charLength, national bool) string {
 	case "INTEGER", "INT", "SMALLINT":
 		return "NUMBER(38,0)"
 	case "BINARY_FLOAT":
-		return "FLOAT"
+		return "REAL"
 	case "BINARY_DOUBLE":
 		return "DOUBLE"
 	case "CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "CHAR VARYING", "CHARACTER VARYING", "NCHAR", "NATIONAL CHAR", "NATIONAL CHARACTER", "NVARCHAR2", "NCHAR VARYING", "NATIONAL CHAR VARYING", "NATIONAL CHARACTER VARYING":

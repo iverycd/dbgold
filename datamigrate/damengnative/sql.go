@@ -185,9 +185,31 @@ func shadowedSchema(tokens []sqlToken, source string) bool {
 	if !hasReference {
 		return false
 	}
+	qualifiedCastType := func(i int) bool {
+		if !is(i-1, "AS") || i+2 >= len(tokens) || tokens[i+1].kind != 'p' || tokens[i+1].value != "." || tokens[i+2].kind != 'i' && tokens[i+2].kind != 'q' {
+			return false
+		}
+		depth := 0
+		for j := i - 2; j >= 0; j-- {
+			if tokens[j].kind != 'p' {
+				continue
+			}
+			if tokens[j].value == ")" {
+				depth++
+			}
+			if tokens[j].value == "(" {
+				if depth > 0 {
+					depth--
+					continue
+				}
+				return is(j-1, "CAST") && (j < 2 || tokens[j-2].value != ".")
+			}
+		}
+		return false
+	}
 	for i, t := range tokens {
 		if match(t) {
-			if is(i-1, "AS") || is(i+1, "IN") || is(i+1, "OUT") || is(i+1, "INOUT") || is(i+1, "CONSTANT") || is(i+1, "AS") && (is(i-1, "WITH") || i > 0 && tokens[i-1].value == ",") {
+			if is(i-1, "AS") && !qualifiedCastType(i) || is(i+1, "IN") || is(i+1, "OUT") || is(i+1, "INOUT") || is(i+1, "CONSTANT") || is(i+1, "AS") && (is(i-1, "WITH") || i > 0 && tokens[i-1].value == ",") {
 				return true
 			}
 			if i+1 < len(tokens) && tokens[i+1].kind == 'i' && (is(i-1, "DECLARE") || is(i-1, "IS") || i > 0 && tokens[i-1].value == ";") {

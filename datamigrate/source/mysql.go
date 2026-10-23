@@ -259,7 +259,7 @@ func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*Table
 	}
 	rows, err := r.queryContext(ctx,
 		`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
-		        NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, DATETIME_PRECISION
+		        NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, DATETIME_PRECISION, COLUMN_TYPE
 		 FROM information_schema.COLUMNS
 		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		 ORDER BY ORDINAL_POSITION`, r.dbName, table)
@@ -274,7 +274,7 @@ func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*Table
 		var length, precision, scale, dateTimePrecision sql.NullInt64
 		var defaultVal sql.NullString
 		if err := rows.Scan(&col.Name, &col.DataType, &length, &precision, &scale,
-			&nullable, &defaultVal, &extra, &dateTimePrecision); err != nil {
+			&nullable, &defaultVal, &extra, &dateTimePrecision, &col.FormattedType); err != nil {
 			return nil, err
 		}
 		if length.Valid {

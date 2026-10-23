@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 
+	"dbgold/internal/dmmeta"
+
 	_ "gitee.com/chunanyong/dm"
 )
 
@@ -115,7 +117,60 @@ func (r *DaMengReader) GetTableDDLInfo(ctx context.Context, table string) (*Tabl
 		}
 		info.Columns = append(info.Columns, col)
 	}
-	return info, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Release the catalog connection before the descriptor query, including
+	// when the pool has only one available connection.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := r.describeFloatStorage(ctx, info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func (r *DaMengReader) describeFloatStorage(ctx context.Context, info *TableDDLInfo) error {
+	quote := func(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
+	var indexes []int
+	var projection []string
+	for i, col := range info.Columns {
+		if dmmeta.IsFloatType(col.DataType) {
+			indexes = append(indexes, i)
+			projection = append(projection, quote(col.Name))
+		}
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
+	query := "SELECT " + strings.Join(projection, ",") + " FROM " + quote(r.schema) + "." + quote(info.TableName) + " WHERE 1=0"
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("读取达梦表 %s 浮点列实际类型: %w", info.TableName, err)
+	}
+	columns, err := rows.ColumnTypes()
+	closeErr := rows.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if len(columns) != len(indexes) {
+		return fmt.Errorf("达梦表 %s 浮点列实际类型数量不一致", info.TableName)
+	}
+	for i, index := range indexes {
+		col := &info.Columns[index]
+		if columns[i].Name() != col.Name {
+			return fmt.Errorf("达梦表 %s 浮点列实际名称 %q 与目录名称 %q 不一致", info.TableName, columns[i].Name(), col.Name)
+		}
+		col.DamengFloatStorage, err = dmmeta.FloatStorage(columns[i], col.Precision)
+		if err != nil {
+			return fmt.Errorf("达梦列 %s.%s: %w", info.TableName, col.Name, err)
+		}
+	}
+	return nil
 }
 
 func (r *DaMengReader) GetPrimaryKey(ctx context.Context, table string) ([]string, error) {

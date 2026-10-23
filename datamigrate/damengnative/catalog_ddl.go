@@ -89,8 +89,14 @@ func (r *catalogReader) extractDefinitions() {
 			continue
 		}
 		if o.Kind == "table" {
-			ddl = r.disableConstraintDefinitions(o.Name, ddl)
 			originalDDL := ddl
+			ddl, foundations, delayed, err := r.freezeTableKeyAndValidationPlan(o.Name, ddl)
+			if err != nil {
+				r.issue(o, err.Error())
+				continue
+			}
+			prepared := append(append([]Unit{}, foundations...), delayed...)
+			ddl = r.disableConstraintDefinitions(o.Name, ddl, prepared...)
 			r.checkExistingIndexReferences(o, ddl)
 			base, deferred, err := deferForeignKeys(ddl, r.schema, o.Name)
 			if err != nil {
@@ -99,6 +105,14 @@ func (r *catalogReader) extractDefinitions() {
 			}
 			base = r.stripGeneratedConstraintNames(o.Name, base)
 			o.Units = append(o.Units, Unit{SQL: base, Phase: phase})
+			for _, unit := range foundations {
+				unit.SQL = r.stripGeneratedConstraintNames(o.Name, unit.SQL)
+				o.Units = append(o.Units, unit)
+			}
+			for _, unit := range delayed {
+				unit.SQL = r.stripGeneratedConstraintNames(o.Name, unit.SQL)
+				o.Units = append(o.Units, unit)
+			}
 			deferred, err = r.freezeTableForeignKeys(o.Name, len(deferred))
 			if err != nil {
 				r.issue(o, err.Error())
@@ -269,7 +283,11 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 		if idx.Kind != "index" || idx.Table != table.Name || !idx.Managed || idx.Generated {
 			continue
 		}
-		tokens, _ := nativeTokens(ddl)
+		definitions := ddl
+		for _, unit := range table.Units {
+			definitions += "\n" + unit.SQL
+		}
+		tokens, _ := nativeTokens(definitions)
 		found := false
 		for _, t := range tokens {
 			if t.kind == 'q' && t.value == idx.Name || t.kind == 'i' && strings.ToUpper(t.value) == idx.Name {
@@ -287,6 +305,9 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 		if c.ConstraintType == "R" {
 			continue
 		} // FKs carry their complete frozen state atomically in their ADD unit.
+		if r.hasFrozenConstraintUnit(c, table.Units) {
+			continue
+		}
 		if c.Generated {
 			ts, _ := nativeTokens(ddl)
 			preserved := false
@@ -294,16 +315,16 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 				if ts[i].kind == 'i' && strings.EqualFold(ts[i].value, "CONSTRAINT") && ts[i+1].value == c.Name {
 					depth := 0
 					for _, t := range ts[i+2:] {
-						if t.value == "(" {
+						if t.kind == 'p' && t.value == "(" {
 							depth++
 						}
-						if t.value == ")" {
+						if t.kind == 'p' && t.value == ")" {
 							depth--
 							if depth < 0 {
 								break
 							}
 						}
-						if depth == 0 && t.value == "," {
+						if depth == 0 && t.kind == 'p' && t.value == "," {
 							break
 						}
 						if depth == 0 && t.kind == 'i' && strings.EqualFold(t.value, "DISABLE") {
@@ -325,10 +346,10 @@ func (r *catalogReader) restoreConstraintStates(table *Object, ddl string) {
 	}
 }
 
-func (r *catalogReader) disableConstraintDefinitions(table, ddl string) string {
+func (r *catalogReader) disableConstraintDefinitions(table, ddl string, prepared ...Unit) string {
 	states := map[string]Object{}
 	for _, o := range r.snapshot.Objects {
-		if o.Kind == "constraint" && o.Table == table && o.Status == "DISABLED" && o.ConstraintType != "R" {
+		if o.Kind == "constraint" && o.Table == table && o.Status == "DISABLED" && o.ConstraintType != "R" && !r.hasFrozenConstraintUnit(o, prepared) {
 			states[o.Name] = o
 		}
 	}
@@ -362,16 +383,16 @@ func (r *catalogReader) disableConstraintDefinitions(table, ddl string) string {
 		hasState := false
 		for j := i + 2; j < len(ts); j++ {
 			t := ts[j]
-			if t.value == "(" {
+			if t.kind == 'p' && t.value == "(" {
 				depth++
 			}
-			if t.value == ")" {
+			if t.kind == 'p' && t.value == ")" {
 				depth--
 				if depth < 0 {
 					break
 				}
 			}
-			if depth == 0 && t.value == "," {
+			if depth == 0 && t.kind == 'p' && t.value == "," {
 				break
 			}
 			if depth == 0 && t.kind == 'i' && (strings.EqualFold(t.value, "ENABLE") || strings.EqualFold(t.value, "DISABLE")) {
@@ -409,7 +430,7 @@ func (r *catalogReader) checkExistingIndexReferences(table *Object, ddl string) 
 			continue
 		}
 		t := ts[i+2]
-		if t.value == "(" || t.kind != 'q' && t.kind != 'i' || t.kind == 'i' && storage[strings.ToUpper(t.value)] {
+		if t.kind == 'p' && t.value == "(" || t.kind != 'q' && t.kind != 'i' || t.kind == 'i' && storage[strings.ToUpper(t.value)] {
 			continue
 		}
 		name := t.value
@@ -417,7 +438,7 @@ func (r *catalogReader) checkExistingIndexReferences(table *Object, ddl string) 
 		if t.kind == 'i' {
 			name = strings.ToUpper(name)
 		}
-		if i+4 < len(ts) && ts[i+3].value == "." {
+		if i+4 < len(ts) && ts[i+3].kind == 'p' && ts[i+3].value == "." {
 			owner, name = name, ts[i+4].value
 			if ts[i+4].kind == 'i' {
 				name = strings.ToUpper(name)
@@ -438,12 +459,12 @@ func deferForeignKeys(ddl, schema, table string) (string, []string, error) {
 	open, close := -1, -1
 	depth := 0
 	for i, t := range tokens {
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			if open < 0 {
 				open = i
 			}
 			depth++
-		} else if t.value == ")" {
+		} else if t.kind == 'p' && t.value == ")" {
 			depth--
 			if depth == 0 && open >= 0 {
 				close = i
@@ -458,6 +479,9 @@ func deferForeignKeys(ddl, schema, table string) (string, []string, error) {
 	start := tokens[open].end
 	depth = 0
 	for _, t := range tokens[open+1 : close] {
+		if t.kind != 'p' {
+			continue
+		}
 		switch t.value {
 		case "(":
 			depth++
@@ -480,10 +504,10 @@ func deferForeignKeys(ddl, schema, table string) (string, []string, error) {
 		ref, fk := -1, -1
 		depth = 0
 		for i, t := range ts {
-			if t.value == "(" {
+			if t.kind == 'p' && t.value == "(" {
 				depth++
 			}
-			if t.value == ")" {
+			if t.kind == 'p' && t.value == ")" {
 				depth--
 			}
 			if depth == 0 && t.kind == 'i' {
@@ -686,7 +710,7 @@ func bindNativeGrantObject(ddl, schema, name string) (string, error) {
 			break
 		}
 		end := start
-		if end+2 < len(tokens) && tokens[end+1].value == "." {
+		if end+2 < len(tokens) && tokens[end+1].kind == 'p' && tokens[end+1].value == "." {
 			if !strings.EqualFold(tokens[start].value, schema) {
 				return "", fmt.Errorf("原生授权对象 Schema 与目录归属不一致")
 			}
@@ -701,9 +725,9 @@ func bindNativeGrantObject(ddl, schema, name string) (string, error) {
 		// Only the identifier lists before ON are column names; principals and
 		// privilege keywords retain the native spelling.
 		for _, column := range tokens[:i] {
-			if column.value == "(" {
+			if column.kind == 'p' && column.value == "(" {
 				depth++
-			} else if column.value == ")" {
+			} else if column.kind == 'p' && column.value == ")" {
 				depth--
 			} else if depth > 0 && (column.kind == 'i' || column.kind == 'q') {
 				prefix.WriteString(ddl[last:column.start])
@@ -719,7 +743,7 @@ func bindNativeGrantObject(ddl, schema, name string) (string, error) {
 func (r *catalogReader) namedObject(name string) *Object {
 	for i := range r.snapshot.Objects {
 		o := &r.snapshot.Objects[i]
-		if o.Name == name && (o.Kind == "table" || o.Kind == "view" || o.Kind == "materialized_view" || o.Kind == "sequence") {
+		if o.Name == name && (o.Kind == "table" || o.Kind == "table_partition" || o.Kind == "view" || o.Kind == "materialized_view" || o.Kind == "sequence") {
 			return o
 		}
 	}
@@ -733,9 +757,9 @@ func splitSimpleDDL(ddl string) ([]string, error) {
 	var units []string
 	start, depth := 0, 0
 	for i, t := range tokens {
-		if t.value == "(" {
+		if t.kind == 'p' && t.value == "(" {
 			depth++
-		} else if t.value == ")" {
+		} else if t.kind == 'p' && t.value == ")" {
 			depth--
 		}
 		// DM GET_DEPENDENT_DDL can join independent grants with CRLF and no

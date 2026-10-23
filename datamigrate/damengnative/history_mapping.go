@@ -47,38 +47,10 @@ func RewriteMaterializedHistory(original *MaterializedHistoryPlan, source, targe
 		view := &plan.Views[i]
 		var err error
 		if view.EmptyTouch != nil {
-			empty := *view.EmptyTouch
-			empty.DefinitionSQL, _, err = RewriteSchema(empty.DefinitionSQL, source, target)
+			view.EmptyTouch, err = RewriteEmptyTouch(view.EmptyTouch, source, target)
 			if err != nil {
 				return nil, err
 			}
-			empty.Columns = append([]MaterializedEmptyColumn{}, empty.Columns...)
-			for j := range empty.Columns {
-				empty.Columns[j].DefaultSQL, _, err = RewriteSchema(empty.Columns[j].DefaultSQL, source, target)
-				if err != nil {
-					return nil, err
-				}
-				empty.Columns[j].ValueSQL, _, err = RewriteSchema(empty.Columns[j].ValueSQL, source, target)
-				if err != nil {
-					return nil, err
-				}
-			}
-			empty.Constraints = append([]MaterializedEmptyConstraint{}, empty.Constraints...)
-			for j := range empty.Constraints {
-				empty.Constraints[j].Columns = append([]string{}, empty.Constraints[j].Columns...)
-				empty.Constraints[j].DefinitionSQL, _, err = RewriteSchema(empty.Constraints[j].DefinitionSQL, source, target)
-				if err != nil {
-					return nil, err
-				}
-			}
-			empty.IdentityRestore = append([]string{}, empty.IdentityRestore...)
-			for j := range empty.IdentityRestore {
-				empty.IdentityRestore[j], _, err = RewriteSchema(empty.IdentityRestore[j], source, target)
-				if err != nil {
-					return nil, err
-				}
-			}
-			view.EmptyTouch = &empty
 		}
 		if view.Redefinition != nil {
 			redefinition := *view.Redefinition

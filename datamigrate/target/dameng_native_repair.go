@@ -152,6 +152,9 @@ func (w *DaMengNativeWriter) reconcileNativeUnit(ctx context.Context, object dam
 	if unit < 0 || unit >= len(object.Units) {
 		return false, false, fmt.Errorf("原生核验步骤超出冻结清单")
 	}
+	if object.Units[unit].Phase == "interval_prepare" {
+		return w.ReconcileDamengNativeIntervalPartitions(ctx, object, object.Units[unit])
+	}
 	if object.Units[unit].Phase == "mv_history" {
 		return w.ReconcileDamengNativeMaterializedHistory(ctx, object, object.Units[unit])
 	}
@@ -161,6 +164,9 @@ func (w *DaMengNativeWriter) reconcileNativeUnit(ctx context.Context, object dam
 	snapshot, err := damengnative.ReadCatalogForVerification(ctx, w.db, w.schema)
 	if err != nil {
 		return false, false, err
+	}
+	if handled, done, retry, err := w.reconcileNativeOwnedUnit(ctx, object, unit, snapshot); handled {
+		return done, retry, err
 	}
 	var found *damengnative.Object
 	for i := range snapshot.Objects {
