@@ -35,12 +35,14 @@ VITE_API_TARGET=http://localhost:18089
 
 ## 测试/开发服务器一键部署
 
-`deploy.sh` 用于把当前工作区快速部署到可直接运行二进制的测试或开发服务器。脚本会交叉编译 Linux/amd64 后端、执行前端构建，上传 `dbgold` 和 `frontend/dist`，停止旧的远程 `dbgold` 进程后重新启动服务。为保护运行数据，它不会上传或覆盖远程的 `dbgold.db`。
+`deploy.sh` 用于把当前工作区快速部署到可直接运行 Linux/amd64 二进制的测试或开发服务器。每次部署都会构建后端、前端和 Oscar Java 桥接程序，并一起发布 JDBC 驱动及许可文件，避免新后端仍加载旧桥接 JAR。
 
-使用前请确认本机已安装 `sshpass`（macOS：`brew install sshpass`）、脚本中固定的 Go 路径 `/Users/kay/sdk/go1.25.5/bin/go` 可用、前端依赖已安装且可以执行 `npm run build`；远程服务器还需允许使用密码进行 SSH 登录。
+本机需要 Go 1.25.5、Node/npm、`sshpass`（macOS：`brew install sshpass`）及包含 `javac`、`jar` 的 JDK 9 或更高版本，前端依赖需提前安装。`GO_BIN` 默认为 `/Users/kay/sdk/go1.25.5/bin/go`，可通过环境变量覆盖。本机还必须有 `third_party/oscar/oscarJDBC8.jar`、`third_party/oscar/README.md` 和 `third_party/oscar/LICENSE`。
+
+远程服务器需要允许密码 SSH 登录，提供 Java 8 或更高版本及 `sha256sum`、`readlink`、`pgrep`、`nohup`、`timeout` 等 Linux 工具。使用 `-j` 指定远程 Java 的绝对路径；未指定时依次查找 `<部署目录>/runtime/bin/java` 和远程 `PATH` 中的 `java`。脚本不会自动安装 Java。
 
 ```bash
-./deploy.sh -h <主机或IP> -u <远程账号> -p <远程密码> [-P <SSH端口>] [-d <部署目录>] [-r <服务端口>]
+./deploy.sh -h <主机或IP> -u <远程账号> -p <远程密码> [-P <SSH端口>] [-d <部署目录>] [-r <服务端口>] [-j <远程Java绝对路径>]
 ```
 
 - `-h`：远程主机或 IP，必填。
@@ -49,14 +51,24 @@ VITE_API_TARGET=http://localhost:18089
 - `-P`：SSH 端口，默认 `22`。
 - `-d`：远程部署目录，默认 `/opt/dbgold`。
 - `-r`：远程 dbgold 服务端口，默认 `18089`。
+- `-j`：远程 Java 可执行文件的绝对路径，可选，例如 `/usr/lib/jvm/java-17/bin/java`。
 
 示例：
 
 ```bash
 ./deploy.sh -h 192.168.1.10 -u root -p 'secret' -P 22 -d /opt/dbgold -r 18089
+
+# 使用其他本机 Go 路径，并指定远程 Java
+GO_BIN=/path/to/go ./deploy.sh -h 192.168.1.10 -u root -p 'secret' -j /usr/lib/jvm/java-17/bin/java
 ```
 
-部署完成后，可通过 `http://服务器IP:服务端口/` 访问服务；远程启动日志位于 `<部署目录>/dbgold.out`，应用日志位于 `<部署目录>/log/`。
+脚本先把全部产物上传到远程暂存目录，校验 SHA-256，并检查所选 Java 能加载桥接程序和 JDBC 驱动；构建、上传或这些预检失败时，旧服务继续运行。全部通过后才停止本部署目录对应的 dbgold 实例，最多等待 20 秒优雅退出，再替换产物并启动新进程。
+
+启动时显式设置 `STATIC_DIR`、`OSCAR_JAVA_BIN`、`OSCAR_BRIDGE_JAR`、`OSCAR_JDBC_JAR` 的绝对路径，确保加载本次发布的前端和 JAR，覆盖 `.env` 中可能遗留的旧路径。脚本会在最多 30 秒内检查新进程和 `/api/health/ready`，通过后才报告部署完成；失败时输出启动日志并返回非零状态。
+
+远程 `dbgold.db`、`.env`、上传文件及应用日志会保留。部署完成后，可通过 `http://服务器IP:服务端口/` 访问服务；远程启动日志位于 `<部署目录>/dbgold.out`，应用日志默认位于 `<部署目录>/log/`。
+
+可执行 `python3 deploy/tests/test_deploy.py` 验证部署流程；测试使用模拟命令，不会连接真实服务器或终止真实进程。
 
 > 注意：脚本会通过命令行传递密码，密码可能短暂出现在本机进程列表中；同时为便于首次连接，脚本使用 `StrictHostKeyChecking=no` 放宽 SSH 主机密钥校验。此方式仅适用于直接运行二进制的测试/开发服务器，不能替代下文的 Docker 容器化生产安装或升级流程。
 
