@@ -52,7 +52,7 @@ func (m *Migrator) prepareDamengNativeRepair(p *damengnative.Preflight) error {
 			}
 			item.Columns = append([]source.ColumnInfo{}, item.SourceColumns...)
 		}
-		m.repairs.objects = append(m.repairs.objects, item)
+		m.repairs.appendObject(item)
 	}
 	for _, drop := range p.Drops {
 		o := drop

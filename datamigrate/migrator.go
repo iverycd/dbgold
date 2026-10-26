@@ -1279,7 +1279,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// 注释(表注释 + 列注释)。注意:MySQL 目标库的列注释暂不支持(需列类型重建列定义),
 	// 此类语句 CommentStatements 返回空,这里跳过、不计入 Total/Failed。
 	if want("comments") {
+		readStarted := time.Now()
 		comments, err := m.reader.GetComments(ctx)
+		m.logCommentRead(time.Since(readStarted), len(comments), err)
 		if err != nil {
 			if m.stopOracleDamengTask(ctx, err) {
 				return
@@ -1287,6 +1289,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			m.log.Errorf("获取注释信息失败: %v", err)
 			recordMetadataFailure(&report.Comments, err)
 		} else {
+			defer m.startCommentCreationStats(ctx, &report.Comments, time.Now)()
 			matched := 0
 			for _, cm := range comments {
 				if tableSet[cm.TableName] {

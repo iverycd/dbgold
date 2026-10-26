@@ -22,14 +22,16 @@ type RepairManifest struct {
 	Objects []repair.Object `json:"objects"`
 }
 type repairRecorder struct {
-	mu           sync.Mutex
-	objects      []repair.Object
-	sinkErr      error
-	saveDuration time.Duration
-	fullSaves    int
-	objectSaves  int
-	objectWrites int
-	saveFailures int
+	mu                 sync.Mutex
+	objects            []repair.Object
+	objectIndex        map[string]int
+	indexedObjectCount int
+	sinkErr            error
+	saveDuration       time.Duration
+	fullSaves          int
+	objectSaves        int
+	objectWrites       int
+	saveFailures       int
 }
 
 func repairID(kind, table, name string) string { return repair.Hash([]string{kind, table, name})[:32] }
@@ -210,7 +212,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		if o.Kind != "table" && o.Table != "" && !(m.isMySQLDameng() && o.Kind == "trigger") {
 			o.Dependencies = append(o.Dependencies, repairID("table", o.Table, o.Table))
 		}
-		m.repairs.objects = append(m.repairs.objects, o)
+		m.repairs.appendObject(o)
 	}
 	for i, t := range participating {
 		if cancelled() {
@@ -545,6 +547,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		}
 	}
 	m.repairs.objects = kept
+	m.repairs.rebuildObjectIndex()
 	// Keep the mapping used to generate each structured object; later manual column
 	// changes can regenerate its draft without guessing replacements in SQL text.
 	attachRepairColumnMappings(m.repairs.objects)
@@ -573,21 +576,14 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		return e
 	}
 	o.ID = repairID(o.Kind, o.Table, o.TargetName)
-	idx := -1
-	for i, v := range r.objects {
-		if v.ID == o.ID {
-			idx = i
-			break
-		}
-	}
+	idx := r.objectPosition(o.ID)
 	if idx < 0 {
 		o.Schema = m.cfg.TargetSchema
 		o.Dependencies = []string{}
 		if o.Table != "" && o.Kind != "table" {
 			o.Dependencies = append(o.Dependencies, repairID("table", o.Table, o.Table))
 		}
-		r.objects = append(r.objects, o)
-		idx = len(r.objects) - 1
+		idx = r.appendObject(o)
 	}
 	old := &r.objects[idx]
 	old.Units = unitsFor(ss)
@@ -612,9 +608,21 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	if o.MySQLDamengTrigger != nil {
 		old.MySQLDamengTrigger = o.MySQLDamengTrigger
 	}
+	// A single MySQL -> Dameng COMMENT has no transaction or post-execution
+	// statements. Persist the object and its SQL unit together at each boundary,
+	// retaining a durable running record before the writer can issue SQL.
+	compactComment := m.cfg.CaptureRepair && m.cfg.RepairObjectSink != nil && m.isMySQLDameng() && o.Kind == "comment" && len(old.Units) == 1
+	compactStarted := compactComment
+	commentEvents := 0
+	if compactComment {
+		old.Units[0].Status = "running"
+	}
 	if err := m.flushRepairObjectLocked(*old); err != nil {
 		old.Status = "failed"
 		old.Error = err.Error()
+		if compactComment {
+			old.Units[0].Status = "pending" // No writer was called.
+		}
 		r.mu.Unlock()
 		return err
 	}
@@ -627,6 +635,25 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 			return r.sinkErr
 		}
 		item := &r.objects[idx]
+		deferSave := false
+		if compactComment {
+			matches := e.SQL == item.Units[0].SQL
+			switch {
+			case commentEvents == 0 && matches && e.Status == "running":
+				commentEvents = 1
+				deferSave = true // The initial snapshot already contains this state.
+			case commentEvents == 1 && matches && (e.Status == "succeeded" || e.Status == "failed" || e.Status == "unknown"):
+				commentEvents = 2
+				deferSave = true // Save the SQL result with the final object status.
+			default:
+				if commentEvents == 0 {
+					// No planned SQL has started. Let the ordinary observer handle
+					// the actual event, including a different physical statement.
+					item.Units[0].Status = "pending"
+				}
+				compactComment = false
+			}
+		}
 		unit := -1
 		for i, u := range item.Units {
 			if u.SQL == e.SQL && ((e.Status == "reused" && u.Status == "pending") || (e.Status == "running" && !observed[i]) || (e.Status != "running" && u.Status == "running")) {
@@ -683,6 +710,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		}
 		item.Units[unit].Error = e.Error
 		item.Units[unit].Selected = item.Units[unit].Status != "succeeded" && !item.Units[unit].Destructive
+		if deferSave {
+			return nil
+		}
 		return m.flushRepairObjectLocked(*item)
 	})
 	err := fn(ctx)
@@ -692,6 +722,26 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		err = r.sinkErr
 	}
 	item := &r.objects[idx]
+	if compactStarted && compactComment && commentEvents == 0 {
+		// Keep the existing contract for writers that do not emit observations:
+		// a nil result completes pending units; an error leaves them unknown.
+		item.Units[0].Status = "pending"
+	}
+	if compactStarted && !compactComment && !observed[0] && item.Units[0].Status == "pending" {
+		// An unexpected physical statement is not evidence that the planned
+		// COMMENT ran. Keep it recoverable instead of completing it implicitly.
+		item.Units[0].Status = "unknown"
+	}
+	if compactStarted && err == nil {
+		for _, unit := range item.Units {
+			if unit.Status == "failed" || unit.Status == "rolled_back" {
+				// An observed failure cannot become success even if a writer
+				// accidentally discards its execution error.
+				err = fmt.Errorf("注释 SQL 执行未成功（%s）: %s", unit.Status, unit.Error)
+				break
+			}
+		}
+	}
 	item.Status = "succeeded"
 	item.Error = ""
 	if err != nil {
@@ -713,6 +763,10 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		if u.Status == "unknown" {
 			item.Status = "unknown"
 		}
+	}
+	if compactStarted && item.Status == "unknown" && err == nil {
+		err = fmt.Errorf("注释 SQL 执行结果未确认")
+		item.Error = err.Error()
 	}
 	if e := m.flushRepairObjectLocked(*item); e != nil {
 		return errors.Join(err, e)
@@ -888,12 +942,8 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 				table = m.objName(p.Object.Name)
 			}
 			id := repairID(p.Object.Kind, table, m.objName(p.Object.Name))
-			found := false
-			for _, o := range r.objects {
-				found = found || o.ID == id
-			}
-			if !found {
-				r.objects = append(r.objects, repair.Object{ID: id, Kind: p.Object.Kind, Name: p.Object.Name, SourceName: p.Object.Name, SourceTable: p.Object.Table, Table: table, TargetName: m.objName(p.Object.Name), Schema: m.cfg.TargetSchema, DDL: dialect.JoinSQL(p.Statements), Units: unitsFor(p.Statements), Status: "pending", RequiresReview: true, Dependencies: []string{}})
+			if r.objectPosition(id) < 0 {
+				r.appendObject(repair.Object{ID: id, Kind: p.Object.Kind, Name: p.Object.Name, SourceName: p.Object.Name, SourceTable: p.Object.Table, Table: table, TargetName: m.objName(p.Object.Name), Schema: m.cfg.TargetSchema, DDL: dialect.JoinSQL(p.Statements), Units: unitsFor(p.Statements), Status: "pending", RequiresReview: true, Dependencies: []string{}})
 			}
 		}
 		// PG → MySQL may embed keys and comments into CREATE TABLE. Preserve
@@ -1010,7 +1060,7 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			}
 		}
 		if match < 0 {
-			r.objects = append(r.objects, legacy)
+			r.appendObject(legacy)
 		} else {
 			o := &r.objects[match]
 			if legacy.SourceDDL != "" {
