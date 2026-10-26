@@ -2,6 +2,7 @@ package mysqldmtrigger
 
 import (
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -96,9 +97,9 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 		case int64:
 			if mysql.HasIsBooleanFlag(e.GetType().GetFlag()) {
 				if v != 0 {
-					return expression{sql: "TRUE", kind: kindBool}, nil
+					return expression{sql: "1", kind: kindNumber}, nil
 				}
-				return expression{sql: "FALSE", kind: kindBool}, nil
+				return expression{sql: "0", kind: kindNumber}, nil
 			}
 			return expression{sql: strconv.FormatInt(v, 10), kind: kindNumber}, nil
 		case uint64:
@@ -160,6 +161,9 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 			owner = t
 			col, err = c.column(t, cn.Name.O)
 			prefix = c.target(t)
+			if c.allowAggregate && c.aggregateDepth == 0 {
+				c.hasPlainQueryColumn = true
+			}
 		}
 		if err != nil {
 			return expression{}, err
@@ -257,6 +261,11 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 			if a.kind != kindNumber && a.kind != kindNull || b.kind != kindNumber && b.kind != kindNull {
 				return bad("算术涉及跨类型转换")
 			}
+			if e.Op == opcode.Div || e.Op == opcode.IntDiv || e.Op == opcode.Mod {
+				if err := c.checkDivisor(e.R); err != nil {
+					return expression{}, err
+				}
+			}
 			if e.Op == opcode.Mod {
 				return expression{sql: "MOD(" + a.sql + ", NULLIF(" + b.sql + ", 0))", kind: kindNumber}, nil
 			}
@@ -274,6 +283,29 @@ func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, er
 		return bad("运算符 " + e.Op.String() + " 需要人工适配")
 	case *ast.FuncCallExpr:
 		return c.function(e, t)
+	case *ast.AggregateFuncExpr:
+		if !c.allowAggregate || c.aggregateDepth != 0 || e.Distinct || e.Order != nil || len(e.Args) != 1 {
+			return bad("聚合只支持 SELECT 字段中的单层 COUNT/SUM/AVG/MIN/MAX，不支持 DISTINCT 或聚合排序")
+		}
+		fn := strings.ToUpper(e.F)
+		if fn != "COUNT" && fn != "SUM" && fn != "AVG" && fn != "MIN" && fn != "MAX" {
+			return bad("聚合函数 " + fn + " 需要人工适配")
+		}
+		c.aggregateDepth++
+		v, err := c.expr(e.Args[0], t)
+		c.aggregateDepth--
+		if err != nil {
+			return expression{}, err
+		}
+		if fn != "COUNT" && v.kind != kindNumber && v.kind != kindNull && !((fn == "MIN" || fn == "MAX") && v.kind == kindTime) {
+			return bad("聚合函数 " + fn + " 的字符排序或参数类型需要人工适配")
+		}
+		c.hasAggregate = true
+		k := v.kind
+		if fn == "COUNT" || fn == "SUM" || fn == "AVG" {
+			k = kindNumber
+		}
+		return expression{sql: fn + "(" + v.sql + ")", kind: k}, nil
 	case *ast.CaseExpr:
 		var base expression
 		var err error
@@ -395,6 +427,12 @@ func (c *converter) compare(op opcode.Op, a, b expression) (expression, error) {
 		return expression{}, fmt.Errorf("比较涉及跨类型隐式转换")
 	}
 	if a.kind == kindText || b.kind == kindText {
+		if c.opt.Capabilities.EmptyStringIsNull {
+			return expression{}, fmt.Errorf("目标空字符串与 NULL 无法区分，字符比较需要人工适配")
+		}
+		if op != opcode.EQ && op != opcode.NE && op != opcode.NullEQ {
+			return expression{}, fmt.Errorf("字符大小比较依赖目标字符编码，需要人工适配")
+		}
 		var err error
 		a, b, err = c.textKeys(a, b)
 		if err != nil {
@@ -618,6 +656,9 @@ func (c *converter) function(e *ast.FuncCallExpr, t *source.TableDDLInfo) (expre
 		if len(args) != 2 || args[0].kind != kindNumber || args[1].kind != kindNumber {
 			return bad()
 		}
+		if err := c.checkDivisor(e.Args[1]); err != nil {
+			return expression{}, err
+		}
 		return expression{sql: "MOD(" + sqls[0] + ", NULLIF(" + sqls[1] + ", 0))", kind: kindNumber}, nil
 	case "upper", "ucase", "lower", "lcase", "ltrim", "rtrim":
 		if len(args) != 1 || args[0].kind != kindText && args[0].kind != kindNull {
@@ -726,3 +767,34 @@ func (c *converter) numericText(v expression) (string, error) {
 }
 
 var numericLiteral = regexp.MustCompile(`^[+-]?[0-9]+(?:\.[0-9]+)?$`)
+
+// In strict trigger SQL modes, turning division by zero into NULL would change
+// a source write error into a successful target write. Only accept divisors
+// whose nonzero value is established syntactically, without folding mutable
+// columns, local variables, or function calls.
+func (c *converter) checkDivisor(n ast.ExprNode) error {
+	if c.mode.HasStrictMode() && c.mode.HasErrorForDivisionByZeroMode() && !nonzeroLiteral(n) {
+		return fmt.Errorf("严格 SQL_MODE 的除零异常语义需要人工适配；除数必须是可确认非零的数值字面量")
+	}
+	return nil
+}
+
+func nonzeroLiteral(n ast.ExprNode) bool {
+	switch e := n.(type) {
+	case *ast.ParenthesesExpr:
+		return nonzeroLiteral(e.Expr)
+	case *ast.UnaryOperationExpr:
+		return (e.Op == opcode.Plus || e.Op == opcode.Minus) && nonzeroLiteral(e.V)
+	case ast.ValueExpr:
+		switch v := e.GetValue().(type) {
+		case int64:
+			return v != 0
+		case uint64:
+			return v != 0
+		case *test_driver.MyDecimal:
+			r, ok := new(big.Rat).SetString(v.String())
+			return ok && r.Sign() != 0
+		}
+	}
+	return false
+}

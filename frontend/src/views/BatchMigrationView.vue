@@ -137,9 +137,9 @@
                   <a-checkbox v-if="nativeDamengRows.length" v-model="options.overwrite_existing">达梦同库：覆盖目标同名对象（删除重建，默认关闭）</a-checkbox>
                   <a-checkbox v-model="options.validate_data" :disabled="options.migrate_content === 'schema_only'">迁移后校验数据内容</a-checkbox>
                   <a-select v-model="batchTriggerMode" :disabled="options.migrate_content === 'data_only'" style="width:290px" aria-label="触发器迁移策略">
-                    <a-option value="default">触发器：按组合默认（MySQL → 达梦开启）</a-option>
-                    <a-option value="on">触发器：支持的迁移行全部开启</a-option>
-                    <a-option value="off">触发器：全部关闭</a-option>
+                    <a-option value="default">MySQL 触发器：按组合默认（达梦开启）</a-option>
+                    <a-option value="on">MySQL 触发器：支持的目标全部开启</a-option>
+                    <a-option value="off">MySQL 触发器：全部关闭</a-option>
                   </a-select>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
                   <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>

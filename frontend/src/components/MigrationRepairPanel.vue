@@ -172,7 +172,7 @@
         <a-alert v-else-if="isMySQLDamengTrigger(editing.object)" type="info">触发器 SQL 为只读，按原生成的单个完整语句执行。达梦 DDL 可能自动提交；重试前会核对目标定义、编译状态和依赖，不会覆盖同名冲突对象。</a-alert>
         <a-alert v-else-if="isMySQLPGTrigger(editing.object)" type="info">触发器 SQL 为只读。重试会在一个事务中一起执行原生成函数和触发器；不支持编辑 SQL 或单独勾选步骤。</a-alert>
         <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
-        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ isMySQLDamengTrigger(editing.object) ? '上次执行结果不确定。重试只核对目标目录；仅当完整定义一致、编译有效且已启用时确认成功，无法证明时保留未知状态，不重复提交 CREATE。' : editing.object.native ? '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。' : '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。' }}</a-alert>
+        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ isMySQLDamengTrigger(editing.object) ? '上次执行结果不确定。重试先核对目标目录；原定义一致、编译有效且已启用时复用，确认不存在才执行冻结的 CREATE；冲突或无法核实时保留未知状态。' : editing.object.native ? '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。' : '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。' }}</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.requires_review && !editing.object.native && !isGeneratedMySQLTrigger(editing.object)" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
@@ -226,7 +226,7 @@
 
     <a-modal v-model:visible="executeConfirmVisible" :mask-closable="false" :width="800" title="确认执行 DDL" :footer="false">
       <p>目标：<strong>{{ editing ? qualified(editing.object) : '' }}</strong> · 草稿版本 {{ executeVersion }}</p>
-      <a-alert type="warning">以下完整执行单元将依次提交。<template v-if="editing && isMySQLPGTrigger(editing.object)">触发器函数和触发器将在同一事务中一起重试。</template><template v-else-if="editing && isMySQLDamengTrigger(editing.object)">达梦触发器 DDL 可能自动提交；结果未知时只核对目录，确认已成功的原定义不会重放。</template><template v-else>已成功和破坏性步骤不会重放；部分数据库无法整体回滚。</template></a-alert>
+      <a-alert type="warning">以下完整执行单元将依次提交。<template v-if="editing && isMySQLPGTrigger(editing.object)">触发器函数和触发器将在同一事务中一起重试。</template><template v-else-if="editing && isMySQLDamengTrigger(editing.object)">达梦触发器 DDL 可能自动提交；结果未知时先核对目录，原定义一致则复用，确认不存在才执行冻结的 CREATE；冲突或无法核实时保留未知状态。</template><template v-else>已成功和破坏性步骤不会重放；部分数据库无法整体回滚。</template></a-alert>
       <pre v-for="unit in executionSnapshot" :key="unit.id" class="sql-preview">{{ unit.sql }}</pre>
       <div class="modal-actions"><a-button @click="executeConfirmVisible = false">返回编辑</a-button><a-button type="primary" :loading="submitting" @click="confirmExecute">执行以上 DDL</a-button></div>
     </a-modal>

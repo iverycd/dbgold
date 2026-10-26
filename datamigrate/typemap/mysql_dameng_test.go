@@ -1,6 +1,7 @@
 package typemap
 
 import (
+	"fmt"
 	"testing"
 
 	"dbgold/datamigrate/source"
@@ -48,6 +49,40 @@ func TestMySQLToDameng(t *testing.T) {
 	for _, c := range cases {
 		got := MySQLToDameng(c.col, c.charInLength, c.useNvarchar2)
 		assert.Equal(t, c.expected, got, "type=%s charInLen=%v nvarchar2=%v", c.col.DataType, c.charInLength, c.useNvarchar2)
+	}
+}
+
+func TestMySQLToDamengCharacterLengths(t *testing.T) {
+	cases := []struct {
+		dataType string
+		length   int64
+		expected [4]string
+	}{
+		{"char", 0, [4]string{"CHAR(1)", "CHAR(1 CHAR)", "NVARCHAR2(1)", "NVARCHAR2(1)"}},
+		{"char", -1, [4]string{"CHAR(1)", "CHAR(1 CHAR)", "NVARCHAR2(1)", "NVARCHAR2(1)"}},
+		{"char", 8, [4]string{"CHAR(8)", "CHAR(8 CHAR)", "NVARCHAR2(8)", "NVARCHAR2(8)"}},
+		{"varchar", 0, [4]string{"VARCHAR2(1)", "VARCHAR2(1 CHAR)", "NVARCHAR2(1)", "NVARCHAR2(1)"}},
+		{"varchar", -1, [4]string{"VARCHAR2(1)", "VARCHAR2(1 CHAR)", "NVARCHAR2(1)", "NVARCHAR2(1)"}},
+		{"varchar", 100, [4]string{"VARCHAR2(100)", "VARCHAR2(100 CHAR)", "NVARCHAR2(100)", "NVARCHAR2(100)"}},
+	}
+	options := []struct {
+		name         string
+		charInLength bool
+		useNvarchar2 bool
+	}{
+		{"default", false, false},
+		{"char_length", true, false},
+		{"nvarchar2", false, true},
+		{"nvarchar2_with_char_length", true, true},
+	}
+	for _, tc := range cases {
+		for i, opt := range options {
+			t.Run(fmt.Sprintf("%s/length=%d/%s", tc.dataType, tc.length, opt.name), func(t *testing.T) {
+				col := source.ColumnInfo{DataType: tc.dataType, Length: tc.length}
+				got := MySQLToDameng(col, opt.charInLength, opt.useNvarchar2)
+				assert.Equal(t, tc.expected[i], got)
+			})
+		}
 	}
 }
 

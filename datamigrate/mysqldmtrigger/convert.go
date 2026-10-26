@@ -23,16 +23,19 @@ type label struct {
 	loop           bool
 }
 type converter struct {
-	info        source.TriggerInfo
-	tables      map[string]*source.TableDDLInfo
-	opt         Options
-	parser      *parser.Parser
-	tokens      []token
-	pos, serial int
-	scopes      []map[string]variable
-	labels      []label
-	deps        map[string]*source.TableDDLInfo
-	mode        mysql.SQLMode
+	info                              source.TriggerInfo
+	tables                            map[string]*source.TableDDLInfo
+	opt                               Options
+	parser                            *parser.Parser
+	tokens                            []token
+	pos, serial                       int
+	scopes                            []map[string]variable
+	labels                            []label
+	deps                              map[string]*source.TableDDLInfo
+	mode                              mysql.SQLMode
+	allowAggregate                    bool
+	aggregateDepth                    int
+	hasAggregate, hasPlainQueryColumn bool
 }
 
 func validName(s string) bool {
@@ -90,6 +93,11 @@ func Convert(info source.TriggerInfo, tables map[string]*source.TableDDLInfo, op
 	for name, sqlText := range opt.PredecessorSQLs {
 		if name != strings.ToUpper(name) || !validName(name) || !strings.HasPrefix(sqlText, "CREATE TRIGGER "+quote(opt.Schema)+"."+quote(name)+" ") || !strings.Contains(sqlText, ToolMarker) {
 			return empty, fmt.Errorf("前驱触发器 %s 的冻结定义身份不一致", name)
+		}
+	}
+	for name, sqlText := range opt.PeerSQLs {
+		if name != strings.ToUpper(name) || !validName(name) || !strings.HasPrefix(sqlText, "CREATE TRIGGER "+quote(opt.Schema)+"."+quote(name)+" ") || !strings.Contains(sqlText, ToolMarker) {
+			return empty, fmt.Errorf("同组触发器 %s 的冻结定义身份不一致", name)
 		}
 	}
 	c := &converter{info: info, tables: tables, opt: opt, parser: parser.New(), deps: map[string]*source.TableDDLInfo{}, mode: mode}

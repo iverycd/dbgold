@@ -124,3 +124,77 @@ func TestSQLModeNamesMetadataAndEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregateSelectIntoAndLocalPrecedence(t *testing.T) {
+	info, tables, opt := triggerFixture(`BEGIN DECLARE Id INT DEFAULT 7; DECLARE n INT; DECLARE total DECIMAL(12,2); SELECT COUNT(*),SUM(Amount) INTO n,total FROM Audit WHERE Audit.Id=NEW.Id; SELECT Id INTO n FROM Audit WHERE Audit.Id=NEW.Id; SET NEW.Amount=total+n; END`)
+	p, err := Convert(info, tables, opt)
+	require.NoError(t, err)
+	require.NoError(t, ValidatePlan(p))
+	require.Contains(t, p.TriggerSQL, `COUNT(1)`)
+	require.Contains(t, p.TriggerSQL, `SUM("DEST"."AUDITLOG"."RECORDEDAMOUNT")`)
+	require.Contains(t, p.TriggerSQL, `SELECT DBGOLD_VAR_1 INTO`)
+	for _, body := range []string{
+		`BEGIN DECLARE n INT; SELECT COUNT(*)+Id INTO n FROM Audit; END`,
+		`BEGIN DECLARE n INT; SELECT COUNT(DISTINCT Id) INTO n FROM Audit; END`,
+		`BEGIN DECLARE n INT; SELECT SUM(MAX(Id)) INTO n FROM Audit; END`,
+		`SET NEW.Amount=SUM(NEW.Amount)`,
+		`BEGIN DECLARE n INT; SELECT Id INTO n FROM Audit WHERE COUNT(*)>0; END`,
+	} {
+		info, tables, opt := triggerFixture(body)
+		p, err := Convert(info, tables, opt)
+		require.Error(t, err, body)
+		require.Empty(t, p.TriggerSQL)
+	}
+}
+
+func TestEmptyBlocksAndTruncatedAssignments(t *testing.T) {
+	for _, body := range []string{`BEGIN END`, `BEGIN IF NEW.Id>0 THEN END IF; END`, `BEGIN CASE NEW.Id WHEN 1 THEN END CASE; END`, `BEGIN x: LOOP LEAVE x; END LOOP x; END`} {
+		info, tables, opt := triggerFixture(body)
+		p, err := Convert(info, tables, opt)
+		require.NoError(t, err, body)
+		require.NoError(t, ValidatePlan(p))
+		if body != `BEGIN x: LOOP LEAVE x; END LOOP x; END` {
+			require.Contains(t, p.TriggerSQL, "NULL;", body)
+		}
+	}
+	for _, body := range []string{`SET NEW.Amount=`, `SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT=`} {
+		info, tables, opt := triggerFixture(body)
+		require.NotPanics(t, func() { p, err := Convert(info, tables, opt); require.Error(t, err); require.Empty(t, p.TriggerSQL) })
+	}
+}
+
+func TestMySQLBooleanLiteralsAndNewTimestampPrecision(t *testing.T) {
+	info, tables, opt := triggerFixture(`BEGIN SET NEW.Amount=TRUE+1; SET NEW.Stamp=NOW(6); IF FALSE THEN SET NEW.Amount=0; END IF; END`)
+	p, err := Convert(info, tables, opt)
+	require.NoError(t, err)
+	require.Contains(t, p.TriggerSQL, `:= (1 + 1)`)
+	require.Contains(t, p.TriggerSQL, `AS TIMESTAMP(3))`)
+	require.Contains(t, p.TriggerSQL, `IF (0 <> 0)`)
+	require.NoError(t, ValidatePlan(p))
+}
+
+func TestStrictDivisionByZeroDoesNotBecomeSuccessfulNullWrite(t *testing.T) {
+	for _, mode := range []string{"STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO", "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO"} {
+		for _, expr := range []string{`NEW.Amount/0`, `NEW.Amount DIV 0`, `NEW.Amount%0`, `MOD(NEW.Amount,0)`, `NEW.Amount/NEW.Id`, `NEW.Amount DIV NEW.Id`, `NEW.Amount%NEW.Id`, `MOD(NEW.Amount,NEW.Id)`, `NEW.Amount/(1-1)`, `NEW.Amount/0.000`} {
+			info, tables, opt := triggerFixture("SET NEW.Amount=" + expr)
+			info.SQLMode = mode
+			p, err := Convert(info, tables, opt)
+			require.ErrorContains(t, err, "除零异常", mode+": "+expr)
+			require.Empty(t, p.TriggerSQL)
+		}
+		for _, expr := range []string{`NEW.Amount/2`, `NEW.Amount DIV -2`, `NEW.Amount%(+2)`, `MOD(NEW.Amount,(-2))`, `NEW.Amount/0.001`, `NEW.Amount/(-0.001)`} {
+			info, tables, opt := triggerFixture("SET NEW.Amount=" + expr)
+			info.SQLMode = mode
+			p, err := Convert(info, tables, opt)
+			require.NoError(t, err, mode+": "+expr)
+			require.NoError(t, ValidatePlan(p))
+		}
+	}
+	for _, mode := range []string{"", "STRICT_TRANS_TABLES", "ERROR_FOR_DIVISION_BY_ZERO"} {
+		info, tables, opt := triggerFixture(`SET NEW.Amount=NEW.Amount/NEW.Id`)
+		info.SQLMode = mode
+		p, err := Convert(info, tables, opt)
+		require.NoError(t, err, mode)
+		require.Contains(t, p.TriggerSQL, "NULLIF(")
+	}
+}

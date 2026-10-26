@@ -34,10 +34,10 @@ func dmTriggerWriterFixture(t *testing.T) (*DaMengWriter, sqlmock.Sqlmock) {
 }
 
 func expectDMTriggerTarget(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery(`SELECT PARA_VALUE FROM V\$DM_INI`).WillReturnRows(sqlmock.NewRows([]string{"mode"}).AddRow("0"))
+	mock.ExpectQuery(`SELECT SF_GET_PARA_VALUE`).WillReturnRows(sqlmock.NewRows([]string{"mode"}).AddRow("0"))
 	mock.ExpectQuery(`SELECT CASE WHEN '' IS NULL`).WillReturnRows(sqlmock.NewRows([]string{"empty", "concat"}).AddRow(0, 0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ALL_TABLES`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(`SELECT COLUMN_NAME,DATA_TYPE`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "length", "precision", "scale", "nullable", "default", "extra", "ordinal", "datetime_precision", "generated"}).AddRow("VALUE", "INTEGER", 4, 10, 0, "NO", nil, "", 1, 0, ""))
+	mock.ExpectQuery(`SELECT c.COLUMN_NAME,c.DATA_TYPE`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "length", "precision", "scale", "flags"}).AddRow("VALUE", "INTEGER", 4, 10, 0, 0))
 }
 
 func dmTriggerRows(p mysqldmtrigger.Plan, body string) *sqlmock.Rows {
@@ -77,6 +77,58 @@ func TestMySQLDamengTriggerWholeUnitAndCatalogValidation(t *testing.T) {
 	require.NoError(t, CreateMySQLDamengTrigger(ctx, w, p))
 	require.Equal(t, []string{"running", "succeeded"}, states)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLDamengTriggerCapabilitiesDoNotRequireINIPrivilege(t *testing.T) {
+	w, mock := dmTriggerWriterFixture(t)
+	mock.ExpectQuery(`SELECT SF_GET_PARA_VALUE`).WillReturnError(errors.New("[-5730] No select INI parameter privilege"))
+	mock.ExpectQuery(`SELECT CASE WHEN '' IS NULL`).WillReturnRows(sqlmock.NewRows([]string{"empty", "concat"}).AddRow(1, 0))
+	c, err := DetectMySQLDamengTriggerCapabilities(context.Background(), w)
+	require.NoError(t, err)
+	require.Equal(t, mysqldmtrigger.Capabilities{CompatibleMode: "unknown", EmptyStringIsNull: true}, c)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLDamengTriggerCapabilitiesRequireBehavioralEvidence(t *testing.T) {
+	w, mock := dmTriggerWriterFixture(t)
+	mock.ExpectQuery(`SELECT SF_GET_PARA_VALUE`).WillReturnError(errors.New("not permitted"))
+	mock.ExpectQuery(`SELECT CASE WHEN '' IS NULL`).WillReturnError(errors.New("behavior query failed"))
+	_, err := DetectMySQLDamengTriggerCapabilities(context.Background(), w)
+	require.ErrorContains(t, err, "behavior query failed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLDamengTriggerOrdinaryMigrationReusesExactExistingDefinition(t *testing.T) {
+	p := dmTriggerPlanFixture(t)
+	w, mock := dmTriggerWriterFixture(t)
+	expectDMTriggerTarget(mock)
+	expectDMTriggerInspection(mock, p, true, p.TriggerSQL)
+	var state string
+	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { state = e.Status; return nil })
+	require.NoError(t, CreateMySQLDamengTrigger(ctx, w, p))
+	require.Equal(t, "reused", state)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLDamengTriggerKnownInvalidIsFailed(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		t.Run(map[bool]string{false: "created", true: "retry"}[retry], func(t *testing.T) {
+			p := dmTriggerPlanFixture(t)
+			w, mock := dmTriggerWriterFixture(t)
+			expectDMTriggerTarget(mock)
+			if !retry {
+				expectDMTriggerInspection(mock, p, false, "")
+				mock.ExpectExec(regexp.QuoteMeta(p.TriggerSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+			}
+			mock.ExpectQuery(`SELECT OBJECT_TYPE,STATUS FROM ALL_OBJECTS`).WithArgs(p.Schema, p.Name).WillReturnRows(sqlmock.NewRows([]string{"type", "status"}).AddRow("TRIGGER", "INVALID"))
+			var state string
+			ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { state = e.Status; return nil })
+			err := w.createMySQLDamengTrigger(ctx, p, retry)
+			require.ErrorContains(t, err, "编译无效")
+			require.Equal(t, "failed", state)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestMySQLDamengTriggerConflictsAndUnknownOutcomes(t *testing.T) {
@@ -130,10 +182,8 @@ func TestMySQLDamengTriggerRepairReconcilesWithoutReplay(t *testing.T) {
 					expectDMTriggerInspection(mock, p, true, p.TriggerSQL)
 				case "absent":
 					expectDMTriggerInspection(mock, p, false, "")
-					if status == "failed" {
-						mock.ExpectExec(regexp.QuoteMeta(p.TriggerSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-						expectDMTriggerInspection(mock, p, true, p.TriggerSQL)
-					}
+					mock.ExpectExec(regexp.QuoteMeta(p.TriggerSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+					expectDMTriggerInspection(mock, p, true, p.TriggerSQL)
 				case "different":
 					expectDMTriggerInspection(mock, p, true, p.TriggerSQL+"\nNULL;")
 				case "unreadable":
@@ -142,7 +192,7 @@ func TestMySQLDamengTriggerRepairReconcilesWithoutReplay(t *testing.T) {
 				o := dmTriggerRepairFixture(p, status)
 				var saved []repair.Unit
 				units, err := ExecuteRepair(context.Background(), w, o, o.Units, func(units []repair.Unit) error { saved = units; return nil })
-				if targetState == "identical" || targetState == "absent" && status == "failed" {
+				if targetState == "identical" || targetState == "absent" {
 					require.NoError(t, err)
 					require.Equal(t, "succeeded", units[0].Status)
 					require.False(t, units[0].Selected)
@@ -199,6 +249,19 @@ func TestMySQLDamengTriggerColumnCapacity(t *testing.T) {
 	require.False(t, mysqlDMCompatibleColumn("INT", source.ColumnInfo{DataType: "VARCHAR", Length: 30}))
 }
 
+func TestMySQLDamengTriggerRejectsGeneratedTargetColumns(t *testing.T) {
+	p := dmTriggerPlanFixture(t)
+	w, mock := dmTriggerWriterFixture(t)
+	mock.ExpectQuery(`SELECT SF_GET_PARA_VALUE`).WillReturnRows(sqlmock.NewRows([]string{"mode"}).AddRow("0"))
+	mock.ExpectQuery(`SELECT CASE WHEN '' IS NULL`).WillReturnRows(sqlmock.NewRows([]string{"empty", "concat"}).AddRow(0, 0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ALL_TABLES`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT c.COLUMN_NAME,c.DATA_TYPE.*SYSCOLINFOS`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "length", "precision", "scale", "flags"}).AddRow("VALUE", "INT", 0, 0, 0, 1))
+	err := CreateMySQLDamengTrigger(context.Background(), w, p)
+	require.ErrorContains(t, err, "名称、类型或容量不兼容")
+	require.True(t, IsMySQLDamengTriggerPreflight(err))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestMySQLDamengTriggerFrozenOrderingRejectsChangedPredecessor(t *testing.T) {
 	first := dmTriggerPlanFixture(t)
 	sourceTables := map[string]*source.TableDDLInfo{first.SourceTables[0].TableName: &first.SourceTables[0]}
@@ -220,6 +283,44 @@ func TestMySQLDamengTriggerFrozenOrderingRejectsChangedPredecessor(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestMySQLDamengTriggerRerunAcceptsOnlyFrozenExistingPeers(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "identical_peer", true: "changed_peer"}[changed], func(t *testing.T) {
+			first := dmTriggerPlanFixture(t)
+			sourceTables := map[string]*source.TableDDLInfo{first.SourceTables[0].TableName: &first.SourceTables[0]}
+			src := first.Source
+			src.Name = "Second"
+			options := first.Options
+			options.Predecessor = first.Name
+			options.PredecessorSQLs = map[string]string{first.Name: first.TriggerSQL}
+			second, err := mysqldmtrigger.Convert(src, sourceTables, options)
+			require.NoError(t, err)
+			first.Options.PeerSQLs = map[string]string{second.Name: second.TriggerSQL}
+			require.NoError(t, mysqldmtrigger.ValidatePlan(first))
+			w, mock := dmTriggerWriterFixture(t)
+			expectDMTriggerTarget(mock)
+			mock.ExpectQuery(`SELECT OBJECT_TYPE,STATUS FROM ALL_OBJECTS`).WithArgs(first.Schema, first.Name).WillReturnRows(sqlmock.NewRows([]string{"type", "status"}).AddRow("TRIGGER", "VALID"))
+			peerBody := second.TriggerSQL
+			if changed {
+				peerBody += "\nNULL;"
+			}
+			rows := dmTriggerRows(first, first.TriggerSQL)
+			rows.AddRow(second.Schema, second.Name, second.Schema, second.Table, "BEFORE ROW", "INSERT", "Y", nil, peerBody)
+			mock.ExpectQuery(`SELECT OWNER,TRIGGER_NAME,TABLE_OWNER`).WithArgs(first.Schema, first.Table).WillReturnRows(rows)
+			if !changed {
+				mock.ExpectQuery(`SELECT OBJECT_TYPE,STATUS FROM ALL_OBJECTS`).WithArgs(second.Schema, second.Name).WillReturnRows(sqlmock.NewRows([]string{"type", "status"}).AddRow("TRIGGER", "VALID"))
+			}
+			err = CreateMySQLDamengTrigger(context.Background(), w, first)
+			if changed {
+				require.ErrorContains(t, err, "同组定义")
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestMySQLDamengLoadTriggerGuard(t *testing.T) {
 	for _, status := range []string{"Y", "ENABLED", "N", "DISABLED", "unknown"} {
 		t.Run(status, func(t *testing.T) {
@@ -232,6 +333,32 @@ func TestMySQLDamengLoadTriggerGuard(t *testing.T) {
 				require.Error(t, err)
 			}
 			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestMySQLDamengRecoveryDoesNotExemptGeneratedBusinessTriggers(t *testing.T) {
+	w, mock := dmTriggerWriterFixture(t)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ALL_TABLES`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ALL_TRIGGERS.*STATUS IN`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	_, err := InspectRecovery(context.Background(), w, "ORDERS")
+	require.ErrorContains(t, err, "启用的自定义触发器")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLDamengRecoveryChecksTriggersImmediatelyBeforeMutation(t *testing.T) {
+	for _, action := range []string{"truncate", "load"} {
+		t.Run(action, func(t *testing.T) {
+			w, mock := dmTriggerWriterFixture(t)
+			mock.ExpectQuery(`SELECT TRIGGER_NAME,STATUS FROM ALL_TRIGGERS`).WithArgs("APP", "ORDERS").WillReturnRows(sqlmock.NewRows([]string{"name", "status"}).AddRow("BUSINESS", "Y"))
+			var err error
+			if action == "truncate" {
+				err = TruncateRecovery(context.Background(), w, "ORDERS")
+			} else {
+				err = PrepareRecovery(context.Background(), w, "ORDERS", []source.ColumnInfo{{Name: "VALUE", DataType: "int"}})
+			}
+			require.ErrorContains(t, err, "禁止复制数据")
+			require.NoError(t, mock.ExpectationsWereMet(), "neither truncation nor data preparation can proceed after the guard fails")
 		})
 	}
 }

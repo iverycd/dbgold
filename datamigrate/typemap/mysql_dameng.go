@@ -44,21 +44,25 @@ func MySQLToDameng(col source.ColumnInfo, charInLength, useNvarchar2 bool) strin
 	case "double", "double precision", "real":
 		return "DOUBLE"
 	case "char":
+		// MySQL 支持零长度字符字段，达梦要求正长度；仅在目标映射时兜底为 1。
+		length := max(col.Length, int64(1))
 		if useNvarchar2 {
-			return fmt.Sprintf("NVARCHAR2(%d)", col.Length)
+			return fmt.Sprintf("NVARCHAR2(%d)", length)
 		}
 		if charInLength {
-			return fmt.Sprintf("CHAR(%d CHAR)", col.Length)
+			return fmt.Sprintf("CHAR(%d CHAR)", length)
 		}
-		return fmt.Sprintf("CHAR(%d)", col.Length)
+		return fmt.Sprintf("CHAR(%d)", length)
 	case "varchar":
+		// 与 CHAR 一样，保留源长度，仅为目标 DDL 使用最小有效长度。
+		length := max(col.Length, int64(1))
 		if useNvarchar2 {
-			return fmt.Sprintf("NVARCHAR2(%d)", col.Length)
+			return fmt.Sprintf("NVARCHAR2(%d)", length)
 		}
 		if charInLength {
-			return fmt.Sprintf("VARCHAR2(%d CHAR)", col.Length)
+			return fmt.Sprintf("VARCHAR2(%d CHAR)", length)
 		}
-		return fmt.Sprintf("VARCHAR2(%d)", col.Length)
+		return fmt.Sprintf("VARCHAR2(%d)", length)
 	case "tinytext":
 		return "VARCHAR2(4000)"
 	case "text", "mediumtext", "longtext":

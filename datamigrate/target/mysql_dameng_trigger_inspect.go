@@ -12,6 +12,20 @@ import (
 	"dbgold/datamigrate/mysqldmtrigger"
 )
 
+type mysqlDMTriggerInvalidError struct{ name string }
+
+func (e mysqlDMTriggerInvalidError) Error() string {
+	return fmt.Sprintf("目标触发器 %s 已创建但编译无效，需人工核对编译错误", e.name)
+}
+
+func mysqlDMTriggerInspectionStatus(err error) string {
+	var invalid mysqlDMTriggerInvalidError
+	if errors.As(err, &invalid) {
+		return "failed"
+	}
+	return "unknown"
+}
+
 func (w *DaMengWriter) mysqlDMTriggerObject(ctx context.Context, name string) (bool, error) {
 	rows, err := w.db.QueryContext(ctx, `SELECT OBJECT_TYPE,STATUS FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=?`, w.schema, name)
 	if err != nil {
@@ -25,6 +39,9 @@ func (w *DaMengWriter) mysqlDMTriggerObject(ctx context.Context, name string) (b
 			return false, err
 		}
 		count++
+		if count == 1 && strings.TrimSpace(kind) == "TRIGGER" && strings.TrimSpace(status) == "INVALID" {
+			return false, mysqlDMTriggerInvalidError{name: w.schema + "." + name}
+		}
 		if count != 1 || strings.TrimSpace(kind) != "TRIGGER" || strings.TrimSpace(status) != "VALID" {
 			return false, fmt.Errorf("目标同名对象 %s.%s 不是唯一且编译有效的 TRIGGER（类型=%s，状态=%s），禁止覆盖", w.schema, name, kind, status)
 		}
@@ -74,8 +91,11 @@ func (w *DaMengWriter) inspectMySQLDamengTrigger(ctx context.Context, p mysqldmt
 			continue
 		}
 		ancestorSQL, known := p.Options.PredecessorSQLs[name]
+		if !known {
+			ancestorSQL, known = p.Options.PeerSQLs[name]
+		}
 		if !known || !mysqlDMTriggerMatches(trigger, ancestorSQL, p.Schema) {
-			return false, fmt.Errorf("目标表 %s 存在同类启用触发器 %s，无法证明其属于冻结顺序链", p.Table, name)
+			return false, fmt.Errorf("目标表 %s 存在同类启用触发器 %s，无法证明其属于冻结顺序链或同组定义", p.Table, name)
 		}
 		valid, err := w.mysqlDMTriggerObject(ctx, name)
 		if err != nil {

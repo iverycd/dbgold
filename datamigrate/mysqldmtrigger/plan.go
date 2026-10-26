@@ -24,7 +24,9 @@ type Options struct {
 	ColumnNames map[string]map[string]string
 	Predecessor string
 	// Read-only predecessor proofs; these SQL strings are never execution units.
-	PredecessorSQLs   map[string]string
+	PredecessorSQLs map[string]string
+	// Optional existing group members, compared to catalogs but never executed.
+	PeerSQLs          map[string]string
 	CharacterMetadata *source.TriggerCharacterMetadata
 	Capabilities      Capabilities
 }

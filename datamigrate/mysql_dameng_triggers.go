@@ -29,13 +29,13 @@ func (m *Migrator) isMySQLDameng() bool {
 }
 
 func (m *Migrator) mysqlDMTriggerRequested() bool {
-	if !m.isMySQLDameng() || len(m.cfg.ViewNames) > 0 || m.cfg.Content == "data_only" {
+	if len(m.cfg.ViewNames) > 0 || m.cfg.Content == "data_only" {
 		return false
 	}
 	if m.cfg.objectMode() {
-		return slices.Contains(m.cfg.Objects, "triggers")
+		return slices.Contains(m.cfg.Objects, "triggers") && m.isMySQLDameng()
 	}
-	return m.cfg.MigrateTriggers
+	return m.cfg.MigrateTriggers && m.isMySQLDameng()
 }
 
 // Preparation is read-only. The same frozen mapping is used by table DDL,
@@ -158,6 +158,22 @@ func (m *Migrator) prepareMySQLDamengTriggers(ctx context.Context) {
 			previousSQLs[mysqlDMTriggerGroup(v)][p.plan.Name] = p.plan.TriggerSQL
 		}
 		m.mysqlDMTriggers = append(m.mysqlDMTriggers, p)
+	}
+	// Freeze optional later members too, so an existing complete group can be
+	// reconciled without mistaking its descendants for unrelated business logic.
+	for i := range m.mysqlDMTriggers {
+		p := &m.mysqlDMTriggers[i]
+		if p.err != nil {
+			continue
+		}
+		o := p.plan.Options
+		o.PeerSQLs = map[string]string{}
+		for _, peer := range m.mysqlDMTriggers {
+			if peer.err == nil && peer.plan.Name != p.plan.Name && mysqlDMTriggerGroup(peer.source) == mysqlDMTriggerGroup(p.source) {
+				o.PeerSQLs[peer.plan.Name] = peer.plan.TriggerSQL
+			}
+		}
+		p.plan, p.err = mysqldmtrigger.Convert(p.source, metadata, o)
 	}
 	m.log.Info("MySQL → 达梦触发器将在数据迁移与校验完成后创建；按目标所属用户权限执行，不映射源 DEFINER，请保持业务会话时区一致")
 }

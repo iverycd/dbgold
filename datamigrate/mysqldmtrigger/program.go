@@ -1,6 +1,7 @@
 package mysqldmtrigger
 
 import (
+	"dbgold/datamigrate/source"
 	"fmt"
 	"strings"
 
@@ -13,6 +14,9 @@ func (c *converter) sequence(stops ...string) (string, error) {
 	for c.pos < len(c.tokens) {
 		for _, s := range stops {
 			if c.at(s) {
+				if b.Len() == 0 {
+					return "NULL;\n", nil
+				}
 				return b.String(), nil
 			}
 		}
@@ -516,6 +520,7 @@ func (c *converter) setStatement() (string, error) {
 		}
 		target := ""
 		kind := kindUnknown
+		var targetColumn *source.ColumnInfo
 		n, e := identifier(c.tokens[c.pos])
 		if e != nil {
 			return "", fmt.Errorf("会话/系统变量或 SET 目标不支持")
@@ -542,6 +547,7 @@ func (c *converter) setStatement() (string, error) {
 				return "", fmt.Errorf("自增列赋值需要人工适配")
 			}
 			kind = kindOf(col.DataType)
+			targetColumn = col
 			target = ":NEW." + quote(c.columnName(c.info.TableName, col.Name))
 		} else {
 			v, ok := c.lookup(n)
@@ -557,6 +563,9 @@ func (c *converter) setStatement() (string, error) {
 		start := c.pos
 		s, e := c.until(",", ";")
 		if e != nil && c.pos == len(c.tokens) {
+			if start == len(c.tokens) {
+				return "", fmt.Errorf("SET 缺少赋值表达式")
+			}
 			s = c.info.Body[c.tokens[start].start:]
 			e = nil
 		}
@@ -570,7 +579,14 @@ func (c *converter) setStatement() (string, error) {
 		if e = assignable(kind, v.kind); e != nil {
 			return "", e
 		}
-		b.WriteString(target + " := " + v.sql + ";\n")
+		value := v.sql
+		if targetColumn != nil {
+			value, e = c.assigned(targetColumn, v)
+			if e != nil {
+				return "", e
+			}
+		}
+		b.WriteString(target + " := " + value + ";\n")
 		if !c.at(",") {
 			break
 		}
@@ -615,6 +631,9 @@ func (c *converter) signal() (string, error) {
 		start := c.pos
 		s, e := c.until(";")
 		if e != nil && c.pos == len(c.tokens) {
+			if start == len(c.tokens) {
+				return "", fmt.Errorf("SIGNAL 缺少 MESSAGE_TEXT 表达式")
+			}
 			s = c.info.Body[c.tokens[start].start:]
 			e = nil
 		}

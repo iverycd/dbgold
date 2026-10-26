@@ -219,6 +219,11 @@ func (c *converter) selectParts(q *ast.SelectStmt, cols []*source.ColumnInfo) ([
 		tail = " FROM " + c.target(t)
 	}
 	var fields []string
+	previousAllow, previousAggregate, previousPlain := c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn
+	c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn = true, false, false
+	defer func() {
+		c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn = previousAllow, previousAggregate, previousPlain
+	}()
 	for i, f := range q.Fields.Fields {
 		if f == nil || f.WildCard != nil || f.Expr == nil || f.AsName.O != "" {
 			return nil, "", fmt.Errorf("SELECT 必须列出明确表达式，不支持星号或列别名")
@@ -236,6 +241,10 @@ func (c *converter) selectParts(q *ast.SelectStmt, cols []*source.ColumnInfo) ([
 		}
 		fields = append(fields, sql)
 	}
+	if c.hasAggregate && c.hasPlainQueryColumn {
+		return nil, "", fmt.Errorf("无 GROUP BY 的聚合查询不能混合普通表列")
+	}
+	c.allowAggregate = false
 	where, e := c.where(q.Where, t)
 	if e != nil {
 		return nil, "", e
@@ -316,11 +325,11 @@ func (c *converter) selectInto() (string, error) {
 	if !ok {
 		return "", fmt.Errorf("SELECT INTO 不支持 UNION")
 	}
-	if len(q.Fields.Fields) != len(vars) {
-		return "", fmt.Errorf("SELECT INTO 变量数量不匹配")
-	}
 	if e = validateSelect(q); e != nil {
 		return "", e
+	}
+	if len(q.Fields.Fields) != len(vars) {
+		return "", fmt.Errorf("SELECT INTO 变量数量不匹配")
 	}
 	var t *source.TableDDLInfo
 	tail := " FROM DUAL"
@@ -337,6 +346,11 @@ func (c *converter) selectInto() (string, error) {
 	}
 	var declarations, assignments strings.Builder
 	var fields, temps []string
+	previousAllow, previousAggregate, previousPlain := c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn
+	c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn = true, false, false
+	defer func() {
+		c.allowAggregate, c.hasAggregate, c.hasPlainQueryColumn = previousAllow, previousAggregate, previousPlain
+	}()
 	for j, f := range q.Fields.Fields {
 		if f.WildCard != nil || f.Expr == nil || f.AsName.O != "" {
 			return "", fmt.Errorf("SELECT INTO 不支持星号或别名")
@@ -353,6 +367,9 @@ func (c *converter) selectInto() (string, error) {
 		temps = append(temps, tmp)
 		fields = append(fields, v.sql)
 		assignments.WriteString(quote(vars[j].name) + " := " + tmp + ";\n")
+	}
+	if c.hasAggregate && c.hasPlainQueryColumn {
+		return "", fmt.Errorf("无 GROUP BY 的聚合查询不能混合普通表列")
 	}
 	_ = qtext
 	return "DECLARE\n" + declarations.String() + "BEGIN\nSELECT " + strings.Join(fields, ", ") + " INTO " + strings.Join(temps, ", ") + tail + where + ";\n" + assignments.String() + "EXCEPTION WHEN NO_DATA_FOUND THEN NULL;\nEND;\n", nil

@@ -22,16 +22,13 @@ type preparedMySQLPGTrigger struct {
 }
 
 func (m *Migrator) mysqlPGTriggerRequested() bool {
-	if m.isMySQLDameng() {
-		return false
-	}
 	if len(m.cfg.ViewNames) > 0 || m.cfg.Content == "data_only" {
 		return false
 	}
 	if m.cfg.objectMode() {
-		return slices.Contains(m.cfg.Objects, "triggers")
+		return slices.Contains(m.cfg.Objects, "triggers") && !m.isMySQLDameng()
 	}
-	return m.cfg.MigrateTriggers
+	return m.cfg.MigrateTriggers && !m.isMySQLDameng()
 }
 
 func (m *Migrator) mysqlPGTargetTables(tables []string) []string {

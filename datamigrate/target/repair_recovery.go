@@ -180,6 +180,11 @@ func (w *OracleWriter) onlyManagedRecoveryTriggers(ctx context.Context, table st
 // TruncateRecovery is only called after the application has persisted the
 // user's explicit replace-data choice. It never uses CASCADE or disables FKs.
 func TruncateRecovery(ctx context.Context, w Writer, table string) error {
+	if dw, ok := w.(*DaMengWriter); ok && dw.srcType == "mysql" {
+		if err := dw.CheckMySQLDamengLoadTriggers(ctx, table); err != nil {
+			return err
+		}
+	}
 	if err := checkRecoveryRisks(ctx, w, table, true); err != nil {
 		return err
 	}
@@ -199,6 +204,11 @@ func TruncateRecovery(ctx context.Context, w Writer, table string) error {
 // Actual target types are loaded independently; SQL Server binds using these
 // actual types instead of regenerating the pre-repair CAST from source types.
 func PrepareRecovery(ctx context.Context, w Writer, table string, columns []source.ColumnInfo) error {
+	if dw, ok := w.(*DaMengWriter); ok && dw.srcType == "mysql" {
+		if err := dw.CheckMySQLDamengLoadTriggers(ctx, table); err != nil {
+			return err
+		}
+	}
 	actual, err := InspectRecovery(ctx, w, table)
 	if err != nil {
 		return err

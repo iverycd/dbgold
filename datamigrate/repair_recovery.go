@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/mysqldmtrigger"
 	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
@@ -144,6 +145,11 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		return p, fmt.Errorf("读取目标表行数: %w", err)
 	}
 	p.DataRequired = cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus != "succeeded"
+	if p.DataRequired && r.DBType() == "mysql" && w.DBType() == "dameng" {
+		if err = target.CheckMySQLDamengLoadTriggers(ctx, w, strings.ToUpper(p.TargetTable)); err != nil {
+			return p, err
+		}
+	}
 	if !p.DataRequired && cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus == "succeeded" && p.SourceRows != p.TargetRows {
 		return p, fmt.Errorf("已完成的数据行数发生变化，请核对后另行恢复数据")
 	}
@@ -522,6 +528,27 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	if o.MySQLDamengTrigger != nil {
+		plan := o.MySQLDamengTrigger
+		if err := mysqldmtrigger.ValidatePlan(*plan); err != nil {
+			o.Status, o.Error, o.DiagnosticOnly = "blocked", err.Error(), true
+			return o
+		}
+		for _, sourceTable := range plan.SourceTables {
+			if sourceTable.TableName != table.SourceName && sourceTable.TableName != table.SourceTable {
+				continue
+			}
+			for _, column := range sourceTable.Columns {
+				expected := plan.Options.ColumnNames[sourceTable.TableName][column.Name]
+				if mapped, ok := mapping[column.Name]; !ok || expected == "" || mapped != expected {
+					o.Status, o.Error, o.DiagnosticOnly = "blocked", "表列映射已改变，请重新迁移触发器；原生成达梦 SQL 不能跟随手工映射重放", true
+					return o
+				}
+			}
+		}
+		o.RequiresReview = false
+		return o
+	}
 	if o.MySQLPGTrigger != nil {
 		if err := mysqltrigger.ValidatePlan(*o.MySQLPGTrigger); err != nil {
 			o.Status, o.Error, o.DiagnosticOnly = "blocked", err.Error(), true

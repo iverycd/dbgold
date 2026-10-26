@@ -1650,7 +1650,8 @@ test('MySQL Dameng trigger retry is one immutable read-only unit and reconciles 
     const editors = []
     const html = await renderPanel(p, undefined, editor => editors.push(editor))
     assert.match(html, /达梦 DDL 可能自动提交/)
-    assert.match(html, /重试只核对目标目录/)
+    assert.match(html, /重试先核对目标目录/)
+    assert.match(html, /确认不存在才执行冻结的 CREATE/)
     assert.equal(editors.length, 0)
     trigger.object.units[0].sql += ' changed'
     assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), false)

@@ -265,7 +265,7 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	defer m.clearSourceTableDDLCache()
 	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
 	m.prepareMySQLPGTriggers(ctx)
-	if m.isMySQLDameng() {
+	if m.mysqlDMTriggerRequested() {
 		m.dmPlans, m.dmUsable, m.dmBlocked = nil, nil, nil
 	}
 	m.mysqlDMTriggers, m.mysqlDMTriggerError = nil, nil
@@ -377,7 +377,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
-	if m.isMySQLDameng() && m.cfg.Content == "data_only" {
+	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
 		for _, table := range tables {
 			if tablesFailed[table] {
 				continue
@@ -485,7 +485,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 
 	// Phase 2: 迁移数据（并发）
 	report.Data.Total = len(tables) - len(tablesFailed)
-	if m.isMySQLDameng() && m.cfg.Content == "data_only" {
+	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
 		report.Data.Total += report.Data.Failed
 	}
 	if skipData {

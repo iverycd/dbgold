@@ -17,7 +17,7 @@ func TestMySQLDamengTriggerRepairScopeIsImmutable(t *testing.T) {
 	o := repair.Object{Kind: "trigger", Schema: p.Schema, Table: p.Table, TargetName: p.Name, MySQLDamengTrigger: &p, Status: "unknown", Units: []repair.Unit{{ID: "whole", SQL: p.TriggerSQL, OriginalSQL: p.TriggerSQL, Status: "unknown", Selected: true}}}
 	require.True(t, o.CanExecuteDDL())
 	require.False(t, o.CanEditDDL())
-	require.NoError(t, validateRepairObjectScope(o, o.Units, "dameng"), "unknown plans are eligible only for read-only reconciliation in the target executor")
+	require.NoError(t, validateRepairObjectScope(o, o.Units, "dameng"), "unknown plans require catalog reconciliation before any CREATE in the target executor")
 	require.Error(t, validateRepairObjectScope(o, o.Units, "postgres"))
 	edited := append([]repair.Unit(nil), o.Units...)
 	edited[0].SQL += "\nNULL;"

@@ -38,10 +38,16 @@ func DetectMySQLDamengTriggerCapabilities(ctx context.Context, w Writer) (mysqld
 
 func (w *DaMengWriter) DetectMySQLDamengTriggerCapabilities(ctx context.Context) (c mysqldmtrigger.Capabilities, err error) {
 	var empty, concat int
-	err = w.db.QueryRowContext(ctx, `SELECT PARA_VALUE FROM V$DM_INI WHERE PARA_NAME='COMPATIBLE_MODE'`).Scan(&c.CompatibleMode)
-	if err == nil {
-		err = w.db.QueryRowContext(ctx, `SELECT CASE WHEN '' IS NULL THEN 1 ELSE 0 END, CASE WHEN CONCAT('x',CAST(NULL AS VARCHAR(1))) IS NULL THEN 1 ELSE 0 END FROM DUAL`).Scan(&empty, &concat)
+	// Reading INI values requires an extra privilege even through the public
+	// SF_GET function. The mode is informational; measured behavior determines
+	// conversion eligibility and remains mandatory for an ordinary schema user.
+	if modeErr := w.db.QueryRowContext(ctx, `SELECT SF_GET_PARA_VALUE(1,'COMPATIBLE_MODE') FROM DUAL`).Scan(&c.CompatibleMode); modeErr != nil {
+		if ctx.Err() != nil {
+			return c, ctx.Err()
+		}
+		c.CompatibleMode = "unknown"
 	}
+	err = w.db.QueryRowContext(ctx, `SELECT CASE WHEN '' IS NULL THEN 1 ELSE 0 END, CASE WHEN CONCAT('x',CAST(NULL AS VARCHAR(1))) IS NULL THEN 1 ELSE 0 END FROM DUAL`).Scan(&empty, &concat)
 	if err != nil {
 		return c, fmt.Errorf("读取达梦触发器兼容能力: %w", err)
 	}
@@ -96,12 +102,12 @@ func CreateMySQLDamengTrigger(ctx context.Context, w Writer, p mysqldmtrigger.Pl
 }
 
 func (w *DaMengWriter) CreateMySQLDamengTrigger(ctx context.Context, p mysqldmtrigger.Plan) error {
-	return w.createMySQLDamengTrigger(ctx, p, false, false)
+	return w.createMySQLDamengTrigger(ctx, p, false)
 }
 
 // Dameng DDL commits independently of a Go transaction. Keep the entire CREATE
 // as one durable unit, and only record success after inspecting the catalog.
-func (w *DaMengWriter) createMySQLDamengTrigger(ctx context.Context, p mysqldmtrigger.Plan, allowReuse, uncertain bool) (err error) {
+func (w *DaMengWriter) createMySQLDamengTrigger(ctx context.Context, p mysqldmtrigger.Plan, retry bool) (err error) {
 	started := false
 	defer func() {
 		if err != nil && !started {
@@ -119,23 +125,15 @@ func (w *DaMengWriter) createMySQLDamengTrigger(ctx context.Context, p mysqldmtr
 	}
 	exists, err := w.inspectMySQLDamengTrigger(ctx, p)
 	if err != nil {
-		if allowReuse {
+		if retry {
 			started = true
-			return errors.Join(err, repair.Observe(ctx, p.TriggerSQL, "unknown", err))
+			return errors.Join(err, repair.Observe(ctx, p.TriggerSQL, mysqlDMTriggerInspectionStatus(err), err))
 		}
 		return err
 	}
 	if exists {
-		if !allowReuse {
-			return fmt.Errorf("目标触发器 %s.%s 已存在，普通迁移禁止覆盖或接管", p.Schema, p.Name)
-		}
 		started = true
 		return repair.Observe(ctx, p.TriggerSQL, "reused", nil)
-	}
-	if uncertain {
-		started = true
-		err = fmt.Errorf("原执行结果未知且目标触发器不存在，不能证明先前执行结果，禁止自动重放")
-		return errors.Join(err, repair.Observe(ctx, p.TriggerSQL, "unknown", err))
 	}
 	if err = repair.Observe(ctx, p.TriggerSQL, "running", nil); err != nil {
 		return fmt.Errorf("保存触发器执行前状态: %w", err)
@@ -149,7 +147,7 @@ func (w *DaMengWriter) createMySQLDamengTrigger(ctx context.Context, p mysqldmtr
 		if err == nil {
 			err = fmt.Errorf("CREATE 返回成功但未找到目标触发器")
 		}
-		return errors.Join(err, repair.Observe(ctx, p.TriggerSQL, "unknown", err))
+		return errors.Join(err, repair.Observe(ctx, p.TriggerSQL, mysqlDMTriggerInspectionStatus(err), err))
 	}
 	return repair.Observe(ctx, p.TriggerSQL, "succeeded", nil)
 }
@@ -159,7 +157,9 @@ func (w *DaMengWriter) validateMySQLDamengTriggerTarget(ctx context.Context, p m
 	if err != nil {
 		return err
 	}
-	if c != p.Options.Capabilities {
+	frozen := p.Options.Capabilities
+	modeChanged := c.CompatibleMode != "unknown" && frozen.CompatibleMode != "unknown" && c.CompatibleMode != frozen.CompatibleMode
+	if modeChanged || c.EmptyStringIsNull != frozen.EmptyStringIsNull || c.ConcatNullYieldsNull != frozen.ConcatNullYieldsNull {
 		return fmt.Errorf("达梦兼容模式或空串/NULL 拼接能力已偏离冻结触发器计划")
 	}
 	seen := map[string]bool{}
@@ -179,7 +179,7 @@ func (w *DaMengWriter) validateMySQLDamengTriggerTarget(ctx context.Context, p m
 		if ordinary != 1 {
 			return fmt.Errorf("触发器依赖表 %s.%s 不存在或不可见", w.schema, name)
 		}
-		columns, err := inspectColumns(ctx, w, name)
+		columns, err := w.inspectMySQLDMTriggerColumns(ctx, name)
 		if err != nil {
 			return err
 		}
@@ -212,6 +212,36 @@ func (w *DaMengWriter) validateMySQLDamengTriggerTarget(ctx context.Context, p m
 		}
 	}
 	return nil
+}
+
+// DM8 ALL_TAB_COLUMNS has no Oracle VIRTUAL_COLUMN field. Its generated-column
+// flag lives in SYSCOLINFOS.INFO1 bit 0, as in the existing native catalog
+// reader; a missing catalog privilege remains a preflight failure.
+func (w *DaMengWriter) inspectMySQLDMTriggerColumns(ctx context.Context, table string) ([]source.ColumnInfo, error) {
+	rows, err := w.db.QueryContext(ctx, `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.CHAR_LENGTH,c.DATA_LENGTH),NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),NVL(ci.INFO1,0) FROM ALL_TAB_COLUMNS c JOIN SYS.SYSOBJECTS o ON o.NAME=c.TABLE_NAME AND o.SCHID=(SELECT ID FROM SYS.SYSOBJECTS WHERE TYPE$='SCH' AND NAME=c.OWNER) JOIN SYS.SYSCOLUMNS sc ON sc.ID=o.ID AND sc.NAME=c.COLUMN_NAME LEFT JOIN SYS.SYSCOLINFOS ci ON ci.ID=o.ID AND ci.COLID=sc.COLID WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`, w.schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var columns []source.ColumnInfo
+	for rows.Next() {
+		var column source.ColumnInfo
+		var flags int64
+		if err := rows.Scan(&column.Name, &column.DataType, &column.Length, &column.Precision, &column.Scale, &flags); err != nil {
+			return nil, err
+		}
+		if flags&1 != 0 {
+			column.Generated = "generated"
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("触发器依赖表 %s.%s 不存在或列元数据不可见", w.schema, table)
+	}
+	return columns, nil
 }
 
 func mysqlDMCompatibleColumn(want string, actual source.ColumnInfo) bool {
@@ -305,7 +335,6 @@ func executeMySQLDamengTriggerRepair(ctx context.Context, w Writer, o repair.Obj
 		}
 		return nil
 	})
-	uncertain := o.Status == "unknown" || o.Status == "running" || out[0].Status == "unknown" || out[0].Status == "running"
-	err := dw.createMySQLDamengTrigger(observed, *o.MySQLDamengTrigger, true, uncertain)
+	err := dw.createMySQLDamengTrigger(observed, *o.MySQLDamengTrigger, true)
 	return out, err
 }

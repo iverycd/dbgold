@@ -210,7 +210,7 @@ func validateMySQLDamengTriggerDependencyObjects(o repair.Object, objects []repa
 		var current *repair.Object
 		for i := range objects {
 			item := &objects[i]
-			if item.Kind != "table" || item.Table != name && item.TargetName != name {
+			if item.Kind != "table" || strings.ToUpper(item.Table) != name && strings.ToUpper(item.TargetName) != name {
 				continue
 			}
 			if current != nil {
@@ -221,7 +221,7 @@ func validateMySQLDamengTriggerDependencyObjects(o repair.Object, objects []repa
 		if current == nil {
 			continue // An external existing table is validated against the live target.
 		}
-		if current.Schema != p.Schema || current.TargetName != name {
+		if strings.ToUpper(current.Schema) != p.Schema || strings.ToUpper(current.TargetName) != name {
 			return fmt.Errorf("依赖表 %s 的目标身份已偏离触发器计划", name)
 		}
 		if current.DataStatus != "succeeded" && current.DataStatus != "not_required" {

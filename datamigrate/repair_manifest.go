@@ -678,7 +678,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 			item.Units[unit].Status = "succeeded"
 			if m.log != nil {
 				statement, _, _ := strings.Cut(e.SQL, "\n")
-				m.log.Infof("已核验并复用目标序列对象：%s", statement)
+				m.log.Infof("已核验并复用目标对象：%s", statement)
 			}
 		}
 		item.Units[unit].Error = e.Error

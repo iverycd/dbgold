@@ -43,7 +43,7 @@ func EnrichRepairReferences(objects []repair.Object, report MigrationReport) {
 			if o.SourceDDL == "" {
 				o.SourceDDL = matches[0].SourceDDL
 			}
-			if o.MySQLPGTrigger == nil {
+			if o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil {
 				o.DiagnosticOnly = o.DiagnosticOnly || matches[0].DiagnosticOnly
 			}
 		}

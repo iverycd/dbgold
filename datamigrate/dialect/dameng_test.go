@@ -68,6 +68,39 @@ CREATE TABLE "APP"."USERS" (
 	}
 }
 
+func TestDaMengMySQLZeroLengthCharacterColumns(t *testing.T) {
+	info := &source.TableDDLInfo{
+		TableName: "TABLE_01LIXIANGMINGXI",
+		Columns: []source.ColumnInfo{
+			{Name: "计划编号", DataType: "char", Length: 0, IsNullable: false},
+			{Name: "需求行项目清单ID", DataType: "char", Length: 0, IsNullable: false},
+			{Name: "备注", DataType: "varchar", Length: 0, IsNullable: true},
+			{Name: "立项单号", DataType: "varchar", Length: 200, IsNullable: false, Default: strptr("未编号")},
+			{Name: "状态代码", DataType: "char", Length: 8, IsNullable: true},
+		},
+	}
+	stmts, err := NewDaMeng().CreateTableStatements("EPOINTBID_TP8_0_51_2_JS", info, "mysql", TypeOpt{CharInLength: true}, identity)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := `DROP TABLE "EPOINTBID_TP8_0_51_2_JS"."TABLE_01LIXIANGMINGXI" CASCADE CONSTRAINTS;
+CREATE TABLE "EPOINTBID_TP8_0_51_2_JS"."TABLE_01LIXIANGMINGXI" (
+  "计划编号" CHAR(1 CHAR) NOT NULL,
+  "需求行项目清单ID" CHAR(1 CHAR) NOT NULL,
+  "备注" VARCHAR2(1 CHAR),
+  "立项单号" VARCHAR2(200 CHAR) NOT NULL DEFAULT '未编号',
+  "状态代码" CHAR(8 CHAR)
+)`
+	if got := JoinSQL(stmts); got != want {
+		t.Errorf("dameng zero-length character DDL mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	for i, length := range []int64{0, 0, 0, 200, 8} {
+		if got := info.Columns[i].Length; got != length {
+			t.Errorf("source column %s length changed: got %d, want %d", info.Columns[i].Name, got, length)
+		}
+	}
+}
+
 func TestDaMengIndexAndFK_Golden(t *testing.T) {
 	d := NewDaMeng()
 	// 主键
