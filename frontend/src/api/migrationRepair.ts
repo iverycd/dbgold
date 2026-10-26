@@ -25,6 +25,7 @@ export interface RepairObject {
   native?: { id: string; kind: string; name: string; schema: string; managed?: boolean; units: { sql: string; phase: string }[] }
   native_fingerprint?: string
   mysql_pg_trigger?: Record<string, unknown>
+  mysql_dameng_trigger?: Record<string, unknown>
   verification?: RepairVerification
   manual_verification?: ManualVerification
   id: string

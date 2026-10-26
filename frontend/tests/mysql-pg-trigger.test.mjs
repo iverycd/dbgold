@@ -49,12 +49,12 @@ test('trigger capability controls options and resets data-only or unsupported se
   } finally { scope.stop() }
 })
 
-test('batch multipart explicitly preserves the trigger opt-in and defaults off', async () => {
+test('batch multipart preserves explicit choices and omits the pair-default choice', async () => {
   const requests = []
   const api = execute(readFileSync(new URL('../src/api/migration.ts', import.meta.url), 'utf8'), () => ({ default: { post: async (url, data) => { requests.push(data); return {} } } }))
-  for (const enabled of [undefined, true]) {
+  for (const enabled of [undefined, false, true]) {
     await api.startBatch(new Blob(['excel']), [], { migrate_content: 'both', migrate_triggers: enabled })
-    assert.equal(requests.at(-1).get('migrate_triggers'), String(!!enabled))
+    assert.equal(requests.at(-1).get('migrate_triggers'), enabled === undefined ? null : String(enabled))
   }
 })
 
@@ -93,4 +93,74 @@ test('interrupted trigger inventories never claim all succeeded while work remai
     assert.notEqual(row.statusColor, 'green')
     assert.ok(migrationReportUtils.formatReportCategories(value).join('\n').includes(expected))
   }
+})
+
+
+test('MySQL Dameng defaults on without resetting a manual uncheck within the pair', async () => {
+  const scope = Vue.effectScope()
+  const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
+  const page = scope.run(() => execute(`${descriptor.scriptSetup.content}\nexport { connections, supportedPairs, dataMigrate, objMigrate, dataSupportsTriggers, objectTypeOptions, dataMigrationRequest, triggerMigrationHint };`, id => {
+    if (id === 'vue') return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
+    if (id === 'vue-router') return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
+    if (id === '@/utils/connectionDatabase') return connectionDatabaseUtils
+    if (id === '@/composables/connectionDatabaseEditors') return connectionDatabaseEditors
+    if (id === '@/utils/migrationOptions') return { applyTargetMigrationDefaults() {} }
+    return {}
+  }))
+  try {
+    page.connections.value = [{ id: 1, db_type: 'mysql' }, { id: 2, db_type: 'postgres' }, { id: 3, db_type: 'dameng' }]
+    page.supportedPairs.value = [{ source: 'mysql', target: 'postgres', supports_triggers: true }, { source: 'mysql', target: 'dameng', supports_triggers: true }]
+    Object.assign(page.dataMigrate, { srcConnId: 1, dstConnId: 3 })
+    Object.assign(page.objMigrate, { srcConnId: 1, dstConnId: 3 })
+    await Vue.nextTick()
+    assert.equal(page.dataMigrate.migrateTriggers, true)
+    assert.ok(page.objectTypeOptions.value.some(option => option.value === 'triggers'))
+    assert.equal(page.dataMigrationRequest().migrate_triggers, true)
+    assert.match(page.triggerMigrationHint('dameng'), /所有者.*直接权限/)
+    assert.doesNotMatch(page.triggerMigrationHint('dameng'), /PG|SECURITY INVOKER/)
+    page.dataMigrate.migrateTriggers = false
+    page.dataMigrate.content = 'schema_only'
+    await Vue.nextTick()
+    assert.equal(page.dataMigrationRequest().migrate_triggers, false)
+    page.dataMigrate.content = 'both'
+    await Vue.nextTick()
+    assert.equal(page.dataMigrate.migrateTriggers, false)
+    page.dataMigrate.content = 'data_only'
+    await Vue.nextTick()
+    assert.equal(page.dataMigrate.migrateTriggers, false)
+    page.dataMigrate.content = 'schema_only'
+    await Vue.nextTick()
+    assert.equal(page.dataMigrate.migrateTriggers, true)
+    page.dataMigrate.dstConnId = 2
+    await Vue.nextTick()
+    assert.equal(page.dataMigrate.migrateTriggers, false, 'DM default must not opt PG in')
+  } finally { scope.stop() }
+})
+
+test('batch default trigger policy is restored after data-only and can explicitly opt out', async () => {
+  const scope = Vue.effectScope()
+  const { descriptor } = parse(readFileSync(new URL('../src/views/BatchMigrationView.vue', import.meta.url), 'utf8'))
+  const page = scope.run(() => execute(`${descriptor.scriptSetup.content}\nexport { options, batchTriggerMode };`, id => {
+    if (id === 'vue') return { ...Vue, onUnmounted() {} }
+    if (id === '@/utils/migrationOptions') return { defaultBatchOwnerOptions: () => ({ change_owner: true }) }
+    return {}
+  }))
+  try {
+    assert.equal(page.options.migrate_triggers, undefined)
+    page.batchTriggerMode.value = 'on'
+    await Vue.nextTick()
+    assert.equal(page.options.migrate_triggers, true)
+    page.options.migrate_content = 'data_only'
+    await Vue.nextTick()
+    assert.equal(page.options.migrate_triggers, false)
+    page.options.migrate_content = 'both'
+    await Vue.nextTick()
+    assert.equal(page.options.migrate_triggers, true)
+    page.batchTriggerMode.value = 'off'
+    await Vue.nextTick()
+    assert.equal(page.options.migrate_triggers, false)
+    page.batchTriggerMode.value = 'default'
+    await Vue.nextTick()
+    assert.equal(page.options.migrate_triggers, undefined)
+  } finally { scope.stop() }
 })

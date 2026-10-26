@@ -277,7 +277,7 @@ func ValidateBatch(c *gin.Context) {
 type batchOptions struct {
 	OverwriteExisting  bool
 	ValidateData       bool
-	MigrateTriggers    bool
+	MigrateTriggers    *bool
 	ExcludedObjects    map[int][]datamigrate.ObjectRef
 	MigrateContent     string // both / schema_only / data_only
 	PageSize           int
@@ -333,7 +333,7 @@ func parseBatchOptions(c *gin.Context) batchOptions {
 	return batchOptions{
 		OverwriteExisting:  boolOr("overwrite_existing", false),
 		ValidateData:       boolOr("validate_data", false),
-		MigrateTriggers:    boolOr("migrate_triggers", false),
+		MigrateTriggers:    optionalBool("migrate_triggers"),
 		MigrateContent:     content,
 		PageSize:           intOr("page_size", 20000),
 		MaxParallel:        intOr("max_parallel", 10),
@@ -396,7 +396,7 @@ func StartBatch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if opts.MigrateTriggers && opts.MigrateContent == "data_only" {
+	if opts.MigrateTriggers != nil && *opts.MigrateTriggers && opts.MigrateContent == "data_only" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "仅迁移数据时不能启用触发器迁移"})
 		return
 	}
@@ -438,7 +438,8 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			disabled := false
 			rowOpts.ChangeOwner = &disabled
 			rowOpts.StripViewSchemas = ""
-			rowOpts.MigrateTriggers = true
+			enabled := true
+			rowOpts.MigrateTriggers = &enabled
 		}
 		// 批次被取消时，剩余子任务直接标记为 cancelled，不再执行
 		if b, err := store.GetBatchMigration(batchID); err == nil && b.Status == "cancelled" {
@@ -461,7 +462,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 
 		dbJob := &store.DataMigrationJob{
 			ValidateData:       rowOpts.ValidateData,
-			MigrateTriggers:    rowOpts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			MigrateTriggers:    resolveTriggerMigration(r.SrcDBType, r.DstDBType, rowOpts.MigrateContent, rowOpts.MigrateTriggers) && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
 			ExcludedObjects:    encodeExcludedObjects(rowOpts.ExcludedObjects[r.RowNum]),
 			OwnerID:            ownerID,
 			JobID:              jobID,
@@ -502,7 +503,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		p := migrationParams{
 			OverwriteExisting:  rowOpts.OverwriteExisting,
 			ValidateData:       rowOpts.ValidateData,
-			MigrateTriggers:    rowOpts.MigrateTriggers && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			MigrateTriggers:    resolveTriggerMigration(r.SrcDBType, r.DstDBType, rowOpts.MigrateContent, rowOpts.MigrateTriggers) && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
 			ExcludedObjects:    rowOpts.ExcludedObjects[r.RowNum],
 			SrcDatabase:        sourceSchema,
 			MigrateMode:        "all",

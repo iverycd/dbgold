@@ -136,7 +136,11 @@
                 <a-space wrap>
                   <a-checkbox v-if="nativeDamengRows.length" v-model="options.overwrite_existing">达梦同库：覆盖目标同名对象（删除重建，默认关闭）</a-checkbox>
                   <a-checkbox v-model="options.validate_data" :disabled="options.migrate_content === 'schema_only'">迁移后校验数据内容</a-checkbox>
-                  <a-checkbox v-model="options.migrate_triggers" :disabled="options.migrate_content === 'data_only'">迁移触发器（仅应用于 MySQL → PG 内核行）</a-checkbox>
+                  <a-select v-model="batchTriggerMode" :disabled="options.migrate_content === 'data_only'" style="width:290px" aria-label="触发器迁移策略">
+                    <a-option value="default">触发器：按组合默认（MySQL → 达梦开启）</a-option>
+                    <a-option value="on">触发器：支持的迁移行全部开启</a-option>
+                    <a-option value="off">触发器：全部关闭</a-option>
+                  </a-select>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
                   <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
                   <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
@@ -149,6 +153,7 @@
             </a-collapse-item>
           </a-collapse>
 
+          <a-alert v-if="options.migrate_content !== 'data_only' && batchTriggerMode !== 'off'" type="info">MySQL → 达梦行默认迁移触发器，在数据导入和校验后创建，目标触发器所有者需有相关表的直接权限；转换或创建失败会记录原因并继续迁移其他对象。PG 内核目标仅在选择“全部开启”时迁移触发器，以 SECURITY INVOKER 执行，需核对业务用户权限和会话时区。</a-alert>
           <a-alert v-if="nativeDamengRows.length" type="info">达梦同库行执行整个 Schema 的全部对象与数据迁移，自动保留原生定义与大小写。共享转换选项对这些行不生效；每行执行前重新预检，阻止项会记录到任务报告。源库需停写，目标 Schema 需提前创建。</a-alert>
           <a-card v-if="pgMySQLRows.length" title="PG → MySQL 对象排除（按 Excel 行生效）" size="small">
             <a-alert type="info">上面的校验只检查迁移组合。每行启动时都会执行完整兼容预检，阻止项会保存在任务报告中。可根据报告明确排除独立对象或整表后重新提交；排除后仍会重新检查依赖。源 schema 可使用 Excel 可选列 source_schema 指定，未填时为 public。</a-alert>
@@ -159,7 +164,6 @@
               <a-input v-model="batchObjectDraft.name" placeholder="源对象名（原始大小写）" style="width:210px" />
               <a-button @click="addBatchObjectExclusion">明确排除</a-button>
             </a-space>
-            <a-alert v-if="options.migrate_triggers" type="info">触发器以 SECURITY INVOKER 执行，业务写入用户需有相关表权限；源库与目标会话应使用一致时区。其他迁移组合保持原流程。</a-alert>
             <div v-for="(objects, row) in options.excluded_objects_by_row" :key="row">
               第 {{ row }} 行：<a-tag v-for="(object, index) in objects" :key="index" closable color="orange" @close="objects.splice(index, 1)">{{ object.kind }}: {{ object.table ? object.table + '.' : '' }}{{ object.name }}</a-tag>
             </div>
@@ -295,7 +299,7 @@ const validateResult = ref<BatchValidateResult | null>(null)
 const options = reactive<BatchOptions>({
   migrate_content: 'both',
   overwrite_existing: false,
-  migrate_triggers: false,
+  migrate_triggers: undefined,
   validate_data: false,
   page_size: 20000,
   max_parallel: 10,
@@ -308,6 +312,11 @@ const options = reactive<BatchOptions>({
   strip_view_schemas: '',
 })
 
+
+const batchTriggerMode = ref<'default' | 'on' | 'off'>('default')
+watch([batchTriggerMode, () => options.migrate_content], ([mode, content]) => {
+  options.migrate_triggers = content === 'data_only' ? false : mode === 'default' ? undefined : mode === 'on'
+})
 
 const exclusionKinds = [
   { value: 'table', label: '整表' }, { value: 'index', label: '索引' }, { value: 'primary_key', label: '主键' },

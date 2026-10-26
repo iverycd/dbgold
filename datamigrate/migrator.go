@@ -50,7 +50,7 @@ type Config struct {
 	// 为空时保持完整迁移流程(建表+数据+全部 Post-DDL);非空时只执行所列对象类型的 Post-DDL,
 	// 跳过建表、数据迁移、行数对比。
 	Objects []string
-	// MigrateTriggers opts ordinary MySQL -> PG schema jobs into trigger conversion.
+	// MigrateTriggers opts ordinary MySQL -> PG/Dameng schema jobs into trigger conversion.
 	// CDC and old saved jobs leave this false; object mode selects "triggers" explicitly.
 	MigrateTriggers bool
 	// TableNames 精确表名列表(源库原始大小写)。仅对象迁移模式下作为迁移表集合,
@@ -72,6 +72,8 @@ type Migrator struct {
 	compatibilityFunctions *target.CompatibilityFunctionsReport
 	mysqlPGTriggers        []preparedMySQLPGTrigger
 	mysqlPGTriggerError    error
+	mysqlDMTriggers        []preparedMySQLDamengTrigger
+	mysqlDMTriggerError    error
 	sourceDDLCache         sourceTableDDLCache
 	repairs                *repairRecorder
 	dmPlans                map[string]*damengTablePlan
@@ -235,6 +237,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		report.DataValidation = dataValidation
 		m.validateDataContent(ctx, &report)
 	}
+	m.createMySQLDamengTriggers(ctx, &report)
 	m.finalizeDamengNativeEvents(ctx, &report)
 	m.recordOracleDamengTaskFailure(ctx, &report)
 	if m.cfg.CaptureRepair {
@@ -262,6 +265,11 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	defer m.clearSourceTableDDLCache()
 	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
 	m.prepareMySQLPGTriggers(ctx)
+	if m.isMySQLDameng() {
+		m.dmPlans, m.dmUsable, m.dmBlocked = nil, nil, nil
+	}
+	m.mysqlDMTriggers, m.mysqlDMTriggerError = nil, nil
+	m.prepareMySQLDamengTriggers(ctx)
 	if !m.cfg.CaptureRepair {
 		report := m.runPrepared(ctx)
 		report.CompatibilityFunctions = m.compatibilityFunctions
@@ -307,7 +315,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	start := time.Now()
 
 	// New opt-in results distinguish installed triggers from historical inventories.
-	if m.mysqlPGTriggerRequested() {
+	if m.mysqlDMTriggerRequested() {
+		m.initializeMySQLDamengTriggerReport(&report)
+	} else if m.mysqlPGTriggerRequested() {
 		m.initializeMySQLPGTriggerReport(&report)
 	} else if count, err := m.reader.GetTriggerCount(ctx); err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
@@ -367,6 +377,19 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
+	if m.isMySQLDameng() && m.cfg.Content == "data_only" {
+		for _, table := range tables {
+			if tablesFailed[table] {
+				continue
+			}
+			if err := target.CheckMySQLDamengLoadTriggers(ctx, m.writer, strings.ToUpper(table)); err != nil {
+				tablesFailed[table] = true
+				report.Data.Failed++
+				report.Data.Items = append(report.Data.Items, ObjectResult{Name: table, Stage: "preflight", Error: err.Error()})
+				m.log.Errorf("目标触发器检查 [%s]，未复制该表数据: %v", table, err)
+			}
+		}
+	}
 	if m.isOracleDameng() && (ctx.Err() != nil || !m.preflightOracleDameng(ctx, tables, &report, tablesFailed)) {
 		report.Tables.Total = max(len(tables), report.Tables.Total)
 		return report
@@ -462,6 +485,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 
 	// Phase 2: 迁移数据（并发）
 	report.Data.Total = len(tables) - len(tablesFailed)
+	if m.isMySQLDameng() && m.cfg.Content == "data_only" {
+		report.Data.Total += report.Data.Failed
+	}
 	if skipData {
 		m.log.Info("=== Phase 2: 跳过迁移数据（仅创建表结构模式）===")
 	} else {

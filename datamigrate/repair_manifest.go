@@ -207,7 +207,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		if o.Dependencies == nil {
 			o.Dependencies = []string{}
 		}
-		if o.Kind != "table" && o.Table != "" {
+		if o.Kind != "table" && o.Table != "" && !(m.isMySQLDameng() && o.Kind == "trigger") {
 			o.Dependencies = append(o.Dependencies, repairID("table", o.Table, o.Table))
 		}
 		m.repairs.objects = append(m.repairs.objects, o)
@@ -507,6 +507,16 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			add(o, ss)
 		}
 	}
+	if m.mysqlDMTriggerRequested() {
+		for _, prepared := range m.mysqlDMTriggers {
+			o := m.mysqlDMTriggerRepairObject(prepared)
+			var ss []dialect.Statement
+			if prepared.err == nil {
+				ss = mysqlDMTriggerStatements(prepared.plan)
+			}
+			add(o, ss)
+		}
+	}
 	// Administrative attributes are separate recoverable work even when their
 	// parent failed before the original migration reached these operations.
 	for _, parent := range slices.Clone(m.repairs.objects) {
@@ -598,6 +608,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	}
 	if o.MySQLPGTrigger != nil {
 		old.MySQLPGTrigger = o.MySQLPGTrigger
+	}
+	if o.MySQLDamengTrigger != nil {
+		old.MySQLDamengTrigger = o.MySQLDamengTrigger
 	}
 	if err := m.flushRepairObjectLocked(*old); err != nil {
 		old.Status = "failed"
@@ -693,7 +706,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		if err == nil && u.Status == "pending" {
 			u.Status = "succeeded"
 		}
-		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) && !target.IsMySQLPGTriggerPreflight(err) {
+		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) && !target.IsMySQLPGTriggerPreflight(err) && !target.IsMySQLDamengTriggerPreflight(err) {
 			u.Status = "unknown"
 		}
 		u.Selected = u.Status != "succeeded" && !u.Destructive
@@ -1003,7 +1016,7 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			if legacy.SourceDDL != "" {
 				o.SourceDDL = legacy.SourceDDL
 			}
-			if legacy.Status != "blocked" && o.MySQLPGTrigger == nil {
+			if legacy.Status != "blocked" && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil {
 				o.DiagnosticOnly = legacy.DiagnosticOnly
 			}
 			if o.Status == "pending" || o.Status == "blocked" {

@@ -76,7 +76,7 @@ func PreflightDataMigration(c *gin.Context) {
 		return
 	}
 	defer writer.Close()
-	cfg := datamigrate.Config{MigrateTriggers: req.MigrateTriggers, OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
+	cfg := datamigrate.Config{MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
 	m := datamigrate.NewMigrator(reader, writer, &datamigrate.Job{LogCh: make(chan string, 16)}, cfg)
 	if native {
 		c.JSON(http.StatusOK, m.PreflightDamengNative(c.Request.Context()))

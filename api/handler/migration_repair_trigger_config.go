@@ -25,7 +25,7 @@ func validateRepairTriggerConfig(j *store.DataMigrationJob, cfg datamigrate.Conf
 // Target catalog validation alone cannot establish that prerequisite, nor can
 // it detect a same-type column mapping that was exchanged after conversion.
 func validateMySQLPGTriggerDependencies(jobID string, o repair.Object) error {
-	if o.MySQLPGTrigger == nil {
+	if o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil {
 		return nil
 	}
 	rows, err := store.ListMigrationRepairObjects(jobID)
@@ -39,6 +39,9 @@ func validateMySQLPGTriggerDependencies(jobID string, o repair.Object) error {
 			return fmt.Errorf("读取触发器依赖记录: %w", err)
 		}
 		objects = append(objects, item)
+	}
+	if o.MySQLDamengTrigger != nil {
+		return validateMySQLDamengTriggerDependencyObjects(o, objects)
 	}
 	return validateMySQLPGTriggerDependencyObjects(o, objects)
 }
@@ -174,6 +177,71 @@ func validateMigrationRepairDependencies(jobID string, object repair.Object) err
 		}
 		if dependency.DataStatus != "" && dependency.DataStatus != "succeeded" && dependency.DataStatus != "not_required" {
 			return fmt.Errorf("原生对象依赖表的数据尚未迁移完成: %s", dependency.TargetName)
+		}
+	}
+	return nil
+}
+
+// The DM program is immutable and may not silently follow a repaired column
+// mapping. Live target metadata is checked again by the target executor.
+func validateMySQLDamengTriggerDependencyObjects(o repair.Object, objects []repair.Object) error {
+	if o.MySQLDamengTrigger == nil {
+		return nil
+	}
+	p := o.MySQLDamengTrigger
+	byID := map[string]repair.Object{}
+	for _, item := range objects {
+		byID[item.ID] = item
+	}
+	for _, id := range o.Dependencies {
+		dependency, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("触发器依赖清单缺少对象 %s，请先修复依赖记录", id)
+		}
+		if dependency.Kind != "table" && dependency.Status != "succeeded" {
+			return fmt.Errorf("前序触发器依赖尚未成功: %s", dependency.TargetName)
+		}
+	}
+	for _, sourceTable := range p.SourceTables {
+		name := p.Options.TableNames[sourceTable.TableName]
+		if name == "" {
+			return fmt.Errorf("触发器依赖表 %s 缺少冻结映射", sourceTable.TableName)
+		}
+		var current *repair.Object
+		for i := range objects {
+			item := &objects[i]
+			if item.Kind != "table" || item.Table != name && item.TargetName != name {
+				continue
+			}
+			if current != nil {
+				return fmt.Errorf("触发器依赖表 %s 的修复记录不唯一", name)
+			}
+			current = item
+		}
+		if current == nil {
+			continue // An external existing table is validated against the live target.
+		}
+		if current.Schema != p.Schema || current.TargetName != name {
+			return fmt.Errorf("依赖表 %s 的目标身份已偏离触发器计划", name)
+		}
+		if current.DataStatus != "succeeded" && current.DataStatus != "not_required" {
+			return fmt.Errorf("依赖表 %s 数据状态为 %s，请先完成数据补迁再安装触发器", name, current.DataStatus)
+		}
+		if current.Status != "succeeded" && !(len(current.Units) == 0 && current.DataStatus == "not_required" && current.Error == "" && (current.Status == "unknown" || current.Status == "pending" || current.Status == "reused")) {
+			return fmt.Errorf("依赖表 %s 结构尚未成功，请先完成表修复", name)
+		}
+		sourceName := current.SourceTable
+		if sourceName == "" {
+			sourceName = current.SourceName
+		}
+		if sourceName != sourceTable.TableName || len(current.ColumnMapping) != len(sourceTable.Columns) {
+			return fmt.Errorf("依赖表 %s 的源身份或列映射已偏离触发器计划", name)
+		}
+		for _, column := range sourceTable.Columns {
+			expected := p.Options.ColumnNames[sourceTable.TableName][column.Name]
+			if expected == "" || current.ColumnMapping[column.Name] != expected {
+				return fmt.Errorf("依赖列 %s.%s 的映射已改变，请重新迁移触发器", name, column.Name)
+			}
 		}
 	}
 	return nil

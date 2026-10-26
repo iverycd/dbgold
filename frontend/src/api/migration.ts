@@ -621,7 +621,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   fd.append('migrate_content', opts.migrate_content)
   fd.append('overwrite_existing', String(!!opts.overwrite_existing))
   fd.append('validate_data', String(!!opts.validate_data))
-  fd.append('migrate_triggers', String(!!opts.migrate_triggers))
+  if (opts.migrate_triggers !== undefined) fd.append('migrate_triggers', String(opts.migrate_triggers))
   fd.append('page_size', String(opts.page_size))
   fd.append('max_parallel', String(opts.max_parallel))
   fd.append('intra_table_parallel', String(opts.intra_table_parallel))

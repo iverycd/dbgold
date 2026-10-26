@@ -28,10 +28,20 @@ func normalizeDamengNativeRequest(req *startDataMigrationRequest) error {
 		return fmt.Errorf("达梦同库迁移只支持整个 Schema 的全部对象和数据，不能筛选表、排除对象或仅迁移结构/数据")
 	}
 	req.MigrateContent = "both"
-	req.MigrateTriggers = true
+	enabled := true
+	req.MigrateTriggers = &enabled
 	req.LowerCaseNames, req.CharInLength, req.UseNvarchar2, req.Distributed = false, false, false, false
 	disabled := false
 	req.ChangeOwner = &disabled
 	req.StripViewSchemas = ""
 	return nil
+}
+
+// Defaults apply only when creating a request. Saved jobs and repair Config
+// retain their resolved bool so old migrations never gain triggers implicitly.
+func resolveTriggerMigration(src, dst, content string, requested *bool) bool {
+	if requested != nil {
+		return *requested
+	}
+	return src == "mysql" && dst == "dameng" && content != "data_only"
 }

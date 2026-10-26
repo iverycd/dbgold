@@ -1623,3 +1623,40 @@ test('MySQL PG triggers retry both original units read-only without saving a dra
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
+
+
+test('MySQL Dameng trigger retry is one immutable read-only unit and reconciles unknown results', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let saves = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, { saveRepairDraft: async () => { saves++; throw new Error('DM trigger must stay read-only') } }))
+    await tick()
+    const trigger = record({ kind: 'trigger', table: 'ORDERS', mysql_dameng_trigger: {}, units: [unit('dm-trigger', 'failed')] })
+    p.records.value = [trigger]
+    p.openEditor(trigger)
+    assert.equal(utils.canEditRepairDDL(trigger.object), false)
+    assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), true)
+    assert.equal(p.canExecute.value, true)
+    await p.prepareExecute()
+    assert.equal(saves, 0)
+    assert.equal(p.executionSnapshot.value.length, 1)
+    assert.equal(p.executeConfirmVisible.value, true)
+    trigger.object.status = 'unknown'
+    trigger.object.units[0].status = 'unknown'
+    p.openEditor(trigger)
+    assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), true)
+    assert.equal(p.canExecute.value, true)
+    await p.prepareExecute()
+    const editors = []
+    const html = await renderPanel(p, undefined, editor => editors.push(editor))
+    assert.match(html, /达梦 DDL 可能自动提交/)
+    assert.match(html, /重试只核对目标目录/)
+    assert.equal(editors.length, 0)
+    trigger.object.units[0].sql += ' changed'
+    assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), false)
+    trigger.object.units[0].sql = trigger.object.units[0].original_sql
+    trigger.object.units.push(unit('extra', 'failed'))
+    assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})

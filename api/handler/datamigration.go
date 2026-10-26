@@ -102,7 +102,7 @@ func GetSupportedPairs(c *gin.Context) {
 func isDamengNativePair(src, dst string) bool { return src == "dameng" && dst == "dameng" }
 
 func supportsTriggerMigration(src, dst string) bool {
-	return src == "mysql" && source.IsPGFamily(dst) || isDamengNativePair(src, dst)
+	return src == "mysql" && (source.IsPGFamily(dst) || dst == "dameng") || isDamengNativePair(src, dst)
 }
 
 func validateTriggerMigration(src, dst, content string, enabled bool) error {
@@ -110,7 +110,7 @@ func validateTriggerMigration(src, dst, content string, enabled bool) error {
 		return nil
 	}
 	if !supportsTriggerMigration(src, dst) {
-		return fmt.Errorf("触发器迁移仅支持 MySQL → PG 内核目标或达梦 → 达梦")
+		return fmt.Errorf("触发器迁移仅支持 MySQL → PG 内核目标、MySQL → 达梦或达梦 → 达梦")
 	}
 	if content == "data_only" {
 		return fmt.Errorf("仅迁移数据时不能启用触发器迁移")
@@ -129,7 +129,7 @@ func validateDataValidationMode(content string, enabled bool) error {
 type startDataMigrationRequest struct {
 	OverwriteExisting  bool                    `json:"overwrite_existing"`
 	ValidateData       bool                    `json:"validate_data"`
-	MigrateTriggers    bool                    `json:"migrate_triggers"`
+	MigrateTriggers    *bool                   `json:"migrate_triggers"`
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
@@ -211,7 +211,8 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
-	if err := validateTriggerMigration(srcConn.DBType, dstConn.DBType, req.MigrateContent, req.MigrateTriggers); err != nil {
+	migrateTriggers := resolveTriggerMigration(srcConn.DBType, dstConn.DBType, req.MigrateContent, req.MigrateTriggers)
+	if err := validateTriggerMigration(srcConn.DBType, dstConn.DBType, req.MigrateContent, migrateTriggers); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -227,7 +228,7 @@ func StartDataMigration(c *gin.Context) {
 	}
 	dbJob := &store.DataMigrationJob{
 		ValidateData:       req.ValidateData,
-		MigrateTriggers:    req.MigrateTriggers,
+		MigrateTriggers:    migrateTriggers,
 		ExcludedObjects:    encodeExcludedObjects(req.ExcludedObjects),
 		OwnerID:            middleware.GetCurrentUserID(c),
 		JobID:              jobID,
@@ -266,7 +267,7 @@ func StartDataMigration(c *gin.Context) {
 	p := migrationParams{
 		OverwriteExisting:  req.OverwriteExisting,
 		ValidateData:       req.ValidateData,
-		MigrateTriggers:    req.MigrateTriggers,
+		MigrateTriggers:    migrateTriggers,
 		ExcludedObjects:    req.ExcludedObjects,
 		MigrateMode:        req.MigrateMode,
 		TableFilter:        req.TableFilter,

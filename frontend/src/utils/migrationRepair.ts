@@ -85,15 +85,21 @@ export const unitCommitted = (status: string) => ['succeeded', 'success', 'repai
 export const isTableRepair = (object: RepairObject) => ['table', 'tables', 'data'].includes(object.kind)
 export const hasRepairDDL = (object: RepairObject) => !!(object.ddl || object.units?.length || object.suggested_ddl)
 export const isMySQLPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_pg_trigger
-export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !object.native && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
+export const isMySQLDamengTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_dameng_trigger
+export const isGeneratedMySQLTrigger = (object: RepairObject) => isMySQLPGTrigger(object) || isMySQLDamengTrigger(object)
+export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !object.mysql_dameng_trigger && !object.native && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
 export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
   if (!isMySQLPGTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back'].includes(object.status)) return false
   return object.units?.length === 2 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(unit.status))
 }
+export function canRetryMySQLDamengTrigger(object: RepairObject): boolean {
+  if (!isMySQLDamengTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back', 'unknown'].includes(object.status)) return false
+  return object.units?.length === 1 && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive && !['succeeded', 'success', 'repaired', 'queued'].includes(unit.status))
+}
 export function canRetryNative(object: RepairObject): boolean {
   return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql)
 }
-export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryNative(object)
+export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object)
 
 export function canEditRepairDDL(object: RepairObject): boolean {
   if (object.native || object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
@@ -120,7 +126,7 @@ export function cloneRepairUnits(units: RepairUnit[] | null | undefined): Repair
 export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
   if (object.native) return (object.units || []).map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   const units = cloneRepairUnits(object.units)
-  if (canRetryMySQLPGTrigger(object)) units.forEach(unit => { unit.selected = true })
+  if (canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object)) units.forEach(unit => { unit.selected = true })
   return units
 }
 export function mappingError(mapping: Record<string, string>): string {

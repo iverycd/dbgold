@@ -22,6 +22,9 @@ type preparedMySQLPGTrigger struct {
 }
 
 func (m *Migrator) mysqlPGTriggerRequested() bool {
+	if m.isMySQLDameng() {
+		return false
+	}
 	if len(m.cfg.ViewNames) > 0 || m.cfg.Content == "data_only" {
 		return false
 	}

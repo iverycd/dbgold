@@ -148,6 +148,12 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 		return nil
 	}
 
+	if obj.MySQLDamengTrigger != nil {
+		if dbType != "dameng" {
+			return fmt.Errorf("触发器原生成计划仅支持达梦目标")
+		}
+		return target.ValidateMySQLDamengTriggerRepair(obj, units)
+	}
 	if obj.Kind == "trigger" && obj.MySQLPGTrigger == nil {
 		return fmt.Errorf("触发器修复缺少可信原生成计划")
 	}

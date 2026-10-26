@@ -245,7 +245,7 @@
                     </a-col>
                     <a-col v-if="dataSupportsTriggers && !isDamengNative" :span="24">
                       <a-checkbox v-model="dataMigrate.migrateTriggers" :disabled="dataMigrate.content === 'data_only'" class="adv-check">迁移所选表的触发器</a-checkbox>
-                      <div v-if="dataMigrate.migrateTriggers" class="adv-hint">转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</div>
+                      <div v-if="dataMigrate.migrateTriggers" class="adv-hint">{{ triggerMigrationHint(selectedDst?.db_type) }}</div>
                     </a-col>
                   </a-row>
 
@@ -782,7 +782,7 @@
             </a-checkbox-group>
           </a-form-item>
 
-          <a-alert v-if="objMigrate.objects.includes('triggers')" type="info">触发器以 SECURITY INVOKER 执行，业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。</a-alert>
+          <a-alert v-if="objMigrate.objects.includes('triggers')" type="info">{{ triggerMigrationHint(omSelectedDst?.db_type) }}</a-alert>
 
           <!-- 表选择 -->
           <a-spin :loading="objMigrate.loadingTables" style="display:block">
@@ -1142,7 +1142,17 @@ watch(isDamengNative, enabled => {
 })
 const dataSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === selectedSrc.value?.db_type && pair.target === selectedDst.value?.db_type && pair.supports_triggers))
 watch(() => dataMigrate.content, content => { if (content === 'schema_only') dataMigrate.validateData = false })
-watch([dataSupportsTriggers, () => dataMigrate.content], ([supported, content]) => { if (!supported || content === 'data_only') dataMigrate.migrateTriggers = false })
+watch([() => selectedSrc.value?.db_type, () => selectedDst.value?.db_type, dataSupportsTriggers, () => dataMigrate.content], ([src, dst, supported, content], [oldSrc, oldDst, oldSupported, oldContent]) => {
+  if (!supported || content === 'data_only') { dataMigrate.migrateTriggers = false; return }
+  const mysqlDameng = src === 'mysql' && dst === 'dameng'
+  if (mysqlDameng && (src !== oldSrc || dst !== oldDst || !oldSupported || oldContent === 'data_only')) dataMigrate.migrateTriggers = true
+  else if (!mysqlDameng && oldSrc === 'mysql' && oldDst === 'dameng') dataMigrate.migrateTriggers = false
+})
+function triggerMigrationHint(targetType?: string): string {
+  return targetType === 'dameng'
+    ? '自动转换受支持的 MySQL 行触发器，数据导入和校验完成后创建；目标触发器所有者需有相关表的直接权限。无法转换或创建的触发器会记录原因，其他对象继续迁移。'
+    : '转换为 PG 触发器函数（SECURITY INVOKER），业务写入用户需有相关表权限；源库与目标会话应使用一致时区。复杂语法会报告不支持自动转换。'
+}
 
 watch(() => dataMigrate.dstConnId, (newId) => {
   const dst = connections.value.find((c) => c.id === newId)

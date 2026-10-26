@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"dbgold/datamigrate/damengnative"
+	"dbgold/datamigrate/mysqldmtrigger"
 	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/source"
 	"encoding/hex"
@@ -24,10 +25,11 @@ type Unit struct {
 }
 
 type Object struct {
-	Native            *damengnative.Object `json:"native,omitempty"`
-	NativeFingerprint string               `json:"native_fingerprint,omitempty"`
-	NativeTable       *damengnative.Table  `json:"native_table,omitempty"`
-	MySQLPGTrigger    *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
+	Native             *damengnative.Object `json:"native,omitempty"`
+	NativeFingerprint  string               `json:"native_fingerprint,omitempty"`
+	NativeTable        *damengnative.Table  `json:"native_table,omitempty"`
+	MySQLPGTrigger     *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
+	MySQLDamengTrigger *mysqldmtrigger.Plan `json:"mysql_dameng_trigger,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -126,7 +128,7 @@ func (o Object) CanExecuteDDL() bool {
 	if o.Native != nil {
 		return o.TrustedNative()
 	}
-	return o.CanEditDDL() || (!o.DiagnosticOnly && o.Kind == "trigger" && o.MySQLPGTrigger != nil && o.Schema != "" && o.TargetName != "")
+	return o.CanEditDDL() || (!o.DiagnosticOnly && o.Kind == "trigger" && (o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil) && o.Schema != "" && o.TargetName != "")
 }
 
 // TrustedNative binds the immutable server-side plan and every physical unit.

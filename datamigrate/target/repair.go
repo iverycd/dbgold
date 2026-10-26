@@ -147,6 +147,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if obj.Kind == "trigger" && obj.MySQLPGTrigger != nil {
 		return executeMySQLPGTriggerRepair(ctx, w, obj, units, onStep)
 	}
+	if obj.Kind == "trigger" && obj.MySQLDamengTrigger != nil {
+		return executeMySQLDamengTriggerRepair(ctx, w, obj, units, onStep)
+	}
 	out := slices.Clone(units)
 	persist := func() error {
 		if onStep == nil {

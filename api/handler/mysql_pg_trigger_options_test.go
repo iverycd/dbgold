@@ -13,13 +13,13 @@ import (
 )
 
 func TestMySQLPGTriggerCapabilityAndValidation(t *testing.T) {
-	for _, dst := range []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
+	for _, dst := range []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase", "dameng"} {
 		require.True(t, supportsTriggerMigration("mysql", dst))
 		require.NoError(t, validateTriggerMigration("mysql", dst, "both", true))
 		require.NoError(t, validateTriggerMigration("mysql", dst, "schema_only", true))
 		require.ErrorContains(t, validateTriggerMigration("mysql", dst, "data_only", true), "仅迁移数据")
 	}
-	for _, pair := range [][2]string{{"oracle", "postgres"}, {"mysql", "mysql"}, {"mysql", "dameng"}, {"mysql", "oscar"}} {
+	for _, pair := range [][2]string{{"oracle", "postgres"}, {"mysql", "mysql"}, {"mysql", "oscar"}} {
 		require.False(t, supportsTriggerMigration(pair[0], pair[1]))
 		require.Error(t, validateTriggerMigration(pair[0], pair[1], "both", true))
 		require.NoError(t, validateTriggerMigration(pair[0], pair[1], "both", false))
@@ -37,7 +37,7 @@ func TestMySQLPGTriggerCapabilityAndValidation(t *testing.T) {
 			require.True(t, pair.Source == "mysql" || isDamengNativePair(pair.Source, pair.Target))
 		}
 	}
-	require.Equal(t, 8, enabled)
+	require.Equal(t, 9, enabled)
 }
 
 func TestMySQLPGTriggerRequestsAndBatchDefaultOff(t *testing.T) {
@@ -45,7 +45,7 @@ func TestMySQLPGTriggerRequestsAndBatchDefaultOff(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest("POST", "/", strings.NewReader(raw))
 		c.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		require.Equal(t, raw == "migrate_triggers=true", parseBatchOptions(c).MigrateTriggers)
+		require.Equal(t, raw == "migrate_triggers=true", resolveTriggerMigration("mysql", "postgres", "both", parseBatchOptions(c).MigrateTriggers))
 	}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(`{"src_conn_id":1,"dst_conn_id":2,"migrate_objects":["triggers"],"table_names":["Orders"]}`))
@@ -61,6 +61,10 @@ func TestMySQLPGTriggerJobSnapshotPersists(t *testing.T) {
 	job, err := store.GetDataMigrationJob("trigger-option")
 	require.NoError(t, err)
 	require.True(t, job.MigrateTriggers)
+	require.NoError(t, store.CreateDataMigrationJob(&store.DataMigrationJob{JobID: "old-dm-trigger-off", SrcDBType: "mysql", DstDBType: "dameng"}))
+	old, err := store.GetDataMigrationJob("old-dm-trigger-off")
+	require.NoError(t, err)
+	require.False(t, old.MigrateTriggers)
 }
 
 func TestMySQLPGTriggerInvalidRequestsDoNotCreateJobs(t *testing.T) {
@@ -68,9 +72,9 @@ func TestMySQLPGTriggerInvalidRequestsDoNotCreateJobs(t *testing.T) {
 		name, dst, body string
 		objects         bool
 	}{
-		{"unsupported target", "dameng", `{"src_conn_id":1,"dst_conn_id":2,"migrate_mode":"all","migrate_triggers":true}`, false},
+		{"unsupported target", "mysql", `{"src_conn_id":1,"dst_conn_id":2,"migrate_mode":"all","migrate_triggers":true}`, false},
 		{"data only", "postgres", `{"src_conn_id":1,"dst_conn_id":2,"migrate_mode":"all","migrate_content":"data_only","migrate_triggers":true}`, false},
-		{"unsupported objects", "dameng", `{"src_conn_id":1,"dst_conn_id":2,"migrate_objects":["triggers"],"table_names":["Orders"]}`, true},
+		{"unsupported objects", "mysql", `{"src_conn_id":1,"dst_conn_id":2,"migrate_objects":["triggers"],"table_names":["Orders"]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			migrationHandlerTestDB(t)

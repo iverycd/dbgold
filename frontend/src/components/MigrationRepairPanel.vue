@@ -114,7 +114,7 @@
         </a-table-column>
         <a-table-column title="操作" :width="220"><template #cell="{ record }"><div class="repair-row-actions">
           <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ hasRepairDDL(record.object) ? '编辑 DDL' : '编写 DDL' }}</a-button>
-          <a-button v-else-if="isMySQLPGTrigger(record.object) || record.object.native" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">查看 / 重试</a-button>
+          <a-button v-else-if="isGeneratedMySQLTrigger(record.object) || record.object.native" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">查看 / 重试</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(primaryRecord(record))">查看诊断</a-button>
           <a-button v-if="isTableRepair(record.object) && !record.object.diagnostic_only" type="text" size="mini" :disabled="busy || !binding?.configured" @click="openRecovery(primaryRecord(record))">接续迁移</a-button>
           <a-button type="text" size="mini" @click="openHistory(record.object.id)">历史</a-button>
@@ -169,12 +169,13 @@
         <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
         <a-alert v-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。只重新创建或修复此对象；表数据及关联对象按需单独接续。</a-alert>
         <a-alert v-else-if="editing.object.native" type="info">达梦原生 SQL 为只读，仅重试原任务冻结的完整执行单元；已成功步骤不会再次执行。</a-alert>
+        <a-alert v-else-if="isMySQLDamengTrigger(editing.object)" type="info">触发器 SQL 为只读，按原生成的单个完整语句执行。达梦 DDL 可能自动提交；重试前会核对目标定义、编译状态和依赖，不会覆盖同名冲突对象。</a-alert>
         <a-alert v-else-if="isMySQLPGTrigger(editing.object)" type="info">触发器 SQL 为只读。重试会在一个事务中一起执行原生成函数和触发器；不支持编辑 SQL 或单独勾选步骤。</a-alert>
         <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
-        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ editing.object.native ? '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。' : '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。' }}</a-alert>
+        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ isMySQLDamengTrigger(editing.object) ? '上次执行结果不确定。重试只核对目标目录；仅当完整定义一致、编译有效且已启用时确认成功，无法证明时保留未知状态，不重复提交 CREATE。' : editing.object.native ? '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。' : '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。' }}</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
-        <a-alert v-if="editing.object.requires_review && !editing.object.native" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
+        <a-alert v-if="editing.object.requires_review && !editing.object.native && !isGeneratedMySQLTrigger(editing.object)" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
         <a-alert v-if="sequencePlanMessage" type="info">{{ sequencePlanMessage }}</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
@@ -202,8 +203,8 @@
           <a-space wrap><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="editing.object.units?.some(unit => unit.original_sql)" size="small" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" @click="useSuggested">采用建议 DDL</a-button><a-button size="small" :disabled="busy || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 打开执行确认</span>
         </div>
-        <div v-for="(unit, index) in isMySQLPGTrigger(editing.object) || editing.object.native ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
-          <div class="unit-heading"><strong>执行步骤 {{ index + 1 }} · 与另一单元一起执行</strong><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag></div>
+        <div v-for="(unit, index) in isGeneratedMySQLTrigger(editing.object) || editing.object.native ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
+          <div class="unit-heading"><strong>执行步骤 {{ index + 1 }}{{ isMySQLPGTrigger(editing.object) ? ' · 与另一单元一起执行' : '' }}</strong><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p><pre class="sql-preview">{{ unit.sql }}</pre>
         </div>
         <div v-for="(unit, index) in canEditRepairDDL(editing.object) ? draftUnits : []" :key="unit.id" class="unit-editor">
@@ -218,14 +219,14 @@
           <a-checkbox v-if="triggerPlanCandidate" v-model="triggerPlanReviewed" :disabled="saving || refreshingTriggerPlan">我已核对当前源定义和完整触发器方案</a-checkbox>
           <a-checkbox v-if="canEditRepairDDL(editing.object) && editing.object.requires_review" v-model="reviewed">我已核对完整执行单元、目标对象及历史提交状态</a-checkbox>
           <a-button v-if="triggerPlanCandidate" type="primary" :loading="saving" :disabled="busy || saving || !triggerPlanReviewed || !binding?.configured" @click="saveTriggerPlan">核对并保存触发器方案</a-button>
-          <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canExecuteRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">{{ isMySQLPGTrigger(editing.object) ? '重试原触发器' : '确认执行步骤' }}</a-button></div>
+          <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft">保存草稿</a-button><a-button v-if="canExecuteRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="saving" :disabled="!canExecute" @click="prepareExecute">{{ isGeneratedMySQLTrigger(editing.object) ? '重试原触发器' : '确认执行步骤' }}</a-button></div>
         </div>
       </template>
     </a-modal>
 
     <a-modal v-model:visible="executeConfirmVisible" :mask-closable="false" :width="800" title="确认执行 DDL" :footer="false">
       <p>目标：<strong>{{ editing ? qualified(editing.object) : '' }}</strong> · 草稿版本 {{ executeVersion }}</p>
-      <a-alert type="warning">以下完整执行单元将依次提交。<template v-if="editing && isMySQLPGTrigger(editing.object)">触发器函数和触发器将在同一事务中一起重试。</template><template v-else>已成功和破坏性步骤不会重放；部分数据库无法整体回滚。</template></a-alert>
+      <a-alert type="warning">以下完整执行单元将依次提交。<template v-if="editing && isMySQLPGTrigger(editing.object)">触发器函数和触发器将在同一事务中一起重试。</template><template v-else-if="editing && isMySQLDamengTrigger(editing.object)">达梦触发器 DDL 可能自动提交；结果未知时只核对目录，确认已成功的原定义不会重放。</template><template v-else>已成功和破坏性步骤不会重放；部分数据库无法整体回滚。</template></a-alert>
       <pre v-for="unit in executionSnapshot" :key="unit.id" class="sql-preview">{{ unit.sql }}</pre>
       <div class="modal-actions"><a-button @click="executeConfirmVisible = false">返回编辑</a-button><a-button type="primary" :loading="submitting" @click="confirmExecute">执行以上 DDL</a-button></div>
     </a-modal>
@@ -241,7 +242,7 @@
           <a-form-item label="源 schema / owner"><a-input v-model="bindingForm.source_schema" /></a-form-item>
           <a-form-item label="目标 schema（与原任务相同）"><a-input v-model="bindingForm.config.TargetSchema" /></a-form-item>
           <a-form-item label="原迁移内容"><a-select v-model="bindingForm.config.Content" placeholder="请选择原任务的迁移内容"><a-option value="both">结构和数据</a-option><a-option value="schema_only">仅结构</a-option><a-option value="data_only">仅数据</a-option></a-select></a-form-item>
-          <a-form-item label="仅对象模式（原任务不是仅对象时留空）"><a-select v-model="bindingForm.config.Objects" multiple><a-option value="primary_keys">主键</a-option><a-option value="indexes">索引</a-option><a-option value="sequences">序列</a-option><a-option value="foreign_keys">外键</a-option><a-option value="comments">注释</a-option><a-option v-if="job?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(job.dst_db_type)" value="triggers">触发器</a-option></a-select></a-form-item>
+          <a-form-item label="仅对象模式（原任务不是仅对象时留空）"><a-select v-model="bindingForm.config.Objects" multiple><a-option value="primary_keys">主键</a-option><a-option value="indexes">索引</a-option><a-option value="sequences">序列</a-option><a-option value="foreign_keys">外键</a-option><a-option value="comments">注释</a-option><a-option v-if="job?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase', 'dameng'].includes(job.dst_db_type)" value="triggers">触发器</a-option></a-select></a-form-item>
           <a-form-item label="每批行数"><a-input-number v-model="bindingForm.config.PageSize" :min="1" :max="100000" /></a-form-item>
           <a-form-item label="名称与类型设置"><a-space wrap><a-checkbox v-model="bindingForm.config.LowerCaseNames">名称转小写</a-checkbox><a-checkbox v-model="bindingForm.config.CharInLength">字符按长度</a-checkbox><a-checkbox v-model="bindingForm.config.UseNvarchar2">NVARCHAR2</a-checkbox><a-checkbox v-model="bindingForm.config.Distributed">分布属性</a-checkbox><a-checkbox v-model="bindingForm.config.ChangeOwner">修改 Owner</a-checkbox></a-space></a-form-item>
         </template>
@@ -297,7 +298,7 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, isMySQLPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
@@ -384,7 +385,7 @@ const canRefreshSequencePlan = computed(() => {
   return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && unit.sql === object.units[index].sql)
 })
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
-const canExecute = computed(() => !busy.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && (editing.value.object.status !== 'unknown' || !!editing.value.object.native) && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isMySQLPGTrigger(editing.value.object) || !!editing.value.object.native || reviewed.value))
+const canExecute = computed(() => !busy.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && (editing.value.object.status !== 'unknown' || !!editing.value.object.native || isMySQLDamengTrigger(editing.value.object)) && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive) && (!editing.value.object.requires_review || isGeneratedMySQLTrigger(editing.value.object) || !!editing.value.object.native || reviewed.value))
 const displayRecords = computed(() => groupRepairRecords(records.value))
 const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
 const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
@@ -498,7 +499,7 @@ async function confirmBatch() {
       return { list: data.data, jobRunning: detail.data.status === 'running' }
     },
     save: async (objectID, record) => {
-      if (isMySQLPGTrigger(record.object) || record.object.native) return record
+      if (isGeneratedMySQLTrigger(record.object) || record.object.native) return record
       const saved = (await saveRepairDraft(id, objectID, { version: record.version, units: cloneRepairUnits(record.object.units), reviewed: true })).data
       if (valid()) replaceRecord(saved)
       return saved
@@ -704,6 +705,9 @@ async function prepareExecute() {
   if (isMySQLPGTrigger(editing.value.object)) {
     if (!canRetryMySQLPGTrigger(editing.value.object)) return
     draftUnits.value = editing.value.object.units.map(unit => ({ ...unit, selected: true }))
+  } else if (isMySQLDamengTrigger(editing.value.object)) {
+    if (!canRetryMySQLDamengTrigger(editing.value.object)) return
+    draftUnits.value = cloneRepairExecutionUnits(editing.value.object)
   } else if (editing.value.object.native) {
     if (!canExecuteRepairDDL(editing.value.object)) return
     draftUnits.value = cloneRepairExecutionUnits(editing.value.object)
