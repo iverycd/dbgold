@@ -32,12 +32,40 @@ func mysqlDMIndexDDL(w *DaMengWriter, idx source.IndexInfo) string {
 	return w.dia.IndexStatements(w.schema, idx)[0].SQL
 }
 
-func mysqlDMIndexCatalogRows(values ...[]driver.Value) *sqlmock.Rows {
-	rows := sqlmock.NewRows([]string{"OWNER", "INDEX_NAME", "UNIQUENESS", "STATUS", "INDEX_TYPE", "COLUMN_NAME", "COLUMN_POSITION", "DESCEND"})
-	for _, value := range values {
-		rows.AddRow(value...)
+type mysqlDMIndexCatalogFixture struct {
+	values   [][]driver.Value
+	errorRow int
+	err      error
+}
+
+func mysqlDMIndexCatalogRows(values ...[]driver.Value) *mysqlDMIndexCatalogFixture {
+	return &mysqlDMIndexCatalogFixture{values: values}
+}
+
+func (f *mysqlDMIndexCatalogFixture) RowError(row int, err error) *mysqlDMIndexCatalogFixture {
+	f.errorRow, f.err = row, err
+	return f
+}
+
+// Preserve the compact joined fixture used by the coverage cases while
+// returning the two schema-wide catalog result sets used by the writer.
+func expectMySQLDMIndexCatalog(mock sqlmock.Sqlmock, schema, table string, fixture *mysqlDMIndexCatalogFixture) {
+	headers := sqlmock.NewRows([]string{"OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "UNIQUENESS", "STATUS", "INDEX_TYPE"})
+	columns := sqlmock.NewRows([]string{"INDEX_OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "COLUMN_NAME", "COLUMN_POSITION", "DESCEND"})
+	seen := map[[2]driver.Value]bool{}
+	for _, value := range fixture.values {
+		key := [2]driver.Value{value[0], value[1]}
+		if !seen[key] {
+			headers.AddRow(value[0], value[1], schema, table, value[2], value[3], value[4])
+			seen[key] = true
+		}
+		columns.AddRow(value[0], value[1], schema, table, value[5], value[6], value[7])
 	}
-	return rows
+	if fixture.err != nil {
+		columns.RowError(fixture.errorRow, fixture.err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesSQL)).WithArgs(schema).WillReturnRows(headers).RowsWillBeClosed()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexColumnsSQL)).WithArgs(schema).WillReturnRows(columns).RowsWillBeClosed()
 }
 
 func observeMySQLDMIndex(events *[]repair.Event, fail func(repair.Event) error) context.Context {
@@ -68,7 +96,7 @@ func TestMySQLDamengIndexReusesVerifiedColumnList(t *testing.T) {
 			idx := source.IndexInfo{TableName: "Orders", IndexName: "RowId", Columns: []string{"Row_ID"}, IsUnique: tc.unique, Method: "BTREE"}
 			ddl := mysqlDMIndexDDL(w, idx)
 			mock.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnError(fmt.Errorf("wrapped: %w", &dm.DmError{ErrCode: -3236, ErrText: "此列列表已索引"}))
-			mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS").WillReturnRows(mysqlDMIndexCatalogRows(
+			expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(
 				[]driver.Value{"APP", "A_DIFFERENT_EXISTING_NAME", tc.uniqueness, "VALID", tc.kind, "ROW_ID", 1, "ASC"},
 			))
 			var events []repair.Event
@@ -88,7 +116,7 @@ func TestMySQLDamengIndexCompositeOrderAndDirection(t *testing.T) {
 	w, mock := mysqlDMIndexFixture(t)
 	idx := source.IndexInfo{TableName: "Orders", IndexName: "ByDate", Columns: []string{"Created", "Id"}, Descending: []bool{true}}
 	mock.ExpectExec(regexp.QuoteMeta(mysqlDMIndexDDL(w, idx))).WillReturnError(&dm.DmError{ErrCode: -3236})
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS").WillReturnRows(mysqlDMIndexCatalogRows(
+	expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(
 		[]driver.Value{"APP", "WRONG_FIRST_CANDIDATE", "NONUNIQUE", "VALID", "NORMAL", "ID", 1, "ASC"},
 		[]driver.Value{"APP", "RIGHT_CANDIDATE", "NONUNIQUE", "VALID", "NORMAL", "CREATED", 1, "DESC"},
 		[]driver.Value{"APP", "RIGHT_CANDIDATE", "NONUNIQUE", "VALID", "NORMAL", "ID", 2, "ASC"},
@@ -130,7 +158,7 @@ func TestMySQLDamengIndexRejectsUnverifiedCoverage(t *testing.T) {
 			}
 			original := &dm.DmError{ErrCode: -3236, ErrText: "此列列表已索引"}
 			mock.ExpectExec(regexp.QuoteMeta(mysqlDMIndexDDL(w, idx))).WillReturnError(original)
-			mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS").WillReturnRows(mysqlDMIndexCatalogRows(tc.rows...))
+			expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(tc.rows...))
 			var events []repair.Event
 			err := w.CreateIndex(observeMySQLDMIndex(&events, nil), idx)
 			require.ErrorIs(t, err, original)
@@ -147,7 +175,7 @@ func TestMySQLDamengIndexRejectsDifferentCompositeOrder(t *testing.T) {
 	idx := source.IndexInfo{TableName: "orders", IndexName: "ix", Columns: []string{"A", "B"}}
 	original := &dm.DmError{ErrCode: -3236}
 	mock.ExpectExec(regexp.QuoteMeta(mysqlDMIndexDDL(w, idx))).WillReturnError(original)
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS").WillReturnRows(mysqlDMIndexCatalogRows(
+	expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(
 		[]driver.Value{"APP", "IX", "UNIQUE", "VALID", "NORMAL", "B", 1, "ASC"},
 		[]driver.Value{"APP", "IX", "UNIQUE", "VALID", "NORMAL", "A", 2, "ASC"},
 	))
@@ -162,17 +190,16 @@ func TestMySQLDamengIndexCatalogFailuresKeepOriginalError(t *testing.T) {
 			original := &dm.DmError{ErrCode: -3236}
 			catalogErr := errors.New("catalog unavailable")
 			mock.ExpectExec(regexp.QuoteMeta(mysqlDMIndexDDL(w, idx))).WillReturnError(original)
-			query := mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS")
 			switch stage {
 			case "query":
-				query.WillReturnError(catalogErr)
+				mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesSQL)).WithArgs("APP").WillReturnError(catalogErr)
 			case "read":
-				query.WillReturnRows(mysqlDMIndexCatalogRows(
+				expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(
 					[]driver.Value{"APP", "IX", "UNIQUE", "VALID", "NORMAL", "ID", 1, "ASC"},
 					[]driver.Value{"APP", "LATER", "UNIQUE", "VALID", "NORMAL", "ID", 1, "ASC"},
 				).RowError(1, catalogErr))
 			case "scan":
-				query.WillReturnRows(mysqlDMIndexCatalogRows([]driver.Value{"APP", "IX", "UNIQUE", "VALID", "NORMAL", "ID", "not a position", "ASC"}))
+				expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows([]driver.Value{"APP", "IX", "UNIQUE", "VALID", "NORMAL", "ID", "not a position", "ASC"}))
 			}
 			err := w.CreateIndex(context.Background(), idx)
 			require.ErrorIs(t, err, original)
@@ -246,7 +273,7 @@ func TestMySQLDamengIndexObserverErrorsRemainFailures(t *testing.T) {
 					expected.WillReturnResult(sqlmock.NewResult(0, 0))
 				case "reused":
 					expected.WillReturnError(&dm.DmError{ErrCode: -3236})
-					mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexCoverageSQL)).WithArgs("APP", "ORDERS").WillReturnRows(mysqlDMIndexCatalogRows(
+					expectMySQLDMIndexCatalog(mock, "APP", "ORDERS", mysqlDMIndexCatalogRows(
 						[]driver.Value{"APP", "PK", "UNIQUE", "VALID", "CLUSTER", "ID", 1, "ASC"},
 					))
 				case "failed":

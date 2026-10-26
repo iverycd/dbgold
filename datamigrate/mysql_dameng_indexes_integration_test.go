@@ -81,7 +81,9 @@ func TestMySQLDamengDuplicateIndexesIntegration(t *testing.T) {
 				config.Content, config.Objects = "schema_only", []string{"indexes"}
 			}
 			job := &Job{LogCh: make(chan string, 1024)}
+			migrationStarted := time.Now()
 			report := NewMigrator(reader, writer, job, config).Run(ctx)
+			t.Logf("%s migration including index DDL/coverage: %s", mode, time.Since(migrationStarted))
 			require.False(t, report.HasFailures(), "%+v; logs=%v", report, drainLogs(job))
 			require.Equal(t, 7, report.Indexes.Total)
 			require.Equal(t, 7, report.Indexes.Success)
@@ -94,21 +96,47 @@ func TestMySQLDamengDuplicateIndexesIntegration(t *testing.T) {
 				}
 			}
 
-			rows, err := dst.QueryContext(ctx, `SELECT i.INDEX_NAME,i.UNIQUENESS,c.COLUMN_NAME
-FROM ALL_INDEXES i JOIN ALL_IND_COLUMNS c ON c.INDEX_OWNER=i.OWNER AND c.INDEX_NAME=i.INDEX_NAME
-WHERE i.TABLE_OWNER=? AND i.TABLE_NAME=? ORDER BY i.INDEX_NAME,c.COLUMN_POSITION`, strings.ToUpper(schema), strings.ToUpper(table))
+			catalogStarted := time.Now()
+			rows, err := dst.QueryContext(ctx, `SELECT INDEX_NAME,UNIQUENESS FROM ALL_INDEXES
+WHERE TABLE_OWNER=? AND TABLE_NAME=?`, strings.ToUpper(schema), strings.ToUpper(table))
 			require.NoError(t, err)
 			defer rows.Close()
-			keys, unique := map[string][]string{}, map[string]bool{}
+			unique := map[string]bool{}
 			for rows.Next() {
-				var name, uniqueness, column string
-				require.NoError(t, rows.Scan(&name, &uniqueness, &column))
-				keys[name] = append(keys[name], column)
+				var name, uniqueness string
+				require.NoError(t, rows.Scan(&name, &uniqueness))
 				unique[name] = uniqueness == "UNIQUE"
 			}
 			require.NoError(t, rows.Err())
+			require.NoError(t, rows.Close())
+			t.Logf("ALL_INDEXES verification read: %s", time.Since(catalogStarted))
+
+			catalogStarted = time.Now()
+			rows, err = dst.QueryContext(ctx, `SELECT INDEX_NAME,COLUMN_NAME,COLUMN_POSITION FROM ALL_IND_COLUMNS
+WHERE TABLE_OWNER=? AND TABLE_NAME=?`, strings.ToUpper(schema), strings.ToUpper(table))
+			require.NoError(t, err)
+			defer rows.Close()
+			keyColumns := map[string]map[int]string{}
+			for rows.Next() {
+				var name, column string
+				var position int
+				require.NoError(t, rows.Scan(&name, &column, &position))
+				if keyColumns[name] == nil {
+					keyColumns[name] = map[int]string{}
+				}
+				keyColumns[name][position] = column
+			}
+			require.NoError(t, rows.Err())
+			require.NoError(t, rows.Close())
+			t.Logf("ALL_IND_COLUMNS verification read: %s", time.Since(catalogStarted))
 			ordinaryCount, uniqueCode, compositeAB, compositeBA := 0, false, false, false
-			for name, columns := range keys {
+			for name, byPosition := range keyColumns {
+				columns := make([]string, len(byPosition))
+				for position := 1; position <= len(columns); position++ {
+					column, ok := byPosition[position]
+					require.True(t, ok, "missing index key position")
+					columns[position-1] = column
+				}
 				if slices.Equal(columns, []string{"ORDINARY"}) {
 					ordinaryCount++
 				}

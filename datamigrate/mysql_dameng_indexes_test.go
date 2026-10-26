@@ -174,3 +174,39 @@ func TestMySQLDamengFailedPrimaryKeyDoesNotSkipOrdinaryIndex(t *testing.T) {
 	require.Len(t, w.indexes, 2, "ordinary index must still be attempted against the actual target")
 	require.Equal(t, "ByRowID", w.indexes[1].IndexName)
 }
+
+type mysqlDMIndexRunWriter struct {
+	mysqlDMIndexWriter
+	runEvidence map[string]bool
+	resets      int
+}
+
+func (w *mysqlDMIndexRunWriter) SetSourceType(string) {
+	w.resets++
+	w.runEvidence = map[string]bool{}
+}
+
+func (w *mysqlDMIndexRunWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
+	if w.runEvidence[idx.IndexName] {
+		return errors.New("stale index coverage carried over from previous run")
+	}
+	w.runEvidence[idx.IndexName] = true
+	return w.mysqlDMIndexWriter.CreateIndex(ctx, idx)
+}
+
+func TestMySQLDamengRepeatedObjectRunsResetIndexEvidence(t *testing.T) {
+	r := newMySQLDMIndexReader()
+	r.indexes = []source.IndexInfo{{TableName: "Orders", IndexName: "ByRowID", Columns: []string{"ROW_ID"}}}
+	w := &mysqlDMIndexRunWriter{mysqlDMIndexWriter: mysqlDMIndexWriter{targetType: "dameng"}}
+	m, _ := newTestMigrator(r, w)
+	m.cfg.TargetDBType, m.cfg.TargetSchema = "dameng", "APP"
+	m.cfg.Objects = []string{"indexes"}
+	for range 2 {
+		report := m.Run(context.Background())
+		require.False(t, report.HasFailures(), "%+v", report)
+		require.Equal(t, 1, report.Indexes.Success)
+	}
+	require.Equal(t, 3, w.resets, "constructor plus each Run must establish a fresh evidence scope")
+	require.Empty(t, w.created, "object-only runs do not reset evidence through CreateTable")
+	require.Len(t, w.indexes, 2)
+}

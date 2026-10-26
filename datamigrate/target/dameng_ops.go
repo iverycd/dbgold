@@ -215,7 +215,7 @@ func (w *DaMengWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) er
 	if idx.Unsupported != "" {
 		return fmt.Errorf("%s", idx.Unsupported)
 	}
-	if w.srcType == "mysql" && !idx.IsPrimary {
+	if w.srcType == "mysql" {
 		return w.createMySQLDamengIndex(ctx, idx)
 	}
 	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))

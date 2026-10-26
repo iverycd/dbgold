@@ -214,6 +214,11 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	if setter, ok := m.writer.(sourceTypeSetter); ok && m.isMySQLDameng() {
+		// Index coverage belongs to this run. Object-only migrations may reuse
+		// a writer without recreating any table, so reset at the run boundary.
+		setter.SetSourceType(m.reader.DBType())
+	}
 	m.validationTables, m.validationScopeFrozen = nil, false
 	m.validationCopied = sync.Map{}
 	var dataValidation *validation.Report

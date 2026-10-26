@@ -24,6 +24,9 @@ type DaMengWriter struct {
 	identMu    sync.Mutex      // 保护 identCache
 	identCache map[string]bool // table → 是否含自增(IDENTITY)列
 
+	mysqlDMIndexesMu sync.Mutex
+	mysqlDMIndexes   mysqlDamengIndexCache
+
 	oracleDMMu sync.RWMutex
 	oracleDM   oracleDMCapabilityCache
 }
@@ -59,7 +62,10 @@ func NewDaMeng(dsn, schema string, pool ConnPoolConfig) (*DaMengWriter, error) {
 func (w *DaMengWriter) EffectiveSchema() string { return w.schema }
 
 // SetSourceType 由 Migrator 注入源库类型(reader.DBType())。
-func (w *DaMengWriter) SetSourceType(srcType string) { w.srcType = srcType }
+func (w *DaMengWriter) SetSourceType(srcType string) {
+	w.resetMySQLDamengIndexCache()
+	w.srcType = srcType
+}
 
 // Dialect 返回达梦方言。
 func (w *DaMengWriter) Dialect() dialect.Dialect { return w.dia }
@@ -74,6 +80,7 @@ func (w *DaMengWriter) qualifiedTable(table string) string {
 // CreateTable 执行建表 DDL。达梦不支持 DROP TABLE IF EXISTS,
 // 故 DDL 拆成 DROP + CREATE 两句,DROP 失败(表不存在)忽略。
 func (w *DaMengWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
+	w.resetMySQLDamengIndexCache()
 	w.resetOracleDMLoadColumns()
 	w.identMu.Lock()
 	w.identCache = map[string]bool{}
