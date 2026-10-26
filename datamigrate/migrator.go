@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1025,6 +1026,19 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 			}
 			report.Indexes.Total = len(filtered)
+			if m.isMySQLDameng() {
+				// Create the strongest same-column index first. DM can reject a
+				// UNIQUE index if a non-unique index already uses those columns.
+				slices.SortStableFunc(filtered, func(a, b source.IndexInfo) int {
+					if a.IsUnique == b.IsUnique {
+						return 0
+					}
+					if a.IsUnique {
+						return -1
+					}
+					return 1
+				})
+			}
 			// Fetch original definitions only for selected unsupported indexes, once
 			// per table. Source SQL is reference material, never a target DDL unit.
 			type sourceDefinition struct {

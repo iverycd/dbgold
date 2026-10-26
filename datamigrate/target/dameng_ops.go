@@ -212,6 +212,12 @@ func (w *DaMengWriter) CreateSequence(ctx context.Context, seq source.SequenceIn
 }
 
 func (w *DaMengWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
+	if idx.Unsupported != "" {
+		return fmt.Errorf("%s", idx.Unsupported)
+	}
+	if w.srcType == "mysql" && !idx.IsPrimary {
+		return w.createMySQLDamengIndex(ctx, idx)
+	}
 	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
 }
 

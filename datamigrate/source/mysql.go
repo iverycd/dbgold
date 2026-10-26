@@ -42,6 +42,7 @@ func (c ConnPoolConfig) applyTo(db *sql.DB) {
 // MySQLReader 实现 Reader 接口，连接到 MySQL 数据库
 type MySQLReader struct {
 	oracleTarget    bool
+	damengTarget    bool
 	db              *sql.DB
 	dbName          string
 	snapshotTx      *sql.Tx
@@ -559,6 +560,9 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 	if r.oracleTarget {
 		return r.oracleIndexes(ctx)
+	}
+	if r.damengTarget {
+		return r.damengIndexes(ctx)
 	}
 	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
