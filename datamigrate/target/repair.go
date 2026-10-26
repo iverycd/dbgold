@@ -131,6 +131,14 @@ func uncertainRepairError(err error) bool {
 }
 
 func repairErrorStatus(err error) string {
+	var manualInvalid manualTriggerInvalidError
+	if errors.As(err, &manualInvalid) {
+		return "failed"
+	}
+	var manualUnknown manualTriggerUnknownError
+	if errors.As(err, &manualUnknown) {
+		return "unknown"
+	}
 	if uncertainRepairError(err) {
 		return "unknown"
 	}
@@ -141,6 +149,9 @@ func repairErrorStatus(err error) string {
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error) ([]repair.Unit, error) {
+	if obj.ManualTrigger != nil {
+		return executeManualTriggerRepair(ctx, w, obj, units, onStep)
+	}
 	if native, ok := w.(*DaMengNativeWriter); ok {
 		return native.executeNativeRepair(ctx, obj, units, onStep)
 	}

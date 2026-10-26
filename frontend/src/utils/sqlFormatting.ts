@@ -17,14 +17,9 @@ const dialects = {
   oscar: sql,
 }
 
-export function createSQLFormatTransaction(state: EditorState, dbType: string): TransactionSpec | null {
-  const selection = state.selection.main
-  const from = selection.empty ? 0 : selection.from
-  const to = selection.empty ? state.doc.length : selection.to
-  const text = state.sliceDoc(from, to)
-  if (!text.trim()) return null
-
-  const formatted = formatDialect(text, {
+export function formatSQLText(text: string, dbType: string): string {
+  if (!text.trim()) return text
+  return formatDialect(text, {
     dialect: dialects[dbType as keyof typeof dialects] ?? sql,
     tabWidth: 2,
     useTabs: false,
@@ -33,6 +28,16 @@ export function createSQLFormatTransaction(state: EditorState, dbType: string): 
     functionCase: 'preserve',
     identifierCase: 'preserve',
   })
+}
+
+export function createSQLFormatTransaction(state: EditorState, dbType: string): TransactionSpec | null {
+  const selection = state.selection.main
+  const from = selection.empty ? 0 : selection.from
+  const to = selection.empty ? state.doc.length : selection.to
+  const text = state.sliceDoc(from, to)
+  if (!text.trim()) return null
+
+  const formatted = formatSQLText(text, dbType)
   if (formatted === text) return null
 
   return {

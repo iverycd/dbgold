@@ -99,9 +99,13 @@ export function canRetryMySQLDamengTrigger(object: RepairObject): boolean {
 export function canRetryNative(object: RepairObject): boolean {
   return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql)
 }
-export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object)
+export function canRetryManualTrigger(object: RepairObject): boolean {
+  return object.kind === 'trigger' && !!object.manual_trigger && object.manual_trigger.revision > 0 && !object.diagnostic_only && object.status === 'unknown' && !!object.schema?.trim() && !!object.table?.trim() && !!object.target_name?.trim() && !!object.units?.length && object.units.some(unit => unit.sql === object.manual_trigger!.sql) && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive)
+}
+export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object) || canRetryManualTrigger(object)
 
 export function canEditRepairDDL(object: RepairObject): boolean {
+  if (object.kind === 'trigger') return !!object.manual_trigger_editable && !!object.schema?.trim() && !!object.target_name?.trim() && !!object.table?.trim()
   if (object.native || object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
   if (['table', 'tables', 'view', 'views', 'sequence', 'sequences', 'owner', 'distribution'].includes(object.kind)) return true
   return ['index', 'indexes', 'primary_key', 'primary_keys', 'primaryKeys', 'unique', 'foreign_key', 'foreign_keys', 'constraints', 'comment', 'comments'].includes(object.kind) && !!(object.table || object.ddl || object.units?.length)
@@ -124,6 +128,7 @@ export function cloneRepairUnits(units: RepairUnit[] | null | undefined): Repair
   return (units || []).map(unit => ({ ...unit, selected: unitCommitted(unit.status) || unit.destructive ? false : !!unit.selected }))
 }
 export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
+  if (object.manual_trigger) return object.units.map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   if (object.native) return (object.units || []).map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   const units = cloneRepairUnits(object.units)
   if (canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object)) units.forEach(unit => { unit.selected = true })

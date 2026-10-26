@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
@@ -8,12 +9,15 @@ import { parse } from '@vue/compiler-sfc'
 
 const file = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 const transpile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const require = createRequire(import.meta.url)
+const formattingContext = { exports: {}, require }
+vm.runInNewContext(transpile(file('../src/utils/sqlFormatting.ts')), formattingContext)
 const utilityContext = { exports: {} }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityContext)
 const batchContext = { exports: {}, require: () => utilityContext.exports }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepairBatch.ts')), batchContext)
 const { descriptor } = parse(file('../src/components/MigrationRepairPanel.vue'))
-const fields = 'records, job, binding, editing, draftUnits, editorVisible, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, canExecute, refreshingTriggerPlan, openEditor, closeEditor, refreshTriggerPlan, saveTriggerPlan, prepareExecute, executeConfirmVisible'
+const fields = 'records, job, binding, editing, draftUnits, editorVisible, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, canExecute, refreshingTriggerPlan, openEditor, closeEditor, refreshTriggerPlan, saveTriggerPlan, prepareExecute, executionSnapshot'
 
 function panel(overrides = {}) {
   const messages = []
@@ -25,6 +29,7 @@ function panel(overrides = {}) {
       if (id === 'vue') return { ...Vue, onUnmounted() {} }
       if (id === '@/utils/migrationRepair') return utilityContext.exports
       if (id === '@/utils/migrationRepairBatch') return batchContext.exports
+      if (id === '@/utils/sqlFormatting') return formattingContext.exports
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async () => ({ data: { job_id: 'job', status: 'failed', src_db_type: 'mysql', dst_db_type: 'postgres' } }) }
@@ -81,7 +86,7 @@ test('failed historical trigger is previewed locally, reviewed, saved and execut
   assert.equal(app.triggerPlanCandidate.value, null)
   assert.equal(app.canExecute.value, true)
   await app.prepareExecute()
-  assert.equal(app.executeConfirmVisible.value, true)
+  assert.equal(app.executionSnapshot.value.length, 2)
   assert.equal(app.draftUnits.value.length, 2)
 })
 

@@ -101,6 +101,7 @@ function editor(initialProps) {
   class TestView {
     static theme = EditorView.theme
     static updateListener = EditorView.updateListener
+    static editable = EditorView.editable
     constructor(config) { this.state = config.state; view = this }
     dispatch = (spec) => {
       const transaction = spec.state ? spec : this.state.update(spec)
@@ -177,5 +178,21 @@ test('editor reports parse errors without changing its document or selection', (
     assert.equal(e.view.state.doc.toString(), "select 'unterminated")
     assert.equal(e.emitted.length, 0)
     assert.deepEqual(e.messages, ['格式化失败，请检查 SQL 或目标数据库语法'])
+  } finally { scope.stop() }
+})
+
+test('read-only editor locks user edits and formatting while a repair request is pending', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const e = scope.run(() => editor({ modelValue: 'select Id from Orders;', dialect: 'postgres', formatDbType: 'postgres', readOnly: true }))
+    assert.equal(e.view.state.facet(EditorState.readOnly), true)
+    assert.equal(e.view.state.facet(EditorView.editable), false)
+    e.formatSQL()
+    assert.equal(e.emitted.length, 0)
+    e.props.readOnly = false; await Vue.nextTick()
+    assert.equal(e.view.state.facet(EditorState.readOnly), false)
+    assert.equal(e.view.state.facet(EditorView.editable), true)
+    e.formatSQL()
+    assert.equal(e.emitted.length, 1)
   } finally { scope.stop() }
 })

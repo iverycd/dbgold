@@ -1,16 +1,20 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
-import { parse } from '@vue/compiler-sfc'
+import { parse, compileStyle } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
 import { formatDialect, postgresql } from 'sql-formatter'
 
 function transpile(source) { return ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText }
+const require = createRequire(import.meta.url)
+const formattingContext = { exports: {}, require }
+vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/sqlFormatting.ts', import.meta.url), 'utf8')), formattingContext)
 const utilsContext = { exports: {} }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const utils = utilsContext.exports
@@ -24,7 +28,7 @@ function loadBatchUtils(timers) {
   return context.exports
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
-const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, reviewed, editorVisible, executeConfirmVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
+const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, editorVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
 const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
@@ -46,6 +50,7 @@ function panel(props, overrides = {}) {
       if (id === '@/utils/migrationRepair') return utils
       if (id === '@/utils/migrationRepairBatch') return batchUtils
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
+      if (id === '@/utils/sqlFormatting') return formattingContext.exports
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } }) }
       if (id === '@/api/connections') return { listConnections: overrides.listConnections || (async () => ({ data: [] })) }
@@ -827,7 +832,7 @@ test('repair formatting uses the target dialect and honors read-only and busy st
   } finally { scope.stop() }
 })
 
-test('formatted SQL persists through saving, reopening and execution confirmation', async () => {
+test('SQL formats by default and persists through saving, reopening and direct execution', async () => {
   const scope = Vue.effectScope()
   try {
     const original = 'Create View "OrdersView" AS select Id, Name from "Orders" where Id > 1;'
@@ -841,17 +846,15 @@ test('formatted SQL persists through saving, reopening and execution confirmatio
     })); await tick()
     p.openEditor(saved)
     const formatted = formatDialect(original, { dialect: postgresql, keywordCase: 'preserve', tabWidth: 2 })
-    p.draftUnits.value[0].sql = formatted
+    assert.equal(p.draftUnits.value[0].sql, formatted, 'opening an editable draft formats it automatically')
     assert.equal(await p.saveDraft(), true)
     p.closeEditor(); p.openEditor(saved)
     assert.equal(p.draftUnits.value[0].sql, formatted)
     assert.equal(p.draftUnits.value[0].original_sql, original)
     assert.equal(p.editing.value.object.ddl, original)
     await p.prepareExecute()
-    assert.equal(p.executeConfirmVisible.value, true)
     assert.equal(p.executionSnapshot.value[0].sql, formatted)
     p.draftUnits.value[0].sql = original
-    assert.equal(p.executeConfirmVisible.value, false, 'editing invalidates the previous confirmation')
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
@@ -1056,18 +1059,18 @@ test('rendered manual repair shows its entry and editor while keeping source def
     assert.ok((await renderPanel(p)).includes('编写 DDL'))
     p.openEditor(failed)
     const html = await renderPanel(p)
-    for (const label of ['添加执行单元', '保存草稿', '确认执行步骤', 'GaussDB', 'Schema：public', '所属表：Orders', '源端定义（只读', 'SOURCE REFERENCE SQL']) assert.ok(html.includes(label), label)
+    for (const label of ['添加执行单元', '保存草稿', '保存并执行', 'GaussDB', 'Schema：public', '所属表：Orders', '源端定义（只读', 'SOURCE REFERENCE SQL']) assert.ok(html.includes(label), label)
     assert.match(html, /<textarea\b[^>]*><\/textarea>/)
     assert.ok(!html.includes('恢复原文'))
     p.openEditor(record({ diagnostic_only: true, units: [], ddl: '' }))
     p.records.value = [] // Inspect diagnostic controls without the table's explanatory batch text.
     const diagnostic = await renderPanel(p)
-    for (const label of ['添加执行单元', '保存草稿', '确认执行步骤']) assert.ok(!diagnostic.includes(label), label)
+    for (const label of ['添加执行单元', '保存草稿', '保存并执行']) assert.ok(!diagnostic.includes(label), label)
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
 
-test('unsupported index accepts manual target SQL only after saving and explicit confirmation', async () => {
+test('unsupported index saves and executes manual target SQL in one action', async () => {
   const scope = Vue.effectScope()
   try {
     const calls = [], source = 'CREATE TABLE source_t(id INT, KEY ix ((source_expression)))'
@@ -1086,9 +1089,8 @@ test('unsupported index accepts manual target SQL only after saving and explicit
     const sql = 'CREATE INDEX ix ON public.Orders ((lower(name)))'
     p.draftUnits.value[0].sql = sql
     await p.prepareExecute()
-    assert.equal(calls.length, 1)
+    assert.equal(calls.length, 2)
     assert.equal(p.executionSnapshot.value[0].sql, sql)
-    assert.equal(p.executeConfirmVisible.value, true)
     await p.confirmExecute()
     assert.equal(calls[1][0], 'execute')
     assert.equal(calls[1][3].version, 2)
@@ -1178,7 +1180,7 @@ test('switching job drops old list, history and editor responses', async () => {
   } finally { scope.stop() }
 })
 
-test('execution saves a versioned complete-unit snapshot and keyboard confirmation cannot send SQL directly', async () => {
+test('one action saves a versioned complete-unit snapshot before execution', async () => {
   const scope = Vue.effectScope()
   try {
     const calls = []
@@ -1190,10 +1192,9 @@ test('execution saves a versioned complete-unit snapshot and keyboard confirmati
     await tick()
     p.openEditor(record({ units: [unit('done', 'succeeded'), unit('drop', 'failed', { destructive: true }), unit('procedure', 'failed', { sql: 'BEGIN NULL; END;' })] }))
     await p.prepareExecute()
-    assert.equal(p.executeConfirmVisible.value, true)
-    assert.equal(calls.length, 1)
+    assert.equal(calls.length, 2)
     assert.equal(p.executionSnapshot.value.length, 1)
-    assert.equal(p.executionSnapshot.value[0].sql, 'BEGIN NULL; END;')
+    assert.equal(p.executionSnapshot.value[0].sql, formattingContext.exports.formatSQLText('BEGIN NULL; END;', 'postgres'))
     await p.confirmExecute()
     assert.equal(calls[1][0], 'execute')
     assert.equal(calls[1][3].version, 2)
@@ -1203,16 +1204,13 @@ test('execution saves a versioned complete-unit snapshot and keyboard confirmati
   } finally { scope.stop() }
 })
 
-test('editing invalidates confirmation and stale previews cannot authorize changed mappings', async () => {
+test('stale recovery previews cannot authorize changed mappings', async () => {
   const scope = Vue.effectScope()
   try {
     let resolvePreview
     const p = scope.run(() => panel({ jobID: 'job' }, { previewRecovery: () => new Promise(resolve => { resolvePreview = resolve }) }))
     await tick()
     p.openEditor(record())
-    p.executeConfirmVisible.value = true
-    p.draftUnits.value[0].sql = 'CREATE TABLE changed (id INT)'
-    assert.equal(p.executeConfirmVisible.value, false)
     p.openRecovery(record())
     p.recoveryForm.mapping = { id: 'renamed' }
     p.invalidatePreview()
@@ -1259,7 +1257,6 @@ test('typing while a save is pending preserves newer edits and does not authoriz
     await pending
     assert.equal(p.editing.value.version, 2)
     assert.equal(p.draftUnits.value[0].sql, 'CREATE TABLE newer (id BIGINT)')
-    assert.equal(p.executeConfirmVisible.value, false)
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
@@ -1292,9 +1289,7 @@ test('table DDL and renamed source-column mapping are saved together before exec
     await p.prepareExecute()
     assert.equal(submitted.column_mapping.ROWID, 'renamed_id')
     assert.equal(submitted.units[0].sql, 'CREATE TABLE Orders (renamed_id INT)')
-    assert.equal(p.executeConfirmVisible.value, true)
     p.mappingForm.values.ROWID = 'another_name'
-    assert.equal(p.executeConfirmVisible.value, false)
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
@@ -1381,7 +1376,7 @@ test('pending related objects can be reviewed one at a time and return to a usab
     p.reviewRelated('index')
     assert.equal(p.editorVisible.value, true)
     assert.equal(p.editing.value.object.id, 'index')
-    p.reviewed.value = true; await p.saveDraft(); p.closeEditor(); await tick(); await tick()
+    await p.saveDraft(); p.closeEditor(); await tick(); await tick()
     assert.equal(p.recoveryVisible.value, true)
     assert.equal(p.recoveryPlan.value.preview.related[0].requires_review, false)
     p.recoveryForm.reviewed = true
@@ -1458,7 +1453,6 @@ test('binding identity errors display backend detail and keep the binding dialog
     assert.deepEqual(p.messages, [message])
     assert.equal(p.bindingVisible.value, true)
     assert.equal(p.saving.value, false)
-    assert.equal(p.executeConfirmVisible.value, false)
     assert.equal(p.recoveryPlan.value, null)
     assert.ok((await renderPanel(p)).includes('源连接与原任务不匹配：主机'))
     p.lifecycle.unmount()
@@ -1485,7 +1479,6 @@ test('recovery identity errors display backend detail without enabling execution
     assert.equal(p.canRecover.value, false)
     await p.confirmRecovery()
     assert.equal(starts, 0)
-    assert.equal(p.executeConfirmVisible.value, false)
     assert.ok((await renderPanel(p)).includes('目标连接与原任务不匹配：数据库'))
     p.lifecycle.unmount()
   } finally { scope.stop() }
@@ -1606,7 +1599,6 @@ test('MySQL PG triggers retry both original units read-only without saving a dra
     assert.equal(p.canExecute.value, true)
     await p.prepareExecute()
     assert.equal(saves, 0)
-    assert.equal(p.executeConfirmVisible.value, true)
     assert.equal(p.executionSnapshot.value.length, 2)
     assert.deepEqual([...p.executionSnapshot.value.map(item => item.sql)], ['CREATE function', 'CREATE trigger'])
     const editors = []
@@ -1640,7 +1632,6 @@ test('MySQL Dameng trigger retry is one immutable read-only unit and reconciles 
     await p.prepareExecute()
     assert.equal(saves, 0)
     assert.equal(p.executionSnapshot.value.length, 1)
-    assert.equal(p.executeConfirmVisible.value, true)
     trigger.object.status = 'unknown'
     trigger.object.units[0].status = 'unknown'
     p.openEditor(trigger)
@@ -1658,6 +1649,214 @@ test('MySQL Dameng trigger retry is one immutable read-only unit and reconciles 
     trigger.object.units[0].sql = trigger.object.units[0].original_sql
     trigger.object.units.push(unit('extra', 'failed'))
     assert.equal(utils.canRetryMySQLDamengTrigger(trigger.object), false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+const triggerSQL = 'CREATE OR REPLACE TRIGGER "Target"."trg" BEFORE DELETE ON "Target"."Orders" FOR EACH ROW BEGIN DELETE FROM "Target"."Audit" WHERE id = :OLD.id; END;'
+const manualTriggerRecord = (extra = {}) => record({ kind: 'trigger', table: 'Orders', schema: 'Target', target_name: 'trg', ddl: triggerSQL, source_ddl: 'SOURCE TRIGGER REFERENCE', diagnostic_only: true, requires_review: true, manual_trigger_editable: true, units: [unit('create-trigger', 'failed', { sql: triggerSQL, original_sql: triggerSQL })], ...extra })
+
+test('server capability enables one formatted target CREATE draft for every failed Dameng trigger variant', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.job.value.dst_db_type = 'dameng'
+    for (const extra of [{}, { mysql_dameng_trigger: {} }, { native: { schema: 'Target', name: 'trg', units: [{ sql: triggerSQL }, { sql: 'ALTER TRIGGER "Target"."trg" COMPILE' }] }, units: [unit('create-trigger', 'succeeded', { sql: triggerSQL, original_sql: triggerSQL }), unit('compile-trigger', 'failed', { sql: 'ALTER TRIGGER "Target"."trg" COMPILE' })] }, { manual_trigger: { sql: triggerSQL, revision: 2 } }]) {
+      const original = manualTriggerRecord(extra)
+      p.openEditor(original)
+      assert.equal(utils.canEditRepairDDL(original.object), true)
+      assert.equal(p.draftUnits.value.length, 1)
+      assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(triggerSQL, 'dameng'))
+      assert.equal(p.draftUnits.value[0].selected, true)
+      assert.equal(p.draftUnits.value[0].destructive, false)
+      assert.equal(p.editing.value.object.source_ddl, 'SOURCE TRIGGER REFERENCE')
+      assert.equal(p.editing.value.object.ddl, triggerSQL)
+      const html = await renderPanel(p)
+      assert.ok(html.includes('保存并执行'))
+      assert.ok(!html.includes('确认执行 DDL'))
+      assert.ok(!html.includes('我已核对完整执行单元'))
+      assert.ok(!html.includes('添加执行单元'))
+    }
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('source-only trigger opens an empty draft and capability false keeps triggers read-only', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.job.value.dst_db_type = 'dameng'
+    p.openEditor(manualTriggerRecord({ ddl: '', units: [] }))
+    assert.equal(p.draftUnits.value.length, 1)
+    assert.equal(p.draftUnits.value[0].sql, '')
+    assert.equal(p.canExecute.value, false)
+    for (const extra of [{ manual_trigger_editable: false }, { manual_trigger_editable: undefined }, { table: '' }]) assert.equal(utils.canEditRepairDDL(manualTriggerRecord(extra).object), false)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('manual trigger saves its single SQL with explicit mode then executes directly and keeps failure editable', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const calls = []
+    let saved = manualTriggerRecord()
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => ({ data: { objects: [saved], binding: { configured: true } } }),
+      saveRepairDraft: async (_job, _id, draft) => {
+        calls.push(['save', JSON.parse(JSON.stringify(draft))])
+        saved = { version: saved.version + 1, object: { ...saved.object, diagnostic_only: false, status: 'draft', manual_trigger: { sql: draft.units[0].sql, revision: 1 }, units: draft.units } }
+        return { data: saved }
+      },
+      executeRepair: async (_job, _id, request) => { calls.push(['execute', request]); saved.object.status = 'failed'; saved.object.error = 'line 5 syntax error'; return { data: { id: 'attempt', object_id: 'obj', status: 'failed' } } },
+      getRepairAttempt: async () => ({ data: { id: 'attempt', object_id: 'obj', status: 'failed', units: [], error: 'line 5 syntax error' } }),
+    })); await tick()
+    p.job.value.dst_db_type = 'dameng'; p.openEditor(saved)
+    await p.prepareExecute()
+    assert.deepEqual(calls.map(call => call[0]), ['save', 'execute'])
+    assert.equal(calls[0][1].mode, 'manual_trigger')
+    assert.equal(calls[0][1].reviewed, true)
+    assert.equal(calls[0][1].units.length, 1)
+    assert.equal(calls[1][1].version, 2)
+    assert.equal(calls[1][1].confirmed, true)
+    assert.equal(p.editorVisible.value, true)
+    assert.equal(p.editing.value.object.error, 'line 5 syntax error')
+    assert.equal(p.draftUnits.value.length, 1)
+    assert.equal(p.canExecute.value, true)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('single-object action locks save plus submit and reuses a request id after a network failure', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let finishSave, saves = 0
+    const requests = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      saveRepairDraft: async (_job, _id, draft) => { saves++; return new Promise(resolve => { finishSave = () => resolve({ data: { version: 2, object: { ...record().object, units: draft.units } } }) }) },
+      executeRepair: async (_job, _id, request) => { requests.push(request); throw new Error('connection lost') },
+    })); await tick(); p.openEditor(record())
+    const first = p.prepareExecute()
+    assert.equal(p.submitting.value, true)
+    await p.prepareExecute()
+    assert.equal(saves, 1)
+    finishSave(); await first
+    assert.equal(p.submitting.value, false)
+    assert.equal(p.editorVisible.value, true)
+    assert.equal(requests.length, 1)
+    await p.prepareExecute()
+    assert.equal(saves, 1, 'same saved version is not saved again after an uncertain POST response')
+    assert.equal(requests.length, 2)
+    assert.equal(requests[1].request_id, requests[0].request_id)
+    assert.equal(requests[1].version, requests[0].version)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('failed saving, edits during saving and switching objects prevent direct SQL submission', async () => {
+  for (const scenario of ['failed', 'edited', 'switched']) {
+    const scope = Vue.effectScope()
+    try {
+      let finishSave, executions = 0
+      const p = scope.run(() => panel({ jobID: 'job' }, {
+        saveRepairDraft: async (_job, _id, draft) => {
+          if (scenario === 'failed') throw new Error('validation failed')
+          return new Promise(resolve => { finishSave = () => resolve({ data: { version: 2, object: { ...record().object, units: draft.units } } }) })
+        },
+        executeRepair: async () => { executions++; assert.fail('stale or rejected draft must not execute') },
+      })); await tick(); p.openEditor(record())
+      const request = p.prepareExecute()
+      if (scenario === 'edited') p.draftUnits.value[0].sql = 'CREATE TABLE Orders(id BIGINT)'
+      if (scenario === 'switched') p.openEditor(record({ id: 'other', name: 'Other', target_name: 'Other' }))
+      finishSave?.(); await request
+      assert.equal(executions, 0, scenario)
+      assert.equal(p.submitting.value, false, scenario)
+      assert.equal(p.editorVisible.value, true, scenario)
+      if (scenario === 'edited') assert.equal(p.draftUnits.value[0].sql, 'CREATE TABLE Orders(id BIGINT)')
+      if (scenario === 'switched') assert.equal(p.editing.value.object.id, 'other')
+      p.lifecycle.unmount()
+    } finally { scope.stop() }
+  }
+})
+
+test('unknown saved manual trigger stays read-only and reconciles frozen units without saving', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const requests = []
+    const object = manualTriggerRecord({ manual_trigger_editable: false, diagnostic_only: false, status: 'unknown', manual_trigger: { sql: triggerSQL, revision: 1 }, units: [unit('create-trigger', 'unknown', { sql: triggerSQL, original_sql: triggerSQL, selected: false })] })
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      saveRepairDraft: async () => assert.fail('unknown manual SQL must stay frozen'),
+      executeRepair: async (_job, _id, request) => { requests.push(request); throw new Error('connection lost') },
+    })); await tick(); p.job.value.dst_db_type = 'dameng'; p.openEditor(object)
+    assert.equal(utils.canEditRepairDDL(object.object), false)
+    assert.equal(utils.canRetryManualTrigger(object.object), true)
+    assert.equal(p.canExecute.value, true)
+    let editors = []
+    const html = await renderPanel(p, undefined, props => editors.push(props))
+    assert.equal(editors.length, 0)
+    assert.ok(html.includes('核对并重试'))
+    await p.prepareExecute(); await p.prepareExecute()
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0].request_id, requests[1].request_id)
+    assert.equal(p.executionSnapshot.value[0].sql, triggerSQL)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('repair editor is wider with a viewport-bounded SQL area and preserves invalid input', async () => {
+  assert.match(descriptor.template.content, /width="min\(1120px, calc\(100vw - 48px\)\)"/)
+  assert.match(descriptor.styles[0].content, /min-height: min\(180px, 30dvh\); max-height: min\(320px, 40dvh\)/)
+  const compiled = compileStyle({ source: descriptor.styles[0].content, filename: 'MigrationRepairPanel.vue', id: 'data-v-repair', scoped: true }).code
+  assert.match(compiled, /\.unit-editor \.repair-sql-editor\[data-v-repair\] \.cm-scroller/, 'repair sizes outrank the asynchronously loaded SqlEditor auto-height rule')
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    const invalid = "CREATE VIEW OrdersView AS SELECT 'unterminated"
+    p.openEditor(record({ kind: 'view', units: [unit('view', 'failed', { sql: invalid, original_sql: invalid })] }))
+    assert.equal(p.draftUnits.value[0].sql, invalid)
+    assert.equal(p.messages.length, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('batch executes a saved native manual trigger plan without resaving its physical phases', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const compileSQL = 'ALTER TRIGGER "Target"."trg" COMPILE'
+    const native = { schema: 'Target', name: 'trg', units: [{ sql: triggerSQL, phase: 'create' }, { sql: compileSQL, phase: 'compile' }] }
+    const saved = manualTriggerRecord({ diagnostic_only: false, requires_review: false, status: 'draft', manual_trigger: { sql: triggerSQL, revision: 1 }, native, units: [unit('create-trigger', 'pending', { sql: triggerSQL, original_sql: triggerSQL }), unit('compile-trigger', 'pending', { sql: compileSQL, original_sql: compileSQL })] })
+    let saves = 0, submits = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList([saved]),
+      saveRepairDraft: async () => { saves++; assert.fail('saved native manual plan must not be converted again') },
+      executeRepair: async (_job, _object, request) => { submits++; assert.equal(request.version, saved.version); return { data: { id: 'attempt', object_id: 'obj', kind: 'ddl', status: 'succeeded', units: saved.object.units } } },
+    })); await tick()
+    p.selectAllFiltered(); await p.prepareBatch()
+    assert.equal(p.batchItems.value[0].record.object.units.length, 2)
+    p.batchReviewed.value = true; await p.confirmBatch()
+    assert.equal(saves, 0)
+    assert.equal(submits, 1)
+    assert.equal(p.batchItems.value[0].status, 'succeeded')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('legacy target SQL can be restored and suggested SQL is formatted without modifying originals', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const suggested = triggerSQL.replace('"Audit"', '"SuggestedAudit"')
+    const original = manualTriggerRecord({ units: [], suggested_ddl: suggested })
+    const p = scope.run(() => panel({ jobID: 'job' })); await tick()
+    p.job.value.dst_db_type = 'dameng'; p.openEditor(original)
+    p.draftUnits.value[0].sql = 'unsaved user changes'
+    p.restoreOriginal()
+    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(triggerSQL, 'dameng'))
+    p.useSuggested()
+    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(suggested, 'dameng'))
+    assert.equal(original.object.ddl, triggerSQL)
+    assert.equal(original.object.suggested_ddl, suggested)
+    const savedSQL = triggerSQL.replace('"Audit"', '"SavedAudit"')
+    p.openEditor(manualTriggerRecord({ manual_trigger: { sql: savedSQL, revision: 2 } }))
+    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(savedSQL, 'dameng'))
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })

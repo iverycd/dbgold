@@ -86,7 +86,12 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 			out[i].Status = "pending"
 			return fmt.Errorf("保存原生执行前状态失败: %w", err)
 		}
-		err := damengnative.ExecuteUnit(run, w, *obj.Native, obj.Native.Units[i])
+		var err error
+		if obj.ManualTrigger != nil {
+			err = executeManualNativeTriggerUnit(run, w, obj, i)
+		} else {
+			err = damengnative.ExecuteUnit(run, w, *obj.Native, obj.Native.Units[i])
+		}
 		if err != nil {
 			out[i].Status, out[i].Error = repairErrorStatus(err), err.Error()
 			return errors.Join(err, persist())

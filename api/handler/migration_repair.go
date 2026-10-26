@@ -284,7 +284,7 @@ func ListMigrationRepairs(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(objects))
 	for i, o := range objects {
-		out = append(out, gin.H{"object": o, "version": rows[i].Version})
+		out = append(out, gin.H{"object": repairObjectResponse(j, o), "version": rows[i].Version})
 	}
 	b, e := store.GetMigrationRepairBinding(j.JobID)
 	if e != nil {
@@ -297,9 +297,9 @@ func ListMigrationRepairs(c *gin.Context) {
 	c.JSON(200, gin.H{"objects": out, "binding": bindingResponse(b, j), "running_attempt_id": a.ID})
 }
 func GetMigrationRepair(c *gin.Context) {
-	_, _, row, o, ok := loadRepairObject(c, false)
+	j, _, row, o, ok := loadRepairObject(c, false)
 	if ok {
-		c.JSON(200, gin.H{"object": o, "version": row.Version})
+		c.JSON(200, gin.H{"object": repairObjectResponse(j, o), "version": row.Version})
 	}
 }
 
@@ -593,11 +593,8 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !o.CanEditDDL() {
-		repairError(c, fmt.Errorf("此记录仅供诊断或接续数据，不支持编辑对象 DDL"))
-		return
-	}
 	var req struct {
+		Mode          string            `json:"mode"`
 		Version       int               `json:"version"`
 		Units         []repair.Unit     `json:"units"`
 		ColumnMapping map[string]string `json:"column_mapping"`
@@ -610,6 +607,35 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	}
 	if req.Version != row.Version {
 		repairError(c, store.ErrRepairConflict)
+		return
+	}
+	if req.Mode != "" && req.Mode != "manual_trigger" {
+		repairError(c, fmt.Errorf("不支持的对象修复模式"))
+		return
+	}
+	if req.Mode == "manual_trigger" || o.ManualTrigger != nil {
+		if binding.TargetSchema != o.Schema {
+			repairError(c, fmt.Errorf("触发器目标 Schema 与原修复绑定不一致"))
+			return
+		}
+		candidate, err := prepareManualTriggerDraft(j, o, req.Units, req.Reviewed)
+		if err != nil {
+			repairError(c, err)
+			return
+		}
+		if err = bindManualTriggerColumnMapping(j.JobID, &candidate); err != nil {
+			repairError(c, err)
+			return
+		}
+		if err = store.SaveMigrationRepairObject(row.JobID, row.ObjectID, req.Version, repairJSON(candidate)); err != nil {
+			repairError(c, err)
+			return
+		}
+		c.JSON(200, gin.H{"object": repairObjectResponse(j, candidate), "version": req.Version + 1})
+		return
+	}
+	if !o.CanEditDDL() {
+		repairError(c, fmt.Errorf("此记录仅供诊断或接续数据，不支持编辑对象 DDL"))
 		return
 	}
 	if req.SequencePlan {
@@ -700,7 +726,7 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
-	c.JSON(200, gin.H{"object": o, "version": req.Version + 1})
+	c.JSON(200, gin.H{"object": repairObjectResponse(j, o), "version": req.Version + 1})
 }
 
 var newMigrationRepairWriter = func(conn *store.Connection, schema string, pool target.ConnPoolConfig) (target.Writer, error) {
@@ -896,11 +922,21 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, store.ErrRepairConflict)
 		return
 	}
-	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil {
+	if o.ManualTrigger != nil {
+		if j.DstDBType != "dameng" || !o.TrustedManualTrigger() {
+			repairError(c, fmt.Errorf("手工触发器计划与原目标不一致"))
+			return
+		}
+		if o.RequiresReview {
+			repairError(c, fmt.Errorf("请保存当前 SQL 后执行"))
+			return
+		}
+	}
+	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
-	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil {
+	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil || o.ManualTrigger != nil {
 		// The read-only retry action always requests the whole frozen transaction;
 		// it does not expose or depend on persisted per-unit selection controls.
 		for i := range o.Units {
@@ -914,17 +950,17 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		return
 	}
 	for _, u := range o.Units {
-		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil {
+		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil {
 			repairError(c, fmt.Errorf("存在未知执行结果，不允许自动重放"))
 			return
 		}
 	}
-	if o.Native == nil {
+	if o.Native == nil && o.ManualTrigger == nil {
 		if e := validateRepairUnits(o.Units); e != nil {
 			repairError(c, e)
 			return
 		}
-	} else if !o.TrustedNative() {
+	} else if o.Native != nil && !o.TrustedNative() {
 		repairError(c, fmt.Errorf("达梦原生执行计划已变化，禁止重放"))
 		return
 	}

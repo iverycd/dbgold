@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
@@ -8,12 +9,15 @@ import { parse } from '@vue/compiler-sfc'
 
 const file = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 const transpile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const require = createRequire(import.meta.url)
+const formattingContext = { exports: {}, require }
+vm.runInNewContext(transpile(file('../src/utils/sqlFormatting.ts')), formattingContext)
 const utilityContext = { exports: {} }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityContext)
 const batchContext = { exports: {}, require: () => utilityContext.exports }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepairBatch.ts')), batchContext)
 const { descriptor } = parse(file('../src/components/MigrationRepairPanel.vue'))
-const fields = 'records, job, binding, editing, draftUnits, reviewed, sequencePlanPending, sequencePlanMessage, canRefreshSequencePlan, canExecute, refreshingSequencePlan, openEditor, closeEditor, refreshSequencePlan, saveDraft, restoreOriginal'
+const fields = 'records, job, binding, editing, draftUnits, sequencePlanPending, sequencePlanMessage, canRefreshSequencePlan, canExecute, refreshingSequencePlan, openEditor, closeEditor, refreshSequencePlan, saveDraft, restoreOriginal'
 
 function panel(overrides = {}) {
   const messages = []
@@ -25,6 +29,7 @@ function panel(overrides = {}) {
       if (id === 'vue') return { ...Vue, onUnmounted() {} }
       if (id === '@/utils/migrationRepair') return utilityContext.exports
       if (id === '@/utils/migrationRepairBatch') return batchContext.exports
+      if (id === '@/utils/sqlFormatting') return formattingContext.exports
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async () => ({ data: { job_id: 'job', status: 'failed', src_db_type: 'oracle', dst_db_type: 'dameng' } }) }
@@ -50,7 +55,7 @@ test('sequence plan API encodes object identity and passes draft version', async
   assert.equal(requests[0][1].version, 4)
 })
 
-test('refresh stays local and requires review before saving generated origins', async () => {
+test('refresh stays local and saving generated origins records review in the single-object action', async () => {
   const saves = []
   const app = panel({
     refreshSequenceRepairPlan: async () => ({ data: candidate() }),
@@ -69,9 +74,7 @@ test('refresh stays local and requires review before saving generated origins', 
   assert.equal(app.records.value[0].object.units[0].id, 'create', 'read-only planning does not replace persisted records')
   assert.equal(app.draftUnits.value[0].id, 'alter')
   assert.equal(app.sequencePlanPending.value, true)
-  assert.equal(app.reviewed.value, false)
-  assert.equal(app.canExecute.value, false)
-  app.reviewed.value = true
+  assert.equal(app.canExecute.value, true)
   assert.equal(await app.saveDraft(), true)
   assert.equal(saves[0].sequence_plan, true)
   assert.equal(saves[0].reviewed, true)
@@ -126,7 +129,6 @@ test('editing or restoring a generated plan cannot bypass server plan validation
   app.records.value = [original]
   app.openEditor(original)
   await app.refreshSequencePlan()
-  app.reviewed.value = true
   app.draftUnits.value[0].sql += ' -- formatted by user'
   assert.equal(app.sequencePlanPending.value, true)
   assert.equal(await app.saveDraft(), false)
@@ -134,7 +136,7 @@ test('editing or restoring a generated plan cannot bypass server plan validation
   assert.equal(app.records.value[0].version, 1)
   assert.ok(app.draftUnits.value[0].sql.includes('formatted by user'))
   app.restoreOriginal()
-  assert.equal(app.draftUnits.value[0].sql, candidate().object.units[0].sql)
+  assert.equal(app.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(candidate().object.units[0].sql, 'dameng'))
   assert.equal(app.sequencePlanPending.value, true, 'restoring SQL must not downgrade the candidate to manual execution')
   assert.equal(await app.saveDraft(), true)
   assert.equal(saves[1].sequence_plan, true)

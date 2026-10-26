@@ -979,7 +979,7 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 				if unit.Phase == "restore" || unit.Phase == "compile" || unit.Phase == "drop" || unit.Phase == "mv_rebase" || unit.Phase == "mv_prepare" || unit.Phase == "mv_history" || unit.Phase == "mv_restore" || unit.Phase == "event_activate" || unit.Phase == "interval_prepare" {
 					continue
 				}
-				mappedUnit, _, rewriteErr := damengnative.RewriteUnit(unit, expected.Profile.Schema, w.schema)
+				mappedUnit, _, rewriteErr := nativeExpectedUnit(unit, want, expected.Profile.Schema, w.schema)
 				if rewriteErr != nil {
 					return issues, rewriteErr
 				}
@@ -1023,6 +1023,16 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 	return issues, nil
 }
 
+// An approved manual trigger revision already names its destination schema.
+// Other objects retain their original source owner, including snapshots whose
+// object schema was omitted by older versions.
+func nativeExpectedUnit(unit damengnative.Unit, object damengnative.Object, sourceSchema, targetSchema string) (damengnative.Unit, []string, error) {
+	if object.Schema != "" {
+		sourceSchema = object.Schema
+	}
+	return damengnative.RewriteUnit(unit, sourceSchema, targetSchema)
+}
+
 // Equal unnamed constraints are separate catalog objects. A single actual
 // unit cannot prove two frozen ADDs merely because their SQL is equivalent.
 func nativeConsumeDefinitionCandidate(unit damengnative.Unit, candidates []damengnative.Unit, used []bool) bool {
@@ -1059,6 +1069,11 @@ func nativeDefinitionsEqual(a, b string) bool {
 			if !strings.HasPrefix(token, "'") && !strings.HasPrefix(token, `"`) && !strings.HasPrefix(strings.ToUpper(token), "Q'") && !strings.HasPrefix(strings.ToUpper(token), "NQ'") {
 				tokens[i] = strings.ToUpper(token)
 			}
+		}
+		// GET_DDL may omit OR REPLACE after a successful manual replacement.
+		// This changes installation behavior, not the stored trigger definition.
+		if len(tokens) > 3 && tokens[0] == "CREATE" && tokens[1] == "OR" && tokens[2] == "REPLACE" && tokens[3] == "TRIGGER" {
+			tokens = append(tokens[:1], tokens[3:]...)
 		}
 		// Restoring the identity's next value intentionally changes its seed,
 		// while its increment and all other table semantics remain fixed.

@@ -528,6 +528,26 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	if o.ManualTrigger != nil {
+		// Manual procedural SQL is the accepted target definition. Regenerating
+		// it from an archived conversion plan would undo the user's repair.
+		// Column renames still require an explicit new manual revision.
+		previous := o.ColumnMapping
+		if len(previous) == 0 {
+			previous = table.ColumnMapping
+		}
+		for sourceName, targetName := range mapping {
+			oldName := previous[sourceName]
+			if oldName == "" {
+				oldName = sourceName
+			}
+			if oldName != targetName {
+				o.RequiresReview = true
+				return o
+			}
+		}
+		return o
+	}
 	if o.MySQLDamengTrigger != nil {
 		plan := o.MySQLDamengTrigger
 		if err := mysqldmtrigger.ValidatePlan(*plan); err != nil {

@@ -1,7 +1,7 @@
 <template>
   <div class="sql-editor" :class="{ 'sql-editor-auto-height': autoHeight }">
     <div v-if="formatDbType" class="sql-format-toolbar">
-      <a-button size="mini" :disabled="formatDisabled || !modelValue.trim()" @mousedown.prevent @click="formatSQL">格式化 SQL</a-button>
+      <a-button size="mini" :disabled="formatDisabled || readOnly || !modelValue.trim()" @mousedown.prevent @click="formatSQL">格式化 SQL</a-button>
       <span>Ctrl / ⌘ + Shift + F · 选中时格式化选区，否则格式化全文</span>
     </div>
     <div ref="editorHost" class="sql-editor-host"></div>
@@ -24,6 +24,7 @@ const props = defineProps<{
   formatDbType?: string
   formatDisabled?: boolean
   autoHeight?: boolean
+  readOnly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -33,6 +34,7 @@ const emit = defineEmits<{
 
 const editorHost = ref<HTMLElement | null>(null)
 const dialectCompartment = new Compartment()
+const readOnlyCompartment = new Compartment()
 let view: EditorView | null = null
 
 function languageExtension() {
@@ -101,7 +103,7 @@ function getExecutableSQL(): string {
 }
 
 function formatSQL(): void {
-  if (!view || !props.formatDbType || props.formatDisabled) return
+  if (!view || !props.formatDbType || props.formatDisabled || props.readOnly) return
   try {
     const transaction = createSQLFormatTransaction(view.state, props.formatDbType)
     if (transaction) view.dispatch(transaction)
@@ -122,6 +124,7 @@ onMounted(() => {
       extensions: [
         basicSetup,
         dialectCompartment.of(languageExtension()),
+        readOnlyCompartment.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
         Prec.highest(keymap.of([{
           key: 'Mod-Shift-f',
           run: () => {
@@ -158,6 +161,9 @@ watch(() => props.modelValue, (value) => {
 
 watch(() => props.dialect, () => {
   view?.dispatch({ effects: dialectCompartment.reconfigure(languageExtension()) })
+})
+watch(() => props.readOnly, value => {
+  view?.dispatch({ effects: readOnlyCompartment.reconfigure([EditorState.readOnly.of(!!value), EditorView.editable.of(!value)]) })
 })
 
 onBeforeUnmount(() => view?.destroy())

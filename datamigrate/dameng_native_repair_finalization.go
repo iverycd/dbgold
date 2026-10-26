@@ -32,7 +32,7 @@ func NativeRepairFinalizationReady(objects []repair.Object, currentID string) er
 		if object.Native == nil || object.Native.Managed || object.DiagnosticOnly || object.ID == currentID {
 			continue
 		}
-		if !object.TrustedNative() {
+		if !object.TrustedNative() || object.ManualTrigger != nil && !object.TrustedManualTrigger() {
 			return fmt.Errorf("对象 %s 的原生冻结计划不可信", object.Name)
 		}
 		if object.DataStatus != "succeeded" && object.DataStatus != "not_required" {
@@ -83,9 +83,24 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 		return fmt.Errorf("源目标版本或语义参数已改变")
 	}
 	frozen := map[string]repair.Object{}
+	manualTargets := map[string]damengnative.Object{}
 	for _, object := range objects {
 		if object.Native != nil && object.Native.Kind != "native_drop" {
-			frozen[object.ID] = object
+			baseline := object
+			if object.ManualTrigger != nil {
+				// An approved target adaptation does not change the frozen source
+				// definition. Authenticate both revisions before using the original
+				// one for source drift and the current one for target proof.
+				if !object.TrustedManualTrigger() {
+					return fmt.Errorf("手工触发器 %s 缺少可信原生修复来源", object.Name)
+				}
+				baseline = *object.ManualTrigger.Original
+				if baseline.ManualTrigger != nil || !baseline.TrustedNative() || object.Kind != "trigger" || object.Native.EventTrigger || object.Native.Managed || baseline.ID != object.ID || baseline.Kind != object.Kind || baseline.Schema != object.Schema || baseline.TargetName != object.TargetName || baseline.Table != object.Table || baseline.Native.Status != object.Native.Status || baseline.Native.EventTrigger || baseline.Native.Managed {
+					return fmt.Errorf("手工触发器 %s 的原生对象身份或来源已改变", object.Name)
+				}
+				manualTargets[object.ID] = *object.Native
+			}
+			frozen[object.ID] = baseline
 		}
 	}
 	for _, object := range snapshot.Objects {
@@ -96,6 +111,9 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 		}
 		if !exists || !trusted {
 			return fmt.Errorf("源对象 %s 已偏离原生冻结清单", object.Name)
+		}
+		if _, manual := manualTargets[object.ID]; manual && (object.Name != original.Native.Name || object.Table != original.Native.Table || object.Status != original.Native.Status) {
+			return fmt.Errorf("源触发器 %s 的对象身份或启停状态已偏离原生冻结清单", object.Name)
 		}
 		for _, unit := range object.Units {
 			mapped, _, rewriteErr := damengnative.RewriteUnit(unit, snapshot.Profile.Schema, destination.Profile.Schema)
@@ -152,6 +170,11 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 	expected := *snapshot
 	expected.Objects = append([]damengnative.Object{}, snapshot.Objects...)
 	for i := range expected.Objects {
+		if manual, ok := manualTargets[expected.Objects[i].ID]; ok {
+			// The manual plan is already authored in the destination schema;
+			// the writer must not rewrite it from the source schema a second time.
+			expected.Objects[i] = manual
+		}
 		if expected.Objects[i].EventTrigger {
 			// Every imported event must still be disabled at the proof point.
 			expected.Objects[i].Status = "DISABLED"

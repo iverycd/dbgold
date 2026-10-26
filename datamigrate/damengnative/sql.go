@@ -18,7 +18,15 @@ type sqlToken struct {
 // than pretty-printing it. In particular, strings and PL/SQL bodies keep their
 // original whitespace, case, quoting and semicolons.
 func nativeTokens(s string) ([]sqlToken, error) {
+	return nativeTokensUntil(s, nil)
+}
+
+func nativeTokensUntil(s string, stop func(sqlToken) bool) ([]sqlToken, error) {
 	var tokens []sqlToken
+	appendToken := func(t sqlToken) bool {
+		tokens = append(tokens, t)
+		return stop != nil && stop(t)
+	}
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
 		if unicode.IsSpace(r) {
@@ -75,7 +83,9 @@ func nativeTokens(s string) ([]sqlToken, error) {
 				return nil, fmt.Errorf("原生 DDL 包含未闭合 Q 字符串")
 			}
 			i += end + 2
-			tokens = append(tokens, sqlToken{start, i, 's', s[q+3 : i-2]})
+			if appendToken(sqlToken{start, i, 's', s[q+3 : i-2]}) {
+				return tokens, nil
+			}
 			continue
 		}
 		if r == '\'' || r == '"' {
@@ -104,7 +114,9 @@ func nativeTokens(s string) ([]sqlToken, error) {
 			if quote == '"' {
 				kind = 'q'
 			}
-			tokens = append(tokens, sqlToken{start, i, kind, b.String()})
+			if appendToken(sqlToken{start, i, kind, b.String()}) {
+				return tokens, nil
+			}
 			continue
 		}
 		if unicode.IsLetter(r) || r == '_' || r == '$' || r == '#' {
@@ -116,11 +128,15 @@ func nativeTokens(s string) ([]sqlToken, error) {
 				}
 				i += z
 			}
-			tokens = append(tokens, sqlToken{start, i, 'i', s[start:i]})
+			if appendToken(sqlToken{start, i, 'i', s[start:i]}) {
+				return tokens, nil
+			}
 			continue
 		}
 		i += n
-		tokens = append(tokens, sqlToken{start, i, 'p', s[start:i]})
+		if appendToken(sqlToken{start, i, 'p', s[start:i]}) {
+			return tokens, nil
+		}
 	}
 	return tokens, nil
 }

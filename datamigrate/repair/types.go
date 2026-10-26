@@ -25,11 +25,13 @@ type Unit struct {
 }
 
 type Object struct {
-	Native             *damengnative.Object `json:"native,omitempty"`
-	NativeFingerprint  string               `json:"native_fingerprint,omitempty"`
-	NativeTable        *damengnative.Table  `json:"native_table,omitempty"`
-	MySQLPGTrigger     *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
-	MySQLDamengTrigger *mysqldmtrigger.Plan `json:"mysql_dameng_trigger,omitempty"`
+	ManualTrigger         *ManualTriggerPlan   `json:"manual_trigger,omitempty"`
+	ManualTriggerEditable bool                 `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.
+	Native                *damengnative.Object `json:"native,omitempty"`
+	NativeFingerprint     string               `json:"native_fingerprint,omitempty"`
+	NativeTable           *damengnative.Table  `json:"native_table,omitempty"`
+	MySQLPGTrigger        *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
+	MySQLDamengTrigger    *mysqldmtrigger.Plan `json:"mysql_dameng_trigger,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -62,6 +64,36 @@ type Object struct {
 	Legacy             bool                 `json:"legacy"`
 	RequiresReview     bool                 `json:"requires_review"`
 	DataStatus         string               `json:"data_status,omitempty"`
+}
+
+// ManualTriggerPlan records an explicitly authored target revision. Original is
+// the first pre-edit object, not another revision, so source provenance and the
+// automatic conversion plan remain available without becoming executable again.
+type ManualTriggerPlan struct {
+	SQL         string   `json:"sql"`
+	Revision    int      `json:"revision"`
+	Original    *Object  `json:"original"`
+	PreviousSQL []string `json:"previous_sql,omitempty"`
+}
+
+// TrustedManualTrigger binds the saved program to the existing repair identity.
+// The response-only editability flag does not participate in this check.
+func (o Object) TrustedManualTrigger() bool {
+	p := o.ManualTrigger
+	if p == nil || p.Revision < 1 || p.Original == nil || p.Original.ManualTrigger != nil || o.Kind != "trigger" || o.DiagnosticOnly || o.Schema == "" || o.TargetName == "" || o.Table == "" {
+		return false
+	}
+	d, err := damengnative.ParseTableTriggerSQL(p.SQL, o.Schema)
+	if err != nil || d.Schema != o.Schema || d.Name != o.TargetName || d.TableSchema != o.Schema || d.Table != o.Table || p.Original.Kind != "trigger" || p.Original.Schema != o.Schema || p.Original.TargetName != o.TargetName {
+		return false
+	}
+	creates := 0
+	for _, unit := range o.Units {
+		if unit.SQL == p.SQL {
+			creates++
+		}
+	}
+	return creates == 1 && (o.Native != nil && o.TrustedNative() || o.Native == nil && len(o.Units) == 1)
 }
 
 type Verification struct {
@@ -106,6 +138,9 @@ func (o *Object) NormalizeLegacyExecution() bool {
 
 // CanEditDDL requires an object identity, not just a report category label.
 func (o Object) CanEditDDL() bool {
+	if o.ManualTrigger != nil {
+		return o.TrustedManualTrigger()
+	}
 	if o.Native != nil {
 		return false
 	}
@@ -125,6 +160,9 @@ func (o Object) CanEditDDL() bool {
 // Generated MySQL trigger programs can be retried as a complete immutable
 // transaction, while remaining unavailable to the general SQL draft editor.
 func (o Object) CanExecuteDDL() bool {
+	if o.ManualTrigger != nil {
+		return o.TrustedManualTrigger()
+	}
 	if o.Native != nil {
 		return o.TrustedNative()
 	}
