@@ -324,3 +324,52 @@ export function formatDataValidation(report?: DataValidationReport, enabled = fa
 export function nativeSchemaNeedsAttention(report?: MigrationReport | null): boolean {
   return report?.native_schema?.preflight?.ready === false || !!report?.native_schema?.verification?.some(issue => issue.severity !== 'warning')
 }
+
+export interface MigrationTiming {
+  created_at?: string | null
+  finished_at?: string | null
+  status?: string
+}
+
+function migrationDate(value?: string | null): Date | null {
+  const text = value?.trim()
+  if (!text || /^000[01]-01-01(?:T|\s|$)/.test(text)) return null
+  const date = new Date(text)
+  return Number.isFinite(date.getTime()) ? date : null
+}
+
+function formatMigrationDate(date: Date | null): string {
+  if (!date) return '未记录'
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${String(date.getFullYear()).padStart(4, '0')}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+export function migrationTimingSummary(job?: MigrationTiming | null): { startedAt: string; finishedAt: string; duration: string } {
+  const start = migrationDate(job?.created_at)
+  const end = migrationDate(job?.finished_at)
+  const running = job?.status === 'running' && !end
+  let duration = running ? '进行中' : '—'
+  if (start && end && end.getTime() >= start.getTime()) {
+    const seconds = Math.floor((end.getTime() - start.getTime()) / 1000)
+    const days = Math.floor(seconds / 86400)
+    const hours = Math.floor(seconds % 86400 / 3600)
+    const minutes = Math.floor(seconds % 3600 / 60)
+    const parts: string[] = []
+    if (days) parts.push(`${days} 天`)
+    if (days || hours) parts.push(`${hours} 小时`)
+    if (days || hours || minutes) parts.push(`${minutes} 分`)
+    parts.push(`${seconds % 60} 秒`)
+    duration = parts.join(' ')
+  }
+  return {
+    startedAt: formatMigrationDate(start),
+    finishedAt: running ? '尚未结束' : formatMigrationDate(end),
+    duration,
+  }
+}
+
+export function formatMigrationTiming(job?: MigrationTiming | null, unavailable = false): string[] {
+  if (unavailable) return ['迁移开始时间：时间信息暂不可用', '迁移结束时间：时间信息暂不可用', '总耗时：—']
+  const timing = migrationTimingSummary(job)
+  return [`迁移开始时间：${timing.startedAt}`, `迁移结束时间：${timing.finishedAt}`, `总耗时：${timing.duration}`]
+}

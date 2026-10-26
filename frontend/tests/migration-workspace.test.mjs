@@ -8,6 +8,8 @@ import ts from 'typescript'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
 
+const flushRequests = () => new Promise(resolve => setImmediate(resolve))
+
 function panel(name, props, exports, { api = {}, emit = () => {}, copied = [], lifecycle = {} } = {}) {
   const { descriptor } = parse(readFileSync(new URL(`../src/views/${name}.vue`, import.meta.url), 'utf8'))
   const source = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { ${exports} };`, {
@@ -21,7 +23,10 @@ function panel(name, props, exports, { api = {}, emit = () => {}, copied = [], l
     defineExpose() {},
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted: fn => { lifecycle.mount = fn }, onUnmounted: fn => { lifecycle.unmount = fn } }
-      if (id === '@/api/migration') return api
+      if (id === '@/api/migration') return {
+        getDataMigrationJob: async jobID => ({ data: { job_id: jobID } }),
+        ...api,
+      }
       if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/clipboard') return { copyText: async text => copied.push(text) }
@@ -237,6 +242,101 @@ test('changing report jobs discards late responses and never emits loaded for an
     pending[2].resolve({ data: { marker: 'unmounted-report' } })
     await last
     assert.equal(emitted.length, 1)
+  } finally { scope.stop() }
+})
+
+test('a ready report is displayed while its task timing is still loading', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let resolveTiming
+    const emitted = []
+    const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'timed-job' },
+      'loadReport, report, loading, timingJob, timingLoading, timingUnavailable', {
+        emit: (...args) => emitted.push(args),
+        api: {
+          getDataMigrationReport: async () => ({ data: { marker: 'ready-report' } }),
+          getDataMigrationJob: () => new Promise(resolve => { resolveTiming = resolve }),
+        },
+      }))
+    const loaded = p.loadReport()
+    await flushRequests()
+    assert.equal(p.report.value.marker, 'ready-report')
+    assert.equal(p.loading.value, false, 'timing does not hold the report loading state')
+    assert.equal(p.timingLoading.value, true)
+    assert.equal(p.timingJob.value, null)
+    assert.equal(p.timingUnavailable.value, false)
+    assert.deepEqual(emitted, [['loaded', 'timed-job', { marker: 'ready-report' }]])
+    await loaded
+    resolveTiming({ data: { job_id: 'timed-job', created_at: '2026-10-26T08:00:00+08:00' } })
+    await flushRequests()
+    assert.equal(p.timingJob.value.job_id, 'timed-job')
+    assert.equal(p.timingLoading.value, false)
+  } finally { scope.stop() }
+})
+
+for (const outcome of ['resolve', 'reject']) {
+  test(`late task timing ${outcome} cannot overwrite the new task or finish its loading state`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const props = Vue.reactive({ jobID: 'old-job' }), pending = [], lifecycle = {}
+      const p = scope.run(() => panel('MigrationReportPanel', props,
+        'loadReport, timingJob, timingLoading, timingUnavailable', {
+          lifecycle,
+          api: {
+            getDataMigrationReport: async () => ({ data: {} }),
+            getDataMigrationJob: id => new Promise((resolve, reject) => pending.push({ id, resolve, reject })),
+          },
+        }))
+      await p.loadReport()
+      props.jobID = 'new-job'
+      await Vue.nextTick()
+      assert.equal(pending[1].id, 'new-job')
+      pending[0][outcome](outcome === 'resolve' ? { data: { job_id: 'old-job' } } : new Error('old request failed'))
+      await flushRequests()
+      assert.equal(p.timingJob.value, null)
+      assert.equal(p.timingLoading.value, true)
+      assert.equal(p.timingUnavailable.value, false)
+      pending[1].resolve({ data: { job_id: 'new-job', created_at: '2026-10-26T09:00:00+08:00' } })
+      await flushRequests()
+      assert.equal(p.timingJob.value.job_id, 'new-job')
+      assert.equal(p.timingLoading.value, false)
+
+      await p.loadReport()
+      assert.equal(p.timingJob.value, null, 'reloading clears the previous timing immediately')
+      lifecycle.unmount()
+      pending[2].resolve({ data: { job_id: 'unmounted-job' } })
+      await flushRequests()
+      assert.equal(p.timingJob.value, null, 'unmounted task timing cannot be written back')
+    } finally { scope.stop() }
+  })
+}
+
+test('timing failure leaves a usable report and a retry clears the timing error', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let attempt = 0, resolveTiming
+    const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'timed-job' },
+      'loadReport, report, fetchError, timingJob, timingLoading, timingUnavailable', {
+        api: {
+          getDataMigrationReport: async () => ({ data: { marker: 'ready-report' } }),
+          getDataMigrationJob: () => {
+            if (++attempt === 1) return Promise.reject(new Error('task details unavailable'))
+            return new Promise(resolve => { resolveTiming = resolve })
+          },
+        },
+      }))
+    await p.loadReport()
+    assert.equal(p.report.value.marker, 'ready-report')
+    assert.equal(p.fetchError.value, '')
+    assert.equal(p.timingUnavailable.value, true)
+    assert.equal(p.timingLoading.value, false)
+    const retry = p.loadReport()
+    assert.equal(p.timingUnavailable.value, false)
+    assert.equal(p.timingLoading.value, true)
+    resolveTiming({ data: { job_id: 'timed-job' } })
+    await retry
+    assert.equal(p.timingJob.value.job_id, 'timed-job')
+    assert.equal(p.timingUnavailable.value, false)
   } finally { scope.stop() }
 })
 

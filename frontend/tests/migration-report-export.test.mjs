@@ -13,7 +13,7 @@ const largeLineCount = 200000
 const jobID = '12345678-report-export'
 const scripts = new Map(views.map(view => {
   const { descriptor } = parse(readFileSync(new URL(`../src/views/${view}.vue`, import.meta.url), 'utf8'))
-  const fields = `report, repairPanel, exportReport${view === 'DataMigrationJobDetailView' ? ', job' : ''}`
+  const fields = `report, repairPanel, exportReport${view === 'DataMigrationJobDetailView' ? ', job' : ', loadReport, timingJob, timingLoading, timingUnavailable, exporting'}`
   return [view, ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { ${fields} };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText]
@@ -50,8 +50,10 @@ function assertNumberedLines(text, prefix, count = largeLineCount, indent = '') 
 function harness(view, overrides = {}) {
   const downloads = [], clicks = [], messages = [], revoked = []
   const scope = Vue.effectScope()
+  const props = Vue.reactive({ jobID })
+  const route = Vue.reactive({ params: { jobId: jobID } })
   const context = {
-    exports: {}, Blob, defineProps: () => ({ jobID }), defineEmits: () => () => {}, defineExpose() {},
+    exports: {}, Blob, defineProps: () => props, defineEmits: () => () => {}, defineExpose() {},
     URL: {
       createObjectURL(blob) { downloads.push(blob); return 'blob:report-export' },
       revokeObjectURL(url) { revoked.push(url) },
@@ -59,10 +61,15 @@ function harness(view, overrides = {}) {
     document: { createElement: () => ({ click() { clicks.push({ href: this.href, download: this.download }) } }) },
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
-      if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: jobID } }), useRouter: () => ({}) }
+      if (id === 'vue-router') return { useRoute: () => route, useRouter: () => ({}) }
       if (id === '@/utils/migrationReport') return { ...migrationReportUtils, ...overrides.reportUtils }
       if (id === '@/utils/autoRepairs') return { ...autoRepairUtils, ...overrides.autoRepairUtils }
-      if (id === '@/api/migration' || id === '@/utils/clipboard') return {}
+      if (id === '@/api/migration') return {
+        getDataMigrationJob: async id => ({ data: { job_id: id } }),
+        getDataMigrationReport: async () => ({ data: emptyReport() }),
+        ...overrides.api,
+      }
+      if (id === '@/utils/clipboard') return {}
       if (id === '@arco-design/web-vue') return { Message: { error: message => messages.push(message), success() {} } }
       throw new Error(`Unexpected report import ${id}`)
     },
@@ -72,7 +79,7 @@ function harness(view, overrides = {}) {
     const page = context.exports
     page.report.value = emptyReport()
     if (page.job) page.job.value = { job_id: jobID }
-    return { page, downloads, clicks, messages, revoked, stop: () => scope.stop() }
+    return { page, props, route, downloads, clicks, messages, revoked, stop: () => scope.stop() }
   } catch (error) {
     scope.stop()
     throw error
@@ -90,6 +97,57 @@ async function exportedText(h) {
 }
 
 for (const view of views) {
+  for (const status of ['done', 'failed', 'cancelled']) {
+    test(`${view} exports the original start, finish, and cross-day duration for a ${status} task`, async () => {
+      const h = harness(view)
+      try {
+        const timing = {
+          job_id: jobID, status,
+          created_at: '2026-10-25T08:02:03', finished_at: '2026-10-26T09:04:06',
+        }
+        if (h.page.job) h.page.job.value = timing
+        else h.page.timingJob.value = timing
+        const text = await exportedText(h)
+        assert.match(text, /^迁移开始时间：2026-10-25 08:02:03$/m)
+        assert.match(text, /^迁移结束时间：2026-10-26 09:04:06$/m)
+        assert.match(text, /^总耗时：1 天 1 小时 2 分 3 秒$/m)
+        assert.match(text, /^导出时间: /m, 'the export time remains separate from migration timing')
+      } finally { h.stop() }
+    })
+  }
+
+  test(`${view} exports an unfinished task without inventing a finish time or elapsed duration`, async () => {
+    const h = harness(view)
+    try {
+      const timing = { job_id: jobID, status: 'running', created_at: '2026-10-26T09:04:06' }
+      if (h.page.job) h.page.job.value = timing
+      else h.page.timingJob.value = timing
+      const text = await exportedText(h)
+      assert.match(text, /^迁移开始时间：2026-10-26 09:04:06$/m)
+      assert.match(text, /^迁移结束时间：尚未结束$/m)
+      assert.match(text, /^总耗时：进行中$/m)
+    } finally { h.stop() }
+  })
+
+  test(`${view} discards an export if the task changes while repair history is loading`, async () => {
+    const h = harness(view)
+    try {
+      let resolveHistory
+      h.page.repairPanel.value = { exportHistory: () => new Promise(resolve => { resolveHistory = resolve }) }
+      const exporting = h.page.exportReport()
+      await Vue.nextTick()
+      assert.equal(typeof resolveHistory, 'function')
+      if (view === 'MigrationReportPanel') h.props.jobID = '87654321-next-task'
+      else h.route.params.jobId = '87654321-next-task'
+      await Vue.nextTick()
+      resolveHistory(['original task repair history'])
+      await exporting
+      assert.deepEqual(h.downloads, [])
+      assert.deepEqual(h.clicks, [])
+      assert.deepEqual(h.messages, [])
+    } finally { h.stop() }
+  })
+
   test(`${view} exports every line of a large repair history without swallowing a stack error`, async () => {
     const h = harness(view)
     try {
@@ -162,6 +220,9 @@ for (const view of views) {
       assert.match(text, /^单次迁移报告\nJob ID: 12345678-report-export\n/)
       assert.match(text, /=== 迁移概览 ===/)
       assert.match(text, /=== 数据内容校验 ===\n未启用/)
+      assert.match(text, /^迁移开始时间：未记录$/m)
+      assert.match(text, /^迁移结束时间：未记录$/m)
+      assert.match(text, /^总耗时：—$/m)
       assert.doesNotMatch(text, /undefined|null|HISTORY_LINE_/)
     } finally { h.stop() }
   })
@@ -178,6 +239,82 @@ for (const view of views) {
     } finally { h.stop() }
   })
 }
+
+test('report export waits for pending task timing and then includes the fetched values', async () => {
+  let resolveTiming
+  const h = harness('MigrationReportPanel', {
+    api: { getDataMigrationJob: () => new Promise(resolve => { resolveTiming = resolve }) },
+  })
+  try {
+    await h.page.loadReport()
+    assert.equal(h.page.timingLoading.value, true)
+    const exporting = h.page.exportReport()
+    await Vue.nextTick()
+    assert.equal(h.page.exporting.value, true)
+    assert.deepEqual(h.downloads, [])
+    resolveTiming({ data: {
+      job_id: jobID, status: 'done', created_at: '2026-10-26T08:00:00', finished_at: '2026-10-26T08:01:02',
+    } })
+    await exporting
+    assert.equal(h.downloads.length, 1)
+    assert.equal(h.page.exporting.value, false)
+    const text = await h.downloads[0].text()
+    assert.match(text, /^迁移开始时间：2026-10-26 08:00:00$/m)
+    assert.match(text, /^迁移结束时间：2026-10-26 08:01:02$/m)
+    assert.match(text, /^总耗时：1 分 2 秒$/m)
+  } finally { h.stop() }
+})
+
+test('report export preserves the report and explicitly marks unavailable timing when its request fails', async () => {
+  let rejectTiming
+  const h = harness('MigrationReportPanel', {
+    api: { getDataMigrationJob: () => new Promise((_, reject) => { rejectTiming = reject }) },
+  })
+  try {
+    await h.page.loadReport()
+    const exporting = h.page.exportReport()
+    rejectTiming(new Error('timing request failed'))
+    await exporting
+    assert.equal(h.page.timingUnavailable.value, true)
+    assert.equal(h.page.exporting.value, false)
+    assert.equal(h.downloads.length, 1)
+    assert.deepEqual(h.messages, [])
+    const text = await h.downloads[0].text()
+    assert.match(text, /^迁移开始时间：时间信息暂不可用$/m)
+    assert.match(text, /^迁移结束时间：时间信息暂不可用$/m)
+    assert.match(text, /^总耗时：—$/m)
+    assert.match(text, /=== 迁移概览 ===/)
+  } finally { h.stop() }
+})
+
+test('switching tasks while export waits for timing prevents a mismatched download and allows the new export', async () => {
+  const pending = []
+  const h = harness('MigrationReportPanel', {
+    api: { getDataMigrationJob: id => new Promise(resolve => pending.push({ id, resolve })) },
+  })
+  try {
+    await h.page.loadReport()
+    const oldExport = h.page.exportReport()
+    h.props.jobID = '87654321-next-task'
+    await Vue.nextTick()
+    assert.equal(pending[1].id, '87654321-next-task')
+    pending[0].resolve({ data: { job_id: jobID, created_at: '2020-01-01T00:00:00' } })
+    await oldExport
+    assert.equal(h.page.exporting.value, false)
+    assert.deepEqual(h.downloads, [])
+    pending[1].resolve({ data: {
+      job_id: '87654321-next-task', status: 'done', created_at: '2026-10-26T10:00:00', finished_at: '2026-10-26T10:00:10',
+    } })
+    await Vue.nextTick()
+    await h.page.exportReport()
+    assert.equal(h.downloads.length, 1)
+    assert.equal(h.clicks[0].download, 'migration-report-87654321.txt')
+    const text = await h.downloads[0].text()
+    assert.match(text, /^Job ID: 87654321-next-task$/m)
+    assert.match(text, /^迁移开始时间：2026-10-26 10:00:00$/m)
+    assert.doesNotMatch(text, /2020-01-01|12345678-report-export/)
+  } finally { h.stop() }
+})
 
 for (const [field, prefix, label] of [
   ['source_ddl', 'SOURCE_DDL_LINE_', '源端表定义'],

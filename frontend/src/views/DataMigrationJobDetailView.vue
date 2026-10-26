@@ -35,6 +35,8 @@
         </div>
       </header>
 
+      <MigrationTimingSummary :job="job" />
+
       <MigrationConnectionRoute
         :src-db-type="job.src_db_type"
         :dst-db-type="job.dst_db_type"
@@ -51,11 +53,6 @@
           <span class="metric-label">报告状态</span>
           <strong>{{ reportHealthText }}</strong>
           <span class="metric-note">{{ report ? '报告已生成' : '等待迁移结果' }}</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">迁移耗时</span>
-          <strong>{{ durationText }}</strong>
-          <span class="metric-note">开始 {{ formatDate(job.created_at) }}</span>
         </div>
         <div class="metric-item">
           <span class="metric-label">表结构</span>
@@ -237,9 +234,9 @@
               <section class="config-section full-width">
                 <div class="section-heading compact"><div><span class="eyebrow">TIMELINE</span><h2>时间信息</h2></div></div>
                 <dl class="info-grid timeline-grid">
-                  <div><dt>开始时间</dt><dd>{{ formatDate(job.created_at) }}</dd></div>
-                  <div><dt>结束时间</dt><dd>{{ formatDate(job.finished_at) }}</dd></div>
-                  <div><dt>迁移耗时</dt><dd>{{ durationText }}</dd></div>
+                  <div><dt>开始时间</dt><dd>{{ timingSummary.startedAt }}</dd></div>
+                  <div><dt>结束时间</dt><dd>{{ timingSummary.finishedAt }}</dd></div>
+                  <div><dt>迁移耗时</dt><dd>{{ timingSummary.duration }}</dd></div>
                 </dl>
               </section>
             </div>
@@ -254,7 +251,7 @@
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
-import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
@@ -262,6 +259,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import MigrationConnectionRoute from '@/components/MigrationConnectionRoute.vue'
+import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
 import { copyText } from '@/utils/clipboard'
 import {
   getDataMigrationJob,
@@ -295,6 +293,7 @@ let disposed = false
 let loadVersion = 0
 
 const jobID = computed(() => String(route.params.jobId || ''))
+const timingSummary = computed(() => migrationTimingSummary(job.value))
 const categoryRows = computed(() => report.value ? reportCategories(report.value) : [])
 const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isInformational))
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))
@@ -321,15 +320,6 @@ const migrationTypeText = computed(() => job.value?.migrate_objects ? '仅对象
 const migrationModeText = computed(() => {
   if (job.value?.migrate_objects) return '对象迁移'
   return ({ all: '全部表', include: '仅包含指定表', exclude: '排除指定表' } as Record<string, string>)[job.value?.migrate_mode || ''] || job.value?.migrate_mode || '单次迁移'
-})
-const durationText = computed(() => {
-  if (!job.value?.finished_at) return job.value?.status === 'running' ? '进行中' : '—'
-  const duration = Math.max(0, new Date(job.value.finished_at).getTime() - new Date(job.value.created_at).getTime())
-  const seconds = Math.floor(duration / 1000)
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remainder = seconds % 60
-  return hours ? `${hours} 小时 ${minutes} 分` : minutes ? `${minutes} 分 ${remainder} 秒` : `${remainder} 秒`
 })
 const contentValidationLabel = computed(() => dataValidationLabel(report.value?.dataValidation, job.value?.validate_data))
 const contentValidationAttention = computed(() => dataValidationNeedsAttention(report.value?.dataValidation, job.value?.validate_data))
@@ -358,7 +348,6 @@ const risks = computed<RiskItem[]>(() => {
 
 function statusText(status: string) { return ({ running: '迁移中', done: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[status] || status }
 function statusColor(status: string) { return ({ running: 'blue', done: 'green', failed: 'red', cancelled: 'gray' } as Record<string, string>)[status] || 'gray' }
-function formatDate(value?: string) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
 function signedDifference(value: number) { return value > 0 ? `+${value}` : String(value) }
 function yesNo(value?: boolean) { return value ? '是' : '否' }
 
@@ -418,7 +407,8 @@ async function load() {
 
 async function exportReport() {
   if (!report.value || !job.value) return
-  const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
+  const current = job.value
+  const lines = ['单次迁移报告', `Job ID: ${current.job_id}`, ...formatMigrationTiming(current), `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   for (const line of formatAutoRepairs(report.value.auto_repairs)) lines.push(line)
   for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
@@ -433,11 +423,12 @@ async function exportReport() {
     }
     catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
   }
+  if (disposed || current.job_id !== jobID.value) return
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = `migration-report-${job.value.job_id.slice(0, 8)}.txt`
+  anchor.download = `migration-report-${current.job_id.slice(0, 8)}.txt`
   anchor.click()
   URL.revokeObjectURL(url)
 }

@@ -10,11 +10,12 @@
     <template v-else-if="report">
       <div class="report-heading">
         <div><h3>迁移报告</h3><span>任务 {{ jobID }}</span></div>
-        <a-button size="small" @click="exportReport">
+        <a-button size="small" :loading="exporting" @click="exportReport">
           <template #icon><icon-download /></template>
           导出报告
         </a-button>
       </div>
+      <MigrationTimingSummary :job="timingJob" :loading="timingLoading" :unavailable="timingUnavailable" />
       <div class="report-stats">
         <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
         <div><span>原始失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
@@ -237,11 +238,12 @@
 
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
+import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation } from '@/utils/migrationReport'
+import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -249,6 +251,8 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   getDataMigrationReport,
+  getDataMigrationJob,
+  type DataMigrationJob,
   type MigrationReport,
   type TableRowCount,
 } from '@/api/migration'
@@ -261,6 +265,10 @@ const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
 const activeTab = ref('overview')
 const repairSummary = ref<RepairSummary>({ jobID: props.jobID, state: 'loading', repaired: 0, attention: 0 })
 const report = ref<MigrationReport | null>(null)
+const timingJob = ref<DataMigrationJob | null>(null)
+const timingLoading = ref(false)
+const timingUnavailable = ref(false)
+const exporting = ref(false)
 const loading = ref(false)
 const fetchError = ref('')
 const noReport = ref(false)
@@ -316,6 +324,19 @@ const sortedRowCounts = computed<TableRowCount[]>(() => [
 ])
 const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isInformational ? 0 : row.failed), 0))
 let reportRequest = 0
+let timingPromise: Promise<void> | null = null
+
+async function loadTiming(jobID: string, request: number) {
+  const isCurrent = () => request === reportRequest && jobID === props.jobID
+  try {
+    const res = await getDataMigrationJob(jobID)
+    if (isCurrent()) timingJob.value = res.data
+  } catch {
+    if (isCurrent()) timingUnavailable.value = true
+  } finally {
+    if (isCurrent()) timingLoading.value = false
+  }
+}
 
 async function loadReport() {
   const request = ++reportRequest
@@ -324,6 +345,10 @@ async function loadReport() {
   fetchError.value = ''
   noReport.value = false
   report.value = null
+  timingJob.value = null
+  timingLoading.value = true
+  timingUnavailable.value = false
+  timingPromise = loadTiming(jobID, request)
   activeTab.value = 'overview'
   repairSummary.value = { jobID, state: 'loading', repaired: 0, attention: 0 }
   preflightActiveKeys.value = []
@@ -347,54 +372,65 @@ async function loadReport() {
 }
 
 async function exportReport() {
-  if (!report.value) return
+  if (!report.value || exporting.value) return
+  const request = reportRequest
+  const jobID = props.jobID
   const r = report.value
-  const lines: string[] = []
+  exporting.value = true
+  try {
+    if (timingPromise) await timingPromise
+    if (request !== reportRequest || jobID !== props.jobID) return
+    const lines: string[] = []
 
-  lines.push('单次迁移报告')
-  lines.push(`Job ID: ${props.jobID}`)
-  lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
-  lines.push('')
-
-  for (const line of formatAutoRepairs(r.auto_repairs)) lines.push(line)
-  if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
-  if (r.warnings?.length) {
-    lines.push('=== 迁移告警 ===')
-    for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
+    lines.push('单次迁移报告')
+    lines.push(`Job ID: ${jobID}`)
+    for (const line of formatMigrationTiming(timingJob.value, timingUnavailable.value)) lines.push(line)
+    lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
     lines.push('')
-  }
-  for (const line of formatReportCategories(r)) lines.push(line)
-  if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
 
-  if (r.rowCounts && r.rowCounts.length > 0) {
-    lines.push('=== 行数对比 ===')
-    const mismatched = r.rowCounts.filter((rc) => !rc.match)
-    if (mismatched.length > 0) {
-      lines.push(`\n不一致的表（${mismatched.length} 张）：`)
-      for (const rc of mismatched) {
-        lines.push(`  ${rc.table}：源 ${rc.src} 行 → 目标 ${rc.dst} 行（差 ${rc.dst - rc.src}）`)
+    for (const line of formatAutoRepairs(r.auto_repairs)) lines.push(line)
+    if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
+    if (r.warnings?.length) {
+      lines.push('=== 迁移告警 ===')
+      for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
+      lines.push('')
+    }
+    for (const line of formatReportCategories(r)) lines.push(line)
+    if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
+
+    if (r.rowCounts && r.rowCounts.length > 0) {
+      lines.push('=== 行数对比 ===')
+      const mismatched = r.rowCounts.filter((rc) => !rc.match)
+      if (mismatched.length > 0) {
+        lines.push(`\n不一致的表（${mismatched.length} 张）：`)
+        for (const rc of mismatched) {
+          lines.push(`  ${rc.table}：源 ${rc.src} 行 → 目标 ${rc.dst} 行（差 ${rc.dst - rc.src}）`)
+        }
+      }
+      lines.push(`\n全部表（${r.rowCounts.length} 张）：`)
+      for (const rc of r.rowCounts) {
+        lines.push(`  ${rc.table}：${rc.src} / ${rc.dst}  ${rc.match ? '✓' : '✗'}`)
       }
     }
-    lines.push(`\n全部表（${r.rowCounts.length} 张）：`)
-    for (const rc of r.rowCounts) {
-      lines.push(`  ${rc.table}：${rc.src} / ${rc.dst}  ${rc.match ? '✓' : '✗'}`)
-    }
-  }
 
-  for (const line of formatDataValidation(r.dataValidation)) lines.push(line)
-  if (repairPanel.value) {
-    try {
-      for (const line of await repairPanel.value.exportHistory()) lines.push(line)
+    for (const line of formatDataValidation(r.dataValidation)) lines.push(line)
+    if (repairPanel.value) {
+      try {
+        for (const line of await repairPanel.value.exportHistory()) lines.push(line)
+      }
+      catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
     }
-    catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
+    if (request !== reportRequest || jobID !== props.jobID) return
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `migration-report-${jobID.slice(0, 8)}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  } finally {
+    exporting.value = false
   }
-  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `migration-report-${props.jobID.slice(0, 8)}.txt`
-  a.click()
-  URL.revokeObjectURL(url)
 }
 
 async function copyDDL(ddl: string) {
