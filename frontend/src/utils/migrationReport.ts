@@ -202,6 +202,11 @@ export function reportCategories(report: MigrationReport) {
   })
 }
 
+function appendReportDDL(lines: string[], label: string, ddl: string) {
+  lines.push(label)
+  for (const line of ddl.split('\n')) lines.push(`      ${line}`)
+}
+
 export function formatReportCategories(report: MigrationReport): string[] {
   const categories = reportCategories(report)
   const lines = ['=== 迁移概览 ===']
@@ -221,7 +226,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
       lines.push(`  ${item.schema}.${item.signature || item.name}：${status}`)
       if (item.generator) lines.push(`    底层函数：${item.generator}`)
       if (item.error) lines.push(`    失败原因：${item.error}`)
-      if (item.ddl) lines.push(`    ${routineLabel} DDL：`, ...item.ddl.split('\n').map(line => `      ${line}`))
+      if (item.ddl) appendReportDDL(lines, `    ${routineLabel} DDL：`, item.ddl)
       else lines.push(`    ${item.definition_warning || `尚未生成${routineLabel} DDL`}`)
     }
     for (const extension of compatibility.extensions ?? []) {
@@ -246,20 +251,20 @@ export function formatReportCategories(report: MigrationReport): string[] {
       if (item.table) lines.push(`    所属表：${item.table}`)
       lines.push(`    失败阶段：${item.stageLabel}`, `    失败原因：${item.error}`)
       if (item.ddl?.trim()) {
-        lines.push('    目标 DDL：', ...item.ddl.split('\n').map(line => `      ${line}`))
+        appendReportDDL(lines, '    目标 DDL：', item.ddl)
       } else if (item.showTargetDDL) {
         lines.push(`    目标 DDL：${item.emptyDDLMessage}`)
       }
       if (item.source_ddl?.trim()) {
-        if (item.sourceIndexDDL) lines.push('    源端失败索引定义（仅供参考，需适配目标库）：', ...item.sourceIndexDDL.split('\n').map(line => `      ${line}`))
-        lines.push(`    ${item.sourceDDLLabel}：`, ...item.source_ddl.split('\n').map(line => `      ${line}`))
+        if (item.sourceIndexDDL) appendReportDDL(lines, '    源端失败索引定义（仅供参考，需适配目标库）：', item.sourceIndexDDL)
+        appendReportDDL(lines, `    ${item.sourceDDLLabel}：`, item.source_ddl)
       }
       if (item.suggestion) lines.push(`    建议：${item.suggestion}`)
       for (const rename of item.column_renames ?? []) {
         lines.push(`    建议列名：${rename.source} → ${rename.target}`)
       }
       if (item.suggested_ddl) {
-        lines.push('    建议 DDL（手动创建）：', ...item.suggested_ddl.split('\n').map(line => `      ${line}`))
+        appendReportDDL(lines, '    建议 DDL（手动创建）：', item.suggested_ddl)
       }
     }
   }

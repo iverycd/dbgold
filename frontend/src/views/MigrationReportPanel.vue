@@ -356,14 +356,14 @@ async function exportReport() {
   lines.push(`导出时间: ${new Date().toLocaleString('zh-CN')}`)
   lines.push('')
 
-  lines.push(...formatAutoRepairs(r.auto_repairs))
+  for (const line of formatAutoRepairs(r.auto_repairs)) lines.push(line)
   if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
   if (r.warnings?.length) {
     lines.push('=== 迁移告警 ===')
     for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
     lines.push('')
   }
-  lines.push(...formatReportCategories(r))
+  for (const line of formatReportCategories(r)) lines.push(line)
   if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
 
   if (r.rowCounts && r.rowCounts.length > 0) {
@@ -381,9 +381,11 @@ async function exportReport() {
     }
   }
 
-  lines.push(...formatDataValidation(r.dataValidation))
+  for (const line of formatDataValidation(r.dataValidation)) lines.push(line)
   if (repairPanel.value) {
-    try { lines.push(...await repairPanel.value.exportHistory()) }
+    try {
+      for (const line of await repairPanel.value.exportHistory()) lines.push(line)
+    }
     catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })

@@ -419,16 +419,18 @@ async function load() {
 async function exportReport() {
   if (!report.value || !job.value) return
   const lines = ['单次迁移报告', `Job ID: ${job.value.job_id}`, `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
-  lines.push(...formatAutoRepairs(report.value.auto_repairs))
-  lines.push(...formatReportCategories(report.value))
+  for (const line of formatAutoRepairs(report.value.auto_repairs)) lines.push(line)
+  for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
   if (allRowCounts.value.length) {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)
   }
-  lines.push(...formatDataValidation(report.value.dataValidation, job.value.validate_data))
+  for (const line of formatDataValidation(report.value.dataValidation, job.value.validate_data)) lines.push(line)
   if (repairPanel.value) {
-    try { lines.push(...await repairPanel.value.exportHistory()) }
+    try {
+      for (const line of await repairPanel.value.exportHistory()) lines.push(line)
+    }
     catch (error: any) { Message.error(error?.response?.data?.error || error?.message || '修复历史加载失败，请重试导出'); return }
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' })
