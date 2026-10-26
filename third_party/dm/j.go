@@ -126,10 +126,13 @@ func (da *DmArray) checkIndexAndCount(index int64, count int) error {
 
 // 获取Array对象在数据库中的类型名称
 func (da *DmArray) GetBaseTypeName() (string, error) {
+	if da == nil {
+		return "", ECGO_IS_NULL.throw()
+	}
 	if err := da.checkValid(); err != nil {
 		return "", err
 	}
-	if da.m_arrDesc == nil || da.m_arrDesc.m_typeDesc == nil {
+	if da.m_arrDesc == nil || da.m_arrDesc.m_typeDesc == nil || da.m_arrDesc.m_typeDesc.m_sqlName == nil {
 		return "", ECGO_IS_NULL.throw()
 	}
 
@@ -138,6 +141,12 @@ func (da *DmArray) GetBaseTypeName() (string, error) {
 
 // 获取Array对象的go数组对象
 func (da *DmArray) GetArray() (interface{}, error) {
+	if da == nil || !da.Valid {
+		return nil, ECGO_IS_NULL.throw()
+	}
+	if da.m_arrDesc == nil || da.m_arrDesc.m_typeDesc == nil || da.m_arrDesc.m_typeDesc.m_arrObj == nil || da.m_arrDesc.m_typeDesc.m_arrObj.column == nil {
+		return nil, ECGO_INVALID_COLUMN_TYPE.throw()
+	}
 	if da.m_arrData == nil || len(da.m_arrData) <= 0 {
 		return nil, nil
 	}

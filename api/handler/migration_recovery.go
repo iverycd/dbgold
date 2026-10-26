@@ -472,6 +472,9 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				pin = finalizer.WithDamengNativeEventFinalization
 			}
 			_, firstErr = executeNativeRecoveryFinalStates(ctx, orderedRelated, nativeRecoveryFinalization{
+				prepareEvents: func(prepare context.Context, _ []repair.Object) ([]repair.Object, error) {
+					return prepareNativeEventJobPolicies(prepare, j.JobID, w)
+				},
 				execute: func(run context.Context, item repair.Object, units []repair.Unit, step func([]repair.Unit) error) ([]repair.Unit, error) {
 					return target.ExecuteRepair(run, w, item, units, step)
 				},

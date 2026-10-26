@@ -7,6 +7,7 @@ import "fmt"
 // The temporary row recipe is executed only against an empty target table.
 type IntervalPartitionPlan struct {
 	Column        string                  `json:"column"`
+	GeneratedKey  bool                    `json:"generated_key,omitempty"`
 	DefinitionSQL string                  `json:"definition_sql"`
 	EmptyTouch    *MaterializedEmptyTouch `json:"empty_touch"`
 	Partitions    []IntervalPartition     `json:"partitions"`
@@ -87,6 +88,13 @@ func RewriteEmptyTouch(original *MaterializedEmptyTouch, source, target string) 
 			if err != nil {
 				return nil, err
 			}
+		}
+	}
+	empty.GeneratedColumns = append([]MaterializedEmptyGeneratedColumn{}, original.GeneratedColumns...)
+	for i := range empty.GeneratedColumns {
+		empty.GeneratedColumns[i].ValueSQL, _, err = RewriteSchema(empty.GeneratedColumns[i].ValueSQL, source, target)
+		if err != nil {
+			return nil, err
 		}
 	}
 	empty.Constraints = append([]MaterializedEmptyConstraint{}, original.Constraints...)

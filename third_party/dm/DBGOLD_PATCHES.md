@@ -17,6 +17,23 @@ documents the driver. The root module pins this directory with a `replace`.
    Dispatch named collections described as `CLASS` object ID 4 through the
    collection encoder when nested inside objects or other collections. The
    ordinary object encoder otherwise drops every collection element.
+3. `dbgold_bfile.go`: add read-only `VisitBFileLocators` methods for materialized
+   objects and collections. Walk server type descriptors and native values to
+   identify BFILE members without inspecting unrelated strings or reading LOBs.
+   Reject incomplete descriptors, mismatched values, cycles and excessive depth.
+4. `zzp.go` / `zzo.go`: recurse into native ARRAY/SARRAY element descriptors,
+   rather than the same array descriptor, when computing and writing wire
+   checksum metadata. Pad omitted static-array elements with native NULLs to
+   their declared length; the old count could consume following object fields.
+5. `v.go` / `j.go`: return explicit errors from complex-value accessors when a
+   NULL or unmaterialized constructor has no server descriptor, instead of
+   panicking or silently treating its unread attributes as an empty value.
+6. `dbgold_member_time.go` / `zzo.go`: preserve a UDT temporal member's stored
+   wall time and explicit timezone instead of converting it to the connection
+   timezone. Retain native WITH LOCAL TIME ZONE semantics by normalizing scale
+   mask bits on a copy of the descriptor. Place a nanosecond timestamp's zone
+   after all nine timestamp bytes; the upstream path overwrites its last byte.
+   Ordinary top-level parameter conversion remains unchanged.
 
 `dbgold_codec_test.go` exercises the actual driver encoders and existing decoders
 without a database, including nested object/array values, negative 38-digit

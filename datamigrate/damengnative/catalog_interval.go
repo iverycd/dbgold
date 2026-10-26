@@ -131,7 +131,7 @@ func (r *catalogReader) freezeIntervalPartitions(o *Object, t Table) error {
 		return err
 	}
 	defer rows.Close()
-	plan := &IntervalPartitionPlan{Column: d.column}
+	plan := &IntervalPartitionPlan{Column: d.column, GeneratedKey: !column.Writable}
 	extra := false
 	for rows.Next() {
 		var p IntervalPartition
@@ -157,6 +157,11 @@ func (r *catalogReader) freezeIntervalPartitions(o *Object, t Table) error {
 	}
 	if !extra {
 		return nil
+	}
+	if plan.GeneratedKey {
+		if _, err = NativeGeneratedColumnDeclaration(ddl, d.column); err != nil {
+			return err
+		}
 	}
 	touch, err := r.freezeTargetEmptyTouch(t, false)
 	if err != nil {
@@ -238,10 +243,14 @@ func (r *catalogReader) freezeIntervalPartitions(o *Object, t Table) error {
 		if d.initial[p.Name] {
 			continue
 		}
-		if column.Writable {
-			p.SeedSQL, err = r.freezeIntervalSeed(t.Name, column, *d, p.HighSQL)
-		} else {
-			p.SeedSQL, p.Values, err = r.freezeGeneratedIntervalSeed(t, column, *d, plan.DefinitionSQL, p.HighSQL, plan.EmptyTouch)
+		// Existing intervals can be allocated without solving a generation
+		// expression. On the empty target only, the native executor temporarily
+		// changes the generated expression to this exact native key constant,
+		// performs its transactional touch, and restores the full declaration.
+		// The source only proves that this key routes to an existing partition.
+		p.SeedSQL, err = r.freezeIntervalSeed(t.Name, column, *d, p.HighSQL)
+		if err == nil && plan.GeneratedKey {
+			p.SeedSQL, err = r.freezeNativeGeneratedConstant(column, p.SeedSQL)
 		}
 		if err != nil {
 			return fmt.Errorf("间隔分区 %s: %w", p.Name, err)

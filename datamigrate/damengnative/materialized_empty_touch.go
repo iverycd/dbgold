@@ -6,11 +6,20 @@ package damengnative
 // restored before the group can succeed. No expression comes from the SQL
 // repair editor.
 type MaterializedEmptyTouch struct {
-	Table           string                        `json:"table"`
-	DefinitionSQL   string                        `json:"definition_sql"`
-	Columns         []MaterializedEmptyColumn     `json:"columns"`
-	Constraints     []MaterializedEmptyConstraint `json:"constraints,omitempty"`
-	IdentityRestore []string                      `json:"identity_restore,omitempty"`
+	Table            string                             `json:"table"`
+	DefinitionSQL    string                             `json:"definition_sql"`
+	Columns          []MaterializedEmptyColumn          `json:"columns"`
+	Constraints      []MaterializedEmptyConstraint      `json:"constraints,omitempty"`
+	IdentityRestore  []string                           `json:"identity_restore,omitempty"`
+	GeneratedColumns []MaterializedEmptyGeneratedColumn `json:"generated_columns,omitempty"`
+}
+
+// Generated keys retain their declaration and are never INSERT columns. A
+// read-only PARTITION FOR proof freezes a native constant for the empty-target
+// epoch; the original declaration remains in DefinitionSQL for exact recovery.
+type MaterializedEmptyGeneratedColumn struct {
+	Name     string `json:"name"`
+	ValueSQL string `json:"value_sql"`
 }
 
 type MaterializedEmptyColumn struct {

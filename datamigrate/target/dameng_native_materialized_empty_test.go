@@ -64,6 +64,7 @@ func TestMaterializedEmptyTouchUnknownCommitNeverClaimsSuccess(t *testing.T) {
 	m.ExpectExec(`INSERT INTO`).WillReturnResult(sqlmock.NewResult(0, 1))
 	m.ExpectExec(`DELETE FROM`).WillReturnResult(sqlmock.NewResult(0, 1))
 	m.ExpectCommit().WillReturnError(context.DeadlineExceeded)
+	m.ExpectExec(`^ROLLBACK$`).WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectExec(`ALTER TABLE`).WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectExec(`CALL SET_SESSION_CONS_CHK`).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectEmptyDDL(m, p.DefinitionSQL)
@@ -71,6 +72,34 @@ func TestMaterializedEmptyTouchUnknownCommitNeverClaimsSuccess(t *testing.T) {
 	m.ExpectQuery(`SELECT COUNT`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 	require.ErrorIs(t, nativeHistoryEmptyTouch(context.Background(), conn, "Dst", p), context.DeadlineExceeded)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestMaterializedEmptyTouchUnknownTransactionNeverRunsRestorationDDL(t *testing.T) {
+	for _, failure := range []string{"commit", "rollback"} {
+		t.Run(failure, func(t *testing.T) {
+			conn, m := historyEmptyTestConn(t)
+			p := historyEmptyTestPlan()
+			m.ExpectQuery(`SELECT COUNT`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+			expectEmptyDDL(m, p.DefinitionSQL)
+			m.ExpectQuery(`SELECT c.OWNER,c.CONSTRAINT_NAME`).WillReturnRows(sqlmock.NewRows([]string{"owner", "name", "table", "kind", "status", "validated", "column"}))
+			m.ExpectExec(`ALTER TABLE`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectExec(`CALL SET_SESSION_CONS_CHK`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectBegin()
+			if failure == "commit" {
+				m.ExpectExec(`INSERT INTO`).WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectExec(`DELETE FROM`).WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectCommit().WillReturnError(errors.New("commit response lost"))
+			} else {
+				m.ExpectExec(`INSERT INTO`).WillReturnError(errors.New("insert response lost"))
+				m.ExpectRollback().WillReturnError(errors.New("rollback response lost"))
+			}
+			m.ExpectExec(`^ROLLBACK$`).WillReturnError(errors.New("session rollback cannot be confirmed"))
+			err := nativeHistoryEmptyTouch(context.Background(), conn, "Dst", p)
+			require.ErrorContains(t, err, "事务结束状态未知")
+			require.ErrorContains(t, err, "拒绝清理DDL")
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestMaterializedEmptyTouchRejectsChangedDefinitionWithoutWrites(t *testing.T) {

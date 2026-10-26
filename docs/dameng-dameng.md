@@ -40,11 +40,11 @@
 
 基表已经删空的旧快照仍保留原数据。目标通过事务内插入并删除临时行恢复原生变化状态，退出前恢复冻结的约束、非空属性、默认值及自增续号；不会留下已提交的临时行或消费默认值引用的序列。空表上的独立表达式/虚拟列索引在历史恢复后创建，避免临时行触发表达式求值。值相等但源状态为 `NEEDS_COMPILE` 的视图仍保留该状态；原 `NEEDS_FULL_REFRESH` 也保留，后续 FORCE 继续按原生规则回退完全刷新。没有增量日志的合法 FORCE（包括 UNION ALL）保留旧快照，后续 FORCE 可正常执行。
 
-空基表的显式可写分区键从原生完整分区定义冻结候选值，以只读 `PARTITION FOR` / `SUBPARTITION FOR` 查询确认落入既有叶分区，覆盖负数、精确边界、日期及多层分区。探测不会执行源端 INSERT、创建新的 INTERVAL 分区或调用用户函数。合法生成分区键保留原有临时行路径，由目标原生表达式计算。`BUILD DEFERRED` 视图保持空快照、原生 `UNUSEABLE` 状态和未初始化水位，核验不会通过额外刷新将其转为已构建状态。
+空基表的显式可写分区键从原生完整分区定义冻结候选值，以只读 `PARTITION FOR` / `SUBPARTITION FOR` 查询确认落入既有叶分区，覆盖负数、精确边界、日期及多层分区。探测不会执行源端 INSERT、创建新的 INTERVAL 分区或调用用户函数。生成分区键也冻结落入既有分区的原生常量，在空目标表临时替换生成表达式，完成临时行后恢复完整原声明，避免 CASE 等表达式对 NULL 输入产生额外分区。`BUILD DEFERRED` 视图保持空快照、原生 `UNUSEABLE` 状态和未初始化水位，核验不会通过额外刷新将其转为已构建状态。
 
 原生 TABLE 元数据遗漏的已有自动 INTERVAL 分区另行冻结，包含名称、边界、表空间及物理定义。目标在导入数据前通过受控临时行物化这些分区，恢复原名称并核对完整目录，保留间隔之间原本不存在的空洞。完整计划先持久化，准备失败或取消不会继续复制数据；未知结果先核对目标分区和临时属性恢复状态。
 
-生成列作为 INTERVAL 分区键时，已支持常量和经过实测的精确数值仿射表达式，包括多列线性组合、定点数刻度及负系数。提取过程只解析原生表达式，以精确有理数和整数格点求取真实可写输入，再通过原生 CAST 和只读分区路由核验；目标仅插入这些真实输入，由原生表达式计算生成列。每个分区的多列种子参与冻结指纹、Schema 映射和账本重载。不会为求逆调用源用户函数。
+生成列作为 INTERVAL 分区键时，采用不求逆的恢复路径，支持合法非线性表达式、CASE、多列乘法和日期函数。源端只读冻结目标分区键的精确原生常量并证明路由；目标在导入前确认表为空，使用原生 MODIFY 将生成表达式临时改为该常量，物化所需分区后恢复完整原声明。生成列始终不是可写入列，约束、默认值及自增也完整恢复。未知回执只接受原表达式或冻结常量对应的中间定义，拒绝任意变化；新字段参与计划指纹、Schema 映射和账本重载，旧仿射种子账本继续兼容。实测构建禁止用户函数作为生成分区键、禁止生成列链，分别返回服务端错误 -2029、-2026；这些不合法的源定义不再列为迁移实现缺口。
 
 分区父表的 `SYSCOLUMNS.INFO2` 可能没有自增标志，自增识别同时读取原生列声明；不会把默认值、字符串或其他列中的 `IDENTITY` 文本当作自增属性。临时行对自增列使用明确的非空值，恢复原始定义后再复制原 ID，最终按源安全边界续号。
 
@@ -56,15 +56,19 @@
 
 事件触发器保留原始事件、调度、WHEN 条件和完整过程体，在 `DECLARE` / `BEGIN` 前加入达梦原生 `DISABLE` 头部子句，从 CREATE 起原子保持停用。TIMER 和 CHECKPOINT 使用同一路径，CHECKPOINT 调度开启时也可迁移；不修改实例参数或其他对象的启停状态。安装后从 `ALL_TRIGGERS` 确认停用状态，确认成功才记为安装完成。整个导入、编译和内容核对期间保持停用。全部核对通过后先恢复物化视图自动刷新策略，再使用最后一个固定连接恢复源事件启停状态，不再执行后续迁移查询或 DDL。恢复自动任务和事件标志着停写导入窗口结束；随后关闭最终会话可能正常触发已恢复的 LOGOUT 逻辑。目标已有的启用事件钩子可能在迁移 DDL 中产生副作用，预检会按其实际事件作用范围阻止执行，包括其他 Schema 所有但针对当前 Schema 的事件钩子。
 
+原生事件启用不受 SQL 事务回滚保护。最终状态恢复途中失败、取消或账本保存失败时，使用同一个固定会话停用本轮已尝试启用的事件并核对目录；确认停用的策略单元回到待恢复，不能确认则记录结果未知。旧账本或进程中断留下“A 已启用、B 未完成”时，单独重试 B 也会先认证和暂停本任务的全部冻结事件，重新证明整个任务的定义和内容，再统一恢复最终策略。成功的 CREATE、数据和编译不重放；已停用的原禁用策略在首次启用其他事件前先按目录归并，防止恢复中途额外建立连接触发 LOGIN。
+
 `ON DATABASE` 保留数据库级作用范围。源端已启用的 LOGIN/LOGOUT 逻辑也可能在建立或关闭源连接时运行；停写安排需要包含这些自动写入路径，现有 Go 接口不能在登录发生前设置会话抑制。不能把 Schema DDL 钩子的测试结果解释为所有数据库事件均无连接副作用。
 
 DBLink 的登录口令只保留在内存中用于原生执行。页面、报告、修复账本与执行错误不保存口令，只展示脱敏定义和冻结源定义的指纹。重启后重试必须能重新连接原源库，读取同一 DBLink 原生定义并核对指纹；定义或凭据变化后拒绝旧计划。目标服务器需要的 DPI/ODBC/OCI 库、DSN 或 MAL 配置仍按外部资源提前准备，不会修改实例配置。
 
-复杂对象和集合支持嵌套对象、数组、NULL、空/非空 BLOB/CLOB，以及高精度负定点数。仓库固定达梦驱动 v1.8.23 的本地副本，仅修复嵌套 LOB 的内容偏移/字符字节长度及负定点数尾数截断，保留上游版权信息；补丁和直接调用驱动编码器/解码器的回归测试见 [third_party/dm/DBGOLD_PATCHES.md](../third_party/dm/DBGOLD_PATCHES.md)。
+复杂对象和集合支持嵌套对象、数组、NULL、空/非空 BLOB/CLOB，以及高精度负定点数。仓库固定达梦驱动 v1.8.23 的本地副本，修复嵌套 LOB 的内容偏移/字符字节长度、负定点数尾数截断、原生 ARRAY 描述符无限递归及短静态数组缺失 NULL 填充，保留上游版权信息。UDT 时间成员保留原始 wall time、显式时区及九位纳秒；LOCAL TIME ZONE 仍沿原生语义转换，通用顶层驱动绑定行为不变。补丁和直接调用驱动编码器/解码器的回归测试见 [third_party/dm/DBGOLD_PATCHES.md](../third_party/dm/DBGOLD_PATCHES.md)。
 
 普通 BFILE 列通过现有驱动原样复制 `目录:文件名` 定位器及 NULL，保留目录和文件名大小写；目录名称不参与 Schema 映射。源端完整冻结并去重这些外部引用，目标预检及最终核验通过原生 `FILEEXISTS(BFILENAME(...))` 确认文件可用和读取权限。目录及外部文件属于提前准备的实例资源，本任务不会创建目录或复制服务器上的外部文件内容；内容校验比较数据库内存储的定位器。目标独有表的原 BFILE 值及外部依赖保持不变。
 
-UDT 内 BFILE 成员的递归外部资源盘点尚未实现，本次 BFILE 验收覆盖普通列；不能把通用对象绑定能力视作该组合的完整资源验收。
+UDT 内 BFILE 成员按驱动原生类型描述符递归盘点，覆盖对象、嵌套对象、VARRAY、静态/动态 ARRAY 和嵌套集合，包括生成列。仅将原生 VARCHAR/精度 512/刻度 6 的 BFILE 成员作为资源，不匹配普通冒号字符串，也不读取无关 LOB。每个源游标关闭后统一去重和核验，兼容单连接池；冻结引用复用目标预检、JSON 账本重载和最终资源核验。静态数组按原声明补足 NULL，避免短数组吞掉对象中后续字段。
+
+原生复杂列的全量内容校验直接读取驱动结构，以带类型、长度和容器边界的编码比较所有成员，不以 JSON/文本转换替代。NULL、空对象/集合、空 LOB、二进制 NUL、精确定点数、浮点位模式和时区均参与摘要；大对象受校验字节预算约束，读取失败或超限会明确失败。差异报告只保留有界摘要，独立原生 DDL 核验仍负责类型定义和归属，不能用值相等代替定义一致。
 
 当前实测构建的 XMLTYPE 以 TEXT/CLOB 和原生刻度 8 表示，但原生 TABLE DDL 会遗漏该属性。提取过程按目录证据恢复相应列的 XMLTYPE 声明，并保留刻度参与核验；数据沿原始 LOB 通道直接绑定，不用 XML 序列化替代原文，避免改写空白、注释、命名空间和 CDATA。
 
@@ -75,7 +79,6 @@ UDT 内 BFILE 成员的递归外部资源盘点尚未实现，本次 BFILE 验�
 - 原始 DDL、对象归属、约束状态、源序列/自增边界无法读取或无法安全解析；目录出现尚无回放实现的对象类型。
 - 无法确认源目标实例身份、版本或语义参数，或者目标缺少外部依赖、表空间、授权主体及必要权限。
 - 无法读取完整物化历史日志、确认承载表及原始分区定义，或由 ROWID 派生的表达式无法安全映射。陈旧 `FAST` / `FORCE` 本身不再是阻止条件；执行时仍须通过旧快照、日志和原生状态的完整核对。
-- 生成列作为 INTERVAL 分区键且已有自动分区时，任意用户函数、非线性表达式、UDT、生成列链，以及当前求解候选未覆盖的受限数值域仍没有通用恢复实现。常量及已验证数值仿射表达式已有真实恢复支持；其余分支会保留完整分区清单并报错，仍属于未完成的支持范围。
 - DBLink 的原生元数据只返回掩码、绑定占位符或未支持的不可移植口令密文，无法建立可回放的完整定义；重试时源定义或凭据与冻结指纹不符。
 - 目标已有、可能影响本任务的启用事件钩子会阻止迁移，需先停用，避免既有业务逻辑影响迁移。新迁移的 TIMER / CHECKPOINT 触发器从创建起保持禁用，不受该限制。
 - 单个普通 LOB 超过驱动可安全读取的长度，或 LOB 长度无法核验。
@@ -120,11 +123,14 @@ npm run build
 - 分区与恢复：`TestDamengNativeEmptyPartitionRouteHistoryIntegration`、`TestDamengNativeDeferredMaterializedIntegration`、`TestDamengNativeHistoryIndexRecoveryIntegration` 使用同组 SOURCE/TARGET 变量和两个 DDL 开关；分别核对空分区基表路由、延迟构建状态，以及历史恢复完成后索引失败的账本重载补迁和后续实际 FAST。
 - 普通 INTERVAL 表：`TestDamengNativeIntervalNonemptyPreparationIntegration` 使用同组 SOURCE/TARGET 变量和 `DAMENG_NATIVE_ALLOW_DDL=1`，核对有数据的表、已删空自动分区、原名称、自增、默认序列及约束。
 - INTERVAL 故障补迁：`TestDamengNativeIntervalUnknownPreparationIntegration` 使用同组 SOURCE/TARGET 变量和 `DAMENG_NATIVE_ALLOW_DDL=1`，模拟准备完成后响应丢失及临时属性清理中断，核对目录归并、属性恢复及稀疏分区不被重复创建。
+- 非线性生成分区键：`TestDamengNativeNonlinearIntervalIntegration` 使用同组 SOURCE/TARGET 变量和两个 DDL 开关，覆盖平方、多列乘法、CASE/ABS 空基表、日期函数及带 NOT NULL/CHECK NOVALIDATE/GLOBAL 唯一索引的生成键；完成后真实写入并执行 FORCE。INTERVAL 故障补迁夹具另含非线性生成表达式修改中断及混合属性中断。
 - 约束与覆盖：`TestDamengNativeConstraintStateIntegration`、`TestDamengNativeOwnedNameConflictIntegration` 使用同组 SOURCE/TARGET 变量和 `DAMENG_NATIVE_ALLOW_DDL=1`，分别核对用户索引绑定、NOVALIDATE 历史数据和子对象冲突零写入。
 - 标量/UDT：`TestDamengNativeIntegrationExactCopy`、`TestDamengNativeIntegrationNestedUDTExactRoundtrip` 使用 `DAMENG_DM_TEST_TARGET_DSN/TARGET_SCHEMA` 和 `DAMENG_DM_TEST_ALLOW_DDL=1`。
 - BFILE/XMLTYPE：`TestDamengNativeIntegrationBFileLocatorAndXMLType` 使用同组 SOURCE/TARGET 变量、`DAMENG_NATIVE_ALLOW_DDL=1` 和 `DAMENG_NATIVE_BFILE_DIRECTORY/BFILE_FILENAME`。两个实例须预先准备同名目录及可读文件；夹具只创建 Schema 内的表和数据，核对缺失资源时目标零写入、定位器与 XML 原值、完整定义和账本重载。
+- 嵌套 BFILE/复杂内容：`TestDamengNativeIntegrationNestedBFileResources` 使用相同 BFILE 环境，覆盖对象、VARRAY、多层集合、静态/动态 ARRAY、NULL/空 LOB、38 位定点数、NUL、带正负时区的九位纳秒时间及 INTERVAL。故意丢失深层文件时预检零创建，正常迁移后重载最终核验；单独修改嵌套定位器时行数不变但内容校验必须失败，恢复后通过。
 - XMLTYPE 历史快照：`TestDamengNativeXMLTypeMaterializedHistoryIntegration` 使用同组 SOURCE/TARGET 变量和两个 DDL 开关，覆盖普通预建承载表、RANGE 预建承载表及已有自动 INTERVAL 分区的空基表，核对历史恢复暂存、物理分区和后续实际 FORCE。
 - 事件：`TestDamengNativeEventLifecycleIntegration` 使用 `DAMENG_NATIVE_EVENT_DSN/EVENT_SCHEMA`；`TestDamengNativeEventMigrationIntegration` 使用 `DAMENG_NATIVE_EVENT_SOURCE_DSN/EVENT_SOURCE_SCHEMA/EVENT_TARGET_DSN/EVENT_TARGET_SCHEMA`，均需 `DAMENG_NATIVE_ALLOW_DDL=1`。`TestDamengNativeBackgroundEventMigrationIntegration` 使用同组跨实例连接变量，专用目标实例须预先开启 `ENABLE_CKPT_EVENT_TRIG=1`；测试自身不改实例参数，配置 `DAMENG_NATIVE_BACKGROUND_WAIT_TIMER=1` 时还等待验证真实 TIMER 调度。
+- 事件失败恢复：`TestDamengNativeEventFinalizationCompensationIntegration` 使用 `DAMENG_DM_TEST_TARGET_DSN/TARGET_SCHEMA` 及对应 DDL 开关；`TestDamengNativeEventJobRetryPartialActivationIntegration` 使用同组 SOURCE/TARGET 变量和 `DAMENG_NATIVE_ALLOW_DDL=1`，验证最终启用失败补偿及 API 全任务账本协调。
 - DBLink：`TestDamengNativeDBLinkIntegration` 使用 `DAMENG_NATIVE_LINK_SOURCE_DSN/SOURCE_SCHEMA/TARGET_DSN/TARGET_SCHEMA/REMOTE_CONNECT/REMOTE_USERNAME/REMOTE_PASSWORD` 及 `DAMENG_NATIVE_ALLOW_DDL=1`。远端必须是从源、目标服务器均可访问的第三个专用 DM 实例，测试只读取远端目录，不创建远端对象。
 
 2026-10-22 已在从本机现有镜像启动的独立临时 DM8 容器中实测：`1-4-6-2024.09.19-243448-20119-ENT`、字典版本 `0x7000c`、`COMPATIBLE_MODE=2`、UTF-8、大小写敏感。上述普通整 Schema 夹具通过同实例异名 Schema 和跨实例两种运行；FAST/FORCE × 主键/ROWID 四种组合通过基线、完整内容核对、用户索引保留与后续实际 FAST 刷新；嵌套 UDT/LOB、标量 NULL/空 LOB、事件 DDL 钩子完整迁移和三实例 DBLink 查询通过。实测同时修复了兼容视图遗漏 MV/列注释、原生授权缺少分隔符/大小写引号、原生包编译语法及驱动集合描述符等问题。
@@ -142,6 +148,10 @@ npm run build
 BFILE/XMLTYPE 的整 Schema 实库夹具通过大小 XML、NULL、重复定位器、混合大小写目录、NUL 文本、完整内容校验及账本 JSON 重载后的最终核验；源文件缺失时目标本次表零创建，资源可用后正常迁移，目标独有的缺失外部文件引用保留。XMLTYPE 同时核对原生刻度，不能以 XML 文本相等掩盖属性丢失。
 
 XMLTYPE 历史快照的三类组合均通过完整迁移、内容校验、账本重载和后续实际 FORCE：普通预建承载表、明确绑定且包含两个 RANGE 分区的预建承载表、已有自动 INTERVAL 分区的空基表。源快照原始 XML 与目标逐值相同，历史恢复暂存及继承根表列属性的物理分区均保留 XMLTYPE 原生刻度 8；原有 16 类非 XML 分区场景随后全部回归通过。
+
+2026-10-26 在相同构建的两套全新临时 DM8 实例追加通过：5 类非线性生成分区键完整迁移和陈旧 FORCE、6 类 INTERVAL 未知回执/属性/生成表达式中断恢复、嵌套 BFILE 与静态/动态 ARRAY 的完整 Schema 内容校验和 JSON 重载核验。复杂对象同时覆盖 38 位负定点数、NUL/Unicode 大 CLOB、BLOB、INTERVAL、正负时区及九位纳秒；仅改变嵌套定位器即可检出内容差异，恢复后重新通过。原有 16 类空分区路由、非空 INTERVAL、3 类 XMLTYPE 历史快照及 15 类陈旧 FAST/FORCE 组合重新实测通过。所有迁移路径仍只使用现有 Go 驱动。
+
+事件失败恢复补充实库通过同会话停用补偿、JSON 重载及 API 的 6 类单对象/关联组接续：包括 A 已启用、B 未完成，原禁用 B 的 unknown/running、CREATE 缺失但旧策略成功，以及关联组只选择 A 而排除 B 的未知策略。每次恢复均重新证明整任务，成功 CREATE 不重放，原禁用事件保持停用；实际业务 DDL 核对启用事件恰好执行原业务体。真实 TIMER 原调度、CHECKPOINT 异步事件和禁用对象不触发也再次通过，临时实例参数恢复原值。
 
 这仍不是“所有对象无例外”的完整验收：所有表达式索引/约束变体、所有数据库事件、其他 DM8 构建/兼容模式以及生产规模故障恢复尚需进一步实测。临时夹具通过不会撤销上面列出的具体边界。
 

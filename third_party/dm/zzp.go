@@ -496,7 +496,7 @@ func calcChkDescLen_array(desc *TypeDescriptor) (int, error) {
 
 	offset += ULINT_SIZE
 
-	tmp, err := calcChkDescLen(desc)
+	tmp, err := calcChkDescLen(desc.m_arrObj)
 	if err != nil {
 		return 0, err
 	}
@@ -626,7 +626,7 @@ func (typeDescriptor *TypeDescriptor) makeChkDesc_array(offset int, desc *TypeDe
 	Dm_build_943.Dm_build_959(typeDescriptor.m_descBuf, offset, int32(desc.m_length))
 	offset += ULINT_SIZE
 
-	return typeDescriptor.makeChkDesc(offset, desc)
+	return typeDescriptor.makeChkDesc(offset, desc.m_arrObj)
 }
 
 func (typeDescriptor *TypeDescriptor) makeChkDesc_record(offset int, desc *TypeDescriptor) (int, error) {

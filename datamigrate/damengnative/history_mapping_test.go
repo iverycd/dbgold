@@ -11,6 +11,7 @@ func TestRewriteMaterializedHistoryPreservesFrozenSourceAndLiteralContent(t *tes
 	original := &MaterializedHistoryPlan{Version: 1, Schema: "MiX", Views: []MaterializedHistoryView{{Name: "Mv", SourceRefresh: "2026-10-22 12:34:56.123456", Query: `SELECT "MiX"."T"."Id",'MiX.T' FROM "MiX"."T" /* MiX.T */`, RowIDColumns: []int{0}, Columns: []Column{{Name: "Id", TypeSchema: "MiX", SQLType: `"MiX"."Ty"`}}, Buffer: MaterializedExchangeBuffer{Name: "Buf", CreateSQL: `CREATE TABLE "MiX"."Buf"("Id" "MiX"."Ty")`, Indexes: []string{`CREATE INDEX "MiX"."I" ON "MiX"."Buf"("Id")`}}}}, Logs: []MaterializedHistoryLog{{Table: "MLOG$_T", Columns: []Column{{Name: "Id", SQLType: `"MiX"."Ty"`, TypeSchema: "MiX"}}, Buffer: MaterializedExchangeBuffer{CreateSQL: `CREATE TABLE "MiX"."LogBuffer"("Id" INT)`}}}, RowIDMaps: []MaterializedRowIDMap{{BaseTable: "T", Table: "RidMap"}}}
 	original.Views[0].Redefinition = &MaterializedRedefinitionPlan{WorkingTable: "Work", SwapName: "Swap", CreateSQL: `CREATE TABLE "MiX"."Work"("Id" "MiX"."Ty", "Text" VARCHAR(20) DEFAULT 'MiX.T')`}
 	original.Views[0].EmptyTouch = &MaterializedEmptyTouch{Table: "T", DefinitionSQL: `CREATE TABLE "MiX"."T"("Id" INT)`, Columns: []MaterializedEmptyColumn{{Name: "Id", DefaultSQL: `"MiX"."Seq".NEXTVAL`}, {Name: "Text", DefaultSQL: `'MiX.T'`}}, Constraints: []MaterializedEmptyConstraint{{Table: "T", Name: "Fk", Columns: []string{"Id"}, DefinitionSQL: `ALTER TABLE "MiX"."T" ADD CONSTRAINT "Fk" FOREIGN KEY("Id") REFERENCES "MiX"."Parent"("Id")`}}, IdentityRestore: []string{`ALTER TABLE "MiX"."T" DROP IDENTITY`}}
+	original.Views[0].EmptyTouch.GeneratedColumns = []MaterializedEmptyGeneratedColumn{{Name: "GenMiX", ValueSQL: `CAST('MiX.T' AS VARCHAR(20))`}}
 	before, err := json.Marshal(original)
 	require.NoError(t, err)
 	mapped, err := RewriteMaterializedHistory(original, "MiX", `Target"Case`)
@@ -31,6 +32,16 @@ func TestRewriteMaterializedHistoryPreservesFrozenSourceAndLiteralContent(t *tes
 	require.Equal(t, "T", mapped.Views[0].EmptyTouch.Constraints[0].Table)
 	require.Contains(t, mapped.Views[0].EmptyTouch.Constraints[0].DefinitionSQL, `REFERENCES "Target""Case"."Parent"`)
 	require.Contains(t, mapped.Views[0].EmptyTouch.IdentityRestore[0], `"Target""Case"."T"`)
+	require.Equal(t, "GenMiX", mapped.Views[0].EmptyTouch.GeneratedColumns[0].Name)
+	require.Equal(t, `CAST('MiX.T' AS VARCHAR(20))`, mapped.Views[0].EmptyTouch.GeneratedColumns[0].ValueSQL)
+	frozenMarker := MaterializedHistorySQL(mapped.Schema, "Mv", mapped)
+	encoded, err := json.Marshal(mapped)
+	require.NoError(t, err)
+	var reload MaterializedHistoryPlan
+	require.NoError(t, json.Unmarshal(encoded, &reload))
+	require.Equal(t, frozenMarker, MaterializedHistorySQL(mapped.Schema, "Mv", &reload))
+	mapped.Views[0].EmptyTouch.GeneratedColumns[0].ValueSQL = `CAST('changed' AS VARCHAR(20))`
+	require.NotEqual(t, frozenMarker, MaterializedHistorySQL(mapped.Schema, "Mv", mapped), "generated constants must participate in the trusted execution marker")
 	mapped.Views[0].RowIDColumns[0] = 7
 	mapped.Views[0].Redefinition.WorkingTable = "changed"
 	mapped.Views[0].EmptyTouch.Constraints[0].Columns[0] = "changed"

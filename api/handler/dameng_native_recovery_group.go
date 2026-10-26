@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -87,11 +88,13 @@ func nativeRecoveryCompleteManaged(objects []repair.Object, completed map[string
 }
 
 type nativeRecoveryFinalization struct {
-	execute   func(context.Context, repair.Object, []repair.Unit, func([]repair.Unit) error) ([]repair.Unit, error)
-	proof     func(context.Context) error
-	pinEvents func(context.Context, func(context.Context) error) error
-	progress  func(repair.Object, []repair.Unit) error
-	save      func(repair.Object) error
+	execute       func(context.Context, repair.Object, []repair.Unit, func([]repair.Unit) error) ([]repair.Unit, error)
+	prepareEvents func(context.Context, []repair.Object) ([]repair.Object, error)
+	proof         func(context.Context) error
+	pinEvents     func(context.Context, func(context.Context) error) error
+	progress      func(repair.Object, []repair.Unit) error
+	save          func(repair.Object) error
+	forceProof    bool
 }
 
 // The proof is executed once for the entire recovered job. Every MV policy is
@@ -106,8 +109,17 @@ func executeNativeRecoveryFinalStates(ctx context.Context, items []repair.Object
 			break
 		}
 	}
-	if !needed {
+	if !needed && !run.forceProof {
 		return items, nil
+	}
+	if run.prepareEvents != nil {
+		prepared, err := run.prepareEvents(ctx, items)
+		if prepared != nil {
+			items = prepared
+		}
+		if err != nil {
+			return items, err
+		}
 	}
 	if run.proof == nil {
 		return items, fmt.Errorf("原生接续缺少整任务最终核验")
@@ -175,6 +187,20 @@ func executeNativeRecoveryFinalStates(ctx context.Context, items []repair.Object
 			return items, fmt.Errorf("原生接续缺少最终固定事件会话")
 		}
 		if err := run.pinEvents(finalContext, func(final context.Context) error { return phase(final, "event_activate") }); err != nil {
+			var failure *damengnative.EventFinalizationFailure
+			if errors.As(err, &failure) {
+				for i := range items {
+					if !repair.ApplyNativeEventRecovery(&items[i], failure.States) {
+						continue
+					}
+					if run.progress != nil {
+						err = errors.Join(err, run.progress(items[i], items[i].Units))
+					}
+					if run.save != nil {
+						err = errors.Join(err, run.save(items[i]))
+					}
+				}
+			}
 			return items, err
 		}
 	}

@@ -34,6 +34,9 @@ func canonical(value any, logical, native Column) ([]byte, error) {
 	if logical.Kind == Unsupported || logical.Kind == "" || native.Kind == Unsupported || native.Kind == "" {
 		return nil, unsupported("列 %s 的类型 %s 缺少无损校验器", logical.Name, native.DatabaseType)
 	}
+	if (logical.Kind == DamengComplex) != (native.Kind == DamengComplex) {
+		return nil, unsupported("达梦复杂值必须由原生复杂类型回读")
+	}
 	if value == nil {
 		return []byte{0}, nil
 	}
@@ -60,6 +63,15 @@ func canonical(value any, logical, native Column) ([]byte, error) {
 			return nil, unsupported("列 %s 的二进制值未以原始字节返回", logical.Name)
 		}
 		payload = string(b)
+	case DamengComplex:
+		if native.Kind != DamengComplex {
+			return nil, unsupported("达梦复杂值必须由原生复杂类型回读")
+		}
+		b, ok := value.(damengComplexCell)
+		if !ok || len(b) > MaxValueBytes || len(b) == 0 {
+			return nil, unsupported("达梦复杂值未由原生结构编码器完整读取")
+		}
+		family, payload = "dameng_complex_v1", string(b)
 	case Number, Float:
 		family = "number"
 		payload, err = canonicalNumber(value, native)

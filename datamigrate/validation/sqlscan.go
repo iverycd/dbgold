@@ -287,6 +287,10 @@ func ClassifyColumn(family string, c *Column) {
 		t = strings.TrimSpace(t[:i])
 	}
 	c.Kind = Unsupported
+	if family == "dameng" && isDamengComplexType(t) {
+		c.Kind = DamengComplex
+		return
+	}
 	switch t {
 	case "char", "character", "nchar", "varchar", "nvarchar", "varchar2", "nvarchar2", "character varying", "national character varying", "national character", "text", "ntext", "tinytext", "mediumtext", "longtext", "clob", "nclob", "bpchar", "enum", "set":
 		c.Kind = Text
@@ -546,6 +550,42 @@ func (s *sqlValidationStream) Next(ctx context.Context) ([]any, error) {
 	if e := s.rows.Scan(p...); e != nil {
 		return nil, e
 	}
+	if s.family == "dameng" {
+		remaining := MaxScanRowBytes
+		for i, value := range values {
+			if s.nativeColumns[i].Kind == DamengComplex {
+				continue
+			}
+			switch v := value.(type) {
+			case []byte:
+				remaining -= len(v)
+			case string:
+				remaining -= len(v)
+			default:
+				remaining -= 32
+			}
+		}
+		if remaining < 0 {
+			return nil, unsupported("原始行超过校验读取字节上限")
+		}
+		for i, c := range s.nativeColumns {
+			if c.Kind == DamengComplex && values[i] != nil {
+				encoded, err := encodeDamengComplex(ctx, values[i], remaining)
+				if err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					return nil, unsupported("达梦复杂列 %s 无法完整读取: %s", c.Name, err)
+				}
+				if len(encoded) == 1 && encoded[0] == 0 {
+					values[i] = nil
+				} else {
+					values[i] = damengComplexCell(encoded)
+				}
+				remaining -= len(encoded)
+			}
+		}
+	}
 	if s.family == "sqlserver" {
 		for i, c := range s.nativeColumns {
 			if values[i] == nil {
@@ -582,6 +622,8 @@ func (s *sqlValidationStream) Next(ctx context.Context) ([]any, error) {
 	for _, v := range values {
 		switch x := v.(type) {
 		case []byte:
+			total += len(x)
+		case damengComplexCell:
 			total += len(x)
 		case string:
 			total += len(x)

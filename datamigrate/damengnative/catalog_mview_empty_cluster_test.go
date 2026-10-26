@@ -128,14 +128,18 @@ func TestMaterializedEmptyPartitionCancellationDoesNotProbe(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
-func TestMaterializedEmptyGeneratedPartitionKeyRetainsNullEpochWithoutEvaluation(t *testing.T) {
+func TestMaterializedEmptyGeneratedPartitionKeyFreezesExistingRouteWithoutEvaluation(t *testing.T) {
 	db, m, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
 	r := nativeMVReader(db)
 	p := &MaterializedEmptyTouch{Table: "Base", DefinitionSQL: `CREATE TABLE "App"."Base"("Id" INT,"A" INT,"B" INT GENERATED ALWAYS AS(danger("Id")) VIRTUAL) PARTITION BY LIST("A") SUBPARTITION BY RANGE("B") SUBPARTITION TEMPLATE(SUBPARTITION "Neg" VALUES LESS THAN(-5))(PARTITION "Five" VALUES(5))`, Columns: []MaterializedEmptyColumn{{Name: "Id"}, {Name: "A"}}}
+	m.ExpectQuery(`SELECT CASE WHEN CAST\(5 AS INT\) IS NOT NULL AND CAST\(CAST\(-5 AS INT\)-1 AS INT\) IS NOT NULL.*SUBPARTITION FOR`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	m.ExpectQuery(`SELECT CAST\("DBGOLD_GENERATED_KEY" AS VARCHAR\(32767\)\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"key"}).AddRow("-6"))
+	m.ExpectQuery(`SELECT CASE WHEN CAST\('-6' AS INT\)=CAST\(CAST\(-5 AS INT\)-1 AS INT\) THEN 1 ELSE 0 END FROM DUAL`).WillReturnRows(sqlmock.NewRows([]string{"equal"}).AddRow(1))
 	require.NoError(t, r.populateMaterializedEmptyCluster(Table{Name: "Base", Columns: []Column{{Name: "Id", Writable: true, DataType: "INT", SQLType: "INT"}, {Name: "A", Writable: true, DataType: "INT", SQLType: "INT"}, {Name: "B", Writable: false, DataType: "INT", SQLType: "INT"}}}, p))
 	require.Empty(t, p.Columns[0].ValueSQL)
 	require.Equal(t, "CAST(5 AS INT)", p.Columns[1].ValueSQL)
+	require.Equal(t, []MaterializedEmptyGeneratedColumn{{Name: "B", ValueSQL: "CAST('-6' AS INT)"}}, p.GeneratedColumns)
 	require.NoError(t, m.ExpectationsWereMet(), "生成表达式不能在源预检求值")
 }

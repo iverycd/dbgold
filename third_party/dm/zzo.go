@@ -6,6 +6,7 @@ package dm
 
 import (
 	"strconv"
+	"time"
 
 	"gitee.com/chunanyong/dm/util"
 )
@@ -245,9 +246,14 @@ func (sv TypeData) toMemberObj(mem interface{}, desc *TypeDescriptor) (*TypeData
 	param.colType = int32(dtype)
 	param.prec = int32(prec)
 	param.scale = int32(scale)
+	param.column = nativeMemberColumn(*desc.column)
 
 	var err error
-	bs, err = G2DB.fromObject(mem, *param, desc.m_conn)
+	if temporal, ok := mem.(time.Time); ok && (dtype == DATE || dtype == TIME || dtype == TIME_TZ || dtype == DATETIME || dtype == DATETIME2 || dtype == DATETIME_TZ || dtype == DATETIME2_TZ) {
+		bs, err = encodeNativeMemberTime(temporal, param.column, desc.m_conn)
+	} else {
+		bs, err = G2DB.fromObject(mem, *param, desc.m_conn)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -435,17 +441,28 @@ func (sv TypeData) convertLobToBytes(value interface{}, dtype int, serverEncodin
 
 func (sv TypeData) sarrayToBytes(data *DmArray, desc *TypeDescriptor) ([]byte, error) {
 	realLen := len(data.m_arrData)
-	results := make([][]byte, realLen)
 	var rdata []byte
 	var err error
 
 	if desc.getObjId() == 4 {
 		return sv.ctlnToBytes(data, desc)
 	}
+	staticLen := desc.getStaticArrayLength()
+	if staticLen < 0 || realLen > staticLen {
+		return nil, ECGO_INVALID_ARRAY_LEN.throw()
+	}
+	results := make([][]byte, staticLen)
 
 	totalLen := 0
-	for i := 0; i < realLen; i++ {
-		results[i], err = sv.typeDataToBytes(&data.m_arrData[i], desc.m_arrObj)
+	for i := 0; i < staticLen; i++ {
+		// Static arrays always have their declared length on the server. Fill
+		// omitted constructor members with NULL, as native PL/SQL declarations
+		// do, so the count cannot consume bytes from the next object attribute.
+		member := newTypeData(nil, nil)
+		if i < realLen {
+			member = &data.m_arrData[i]
+		}
+		results[i], err = sv.typeDataToBytes(member, desc.m_arrObj)
 		if err != nil {
 			return nil, err
 		}
@@ -459,10 +476,10 @@ func (sv TypeData) sarrayToBytes(data *DmArray, desc *TypeDescriptor) ([]byte, e
 	Dm_build_943.Dm_build_959(rdata, off, int32(totalLen))
 	off += ULINT_SIZE
 
-	Dm_build_943.Dm_build_959(rdata, off, int32(data.m_arrDesc.getLength()))
+	Dm_build_943.Dm_build_959(rdata, off, int32(staticLen))
 	off += ULINT_SIZE
 
-	for i := 0; i < realLen; i++ {
+	for i := 0; i < staticLen; i++ {
 		copy(rdata[off:off+len(results[i])], results[i][:len(results[i])])
 		off += len(results[i])
 	}
@@ -1123,7 +1140,8 @@ func (sv TypeData) convertBytes2BaseData(val []byte, out *TypeData, desc *TypeDe
 	offset += valueLen
 	out.m_offset = offset
 
-	tmpObj, err = DB2G.toObject(temp, desc.column, desc.m_conn)
+	memberColumn := nativeMemberColumn(*desc.column)
+	tmpObj, err = DB2G.toObject(temp, &memberColumn, desc.m_conn)
 	if err != nil {
 		return nil, err
 	}

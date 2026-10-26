@@ -938,6 +938,12 @@ func ExecuteMigrationRepair(c *gin.Context) {
 	}
 	needsLinkSource := false
 	needsNativeFinalState := datamigrate.NativeRepairHasFinalState(o)
+	if nativeEventRepairObject(o) && nativeRepairHasPendingOrdinaryUnits(o) {
+		// A stale successful activation can coexist with an absent/uncertain
+		// CREATE after interruption. Event DDL retry must pause the whole
+		// authenticated job group before issuing ordinary DDL as well.
+		needsNativeFinalState = true
+	}
 	if o.Native != nil {
 		for _, unit := range o.Native.Units {
 			needsLinkSource = needsLinkSource || unit.SourceSQLHash != ""
@@ -997,6 +1003,14 @@ func ExecuteMigrationRepair(c *gin.Context) {
 				cfg, err := recoveryConfig(b)
 				if err != nil {
 					finishRepair(a, o, err)
+					return
+				}
+				if nativeEventRepairObject(o) {
+					units, groupErr := retryNativeEventJob(ctx, j.JobID, o, r, w, cfg, func(units []repair.Unit) error {
+						return persistRepairProgress(a, o, units, nil)
+					})
+					a.UnitsJSON = repairJSON(units)
+					finishRepair(a, o, groupErr)
 					return
 				}
 				ctx, err = nativeRepairFinalizationContext(ctx, j.JobID, o.ID, r, w, cfg)

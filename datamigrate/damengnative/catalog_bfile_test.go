@@ -18,7 +18,7 @@ func TestNativeBFilesFreezeExactDeduplicatedExternalReferences(t *testing.T) {
 	r := &catalogReader{ctx: context.Background(), db: db, schema: "Src.Mixed"}
 	object := Object{Kind: "table", Name: "Storage", Schema: r.schema}
 	table := Table{Columns: []Column{{Name: "F\"1", DataType: "BFILE", Writable: true}, {Name: "F2", DataType: "BFILE", Writable: true}, {Name: "Text", DataType: "VARCHAR", Writable: true}, {Name: "Generated", DataType: "BFILE"}}}
-	for _, column := range []string{"F\"1", "F2"} {
+	for _, column := range []string{"F\"1", "F2", "Generated"} {
 		q := Quote(column)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT " + q + ` FROM "Src.Mixed"."Actual Source" WHERE ` + q + " IS NOT NULL")).WillReturnRows(sqlmock.NewRows([]string{"locator"}).AddRow("Mixed.Dir:File 中文.bin").AddRow(nil).AddRow("Mixed.Dir:File 中文.bin")).RowsWillBeClosed()
 	}

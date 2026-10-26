@@ -110,11 +110,26 @@ func (ds *DmStruct) createByStructDescriptor(desc *StructDescriptor, conn *DmCon
 
 // 获取Struct对象在数据库中的类型名称
 func (ds *DmStruct) GetSQLTypeName() (string, error) {
+	if ds == nil || !ds.Valid {
+		return "", ECGO_IS_NULL.throw()
+	}
+	if ds.m_strctDesc == nil || ds.m_strctDesc.m_typeDesc == nil || ds.m_strctDesc.m_typeDesc.m_sqlName == nil {
+		return "", ECGO_INVALID_COLUMN_TYPE.throw()
+	}
 	return ds.m_strctDesc.m_typeDesc.getFulName()
 }
 
 // 获取Struct对象中的各个字段的值
 func (ds *DmStruct) GetAttributes() ([]interface{}, error) {
+	if ds == nil || !ds.Valid {
+		return nil, ECGO_IS_NULL.throw()
+	}
+	if ds.m_strctDesc == nil || ds.m_strctDesc.m_typeDesc == nil {
+		return nil, ECGO_INVALID_COLUMN_TYPE.throw()
+	}
+	if len(ds.m_attribs) != len(ds.m_strctDesc.m_typeDesc.m_fieldsObj) {
+		return nil, ECGO_STRUCT_MEM_NOT_MATCH.throw()
+	}
 	return TypeDataSV.toJavaArrayByDmStruct(ds)
 }
 

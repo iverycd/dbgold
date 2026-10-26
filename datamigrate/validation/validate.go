@@ -529,6 +529,12 @@ func summarize(v any, column Column) ValueSummary {
 			return ValueSummary{Text: "[binary]", Length: int64(len(b)), SHA256: hex.EncodeToString(h[:])}
 		}
 	}
+	if column.Kind == DamengComplex {
+		if b, ok := v.(damengComplexCell); ok {
+			h := sha256.Sum256(b)
+			return ValueSummary{Text: "[dameng object]", Length: int64(len(b)), SHA256: hex.EncodeToString(h[:])}
+		}
+	}
 	var text string
 	switch x := v.(type) {
 	case time.Time:

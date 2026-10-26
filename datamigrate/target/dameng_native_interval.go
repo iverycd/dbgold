@@ -33,11 +33,29 @@ func (w *DaMengNativeWriter) intervalPlan(object damengnative.Object, unit damen
 		columns[column.Name] = true
 		mandatory[column.Name] = column.ValueSQL != ""
 	}
+	if p.GeneratedKey {
+		if columns[p.Column] || !nativeDefinitionsEqual(p.DefinitionSQL, p.EmptyTouch.DefinitionSQL) {
+			return nil, fmt.Errorf("间隔生成键声明不属于冻结只读列")
+		}
+		if _, err := damengnative.NativeGeneratedColumnDeclaration(p.DefinitionSQL, p.Column); err != nil {
+			return nil, err
+		}
+	}
 	for _, part := range p.Partitions {
 		if part.Name == "" || part.HighSQL == "" || names[part.Name] {
 			return nil, fmt.Errorf("间隔分区原生清单不完整或重复")
 		}
 		names[part.Name] = true
+		if p.GeneratedKey {
+			if len(part.Values) != 0 {
+				return nil, fmt.Errorf("间隔生成键原生常量计划不能包含仿射输入")
+			}
+			if part.SeedSQL != "" {
+				if _, err := damengnative.RewriteNativeGeneratedColumnConstant(p.DefinitionSQL, p.Column, part.SeedSQL); err != nil {
+					return nil, err
+				}
+			}
+		}
 		values := map[string]bool{}
 		for _, value := range part.Values {
 			if !columns[value.Column] || value.SQL == "" || values[value.Column] || part.SeedSQL == "" || value.SQL == "NULL" && mandatory[value.Column] {
@@ -309,10 +327,18 @@ func (w *DaMengNativeWriter) ReconcileDamengNativeIntervalPartitions(ctx context
 	if count != 0 {
 		return false, false, fmt.Errorf("间隔分区响应未知且目标已有数据，需要整表恢复确认: %w", err)
 	}
+	if object.Interval.GeneratedKey {
+		if _, e := nativeIntervalGeneratedCurrent(ctx, conn, w.schema, object.Interval); e != nil {
+			return false, false, e
+		}
+	}
 	return false, true, nil
 }
 
 func nativeIntervalTouch(ctx context.Context, conn *sql.Conn, schema string, p *damengnative.IntervalPartitionPlan, part damengnative.IntervalPartition) error {
+	if p.GeneratedKey {
+		return nativeIntervalGeneratedTouch(ctx, conn, schema, p, part)
+	}
 	touch := *p.EmptyTouch
 	touch.Columns = append([]damengnative.MaterializedEmptyColumn{}, p.EmptyTouch.Columns...)
 	values := map[string]string{}

@@ -157,41 +157,21 @@ func (r *catalogReader) populateMaterializedEmptyPartition(t Table, p *Materiali
 	for _, c := range t.Columns {
 		types[c.Name] = c
 	}
-	// A generated partition key is not an INSERT column. Retain the existing
-	// empty-table NULL epoch instead of introducing a preflight rejection or
-	// evaluating an arbitrary generation expression on the source. Preserve
-	// the old top-level writable LIST seed when such a key has deeper levels.
-	generatedKey := false
+	// A generated partition key remains non-writable. Freeze constants for
+	// its native routing independently from the original expression; the
+	// target can temporarily replace only that expression on the empty table.
 	for _, level := range levels {
 		for _, name := range level.keys {
 			c, found := types[name]
 			if !found {
 				return fmt.Errorf("分区列 %s 缺少原生类型", name)
 			}
-			generatedKey = generatedKey || !c.Writable
-		}
-	}
-	if generatedKey {
-		if levels[0].kind == "LIST" {
-			for _, tuple := range levels[0].bounds {
-				if len(tuple) != len(levels[0].keys) || strings.EqualFold(strings.TrimSpace(tuple[0]), "DEFAULT") {
-					continue
+			if !c.Writable {
+				if _, err := NativeGeneratedColumnDeclaration(p.DefinitionSQL, name); err != nil {
+					return err
 				}
-				for i, name := range levels[0].keys {
-					if !types[name].Writable {
-						continue
-					}
-					value := materializedEmptyPartitionValues(types[name], tuple[i], false)[0]
-					for j := range p.Columns {
-						if p.Columns[j].Name == name {
-							p.Columns[j].ValueSQL = value
-						}
-					}
-				}
-				break
 			}
 		}
-		return nil
 	}
 	var names []string
 	options := map[string][]string{}
@@ -206,8 +186,8 @@ func (r *catalogReader) populateMaterializedEmptyPartition(t Table, p *Materiali
 	for _, level := range levels {
 		for i, name := range level.keys {
 			c, found := types[name]
-			if !found || !c.Writable {
-				return fmt.Errorf("分区列 %s 缺少原生可写类型", name)
+			if !found {
+				return fmt.Errorf("分区列 %s 缺少原生类型", name)
 			}
 			if _, seen := options[name]; !seen {
 				names = append(names, name)
@@ -288,6 +268,18 @@ func (r *catalogReader) populateMaterializedEmptyPartition(t Table, p *Materiali
 		for i := range p.Columns {
 			if value, found := values[p.Columns[i].Name]; found {
 				p.Columns[i].ValueSQL = value
+			}
+		}
+		for _, name := range names {
+			if !types[name].Writable {
+				if !materializedEmptyPartitionConstant(values[name]) {
+					return false, fmt.Errorf("生成分区键 %s 的路由不是原生常量", name)
+				}
+				literal, e := r.freezeNativeGeneratedConstant(types[name], values[name])
+				if e != nil {
+					return false, e
+				}
+				p.GeneratedColumns = append(p.GeneratedColumns, MaterializedEmptyGeneratedColumn{Name: name, ValueSQL: literal})
 			}
 		}
 		return true, nil

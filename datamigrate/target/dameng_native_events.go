@@ -14,6 +14,12 @@ import (
 )
 
 type nativeEventSessionKey struct{}
+type nativeEventRecoveryKey struct{}
+
+type nativeEventAttempt struct {
+	object damengnative.Object
+	unit   damengnative.Unit
+}
 
 func nativeEventIdentity(schema string, object damengnative.Object, unit damengnative.Unit) error {
 	if object.Kind != "trigger" || !object.EventTrigger || object.Schema != schema || object.Name == "" || strings.ContainsRune(object.Name, 0) {
@@ -119,7 +125,47 @@ func (w *DaMengNativeWriter) WithDamengNativeEventFinalization(ctx context.Conte
 	if _, err = conn.ExecContext(ctx, "SET SCHEMA "+damengnative.Quote(w.schema)); err != nil {
 		return err
 	}
-	return activate(context.WithValue(ctx, nativeEventSessionKey{}, conn))
+	attempts := []nativeEventAttempt{}
+	final := context.WithValue(ctx, nativeEventSessionKey{}, conn)
+	final = context.WithValue(final, nativeEventRecoveryKey{}, &attempts)
+	err = activate(final)
+	if err == nil {
+		return nil
+	}
+	// SP_ENABLE_EVT_TRIGGER commits independently of a SQL transaction. A
+	// later activation/ledger failure must therefore explicitly pause every
+	// attempted enabled hook before releasing this same session (and LOGOUT).
+	// No new login is opened, even when the original context was cancelled.
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	failure := &damengnative.EventFinalizationFailure{Cause: err}
+	for i := len(attempts) - 1; i >= 0; i-- {
+		attempt := attempts[i]
+		result := damengnative.EventStateRecovery{Schema: attempt.object.Schema, Name: attempt.object.Name, SQL: attempt.unit.SQL, Status: "unknown"}
+		_, disableErr := conn.ExecContext(cleanup, damengnative.EventTriggerStateSQL(attempt.object.Schema, attempt.object.Name, false))
+		var status string
+		proofErr := conn.QueryRowContext(cleanup, `SELECT STATUS FROM ALL_TRIGGERS WHERE OWNER=? AND TRIGGER_NAME=?`, attempt.object.Schema, attempt.object.Name).Scan(&status)
+		if proofErr == nil && nativeEventDisabled(status) {
+			result.Status = "pending"
+		} else {
+			if proofErr == nil {
+				proofErr = fmt.Errorf("事件仍未确认停用: %s", status)
+			}
+			proofErr = errors.Join(disableErr, proofErr)
+			result.Error = proofErr.Error()
+			failure.Cause = errors.Join(failure.Cause, fmt.Errorf("暂停事件 %s: %w", damengnative.Qualified(result.Schema, result.Name), proofErr))
+		}
+		failure.States = append(failure.States, result)
+	}
+	return failure
+}
+
+func nativeEventDisabled(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "N", "0", "DISABLED", "DISABLE":
+		return true
+	}
+	return false
 }
 
 // SetDamengNativeEventState executes only a frozen per-object state command on
@@ -132,6 +178,19 @@ func (w *DaMengNativeWriter) SetDamengNativeEventState(ctx context.Context, obje
 	conn, ok := ctx.Value(nativeEventSessionKey{}).(*sql.Conn)
 	if !ok || conn == nil {
 		return fmt.Errorf("事件触发器状态必须在最终固定会话中恢复")
+	}
+	if !nativeEventDisabled(object.Status) {
+		if attempts, ok := ctx.Value(nativeEventRecoveryKey{}).(*[]nativeEventAttempt); ok && attempts != nil {
+			// Record before the call: an error may mean the server executed it
+			// and the response was lost. Deduplication keeps cleanup bounded.
+			found := false
+			for _, attempted := range *attempts {
+				found = found || attempted.object.Schema == object.Schema && attempted.object.Name == object.Name
+			}
+			if !found {
+				*attempts = append(*attempts, nativeEventAttempt{object: object, unit: unit})
+			}
+		}
 	}
 	_, err := execObserved(ctx, conn, unit.SQL)
 	return err

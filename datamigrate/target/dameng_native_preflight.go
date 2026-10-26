@@ -87,6 +87,19 @@ func (w *DaMengNativeWriter) ValidateDamengNativeObjects(ctx context.Context, ob
 			if err := w.validateHistoryRedefinition(ctx, o.Materialized.History.Views, objects); err != nil {
 				add(o, err.Error())
 			}
+			if !ownsSchema && username != "SYSDBA" && username != "SYS" {
+				for _, view := range o.Materialized.History.Views {
+					if view.EmptyTouch == nil || len(view.EmptyTouch.GeneratedColumns) == 0 {
+						continue
+					}
+					for _, privilege := range []string{"ALTER ANY TABLE", "INSERT ANY TABLE", "DELETE ANY TABLE"} {
+						if !grants[privilege] {
+							add(o, "跨 Schema 恢复空基表生成分区键需要 "+privilege+" 权限")
+						}
+					}
+					break
+				}
+			}
 		}
 		if o.Interval != nil {
 			spaces := map[string]bool{}

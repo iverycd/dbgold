@@ -2,6 +2,7 @@ package target
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -48,6 +49,15 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 			return out, err
 		}
 		if out[i].Status == "unknown" || out[i].Status == "running" {
+			if obj.Native.Units[i].Phase == "event_activate" {
+				if conn, pinned := ctx.Value(nativeEventSessionKey{}).(*sql.Conn); pinned && conn != nil {
+					// Group coordinators must reconcile these states before the
+					// final session opens. A catalog scan here could open LOGIN
+					// hooks already enabled by a preceding object (or deadlock a
+					// one-connection pool while the final session is pinned).
+					return out, fmt.Errorf("不确定事件状态必须在最终事件会话之前完成整组核对")
+				}
+			}
 			done, retry, err := w.reconcileNativeUnit(ctx, *obj.Native, i)
 			if err != nil {
 				return out, err
@@ -140,6 +150,15 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 			return nil
 		})
 		if err != nil {
+			var failure *damengnative.EventFinalizationFailure
+			if errors.As(err, &failure) {
+				recovered := obj
+				recovered.Units = out
+				if repair.ApplyNativeEventRecovery(&recovered, failure.States) {
+					out = recovered.Units
+					err = errors.Join(err, persist())
+				}
+			}
 			return out, err
 		}
 	}

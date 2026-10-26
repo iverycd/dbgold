@@ -65,9 +65,9 @@ func TestDamengNativeIntervalUnknownPreparationIntegration(t *testing.T) {
 		require.NoError(t, side.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM SYS.SYSOBJECTS o JOIN SYS.SYSOBJECTS s ON s.ID=o.SCHID WHERE s.TYPE$='SCH' AND s.NAME=?`, side.s).Scan(&n))
 		require.Zero(t, n, "需要初始为空的专用测试Schema")
 	}
-	for _, tc := range []struct{ attrsInterrupted, generated bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+	for _, tc := range []struct{ attrsInterrupted, generated, expressionInterrupted bool }{{false, false, false}, {true, false, false}, {false, true, false}, {true, true, false}, {false, true, true}, {true, true, true}} {
 		attrsInterrupted := tc.attrsInterrupted
-		t.Run(fmt.Sprint("interrupted_attributes_", attrsInterrupted, "_generated_", tc.generated), func(t *testing.T) {
+		t.Run(fmt.Sprint("interrupted_attributes_", attrsInterrupted, "_generated_", tc.generated, "_expression_", tc.expressionInterrupted), func(t *testing.T) {
 			sq, dq := damengnative.Qualified(ss, "RecoverInterval"), damengnative.Qualified(ds, "RecoverInterval")
 			exec := func(db *sql.DB, s string) { _, e := db.ExecContext(ctx, s); require.NoError(t, e, s) }
 			var frozen *damengnative.Preflight
@@ -86,7 +86,7 @@ func TestDamengNativeIntervalUnknownPreparationIntegration(t *testing.T) {
 			}()
 			generated, key := "", "A"
 			if tc.generated {
-				generated = `,"G" INT GENERATED ALWAYS AS("A"*2) VIRTUAL`
+				generated = `,"G" INT GENERATED ALWAYS AS("A"*"A") VIRTUAL`
 				key = "G"
 			}
 			exec(src, "CREATE TABLE "+sq+`("Id" BIGINT IDENTITY(10,3) PRIMARY KEY,"A" INT NOT NULL,"V" INT DEFAULT ON NULL 42 NOT NULL`+generated+`) PARTITION BY RANGE(`+damengnative.Quote(key)+`) INTERVAL(10)(PARTITION "Initial" VALUES LESS THAN(-5))`)
@@ -142,6 +142,23 @@ func TestDamengNativeIntervalUnknownPreparationIntegration(t *testing.T) {
 			}
 			before := parts()
 			require.Len(t, before, 2)
+			if tc.expressionInterrupted {
+				plan := object.Native.Interval
+				require.True(t, plan.GeneratedKey)
+				var seed string
+				for _, partition := range plan.Partitions {
+					if partition.SeedSQL != "" {
+						seed = partition.SeedSQL
+						break
+					}
+				}
+				require.NotEmpty(t, seed)
+				changed, err := damengnative.RewriteNativeGeneratedColumnConstant(plan.EmptyTouch.DefinitionSQL, plan.Column, seed)
+				require.NoError(t, err)
+				declaration, err := damengnative.NativeGeneratedColumnDeclaration(changed, plan.Column)
+				require.NoError(t, err)
+				exec(dst, "ALTER TABLE "+dq+" MODIFY "+declaration)
+			}
 			if attrsInterrupted {
 				exec(dst, "ALTER TABLE "+dq+" DROP IDENTITY")
 				exec(dst, "ALTER TABLE "+dq+` ALTER COLUMN "V" DROP DEFAULT`)
@@ -156,7 +173,7 @@ func TestDamengNativeIntervalUnknownPreparationIntegration(t *testing.T) {
 			require.NoError(t, e)
 			require.Equal(t, "succeeded", units[unitIndex].Status)
 			require.Equal(t, before, parts(), "不能反复创建或填平稀疏分区，也不能重建已有物理对象")
-			if attrsInterrupted {
+			if attrsInterrupted || tc.expressionInterrupted {
 				require.NotEmpty(t, events, "需要受控恢复未清理属性")
 			} else {
 				require.Empty(t, events, "已完成且属性完整时必须纯读归并，不能重放typed恢复")

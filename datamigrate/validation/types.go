@@ -7,19 +7,20 @@ import "context"
 type Kind string
 
 const (
-	Text        Kind = "text"
-	Binary      Kind = "binary"
-	Number      Kind = "number"
-	Float       Kind = "float"
-	Bool        Kind = "bool"
-	Bits        Kind = "bits"
-	UUID        Kind = "uuid"
-	Date        Kind = "date"
-	Time        Kind = "time"
-	Timestamp   Kind = "timestamp"
-	TimestampTZ Kind = "timestamp_tz"
-	JSON        Kind = "json"
-	Unsupported Kind = "unsupported"
+	Text          Kind = "text"
+	Binary        Kind = "binary"
+	Number        Kind = "number"
+	Float         Kind = "float"
+	Bool          Kind = "bool"
+	Bits          Kind = "bits"
+	UUID          Kind = "uuid"
+	Date          Kind = "date"
+	Time          Kind = "time"
+	Timestamp     Kind = "timestamp"
+	TimestampTZ   Kind = "timestamp_tz"
+	JSON          Kind = "json"
+	DamengComplex Kind = "dameng_complex"
+	Unsupported   Kind = "unsupported"
 )
 
 const (

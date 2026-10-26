@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sort"
@@ -277,6 +278,9 @@ func historyEmptyReadDDL(ctx context.Context, conn *sql.Conn, schema, table stri
 // attribute even after cancellation; the next attempt reconciles catalog state
 // before executing another DML pair.
 func nativeHistoryEmptyTouch(ctx context.Context, conn *sql.Conn, schema string, p *damengnative.MaterializedEmptyTouch) (retErr error) {
+	if p != nil && len(p.GeneratedColumns) != 0 {
+		return nativeHistoryGeneratedEmptyTouch(ctx, conn, schema, p)
+	}
 	if p == nil || p.Table == "" || len(p.Columns) == 0 || p.DefinitionSQL == "" {
 		return fmt.Errorf("缺少冻结的空基表状态恢复计划")
 	}
@@ -355,10 +359,21 @@ func nativeHistoryEmptyTouch(ctx context.Context, conn *sql.Conn, schema string,
 	// Restore FKs last, after PKs and NOT NULL. Resolve generated names once
 	// by their frozen kind/column identity; no user-supplied identifier runs.
 	sort.SliceStable(constraints, func(i, j int) bool { return constraints[i].kind != "R" && constraints[j].kind == "R" })
+	sessionClean := true
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		var cleanupErr error
+		// A failed Commit/Rollback acknowledgment does not prove that the
+		// server ended the transaction. Confirm rollback independently before
+		// any restoration DDL, which otherwise could implicitly commit rows.
+		if !sessionClean {
+			if _, e := conn.ExecContext(cleanup, "ROLLBACK"); e != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				retErr = errors.Join(retErr, fmt.Errorf("空基表事务结束状态未知，拒绝清理DDL并丢弃会话: %w", e))
+				return
+			}
+		}
 		for _, c := range p.Columns {
 			if c.DefaultOnNull && c.ValueSQL == "" {
 				_, e := conn.ExecContext(cleanup, "ALTER TABLE "+q+" ALTER COLUMN "+damengnative.Quote(c.Name)+" SET DEFAULT ON NULL "+c.DefaultSQL)
@@ -496,11 +511,16 @@ func nativeHistoryEmptyTouch(ctx context.Context, conn *sql.Conn, schema string,
 	if _, err = conn.ExecContext(ctx, "CALL SET_SESSION_CONS_CHK(0)"); err != nil {
 		return err
 	}
+	sessionClean = false
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if e := tx.Rollback(); e == nil {
+			sessionClean = true
+		}
+	}()
 	r, err := tx.ExecContext(ctx, "INSERT INTO "+q+"("+strings.Join(cols, ",")+") VALUES("+strings.Join(values, ",")+")")
 	if err != nil {
 		return err
@@ -515,5 +535,9 @@ func nativeHistoryEmptyTouch(ctx context.Context, conn *sql.Conn, schema string,
 	if n, e := r.RowsAffected(); e != nil || n != 1 {
 		return errors.Join(fmt.Errorf("空基表临时行删除数不同: %d", n), e)
 	}
-	return tx.Commit()
+	err = tx.Commit()
+	if err == nil {
+		sessionClean = true
+	}
+	return err
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"dbgold/datamigrate/damengnative"
+	"dbgold/datamigrate/repair"
 )
 
 // Event activation is deliberately outside runDamengNative: Run may still
@@ -90,6 +91,18 @@ func (m *Migrator) finalizeDamengNativeEvents(ctx context.Context, report *Migra
 		return nil
 	})
 	if err != nil {
+		var failure *damengnative.EventFinalizationFailure
+		if errors.As(err, &failure) && m.repairs != nil {
+			m.repairs.mu.Lock()
+			for i := range m.repairs.objects {
+				object := &m.repairs.objects[i]
+				if repair.ApplyNativeEventRecovery(object, failure.States) {
+					states[object.ID] = err
+					err = errors.Join(err, m.flushRepairObjectLocked(*object))
+				}
+			}
+			m.repairs.mu.Unlock()
+		}
 		native.Verification = append(native.Verification, nativeFailure("事件触发器最终状态", err))
 		return
 	}
