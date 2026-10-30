@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 )
@@ -179,6 +180,13 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if obj.Schema == "" || obj.Schema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
+	if obj.PartitionPlan != nil && len(obj.PartitionPlan.KeyColumns) == 0 {
+		// Legacy cross-product KEY plans lack the domain proof needed to make
+		// any repair executable. Reject before opening a DDL session.
+		if err = VerifyPartitionKeyColumns(ctx, w, obj.TargetName, obj.PartitionPlan); err != nil {
+			return out, err
+		}
+	}
 	if dm, ok := w.(*DaMengWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.Native != nil && !repairDefinitionEdited(obj) {
 		return dm.executeOracleDamengSequenceRepair(ctx, obj, out, onStep)
 	}
@@ -207,7 +215,13 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	}
 	var tx *sql.Tx
 	var exec func(string) error
-	if oscar, ok := w.(*OscarWriter); ok {
+	var releaseIntervalSession func()
+	onlyIntervalMarker := len(selected) == 1 && obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[selected[0]].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan)
+	if onlyIntervalMarker {
+		// The typed executor qualifies every object itself. A marker-only retry
+		// needs no SQL session and must work with a single-connection pool.
+		exec = func(string) error { return fmt.Errorf("INTERVAL 物化标记不能作为原始 SQL 执行") }
+	} else if oscar, ok := w.(*OscarWriter); ok {
 		exec = func(q string) error { return oscar.bridge.Exec(ctx, oscar.session, q) }
 	} else {
 		var conn *sql.Conn
@@ -225,7 +239,18 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		if err != nil {
 			return out, err
 		}
+		closeSession := close
+		closed := false
+		close = func() {
+			if !closed {
+				closed = true
+				closeSession()
+			}
+		}
 		defer close()
+		if a.family == "dameng" || obj.PartitionPlan != nil && len(obj.PartitionPlan.KeyColumns) > 0 {
+			releaseIntervalSession = close
+		}
 		// Constrain unqualified identifiers on the same physical connection as
 		// every repair unit. Dispose changed sessions rather than leaking state.
 		sessionSQL := ""
@@ -306,7 +331,20 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			err = ow.validateSQLText(out[i].SQL)
 		}
 		if err == nil {
-			err = exec(out[i].SQL)
+			if obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[i].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan) {
+				materializer, ok := w.(PartitionIntervalMaterializer)
+				if !ok || i != len(out)-1 || obj.PartitionPlan.Interval.Table != obj.TargetName || obj.PartitionPlan.Interval.Schema != obj.Schema {
+					err = fmt.Errorf("INTERVAL 物化单元不属于目标冻结表或不是最终步骤")
+				} else {
+					if releaseIntervalSession != nil {
+						releaseIntervalSession()
+						releaseIntervalSession = nil
+					}
+					err = materializer.MaterializePartitionIntervals(ctx, obj.PartitionPlan)
+				}
+			} else {
+				err = exec(out[i].SQL)
+			}
 		}
 		if err != nil {
 			out[i].Status, out[i].Error = repairErrorStatus(err), err.Error()
@@ -342,6 +380,29 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 				}
 			}
 			return out, errors.Join(err, pe)
+		}
+	}
+	if obj.PartitionPlan != nil && (obj.PartitionPlan.Interval != nil || len(obj.PartitionPlan.KeyColumns) > 0 || partitionConvertedKeyNeedsColumns(obj.PartitionPlan.Source, obj.PartitionPlan.Target)) {
+		if releaseIntervalSession != nil {
+			releaseIntervalSession()
+			releaseIntervalSession = nil
+		}
+		inspector, ok := w.(PartitionInspector)
+		if !ok {
+			return out, fmt.Errorf("分区修复缺少最终目录核验")
+		}
+		actual, e := inspector.InspectPartitionTable(ctx, obj.TargetName)
+		if e != nil {
+			return out, e
+		}
+		if e = partition.Equivalent(obj.PartitionPlan.Target, actual); e != nil {
+			return out, e
+		}
+		if e = VerifyPartitionKeyColumns(ctx, w, obj.TargetName, obj.PartitionPlan); e != nil {
+			return out, e
+		}
+		if e = ctx.Err(); e != nil {
+			return out, e
 		}
 	}
 	invalidateRecoveryCache(w)

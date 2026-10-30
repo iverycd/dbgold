@@ -62,7 +62,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 	if !ok {
 		return nil, fmt.Errorf("Oracle 目标缺少 Oracle 方言")
 	}
-	all, err := m.reader.ListTables(ctx)
+	all, err := m.migrationTables(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		if err = add("TABLE", m.objName(table), m.objName(table), table); err != nil {
 			return nil, err
 		}
-		info, e := m.reader.GetTableDDLInfo(ctx, table)
+		info, e := m.sourceTableDDLInfo(ctx, table)
 		if e != nil {
 			return nil, fmt.Errorf("读取表 %s: %w", table, e)
 		}
@@ -150,6 +150,10 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		}
 		if rebuild {
 			stmts, e := d.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{CharInLength: true, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
+			if e != nil {
+				return nil, e
+			}
+			stmts, e = m.partitionStatements(table, stmts)
 			if e != nil {
 				return nil, e
 			}

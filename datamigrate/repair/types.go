@@ -7,6 +7,7 @@ import (
 	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/mysqldmtrigger"
 	"dbgold/datamigrate/mysqltrigger"
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/source"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ type Unit struct {
 }
 
 type Object struct {
+	PartitionPlan         *partition.Plan      `json:"partition_plan,omitempty"`
 	ManualTrigger         *ManualTriggerPlan   `json:"manual_trigger,omitempty"`
 	ManualTriggerEditable bool                 `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.
 	Native                *damengnative.Object `json:"native,omitempty"`
@@ -184,24 +186,27 @@ func (o Object) TrustedNative() bool {
 }
 
 type RecoveryPreview struct {
-	NativeTable     *damengnative.Table  `json:"native_table,omitempty"`
-	NativeObject    *damengnative.Object `json:"native_object,omitempty"`
-	NativeUnits     []Unit               `json:"native_units,omitempty"`
-	NativeDisable   []damengnative.Unit  `json:"native_disable,omitempty"`
-	NativeRestore   []damengnative.Unit  `json:"native_restore,omitempty"`
-	ObjectID        string               `json:"object_id"`
-	SourceTable     string               `json:"source_table"`
-	TargetTable     string               `json:"target_table"`
-	QualifiedTarget string               `json:"qualified_target"`
-	SourceRows      int64                `json:"source_rows"`
-	TargetRows      int64                `json:"target_rows"`
-	ColumnMapping   map[string]string    `json:"column_mapping"`
-	SourceColumns   []source.ColumnInfo  `json:"source_columns"`
-	TargetColumns   []source.ColumnInfo  `json:"target_columns"`
-	Related         []Object             `json:"related"`
-	DataRequired    bool                 `json:"data_required"`
-	Fingerprint     string               `json:"fingerprint"`
-	Warnings        []string             `json:"warnings"`
+	PartitionPlan       *partition.Plan      `json:"partition_plan,omitempty"`
+	PartitionSourceRows map[string]int64     `json:"partition_source_rows,omitempty"`
+	PartitionTargetRows map[string]int64     `json:"partition_target_rows,omitempty"`
+	NativeTable         *damengnative.Table  `json:"native_table,omitempty"`
+	NativeObject        *damengnative.Object `json:"native_object,omitempty"`
+	NativeUnits         []Unit               `json:"native_units,omitempty"`
+	NativeDisable       []damengnative.Unit  `json:"native_disable,omitempty"`
+	NativeRestore       []damengnative.Unit  `json:"native_restore,omitempty"`
+	ObjectID            string               `json:"object_id"`
+	SourceTable         string               `json:"source_table"`
+	TargetTable         string               `json:"target_table"`
+	QualifiedTarget     string               `json:"qualified_target"`
+	SourceRows          int64                `json:"source_rows"`
+	TargetRows          int64                `json:"target_rows"`
+	ColumnMapping       map[string]string    `json:"column_mapping"`
+	SourceColumns       []source.ColumnInfo  `json:"source_columns"`
+	TargetColumns       []source.ColumnInfo  `json:"target_columns"`
+	Related             []Object             `json:"related"`
+	DataRequired        bool                 `json:"data_required"`
+	Fingerprint         string               `json:"fingerprint"`
+	Warnings            []string             `json:"warnings"`
 }
 
 type RecoveryResult struct {

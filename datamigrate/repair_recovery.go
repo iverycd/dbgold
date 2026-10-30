@@ -9,6 +9,7 @@ import (
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/mysqldmtrigger"
 	"dbgold/datamigrate/mysqltrigger"
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -81,6 +82,52 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	}
 	if info == nil || len(info.Columns) == 0 {
 		return p, fmt.Errorf("源表无可用列元数据")
+	}
+	if reader, ok := partitionSourceReader(r).(source.PartitionReader); ok {
+		current, e := reader.PartitionMetadata(ctx, p.SourceTable)
+		if e != nil {
+			return p, fmt.Errorf("读取源分区定义: %w", e)
+		}
+		if current != nil || obj.PartitionPlan != nil {
+			if obj.PartitionPlan == nil {
+				return p, fmt.Errorf("旧账本缺少分区快照，请创建新的分区迁移任务")
+			}
+			if e = partition.Equivalent(obj.PartitionPlan.Source, current); e != nil {
+				return p, fmt.Errorf("源分区定义已漂移: %w", e)
+			}
+			if e = verifyPartitionKeySourceChecks(ctx, r, p.SourceTable, obj.PartitionPlan); e != nil {
+				return p, e
+			}
+			inspector, ok := w.(target.PartitionInspector)
+			if !ok {
+				return p, fmt.Errorf("目标缺少分区恢复核验能力")
+			}
+			actual, e := inspector.InspectPartitionTable(ctx, p.TargetTable)
+			if e != nil {
+				return p, e
+			}
+			if e = partition.Equivalent(obj.PartitionPlan.Target, actual); e != nil {
+				return p, fmt.Errorf("恢复前必须先补齐目标分区结构: %w", e)
+			}
+			if e = target.VerifyPartitionKeyColumns(ctx, w, p.TargetTable, obj.PartitionPlan); e != nil {
+				return p, e
+			}
+			p.PartitionPlan = obj.PartitionPlan
+			counter, ok := partitionSourceReader(r).(source.PartitionCounter)
+			if !ok {
+				return p, fmt.Errorf("源库缺少逐分区计数能力")
+			}
+			p.PartitionSourceRows, e = counter.CountPartitionRows(ctx, p.SourceTable, current)
+			if e != nil {
+				return p, e
+			}
+			p.PartitionTargetRows, e = inspector.CountPartitionRows(ctx, p.TargetTable, actual)
+			if e != nil {
+				return p, e
+			}
+		}
+	} else if obj.PartitionPlan != nil {
+		return p, fmt.Errorf("源库缺少分区恢复核验能力")
 	}
 	p.SourceColumns = slices.Clone(info.Columns)
 	if len(obj.SourceColumns) > 0 && !recoverySourceColumnsMatch(r.DBType(), obj.SourceColumns, info.Columns) {
@@ -275,6 +322,9 @@ func RunRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error, ops recoveryOps) (res repair.RecoveryResult, err error) {
 	res = repair.RecoveryResult{Status: "running", DataStatus: "running", SourceRows: p.SourceRows, TargetRows: p.TargetRows}
 	finish := func(e error) (repair.RecoveryResult, error) {
+		if e == nil {
+			e = ctx.Err()
+		}
 		if e != nil {
 			if res.Status != "unknown" {
 				res.Status = "failed"
@@ -298,7 +348,7 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	if p.Fingerprint != recoveryFingerprint(cfg, p) {
 		return finish(fmt.Errorf("接续预览签名不匹配"))
 	}
-	obj := repair.Object{ID: p.ObjectID, Kind: "table", SourceName: p.SourceTable, SourceTable: p.SourceTable, Table: p.TargetTable, TargetName: p.TargetTable, SourceColumns: p.SourceColumns, ColumnMapping: p.ColumnMapping}
+	obj := repair.Object{ID: p.ObjectID, Kind: "table", SourceName: p.SourceTable, SourceTable: p.SourceTable, Table: p.TargetTable, TargetName: p.TargetTable, SourceColumns: p.SourceColumns, ColumnMapping: p.ColumnMapping, PartitionPlan: p.PartitionPlan}
 	if !p.DataRequired {
 		obj.DataStatus = "succeeded"
 		if cfg.Content == "schema_only" || cfg.objectMode() || len(cfg.ViewNames) > 0 {
@@ -312,6 +362,9 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	if fresh.SourceRows != p.SourceRows || fresh.TargetRows != p.TargetRows || repair.Hash(fresh.SourceColumns) != repair.Hash(p.SourceColumns) || repair.Hash(fresh.TargetColumns) != repair.Hash(p.TargetColumns) {
 		return finish(fmt.Errorf("源／目标结构或行数已变化，请重新预览并确认"))
 	}
+	if repair.Hash(fresh.PartitionSourceRows) != repair.Hash(p.PartitionSourceRows) || repair.Hash(fresh.PartitionTargetRows) != repair.Hash(p.PartitionTargetRows) {
+		return finish(fmt.Errorf("源／目标逐分区行数已变化，请重新预览并确认"))
+	}
 	// Runtime source metadata (such as DM's actual floating storage family) is
 	// deliberately not serialized in the preview. Use the freshly read copy.
 	p.SourceColumns = fresh.SourceColumns
@@ -321,6 +374,10 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if p.TargetRows > 0 && !truncate {
 		return finish(fmt.Errorf("目标表非空，必须单独确认清空本表后完整重导"))
+	}
+	contentValidation, e := freezePartitionRecoveryValidation(ctx, r, w, cfg, p)
+	if e != nil {
+		return finish(e)
 	}
 	if setter, ok := w.(sourceTypeSetter); ok {
 		setter.SetSourceType(r.DBType())
@@ -332,90 +389,96 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	if e = ops.prepare(ctx, w, p.TargetTable, mapped); e != nil {
 		return finish(e)
 	}
-	// Read a page and the paging key before clearing anything. Conversion errors on
-	// later pages still stop; a preview is not represented as a full-data guarantee.
-	pks, e := r.GetPrimaryKey(ctx, p.SourceTable)
-	if e != nil {
-		return finish(e)
-	}
-	pageSize := int64(cfg.PageSize)
-	if pageSize <= 0 || pageSize > 20000 {
-		pageSize = 2000
-	}
-	cols, types, first, e := r.ReadPage(ctx, p.SourceTable, pks, 0, pageSize)
-	if e != nil {
-		return finish(e)
-	}
-	if e = checkRecoveryPageColumns(p, cols); e != nil {
-		return finish(e)
-	}
-	if p.SourceRows > 0 && len(first) == 0 {
-		return finish(fmt.Errorf("源行数与首批读取不一致，请重新预检"))
-	}
-	if source.IsPGFamily(r.DBType()) && w.DBType() == "mysql" {
-		first, e = convertPGPage(source.PGTable{Info: source.TableDDLInfo{TableName: p.SourceTable, Columns: p.SourceColumns}}, cols, first)
+	if p.PartitionPlan != nil {
+		if e = recoverPartitionRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
+			return finish(e)
+		}
+	} else {
+		// Read a page and the paging key before clearing anything. Conversion errors on
+		// later pages still stop; a preview is not represented as a full-data guarantee.
+		pks, e := r.GetPrimaryKey(ctx, p.SourceTable)
 		if e != nil {
 			return finish(e)
 		}
-	}
-	if progress != nil {
-		if e = progress(res); e != nil {
+		pageSize := int64(cfg.PageSize)
+		if pageSize <= 0 || pageSize > 20000 {
+			pageSize = 2000
+		}
+		cols, types, first, e := r.ReadPage(ctx, p.SourceTable, pks, 0, pageSize)
+		if e != nil {
 			return finish(e)
 		}
-	}
-	if truncate {
-		if e = ops.truncate(ctx, w, p.TargetTable); e != nil {
+		if e = checkRecoveryPageColumns(p, cols); e != nil {
 			return finish(e)
 		}
-		res.TargetRows = 0
-	}
-	write := func(cols, types []string, rows [][]any) error {
-		if e := ctx.Err(); e != nil {
-			return e
+		if p.SourceRows > 0 && len(first) == 0 {
+			return finish(fmt.Errorf("源行数与首批读取不一致，请重新预检"))
 		}
-		if len(rows) == 0 {
-			return nil
-		}
-		dst := make([]string, len(cols))
-		for i, c := range cols {
-			dst[i] = p.ColumnMapping[c]
-		}
-		if e := w.CopyData(ctx, p.TargetTable, dst, types, rows); e != nil {
-			res.Status = "unknown"
-			return fmt.Errorf("写入失败，已确认提交 %d 行；禁止追加重试: %w", res.CommittedRows, e)
-		}
-		res.CommittedRows += int64(len(rows))
-		if progress != nil {
-			return progress(res)
-		}
-		return nil
-	}
-	if e = write(cols, types, first); e != nil {
-		return finish(e)
-	}
-	if int64(len(first)) == pageSize {
-		for offset := pageSize; ; offset += pageSize {
-			if e = ctx.Err(); e != nil {
-				return finish(e)
-			}
-			cols, types, rows, e := r.ReadPage(ctx, p.SourceTable, pks, offset, pageSize)
+		if source.IsPGFamily(r.DBType()) && w.DBType() == "mysql" {
+			first, e = convertPGPage(source.PGTable{Info: source.TableDDLInfo{TableName: p.SourceTable, Columns: p.SourceColumns}}, cols, first)
 			if e != nil {
 				return finish(e)
 			}
-			if e = checkRecoveryPageColumns(p, cols); e != nil {
+		}
+		if progress != nil {
+			if e = progress(res); e != nil {
 				return finish(e)
 			}
-			if source.IsPGFamily(r.DBType()) && w.DBType() == "mysql" {
-				rows, e = convertPGPage(source.PGTable{Info: source.TableDDLInfo{TableName: p.SourceTable, Columns: p.SourceColumns}}, cols, rows)
+		}
+		if truncate {
+			if e = ops.truncate(ctx, w, p.TargetTable); e != nil {
+				return finish(e)
+			}
+			res.TargetRows = 0
+		}
+		write := func(cols, types []string, rows [][]any) error {
+			if e := ctx.Err(); e != nil {
+				return e
+			}
+			if len(rows) == 0 {
+				return nil
+			}
+			dst := make([]string, len(cols))
+			for i, c := range cols {
+				dst[i] = p.ColumnMapping[c]
+			}
+			if e := w.CopyData(ctx, p.TargetTable, dst, types, rows); e != nil {
+				res.Status = "unknown"
+				return fmt.Errorf("写入失败，已确认提交 %d 行；禁止追加重试: %w", res.CommittedRows, e)
+			}
+			res.CommittedRows += int64(len(rows))
+			if progress != nil {
+				return progress(res)
+			}
+			return nil
+		}
+		if e = write(cols, types, first); e != nil {
+			return finish(e)
+		}
+		if int64(len(first)) == pageSize {
+			for offset := pageSize; ; offset += pageSize {
+				if e = ctx.Err(); e != nil {
+					return finish(e)
+				}
+				cols, types, rows, e := r.ReadPage(ctx, p.SourceTable, pks, offset, pageSize)
 				if e != nil {
 					return finish(e)
 				}
-			}
-			if e = write(cols, types, rows); e != nil {
-				return finish(e)
-			}
-			if int64(len(rows)) < pageSize {
-				break
+				if e = checkRecoveryPageColumns(p, cols); e != nil {
+					return finish(e)
+				}
+				if source.IsPGFamily(r.DBType()) && w.DBType() == "mysql" {
+					rows, e = convertPGPage(source.PGTable{Info: source.TableDDLInfo{TableName: p.SourceTable, Columns: p.SourceColumns}}, cols, rows)
+					if e != nil {
+						return finish(e)
+					}
+				}
+				if e = write(cols, types, rows); e != nil {
+					return finish(e)
+				}
+				if int64(len(rows)) < pageSize {
+					break
+				}
 			}
 		}
 	}
@@ -429,6 +492,12 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if after != p.SourceRows || res.CommittedRows != p.SourceRows || res.TargetRows != res.CommittedRows {
 		return finish(fmt.Errorf("行数核验失败：预览源=%d 当前源=%d 已提交=%d 目标=%d", p.SourceRows, after, res.CommittedRows, res.TargetRows))
+	}
+	if e = contentValidation.validate(ctx, r, w, p); e != nil {
+		return finish(e)
+	}
+	if e = ctx.Err(); e != nil {
+		return finish(e)
 	}
 	res.DataStatus = "succeeded"
 	sequences, e := RecoverySequences(ctx, r, w, cfg, p)

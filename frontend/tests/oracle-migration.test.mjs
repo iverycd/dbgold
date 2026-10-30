@@ -1,3 +1,4 @@
+import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
@@ -11,7 +12,7 @@ import { parse } from '@vue/compiler-sfc'
 
 function execute(source, require, globals = {}) {
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, Blob, FormData, ...globals }
+  const context = { exports: {}, require, AbortController, Blob, FormData, ...globals }
   vm.runInNewContext(outputText, context)
   return context.exports
 }
@@ -34,7 +35,7 @@ test('Oracle is selectable in all three forms and submits fixed target defaults'
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
       case '@/api/connections': return { listConnectionSchemas: async id => { schemaRequests.push(id); return { data: ['APP', 'EMPTY_APP'] } } }
-      case '@/api/migration': return { startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }) }
+      case '@/api/migration': return { startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(), createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }) }
       default: return {}
     }
   }))

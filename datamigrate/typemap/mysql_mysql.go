@@ -3,6 +3,8 @@ package typemap
 import (
 	"dbgold/datamigrate/source"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -66,6 +68,16 @@ func MySQLToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) string
 	case "json":
 		return "json"
 	case "bit":
+		// MySQL's CHARACTER_MAXIMUM_LENGTH is NULL for BIT. Its complete
+		// COLUMN_TYPE (and NUMERIC_PRECISION) carries the bit count instead.
+		if m := mysqlNativeBitType.FindStringSubmatch(strings.TrimSpace(col.FormattedType)); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 && n <= 64 {
+				return fmt.Sprintf("bit(%d)", n)
+			}
+		}
+		if col.Precision >= 1 && col.Precision <= 64 {
+			return fmt.Sprintf("bit(%d)", col.Precision)
+		}
 		if col.Length > 0 {
 			return fmt.Sprintf("bit(%d)", col.Length)
 		}
@@ -79,3 +91,5 @@ func MySQLToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) string
 		return dt
 	}
 }
+
+var mysqlNativeBitType = regexp.MustCompile(`(?i)^bit\(([0-9]+)\)$`)

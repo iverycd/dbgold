@@ -28,15 +28,17 @@ type PGObject struct {
 	Reason     string `json:"reason,omitempty"`
 }
 type PGTable struct {
-	Info        TableDDLInfo
-	OID         int64
-	Kind        string
-	Inherits    bool
-	Indexes     []IndexInfo
-	ForeignKeys []FKInfo
-	Checks      []PGObject
-	Unsupported []PGObject
-	Sequences   []PGSequence
+	Info     TableDDLInfo
+	OID      int64
+	Kind     string
+	Inherits bool
+	// PartitionChild is a physical descendant, never a separate copy unit.
+	PartitionChild bool
+	Indexes        []IndexInfo
+	ForeignKeys    []FKInfo
+	Checks         []PGObject
+	Unsupported    []PGObject
+	Sequences      []PGSequence
 }
 type PGSequence struct {
 	SequenceInfo
@@ -466,7 +468,24 @@ func (r *PostgresReader) pgForeignKeys(ctx context.Context) ([]FKInfo, error) {
 // ReadPGSnapshot reads all object identities before filtering. This makes missing
 // privileges and unsupported dependencies visible rather than an empty success.
 func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error) {
+	return r.readPGSnapshot(ctx, nil)
+}
+
+// ReadPGSnapshotForTables keeps the caller's frozen logical-root scope. Catalog
+// inventory is still read in full, but excluded roots and physical descendants
+// do not acquire SELECT/column-read requirements during a strict target plan.
+// The original ReadPGSnapshot keeps its schema-wide compatibility behavior.
+func (r *PostgresReader) ReadPGSnapshotForTables(ctx context.Context, tables []string) (*PGSnapshot, error) {
+	selected := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		selected[table] = true
+	}
+	return r.readPGSnapshot(ctx, selected)
+}
+
+func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string]bool) (*PGSnapshot, error) {
 	snap := &PGSnapshot{Profile: r.profile}
+	found := make(map[string]bool, len(selected))
 	partition := "false"
 	if r.profile.Fields["pg_class.parttype"] {
 		partition = "c.parttype IN ('p','s')"
@@ -479,6 +498,11 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 		security = "c.relrowsecurity"
 	}
 	q := `SELECT c.oid,c.relname,c.relkind,(` + partition + ` OR EXISTS(SELECT 1 FROM ` + r.qcat("pg_inherits") + ` h WHERE h.inhrelid=c.oid OR h.inhparent=c.oid)),obj_description(c.oid,'pg_class'),has_table_privilege(c.oid,'SELECT'),` + security + ` FROM ` + r.qcat("pg_class") + ` c JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind IN ('r','p','f','m') ORDER BY c.relname`
+	declarative := r.profile.Fields["pg_class.relispartition"] && r.profile.Fields["pg_class.relpartbound"] && r.profile.Fields["pg_partitioned_table.partstrat"]
+	nativePartitionCatalog := r.profile.Fields["pg_partition.partstrategy"] && r.profile.Fields["pg_partition.parentid"]
+	if declarative {
+		q = strings.Replace(q, " FROM "+r.qcat("pg_class")+" c JOIN ", ",c.relispartition FROM "+r.qcat("pg_class")+" c JOIN ", 1)
+	}
 	rows, err := r.db.QueryContext(ctx, q, r.schema)
 	if err != nil {
 		return nil, err
@@ -487,10 +511,18 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 		var t PGTable
 		var comment sql.NullString
 		var readable, rowSecurity bool
-		if err = rows.Scan(&t.OID, &t.Info.TableName, &t.Kind, &t.Inherits, &comment, &readable, &rowSecurity); err != nil {
+		values := []interface{}{&t.OID, &t.Info.TableName, &t.Kind, &t.Inherits, &comment, &readable, &rowSecurity}
+		if declarative {
+			values = append(values, &t.PartitionChild)
+		}
+		if err = rows.Scan(values...); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if selected != nil && !selected[t.Info.TableName] {
+			continue
+		}
+		found[t.Info.TableName] = true
 		t.Info.Comment = comment.String
 		if rowSecurity {
 			t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Name: t.Info.TableName, Reason: "源表启用了行级安全策略，不能证明 SELECT 能读取完整数据"})
@@ -505,6 +537,11 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+	for name := range selected {
+		if !found[name] {
+			return nil, fmt.Errorf("选择的源表 %s 不存在或身份已变化", name)
+		}
 	}
 	indexes, err := r.pgIndexes(ctx)
 	if err != nil {
@@ -524,7 +561,15 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 		info.Comment = t.Info.Comment
 		t.Info = *info
 		byName[t.Info.TableName] = t
-		if t.Kind != "r" || t.Inherits {
+		if declarative && t.Kind == "p" && !t.PartitionChild || nativePartitionCatalog && t.Kind == "r" && t.Inherits {
+			part, partitionErr := r.PartitionMetadata(ctx, t.Info.TableName)
+			if partitionErr != nil {
+				t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Table: t.Info.TableName, Name: t.Info.TableName, Reason: "分区元数据读取失败: " + partitionErr.Error()})
+			} else {
+				t.Info.Partition = part
+			}
+		}
+		if (!declarative && (t.Kind != "r" || t.Inherits && t.Info.Partition == nil)) || (declarative && (t.Kind != "r" && t.Kind != "p" || t.Inherits && t.Kind != "p" && !t.PartitionChild)) {
 			t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Table: t.Info.TableName, Name: t.Info.TableName, Reason: "分区、继承、外部表或物化视图首版不自动转换"})
 		}
 	}
@@ -645,13 +690,17 @@ func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error
 		}
 		snap.Views[i].Columns = info.Columns
 	}
-	if err = r.loadPGSequences(ctx, snap); err != nil {
+	if err = r.loadPGSequencesForTables(ctx, snap, selected); err != nil {
 		return nil, err
 	}
 	return snap, nil
 }
 
 func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) error {
+	return r.loadPGSequencesForTables(ctx, snap, nil)
+}
+
+func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGSnapshot, selected map[string]bool) error {
 	rows, err := r.db.QueryContext(ctx, `SELECT c.oid,n.nspname,c.relname FROM `+r.qcat("pg_class")+` c JOIN `+r.qcat("pg_namespace")+` n ON n.oid=c.relnamespace WHERE c.relkind='S' AND (n.nspname=$1 OR EXISTS (SELECT 1 FROM `+r.qcat("pg_depend")+` d JOIN `+r.qcat("pg_attrdef")+` a ON a.oid=d.objid JOIN `+r.qcat("pg_class")+` t ON t.oid=a.adrelid JOIN `+r.qcat("pg_namespace")+` tn ON tn.oid=t.relnamespace WHERE d.refobjid=c.oid AND tn.nspname=$1)) ORDER BY n.nspname,c.relname`, r.schema)
 	if err != nil {
 		return err
@@ -675,6 +724,29 @@ func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) 
 		return err
 	}
 	for _, id := range ids {
+		var refs []pgSequenceReference
+		if selected != nil {
+			var e error
+			refs, e = r.pgSequenceReferences(ctx, id.oid)
+			if e != nil {
+				return e
+			}
+			relevant := false
+			for _, ref := range refs {
+				if ref.s == r.schema && selected[ref.t] {
+					relevant = true
+					break
+				}
+			}
+			if !relevant {
+				// Keep independent object diagnostics, but never acquire state-read
+				// privileges on a sequence owned solely by an excluded root.
+				if len(refs) == 0 && id.schema == r.schema {
+					snap.Objects = append(snap.Objects, PGObject{Kind: "sequence", Name: id.name, Reason: "MySQL 不支持独立序列"})
+				}
+				continue
+			}
+		}
 		seq := PGSequence{Name: id.name, Schema: id.schema}
 		qn := QuotePGIdent(id.schema) + "." + QuotePGIdent(id.name)
 		var last int64
@@ -698,28 +770,11 @@ func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) 
 				seq.StartValue += seq.Increment
 			}
 		}
-		// Union owned columns and defaults referencing this sequence, including
-		// dependencies outside the selected schema (shared generators).
-		q := `SELECT n.nspname,t.relname,a.attname FROM ` + r.qcat("pg_depend") + ` d JOIN ` + r.qcat("pg_class") + ` t ON t.oid=d.refobjid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_attribute") + ` a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid WHERE d.objid=$1 AND d.deptype IN ('a','i')
- UNION SELECT n.nspname,t.relname,a.attname FROM ` + r.qcat("pg_depend") + ` d JOIN ` + r.qcat("pg_attrdef") + ` ad ON ad.oid=d.objid JOIN ` + r.qcat("pg_class") + ` t ON t.oid=ad.adrelid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_attribute") + ` a ON a.attrelid=t.oid AND a.attnum=ad.adnum WHERE d.refobjid=$1 AND d.classid='pg_attrdef'::regclass`
-		rs, e := r.db.QueryContext(ctx, q, id.oid)
-		if e != nil {
-			return e
-		}
-		type ref struct{ s, t, c string }
-		var refs []ref
-		for rs.Next() {
-			var f ref
-			if e = rs.Scan(&f.s, &f.t, &f.c); e != nil {
-				rs.Close()
-				return e
+		if selected == nil {
+			refs, err = r.pgSequenceReferences(ctx, id.oid)
+			if err != nil {
+				return err
 			}
-			refs = append(refs, f)
-		}
-		e = rs.Err()
-		rs.Close()
-		if e != nil {
-			return e
 		}
 		seq.Shared = len(refs) != 1
 		if len(refs) == 0 && id.schema == r.schema {
@@ -744,6 +799,29 @@ func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) 
 		}
 	}
 	return nil
+}
+
+type pgSequenceReference struct{ s, t, c string }
+
+func (r *PostgresReader) pgSequenceReferences(ctx context.Context, oid int64) ([]pgSequenceReference, error) {
+	// Preserve all references, including excluded roots and other schemas, so
+	// selecting one consumer never turns a shared generator into an owned one.
+	query := `SELECT n.nspname,t.relname,a.attname FROM ` + r.qcat("pg_depend") + ` d JOIN ` + r.qcat("pg_class") + ` t ON t.oid=d.refobjid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_attribute") + ` a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid WHERE d.objid=$1 AND d.deptype IN ('a','i')
+ UNION SELECT n.nspname,t.relname,a.attname FROM ` + r.qcat("pg_depend") + ` d JOIN ` + r.qcat("pg_attrdef") + ` ad ON ad.oid=d.objid JOIN ` + r.qcat("pg_class") + ` t ON t.oid=ad.adrelid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_attribute") + ` a ON a.attrelid=t.oid AND a.attnum=ad.adnum WHERE d.refobjid=$1 AND d.classid='pg_attrdef'::regclass`
+	rows, err := r.db.QueryContext(ctx, query, oid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []pgSequenceReference
+	for rows.Next() {
+		var ref pgSequenceReference
+		if err := rows.Scan(&ref.s, &ref.t, &ref.c); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // A dependency on a sequence is not sufficient: nextval(seq)+1 is not an

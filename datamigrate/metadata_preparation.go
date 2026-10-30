@@ -63,6 +63,11 @@ func (m *Migrator) prewarmSourceTableDDL(ctx context.Context, tables []string, p
 					return
 				}
 				info, err := m.reader.GetTableDDLInfo(ctx, selected[index])
+				if info != nil && m.partitionState != nil {
+					if t := m.partitionState.tables[selected[index]]; t != nil {
+						info.Partition = source.ClonePartitionSpec(t.Source)
+					}
+				}
 				if m.stopOracleDamengTask(ctx, err) {
 					return
 				}

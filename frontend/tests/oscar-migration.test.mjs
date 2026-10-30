@@ -1,3 +1,4 @@
+import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 import assert from 'node:assert/strict'
@@ -20,7 +21,7 @@ function loadSource(source, require, filename) {
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
-  const context = { exports: {}, require, FormData, Blob }
+  const context = { exports: {}, require, AbortController, FormData, Blob }
   vm.runInNewContext(outputText, context, { filename })
   return context.exports
 }
@@ -67,7 +68,7 @@ function loadMigrationView(payloads) {
       case '@/api/schema': return { downloadRoutines: () => assert.fail('Unexpected routine export') }
       case '@/api/connections': return { listConnectionSchemas: async () => ({ data: ['schema_a', 'schema_b'] }) }
       case '@/api/migration': return {
-        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit,
+        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(),
         createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
       }
       default: throw new Error(`Unexpected import: ${id}`)

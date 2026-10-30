@@ -41,7 +41,7 @@ func (m *Migrator) migrateOracleDamengViews(ctx context.Context, views []source.
 	if len(m.cfg.StripViewSchemas) > 0 {
 		return []ObjectResult{{Name: "视图模式", Error: "Oracle → 达梦仅映射源 schema 的对象引用，不支持直接删除 schema 前缀"}}
 	}
-	tables, err := m.reader.ListTables(ctx)
+	tables, err := m.migrationTables(ctx)
 	if err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
 			return nil

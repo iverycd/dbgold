@@ -58,7 +58,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if !ok {
 		return failGlobal(fmt.Errorf("缺少 SQL Server 方言"))
 	}
-	all, e := m.reader.ListTables(ctx)
+	all, e := m.migrationTables(ctx)
 	if e != nil {
 		return failGlobal(e)
 	}
@@ -90,10 +90,13 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	ddl := map[string][]dialect.Statement{}
 	sourceInfo := map[string]*source.TableDDLInfo{}
 	for _, t := range tables {
-		info, err := m.reader.GetTableDDLInfo(ctx, t)
+		info, err := m.sourceTableDDLInfo(ctx, t)
 		var ss []dialect.Statement
 		if err == nil {
 			ss, err = dia.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{}, m.objName)
+			if err == nil {
+				ss, err = m.partitionStatements(t, ss)
+			}
 		}
 		if err == nil {
 			sourceInfo[t] = info
@@ -202,13 +205,21 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				r.before, r.err = m.writer.CountRows(ctx, m.objName(t))
 			}
 			if r.err == nil {
-				pk, err := m.reader.GetPrimaryKey(ctx, t)
-				r.err = err
-				if err == nil {
-					ok, msg := m.migrateTableDataSerial(ctx, t, pk)
-					if !ok {
-						r.err = fmt.Errorf("%s；本批次已回滚，之前提交的数据可能保留", msg)
+				var ok bool
+				var msg string
+				if s := m.partitionState; s != nil && s.tables[t] != nil && s.tables[t].Plan != nil {
+					// The partition stream is serial within this table and rechecks
+					// both source and target routing before its first write.
+					ok, msg = m.migratePartitionData(ctx, t)
+				} else {
+					var pk []string
+					pk, r.err = m.reader.GetPrimaryKey(ctx, t)
+					if r.err == nil {
+						ok, msg = m.migrateTableDataSerial(ctx, t, pk)
 					}
+				}
+				if r.err == nil && !ok {
+					r.err = fmt.Errorf("%s；已停止该表，之前提交的数据可能保留", msg)
 				}
 			}
 			if r.err == nil {
@@ -433,7 +444,7 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 	if s, ok := m.reader.(interface{ SourceSchema() string }); ok {
 		src = s.SourceSchema()
 	}
-	allTables, e := m.reader.ListTables(ctx)
+	allTables, e := m.migrationTables(ctx)
 	if e != nil {
 		recordMetadataFailure(category, e)
 		return

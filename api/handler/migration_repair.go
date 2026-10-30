@@ -702,9 +702,26 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 			return
 		}
 	}
-	if len(out) > 100 {
+	if len(out) > 100 && o.PartitionPlan == nil {
 		repairError(c, fmt.Errorf("执行单元过多"))
 		return
+	}
+	if o.PartitionPlan != nil {
+		if err := validateRepairObjectScope(o, out, j.DstDBType); err != nil {
+			repairError(c, err)
+			return
+		}
+		if req.ColumnMapping != nil {
+			same := len(req.ColumnMapping) == len(o.ColumnMapping)
+			for column, mapped := range req.ColumnMapping {
+				value, exists := o.ColumnMapping[column]
+				same = same && exists && value == mapped
+			}
+			if !same {
+				repairError(c, fmt.Errorf("分区修复不能修改冻结的列映射，请重新生成迁移计划"))
+				return
+			}
+		}
 	}
 	sqlChanged := len(o.Units) != len(out)
 	for i, u := range out {

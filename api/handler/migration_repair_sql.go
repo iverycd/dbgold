@@ -133,6 +133,24 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.PartitionPlan != nil {
+		plan := obj.PartitionPlan
+		if obj.Kind != "table" || plan.Source == nil || plan.Target == nil || len(plan.Statements) == 0 {
+			return fmt.Errorf("分区修复缺少完整冻结计划")
+		}
+		if len(units) != len(plan.Statements) || len(obj.Units) != len(units) {
+			return fmt.Errorf("分区修复必须保留全部冻结步骤，不能删除空叶恢复或分区建表步骤")
+		}
+		if plan.Interval != nil && (dbType != "dameng" || plan.Interval.Schema != obj.Schema || plan.Interval.Table != obj.TargetName) {
+			return fmt.Errorf("INTERVAL 修复对象与冻结作用域不一致")
+		}
+		for i, unit := range units {
+			if unit.ID != obj.Units[i].ID || unit.SQL != plan.Statements[i].SQL || unit.SQL != unit.OriginalSQL {
+				return fmt.Errorf("分区修复须按原顺序保留完整冻结语句，不支持手工改写、重排或重复步骤")
+			}
+		}
+		return nil
+	}
 	if obj.ManualTrigger != nil {
 		if dbType != "dameng" || !obj.TrustedManualTrigger() || len(units) != len(obj.Units) {
 			return fmt.Errorf("手工触发器缺少完整的达梦修复计划")

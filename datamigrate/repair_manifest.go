@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
+	"dbgold/datamigrate/validation"
 )
 
 // RepairManifest is an additive report extension. Original category results stay immutable.
@@ -128,7 +130,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		return
 	}
 	finishStage := startRepairPreparationStage(m.log, "读取迁移表列表")
-	tables, err := m.reader.ListTables(ctx)
+	tables, err := m.migrationTables(ctx)
 	if err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
 			return
@@ -241,6 +243,11 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				_, _ = m.planDamengTable(ctx, t)
 			}
 			o.SourceColumns = slices.Clone(info.Columns)
+			if m.partitionState != nil {
+				if t := m.partitionState.tables[t]; t != nil {
+					o.PartitionPlan = t.Plan
+				}
+			}
 			o.Columns = slices.Clone(info.Columns)
 			for i, c := range info.Columns {
 				n := m.targetColumn(t, c.Name)
@@ -586,6 +593,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		idx = r.appendObject(o)
 	}
 	old := &r.objects[idx]
+	if o.PartitionPlan != nil {
+		old.PartitionPlan = o.PartitionPlan
+	}
 	old.Units = unitsFor(ss)
 	old.DDL = dialect.JoinSQL(ss)
 	old.Status = "running"
@@ -774,7 +784,24 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 	return err
 }
 func (m *Migrator) repairTable(ctx context.Context, t string, ss []dialect.Statement) error {
-	return m.captureRepairCall(ctx, repair.Object{Kind: "table", Name: t, SourceName: t, SourceTable: t, Table: m.objName(t), TargetName: m.objName(t)}, ss, func(c context.Context) error { return m.writer.CreateTable(c, ss) })
+	if err := m.recheckPartitionSource(ctx, t); err != nil {
+		return err
+	}
+	o := repair.Object{Kind: "table", Name: t, SourceName: t, SourceTable: t, Table: m.objName(t), TargetName: m.objName(t)}
+	if m.partitionState != nil {
+		if p := m.partitionState.tables[t]; p != nil {
+			o.PartitionPlan = p.Plan
+		}
+	}
+	return m.captureRepairCall(ctx, o, ss, func(c context.Context) error {
+		err := m.createPartitionTable(c, t, ss)
+		if err == nil && m.partitionState != nil {
+			if p := m.partitionState.tables[t]; p != nil {
+				p.schemaExecuted = true
+			}
+		}
+		return err
+	})
 }
 func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) error {
 	k := "index"
@@ -917,7 +944,32 @@ func (m *Migrator) repairPlanned(ctx context.Context, v PlannedObject) error {
 		table = m.objName(v.Object.Name)
 	}
 	name := m.objName(v.Object.Name)
-	return m.captureRepairCall(ctx, repair.Object{Kind: v.Object.Kind, Name: name, Table: table, TargetName: name, SourceName: v.Object.Name, SourceTable: v.Object.Table}, v.Statements, func(c context.Context) error { return m.writer.CreateTable(c, v.Statements) })
+	o := repair.Object{Kind: v.Object.Kind, Name: name, Table: table, TargetName: name, SourceName: v.Object.Name, SourceTable: v.Object.Table}
+	if v.Object.Kind == "table" {
+		if err := m.recheckPartitionSource(ctx, v.Object.Name); err != nil {
+			return err
+		}
+		o.SourceTable = v.Object.Name
+		if m.partitionState != nil {
+			if p := m.partitionState.tables[v.Object.Name]; p != nil {
+				o.PartitionPlan = p.Plan
+			}
+		}
+	}
+	return m.captureRepairCall(ctx, o, v.Statements, func(c context.Context) error {
+		var err error
+		if o.Kind == "table" {
+			err = m.createPartitionTable(c, o.SourceTable, v.Statements)
+		} else {
+			err = m.writer.CreateTable(c, v.Statements)
+		}
+		if err == nil && o.Kind == "table" && m.partitionState != nil {
+			if p := m.partitionState.tables[o.SourceTable]; p != nil {
+				p.schemaExecuted = true
+			}
+		}
+		return err
+	})
 }
 
 func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
@@ -1007,6 +1059,13 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 							o.DataStatus = "failed"
 						}
 					}
+				}
+				if reason := repairDataVerificationFailure(*report, *o); reason != "" {
+					o.DataStatus = "failed"
+					if o.Error != "" {
+						o.Error += "\n"
+					}
+					o.Error += "数据核验未通过: " + reason
 				}
 			}
 			if len(o.Units) == 0 && (m.cfg.Content == "data_only" || m.cfg.objectMode()) {
@@ -1098,6 +1157,63 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 	if m.log != nil {
 		m.log.Infof("修复记录保存：耗时 %s，全量检查点 %d 次，单对象保存 %d 次，对象写入 %d 条，保存失败 %d 次", r.saveDuration.Round(time.Millisecond), r.fullSaves, r.objectSaves, r.objectWrites, r.saveFailures)
 	}
+}
+
+// A matching row count cannot supersede failed or incomplete structural/content
+// checks. Keep the table DDL status so data recovery can still be requested.
+func repairDataVerificationFailure(report MigrationReport, object repair.Object) string {
+	sourceName, targetName := object.SourceTable, object.Table
+	if sourceName == "" {
+		sourceName = object.SourceName
+	}
+	if targetName == "" {
+		targetName = object.TargetName
+	}
+	plan := object.PartitionPlan
+	if report.PartitionMigration != nil {
+		for _, table := range report.PartitionMigration.Tables {
+			if table.SourceTable != sourceName || table.TargetTable != targetName {
+				continue
+			}
+			if table.Plan != nil {
+				plan = table.Plan
+			}
+			if table.Status != "succeeded" && table.Status != "ordinary" {
+				return fmt.Sprintf("分区迁移状态 %s: %s", table.Status, table.Error)
+			}
+		}
+	}
+	if report.DataValidation == nil {
+		return ""
+	}
+	expected := map[[2]string]bool{{sourceName, targetName}: false}
+	if plan != nil {
+		for _, mapping := range plan.Mapping {
+			key := [2]string{sourceName + " PARTITION " + partition.LeafKey(mapping.SourceSchema, mapping.SourceName), targetName + " PARTITION " + partition.LeafKey(mapping.TargetSchema, mapping.TargetName)}
+			expected[key] = false
+		}
+	}
+	for _, table := range report.DataValidation.Tables {
+		key := [2]string{table.SourceTable, table.TargetTable}
+		if _, belongs := expected[key]; !belongs {
+			continue
+		}
+		expected[key] = true
+		if table.Status != validation.StatusPassed {
+			return fmt.Sprintf("%s 内容校验状态 %s: %s", table.SourceTable, table.Status, table.Error)
+		}
+	}
+	var missing []string
+	for key, found := range expected {
+		if !found {
+			missing = append(missing, key[0])
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return fmt.Sprintf("%s 缺少已完成的内容校验结果", missing[0])
+	}
+	return ""
 }
 
 func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object {

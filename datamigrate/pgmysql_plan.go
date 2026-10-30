@@ -44,21 +44,25 @@ type PlannedObject struct {
 	Statements []dialect.Statement `json:"statements"`
 }
 type PGMySQLPreflight struct {
-	Ready         bool                 `json:"ready"`
-	Source        source.PGProfile     `json:"source"`
-	Target        target.MySQLProfile  `json:"target"`
-	Issues        []CompatibilityIssue `json:"issues"`
-	Excluded      []ObjectRef          `json:"excluded"`
-	Objects       []PlannedObject      `json:"objects"`
-	RowsChecked   int64                `json:"rows_checked"`
-	CheckScope    string               `json:"check_scope,omitempty"`
-	textRules     map[string]map[string]target.MySQLTextRules
-	tables        []source.PGTable
-	snapshot      *source.PGSnapshot
-	validationFKs []source.FKInfo
+	PartitionPreflight *PartitionPreflight  `json:"partition_preflight,omitempty"`
+	Ready              bool                 `json:"ready"`
+	Source             source.PGProfile     `json:"source"`
+	Target             target.MySQLProfile  `json:"target"`
+	Issues             []CompatibilityIssue `json:"issues"`
+	Excluded           []ObjectRef          `json:"excluded"`
+	Objects            []PlannedObject      `json:"objects"`
+	RowsChecked        int64                `json:"rows_checked"`
+	CheckScope         string               `json:"check_scope,omitempty"`
+	textRules          map[string]map[string]target.MySQLTextRules
+	tables             []source.PGTable
+	snapshot           *source.PGSnapshot
+	validationFKs      []source.FKInfo
 }
 type pgSnapshotReader interface {
 	ReadPGSnapshot(context.Context) (*source.PGSnapshot, error)
+}
+type pgScopedSnapshotReader interface {
+	ReadPGSnapshotForTables(context.Context, []string) (*source.PGSnapshot, error)
 }
 type mysqlInspector interface {
 	InspectMySQL(context.Context) (target.MySQLProfile, error)
@@ -112,12 +116,27 @@ func (m *Migrator) wantPGObject(kind string) bool {
 // It never calls Writer mutation methods. Run always builds a fresh plan.
 func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	p := &PGMySQLPreflight{CheckScope: "structure", Issues: []CompatibilityIssue{}, Objects: []PlannedObject{}, Excluded: append([]ObjectRef{}, m.cfg.ExcludedObjects...)}
+	if _, ok := m.reader.(source.PartitionReader); ok {
+		p.PartitionPreflight = m.preparePartitions(ctx)
+	}
+	defer func() {
+		if pp := p.PartitionPreflight; pp != nil {
+			pp.CanStart = pp.CanStart && p.Ready
+			if !pp.Ready {
+				p.Ready = false
+				p.Issues = append(p.Issues, pp.Issues...)
+			}
+		}
+	}()
 	fail := func(err error) *PGMySQLPreflight {
 		p.add(ObjectRef{Kind: "metadata", Name: "兼容预检"}, err.Error(), false)
 		return p
 	}
 	if !m.isPGMySQL() {
 		return fail(fmt.Errorf("此预检仅支持 PG 系 → MySQL"))
+	}
+	if pp := p.PartitionPreflight; pp != nil && (pp.FatalError != "" || !pp.CanStart && len(pp.Tables) > 0) {
+		return p // The partition diagnostics already explain a wholly blocked scope.
 	}
 	r, ok := m.reader.(pgSnapshotReader)
 	if !ok {
@@ -132,7 +151,17 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	if err != nil {
 		return fail(err)
 	}
-	snap, err := r.ReadPGSnapshot(ctx)
+	var snap *source.PGSnapshot
+	if scoped, enabled := r.(pgScopedSnapshotReader); enabled && m.partitionState != nil && p.PartitionPreflight != nil {
+		chosen := m.pgMySQLSnapshotTables()
+		if len(chosen) == 0 && len(m.partitionState.blocked) > 0 && len(m.cfg.ViewNames) == 0 {
+			p.PartitionPreflight.CanStart = false
+			return p
+		}
+		snap, err = scoped.ReadPGSnapshotForTables(ctx, chosen)
+	} else {
+		snap, err = r.ReadPGSnapshot(ctx)
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -151,8 +180,19 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	available := map[ObjectRef]bool{}
 	tablesByName := map[string]source.PGTable{}
 	var all []string
+	knownTables := map[string]bool{}
+	if s := m.partitionState; s != nil && p.PartitionPreflight != nil {
+		for _, name := range s.all {
+			all = append(all, name)
+			knownTables[name] = true
+			available[tableRef(name)] = true
+		}
+	}
 	for _, t := range snap.Tables {
-		all = append(all, t.Info.TableName)
+		if !knownTables[t.Info.TableName] {
+			all = append(all, t.Info.TableName)
+			knownTables[t.Info.TableName] = true
+		}
 		tablesByName[t.Info.TableName] = t
 		available[tableRef(t.Info.TableName)] = true
 		for _, idx := range t.Indexes {
@@ -191,7 +231,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	if m.cfg.TableNames != nil {
 		chosen = m.cfg.TableNames
 		for _, t := range chosen {
-			if _, ok := tablesByName[t]; !ok {
+			if !knownTables[t] {
 				p.add(tableRef(t), "选择的源表不存在", false)
 			}
 		}
@@ -206,8 +246,39 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	if viewOnly {
 		selected = map[string]bool{}
 	}
+	if s := m.partitionState; s != nil {
+		for name := range selected {
+			if s.blocked[name] || s.roots[name] != "" && s.roots[name] != name {
+				delete(selected, name)
+			}
+		}
+	}
 	if !viewOnly && len(selected) == 0 {
-		p.add(ObjectRef{Kind: "selection", Name: "表范围"}, "没有可迁移的表", false)
+		if s := m.partitionState; s == nil || len(s.blocked) == 0 {
+			p.add(ObjectRef{Kind: "selection", Name: "表范围"}, "没有可迁移的表", false)
+		} else if p.PartitionPreflight != nil {
+			p.PartitionPreflight.CanStart = false
+		}
+	}
+	skippedForeignKeys := map[ObjectRef]bool{}
+	for _, table := range snap.Tables {
+		if p.PartitionPreflight == nil {
+			break
+		} // Preserve legacy strict planning.
+		if !selected[table.Info.TableName] {
+			continue
+		}
+		for _, fk := range table.ForeignKeys {
+			ref := ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}
+			blockedReference := false
+			if s := m.partitionState; s != nil {
+				blockedReference = s.blocked[fk.RefTable]
+			}
+			if (fk.RefSchema == snap.Profile.Schema || fk.RefSchema == "") && (blockedReference || excluded[tableRef(fk.RefTable)]) && !excluded[ref] {
+				skippedForeignKeys[ref] = true
+				p.warn(ref, "外键依赖未迁移的表 "+fk.RefTable+"，本次跳过该外键；引用方表结构及数据继续执行")
+			}
+		}
 	}
 	isExisting := m.cfg.Content == "data_only" || m.cfg.objectMode() || viewOnly
 	names := map[string]string{}
@@ -393,7 +464,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 		}
 		if m.wantPGObject("foreign_key") {
 			for _, fk := range t.ForeignKeys {
-				if !excluded[ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}] && !hasPrefix(fk.Columns) {
+				if !excluded[ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}] && !skippedForeignKeys[ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}] && !hasPrefix(fk.Columns) {
 					secondary++
 					indexColumns = append(indexColumns, fk.Columns)
 				}
@@ -434,6 +505,9 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 
 		if !isExisting && validColumns {
 			stmts, inline, e := dia.PGTableStatements(p.Target.Database, t, p.Target.Parsed, m.objName)
+			if e == nil {
+				stmts, e = m.partitionStatements(t.Info.TableName, stmts)
+			}
 			if e != nil {
 				p.add(ref, e.Error(), true)
 			} else {
@@ -476,7 +550,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 		}
 		for _, fk := range t.ForeignKeys {
 			ref := ObjectRef{"foreign_key", fk.TableName, fk.ConstraintName}
-			if excluded[ref] {
+			if excluded[ref] || skippedForeignKeys[ref] {
 				continue
 			}
 			if fk.Unsupported != "" || fk.RefSchema != snap.Profile.Schema || fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
@@ -566,6 +640,39 @@ func mapNames(in []string, name func(string) string) []string {
 		out[i] = name(s)
 	}
 	return out
+}
+
+func (m *Migrator) pgMySQLSnapshotTables() []string {
+	s := m.partitionState
+	if s == nil {
+		return nil
+	}
+	chosen := FilterTables(s.all, m.cfg.Mode, m.cfg.Filter)
+	if m.cfg.Mode == "" {
+		chosen = append([]string(nil), s.all...)
+	}
+	if m.cfg.TableNames != nil {
+		chosen = append([]string(nil), m.cfg.TableNames...)
+	}
+	excluded := map[string]bool{}
+	for _, ref := range m.cfg.ExcludedObjects {
+		if ref.Kind == "table" {
+			excluded[ref.Name] = true
+		}
+	}
+	known := map[string]bool{}
+	for _, name := range s.all {
+		known[name] = true
+	}
+	seen := map[string]bool{}
+	result := []string{}
+	for _, name := range chosen {
+		if known[name] && !excluded[name] && !s.blocked[name] && !seen[name] {
+			result = append(result, name)
+			seen[name] = true
+		}
+	}
+	return result
 }
 func mappedPGIndex(i source.IndexInfo, name func(string) string) source.IndexInfo {
 	i.TableName = name(i.TableName)

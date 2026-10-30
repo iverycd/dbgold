@@ -70,6 +70,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	PartitionMigration      *PartitionPreflight                  `json:"partition_migration,omitempty"`
 	NativeSchema            *NativeSchemaReport                  `json:"native_schema,omitempty"`
 	DataValidation          *validation.Report                   `json:"dataValidation,omitempty"`
 	TriggerMigrationEnabled bool                                 `json:"trigger_migration_enabled,omitempty"`
@@ -146,6 +147,16 @@ func newMigrationReport() MigrationReport {
 
 // HasFailures is shared by all job entrypoints; read/validation failures count.
 func (r MigrationReport) HasFailures() bool {
+	if r.PartitionMigration != nil {
+		if !r.PartitionMigration.Ready {
+			return true
+		}
+		for _, t := range r.PartitionMigration.Tables {
+			if t.Status == "failed" || t.Status == "incomplete" || t.Status == "blocked" {
+				return true
+			}
+		}
+	}
 	if r.NativeSchema != nil {
 		if r.NativeSchema.Preflight == nil || !r.NativeSchema.Preflight.Ready || damengnative.HasErrors(r.NativeSchema.Verification) {
 			return true

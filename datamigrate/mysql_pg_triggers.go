@@ -62,7 +62,7 @@ func (m *Migrator) prepareMySQLPGTriggers(ctx context.Context) {
 			return
 		}
 	}
-	all, err := m.reader.ListTables(ctx)
+	all, err := m.migrationTables(ctx)
 	if err != nil {
 		m.mysqlPGTriggerError = err
 		return

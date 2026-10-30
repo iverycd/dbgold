@@ -154,16 +154,30 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 				p.add(ref, "目标自增属性不匹配", false)
 			}
 		}
-		// Data-only writes into an empty schema created in a separate schema-only
-		// run. Appending to populated tables needs a separate conflict policy.
+		// Ordinary data-only tables retain their empty-target requirement.
+		// Partition plans freeze every target leaf's row count for append checks.
 		if m.cfg.Content == "data_only" {
-			var one int
-			e = db.QueryRowContext(ctx, `SELECT 1 FROM `+sqlsyntax.QuoteIdent(p.Target.Database)+`.`+sqlsyntax.QuoteIdent(name)+` LIMIT 1`).Scan(&one)
-			if e != nil && e != sql.ErrNoRows {
-				return e
+			var appendPlan *PartitionTableResult
+			if s := m.partitionState; s != nil {
+				if entry := s.tables[t.Info.TableName]; entry != nil && entry.Plan != nil {
+					appendPlan = entry
+				}
 			}
-			if e == nil {
-				p.add(ref, "data_only 首版要求空目标表，不能隐式追加或覆盖已有行", false)
+			if appendPlan != nil {
+				for _, mapping := range appendPlan.Plan.Mapping {
+					if _, ok := partitionRowCount(appendPlan.Baseline, mapping.TargetSchema, mapping.TargetName, mapping.TargetOrdinal); !ok {
+						p.add(ref, "缺少目标分区 "+mapping.TargetName+" 的追加基线", false)
+					}
+				}
+			} else {
+				var one int
+				e = db.QueryRowContext(ctx, `SELECT 1 FROM `+sqlsyntax.QuoteIdent(p.Target.Database)+`.`+sqlsyntax.QuoteIdent(name)+` LIMIT 1`).Scan(&one)
+				if e != nil && e != sql.ErrNoRows {
+					return e
+				}
+				if e == nil {
+					p.add(ref, "data_only 首版要求空目标表，不能隐式追加或覆盖已有行", false)
+				}
 			}
 		}
 		if e = m.checkExistingPGObjects(ctx, p, db, t); e != nil {

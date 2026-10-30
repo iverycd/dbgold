@@ -46,6 +46,7 @@ func (m *Migrator) planDamengTable(ctx context.Context, table string) (*damengTa
 		return nil, err
 	}
 	copyInfo := *info
+	copyInfo.Partition = source.ClonePartitionSpec(info.Partition)
 	copyInfo.Columns = append([]source.ColumnInfo(nil), info.Columns...)
 	p := &damengTablePlan{source: info, target: &copyInfo, columns: map[string]string{}}
 	for i, c := range info.Columns {

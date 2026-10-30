@@ -1,3 +1,4 @@
+import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -44,7 +45,7 @@ function page(overrides = {}) {
         case '@/api/migration': return {
           startDataMigration: submit, migrateViews: submit, startObjectMigration: submit,
           listConnectionTables: async () => ({ data: ['Table1'] }),
-          preflightDataMigration: async () => ({ data: { ready: true } }),
+          preflightDataMigration: async () => partitionPreflightResponse(),
           createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
           ...overrides.migration,
         }

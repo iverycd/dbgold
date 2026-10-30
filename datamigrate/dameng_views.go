@@ -75,7 +75,7 @@ func (m *Migrator) migrateDamengMappedViews(ctx context.Context, views []source.
 	}
 	tableNames := map[string]string{}
 	if selected != nil {
-		tables, err := m.reader.ListTables(ctx)
+		tables, err := m.migrationTables(ctx)
 		if err != nil {
 			return []ObjectResult{{Name: "视图依赖表", Error: err.Error()}}
 		}

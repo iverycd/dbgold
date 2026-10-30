@@ -311,6 +311,11 @@
             :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running || databaseSelectionBlocked('data')"
             @view-report="showPGTaskResult('data', 'report')" @view-logs="showPGTaskResult('data', 'logs')"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
+          <PartitionPreflightPanel v-if="!isDamengNative"
+            :result="isPGMySQLSelection('data') ? pgChecks.data?.partition_preflight : partitionCheck"
+            :busy="isPGMySQLSelection('data') ? pgBusy.data : partitionCheckBusy"
+            :disabled="dataMigrate.running || databaseSelectionBlocked('data') || !dataMigrate.srcConnId || !dataMigrate.dstConnId || !!dataMigrate.unsupportedMsg"
+            @check="isPGMySQLSelection('data') ? runPGCheck('data') : runPartitionCheck()" />
 
           <section ref="dataResultsSection" tabindex="-1" v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
             <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
@@ -964,6 +969,7 @@ import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPane
 import { compatibilityReportGroups } from '@/utils/migrationReport'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
+import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
 import { createConnectionDatabaseEditors, CONNECTION_DATABASE_EDITORS_KEY } from '@/composables/connectionDatabaseEditors'
@@ -977,6 +983,8 @@ import {
   type DamengNativePreflight,
   type PGMySQLPreflight,
   type PGMySQLPreflightRequest,
+  type PartitionPreflight,
+  type PartitionPreflightResponse,
   type MigrationObjectRef,
   type MigrationReport,
   type CompatibilityFunctionsReport,
@@ -1238,11 +1246,16 @@ async function startDataMigration() {
   try {
     if (isPGMySQLSelection('data')) {
       dataMigrate.logs.push('[INFO] 正在执行迁移预检…')
-      if (!(await ensurePGCheck('data'))?.ready) {
+      if (!preflightCanStart(await ensurePGCheck('data'))) {
         dataMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
         dataMigrate.running = false
         return
       }
+    }
+    if (!isDamengNative.value && !isPGMySQLSelection('data') && !(await ensurePartitionCheck())?.can_start) {
+      dataMigrate.logs.push('[WARN] 分区预检未通过，尚未启动任务')
+      dataMigrate.running = false
+      return
     }
     if (isDamengNative.value && !(await runNativeCheck())?.ready) {
       dataMigrate.logs.push('[WARN] 达梦全对象预检未通过，尚未启动任务')
@@ -1312,6 +1325,7 @@ function resetDataMigration() {
   dataMigrate.currentJobId = ''
   dataExecutionRoute.value = null
   clearPGCheck('data', true)
+  clearPartitionCheck()
   nativeCheckAbort?.abort()
   nativeCheckAbort = null
   nativeCheckBusy.value = false
@@ -1386,6 +1400,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   nativeCheckAbort?.abort()
+  partitionCheckAbort?.abort()
   window.removeEventListener('beforeunload', handleBeforeUnload)
   currentEventSource?.close()
   currentEventSource = null
@@ -1911,7 +1926,7 @@ const pgTaskSummaries = computed(() => ({ data: matchingPGSubmission('data'), ob
 function preparePGSubmission(kind: PGTaskKind): Omit<PGSubmission, 'jobID'> | null {
   const preview = pgChecks[kind]
   const requestKey = JSON.stringify(pgRequest(kind))
-  return isPGMySQLSelection(kind) && preview?.ready && pgCheckRequests.get(kind) === requestKey
+  return isPGMySQLSelection(kind) && preview && preflightCanStart(preview) && pgCheckRequests.get(kind) === requestKey
     ? { requestKey, preview, preflight: null } : null
 }
 function savePGSubmission(kind: PGTaskKind, jobID: string, submitted: Omit<PGSubmission, 'jobID'> | null) {
@@ -1984,7 +1999,50 @@ return {
 const nativeCheck = ref<DamengNativePreflight | null>(null)
 const nativeCheckBusy = ref(false)
 let nativeCheckAbort: AbortController | null = null
+const partitionCheck = ref<PartitionPreflight | null>(null)
+const partitionCheckBusy = ref(false)
+let partitionCheckAbort: AbortController | null = null
+let partitionCheckRequest = ''
+function clearPartitionCheck() {
+  partitionCheckAbort?.abort()
+  partitionCheckAbort = null
+  partitionCheck.value = null
+  partitionCheckBusy.value = false
+  partitionCheckRequest = ''
+}
+function preflightCanStart(result: PGMySQLPreflight | null | undefined) {
+  return result?.partition_preflight ? result.partition_preflight.can_start : !!result?.ready
+}
+async function ensurePartitionCheck() {
+  await nextTick()
+  if (partitionCheck.value?.can_start && partitionCheckRequest === JSON.stringify(dataMigrationRequest())) return partitionCheck.value
+  return runPartitionCheck()
+}
+async function runPartitionCheck() {
+  clearPartitionCheck()
+  if (isDamengNative.value || isPGMySQLSelection('data') || databaseSelectionBlocked('data') || !dataMigrate.srcConnId || !dataMigrate.dstConnId) return
+  const controller = new AbortController()
+  partitionCheckAbort = controller
+  partitionCheckBusy.value = true
+  const request = dataMigrationRequest()
+  const key = JSON.stringify(request)
+  const context = databaseContextKey('data')
+  try {
+    const result = await preflightDataMigration<PartitionPreflightResponse>(request, controller.signal)
+    if (controller.signal.aborted || databaseSelectionBlocked('data') || context !== databaseContextKey('data') || key !== JSON.stringify(dataMigrationRequest())) return
+    if (!result.data.partition_preflight) throw new Error('服务端未返回分区预检结果，请刷新后重试')
+    partitionCheck.value = result.data.partition_preflight
+    partitionCheckRequest = key
+    return partitionCheck.value
+  } catch (error: any) {
+    if (!controller.signal.aborted) Message.error(`分区预检失败：${error?.response?.data?.error ?? error.message}`)
+  } finally {
+    if (partitionCheckAbort === controller) { partitionCheckAbort = null; partitionCheckBusy.value = false }
+  }
+}
+watch([() => databaseContextKey('data'), () => databaseSelectionBlocked('data')], clearPartitionCheck, { flush: 'sync' })
 watch(() => JSON.stringify(dataMigrationRequest()), () => {
+  clearPartitionCheck()
   nativeCheckAbort?.abort()
   nativeCheckAbort = null
   nativeCheckBusy.value = false
@@ -2025,7 +2083,7 @@ async function ensurePGCheck(kind: PGCheckKind) {
   // The backend still builds and validates a fresh plan before executing migration.
   await nextTick()
   if (databaseSelectionBlocked(kind)) return
-  if (pgChecks[kind]?.ready && pgCheckRequests.get(kind) === JSON.stringify(pgRequest(kind))) return pgChecks[kind]
+  if (preflightCanStart(pgChecks[kind]) && pgCheckRequests.get(kind) === JSON.stringify(pgRequest(kind))) return pgChecks[kind]
   return runPGCheck(kind)
 }
 function clearPGCheck(kind: PGCheckKind, clearExclusions = false) {

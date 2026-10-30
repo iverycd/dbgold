@@ -1,3 +1,4 @@
+import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -34,7 +35,7 @@ function page({ start, preflight, objectStart } = {}) {
         case '@/api/migration': return {
           startDataMigration: async request => { starts.push(request); return start ? start(request) : { data: { job_id: 'new-job' } } },
           startObjectMigration: async request => objectStart ? objectStart(request) : { data: { job_id: 'object-job' } },
-          preflightDataMigration: async request => { checks.push(request); return preflight ? preflight(request) : { data: { ready: true } } },
+          preflightDataMigration: async request => { checks.push(request); return preflight ? preflight(request) : partitionPreflightResponse() },
           createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
         }
         default: return {}
@@ -171,14 +172,16 @@ test('opening and dismissing confirmation preserves existing configuration, logs
 test('confirmation submits once and blocks repeated clicks while the request or job is running', async () => {
   const scope = Vue.effectScope()
   try {
-    let resolveStart
-    const { p, starts } = scope.run(() => page({ start: () => new Promise(resolve => { resolveStart = resolve }) }))
+    let resolveStart, notifyStart
+    const reachedStart = new Promise(resolve => { notifyStart = resolve })
+    const { p, starts } = scope.run(() => page({ start: () => { notifyStart(); return new Promise(resolve => { resolveStart = resolve }) } }))
     p.requestDataMigration()
     const pending = p.confirmDataMigration()
     assert.equal(p.dataMigrationConfirmVisible.value, false)
     assert.equal(p.dataMigrationStarting.value, true)
     assert.match(p.dataMigrate.logs[0], /正在提交迁移任务/)
     assert.equal(p.dataMigrate.currentJobId, '', 'submission feedback precedes the task ID and log stream')
+    await reachedStart
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)

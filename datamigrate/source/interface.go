@@ -44,6 +44,7 @@ type TableDDLInfo struct {
 	TableName string
 	Columns   []ColumnInfo
 	Comment   string
+	Partition *PartitionSpec `json:"partition,omitempty"`
 }
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
@@ -81,6 +82,11 @@ type SequenceBinding struct {
 
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
+	// Locality is LOCAL or GLOBAL when the source catalog establishes it.
+	// Derived indexes belong to an already represented logical parent index.
+	Locality    string `json:"locality,omitempty"`
+	Derived     bool   `json:"derived,omitempty"`
+	ParentIndex string `json:"parent_index,omitempty"`
 	Descending  []bool // Optional direction per key column; omitted means ascending.
 	TableName   string
 	IndexName   string

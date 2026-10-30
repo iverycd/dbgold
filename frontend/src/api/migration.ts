@@ -226,6 +226,7 @@ export interface DataValidationReport {
 }
 
 export interface MigrationReport {
+  partition_migration?: PartitionPreflight
   native_schema?: { preflight?: DamengNativePreflight; categories: (CategoryReport & { kind: string; label: string })[]; verification: DamengNativeIssue[]; inventory: DamengNativeObject[] }
   dataValidation?: DataValidationReport
   trigger_migration_enabled?: boolean
@@ -671,6 +672,7 @@ export interface CompatibilityIssue {
   definition?: string
 }
 export interface PGMySQLPreflight {
+  partition_preflight?: PartitionPreflight
   check_scope?: 'structure'
   ready: boolean
   source: { product: string; version: string; mode: string; schema: string; verification: string }
@@ -685,8 +687,37 @@ export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
   table_names?: string[]
   view_names?: string[]
 }
-export const preflightDataMigration = (data: PGMySQLPreflightRequest, signal?: AbortSignal) =>
-  api.post<PGMySQLPreflight>('/migration/data/preflight', data, { timeout: 0, signal })
+export const preflightDataMigration = <T = PGMySQLPreflight>(data: PGMySQLPreflightRequest, signal?: AbortSignal) =>
+  api.post<T>('/migration/data/preflight', data, { timeout: 0, signal })
+
+export interface PartitionValue { kind: 'number' | 'string' | 'date' | 'timestamp' | 'null' | 'minvalue' | 'maxvalue'; text?: string }
+export interface PartitionKey { column?: string; expression?: string; data_type?: string; collation?: string }
+export interface PartitionNode {
+  schema?: string; name: string; ordinal: number; lower?: PartitionValue[]; upper?: PartitionValue[]
+  values?: PartitionValue[][]; default?: boolean; lower_inclusive?: boolean; upper_inclusive?: boolean
+  hash_modulus?: number; hash_remainder?: number; subpartition?: PartitionSpec; is_interval?: boolean
+}
+export interface PartitionSpec {
+  method: string; keys: PartitionKey[]; partitions: PartitionNode[]; automatic?: string; algorithm?: string
+  interval?: { unit: 'number' | 'month' | 'second'; amount: string; transition: PartitionValue }
+  source_ddl?: string; unsupported?: string
+}
+export interface PartitionMapping { source_schema?: string; source_name: string; target_schema?: string; target_name: string; target_ordinal?: number }
+export interface PartitionPlan {
+  source: PartitionSpec; target: PartitionSpec; statements: { SQL: string }[]; mapping?: PartitionMapping[]
+  fingerprint: string; rule: string
+  key_columns?: { column: string; data_type: string; nullable: boolean }[]
+  interval_materialization?: { schema: string; table: string; columns: string[]; values: PartitionValue[]; key_index: number; seeds: { partition_name: string; value: PartitionValue }[] }
+}
+export interface PartitionTableResult {
+  source_table: string; target_table: string; status: string; error?: string; source?: PartitionSpec; plan?: PartitionPlan
+  source_rows?: Record<string, number>; target_rows?: Record<string, number>; baseline?: Record<string, number>
+}
+export interface PartitionPreflight {
+  ready: boolean; can_start: boolean; source_type: string; target_type: string; fatal_error?: string
+  issues: CompatibilityIssue[]; tables: PartitionTableResult[]
+}
+export interface PartitionPreflightResponse { ready: boolean; partition_preflight: PartitionPreflight }
 
 export interface DamengNativeIssue { object_id?: string; kind?: string; name?: string; severity: string; reason: string }
 export interface DamengNativeObject {

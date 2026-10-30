@@ -26,6 +26,13 @@ type SQLScanner struct {
 	db             *sql.DB
 	family, schema string
 	catalog        string
+	partition      *PartitionLocation
+}
+
+func (s *SQLScanner) WithPartition(p PartitionLocation) *SQLScanner {
+	clone := *s
+	clone.partition = &p
+	return &clone
 }
 
 func NewSQLScanner(db *sql.DB, family, schema string) *SQLScanner {
@@ -510,6 +517,43 @@ func (s *SQLScanner) OpenValidationScan(ctx context.Context, table string, colum
 		}
 	}
 	query := "SELECT " + strings.Join(expr, ",") + " FROM " + QuoteValidationIdent(s.family, schema) + "." + QuoteValidationIdent(s.family, table)
+	closeOnError := func(err error) (RowStream, error) { cleanup(); _ = conn.Close(); return nil, err }
+	if p := s.partition; p != nil {
+		switch s.family {
+		case "postgres":
+			if p.Native {
+				kind := "PARTITION"
+				if p.Subpartition {
+					kind = "SUBPARTITION"
+				}
+				query += " " + kind + " (" + QuoteValidationIdent(s.family, p.Name) + ")"
+				break
+			}
+			leafSchema := p.Schema
+			if leafSchema == "" {
+				leafSchema = schema
+			}
+			query = "SELECT " + strings.Join(expr, ",") + " FROM ONLY " + QuoteValidationIdent(s.family, leafSchema) + "." + QuoteValidationIdent(s.family, p.Name)
+		case "mysql", "oracle", "dameng":
+			kind := "PARTITION"
+			if p.Subpartition && s.family != "mysql" {
+				kind = "SUBPARTITION"
+			}
+			query += " " + kind + " (" + QuoteValidationIdent(s.family, p.Name) + ")"
+		case "sqlserver":
+			var fn, col string
+			err := conn.QueryRowContext(ctx, `SELECT pf.name,c.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.indexes i ON i.object_id=t.object_id AND i.index_id IN(0,1) JOIN sys.partition_schemes ps ON ps.data_space_id=i.data_space_id JOIN sys.partition_functions pf ON pf.function_id=ps.function_id JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id AND ic.partition_ordinal=1 JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id WHERE s.name=@p1 AND t.name=@p2`, schema, table).Scan(&fn, &col)
+			if err != nil {
+				return closeOnError(err)
+			}
+			if p.Ordinal < 1 {
+				return closeOnError(fmt.Errorf("分区编号无效"))
+			}
+			query += fmt.Sprintf(" WHERE $PARTITION.%s(%s)=%d", QuoteValidationIdent(s.family, fn), QuoteValidationIdent(s.family, col), p.Ordinal)
+		default:
+			return closeOnError(fmt.Errorf("%s 未实现分区原值内容读取", s.family))
+		}
+	}
 	rows, e := conn.QueryContext(ctx, query)
 	if e != nil {
 		cleanup()

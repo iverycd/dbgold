@@ -477,11 +477,53 @@ func (r *SQLServerReader) GetTriggerCount(ctx context.Context) (int, error) {
 }
 
 func (r *SQLServerReader) CountRows(ctx context.Context, table string) (int64, error) {
+	schema, _, err := resolveSQLServerTable(ctx, r.db, "", table)
+	if err != nil {
+		return 0, err
+	}
 	var count int64
-	err := r.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COUNT(*) FROM [%s]", table),
+	err = r.db.QueryRowContext(ctx,
+		"SELECT COUNT_BIG(*) FROM "+quoteMSSQL(schema)+"."+quoteMSSQL(table),
 	).Scan(&count)
 	return count, err
+}
+
+// The configured dbName is a database, not a table's schema. Readers expose
+// original unqualified table names, so never guess dbo or choose arbitrarily
+// when the same name occurs in more than one schema. Target inspection supplies
+// its known schema and shares the same catalog identity checks.
+func resolveSQLServerTable(ctx context.Context, db *sql.DB, requestedSchema, table string) (string, int64, error) {
+	query := `SELECT s.name,t.object_id FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id WHERE t.name=@p1`
+	args := []any{table}
+	if requestedSchema != "" {
+		query += ` AND s.name=@p2`
+		args = append(args, requestedSchema)
+	}
+	rows, err := db.QueryContext(ctx, query+` ORDER BY s.name`, args...)
+	if err != nil {
+		return "", 0, err
+	}
+	var schema string
+	var objectID int64
+	count := 0
+	for rows.Next() {
+		if err = rows.Scan(&schema, &objectID); err != nil {
+			rows.Close()
+			return "", 0, err
+		}
+		count++
+	}
+	err = rows.Err()
+	if closeErr := rows.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	if count != 1 {
+		return "", 0, fmt.Errorf("SQL Server 表 %s 的 schema 身份不唯一或不存在", table)
+	}
+	return schema, objectID, nil
 }
 
 // GetComments 返回所有表注释和列注释信息(原始大小写)。

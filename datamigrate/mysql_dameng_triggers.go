@@ -58,7 +58,7 @@ func (m *Migrator) prepareMySQLDamengTriggers(ctx context.Context) {
 		}
 	}
 	m.cfg.TargetSchema = strings.ToUpper(m.cfg.TargetSchema)
-	all, err := m.reader.ListTables(ctx)
+	all, err := m.migrationTables(ctx)
 	if err != nil {
 		m.mysqlDMTriggerError = err
 		return

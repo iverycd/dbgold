@@ -26,11 +26,15 @@ func NewDaMeng(dsn, schema string, pool ConnPoolConfig) (*DaMengReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newDaMengReader(db, schema, pool)
+}
+
+func newDaMengReader(db *sql.DB, schema string, pool ConnPoolConfig) (*DaMengReader, error) {
 	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	return &DaMengReader{db: db, schema: strings.ToUpper(schema)}, nil
+	return &DaMengReader{db: db, schema: schema}, nil
 }
 
 func (r *DaMengReader) Close() error   { return r.db.Close() }

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 )
@@ -134,7 +135,27 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("succeeded", "序列及关联触发器完整兼容，当前续号已越过源水位和关联列极值")
 	}
 	if kind == "table" {
-		exists, e := inspectOrdinaryTable(ctx, a, obj.Schema, obj.TargetName)
+		var exists bool
+		var e error
+		if obj.PartitionPlan != nil {
+			inspector, ok := w.(PartitionInspector)
+			if !ok {
+				return verification("unknown", "目标缺少分区核验适配")
+			}
+			actual, err := inspector.InspectPartitionTable(ctx, obj.TargetName)
+			if err != nil {
+				return verification("unknown", err.Error())
+			}
+			if err = partition.Equivalent(obj.PartitionPlan.Target, actual); err != nil {
+				return verification("failed", err.Error())
+			}
+			if err = VerifyPartitionKeyColumns(ctx, w, obj.TargetName, obj.PartitionPlan); err != nil {
+				return verification("failed", err.Error())
+			}
+			exists = true
+		} else {
+			exists, e = inspectOrdinaryTable(ctx, a, obj.Schema, obj.TargetName)
+		}
 		if e != nil {
 			return repair.Verification{Status: "unknown", Message: e.Error()}, e
 		}

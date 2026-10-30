@@ -43,6 +43,31 @@ func TestPGPreflightChecksConnectionOwnershipBeforeConnecting(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+func TestGenericPartitionPreflightAcceptsSupportedPairWithoutCreatingJob(t *testing.T) {
+	migrationHandlerTestDB(t)
+	src := &store.Connection{OwnerID: 7, Name: "isolated-source", DBType: "mysql", Host: "127.0.0.1", Port: 1, Database: "dbgold_partition_test"}
+	dst := &store.Connection{OwnerID: 7, Name: "isolated-target", DBType: "postgres", Host: "127.0.0.1", Port: 1, Database: "dbgold_partition_test"}
+	require.NoError(t, store.CreateConnection(src))
+	require.NoError(t, store.CreateConnection(dst))
+	body, err := json.Marshal(map[string]any{"src_conn_id": src.ID, "dst_conn_id": dst.ID, "migrate_mode": "all", "target_schema": "public"})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set("userID", uint(7))
+	c.Set("role", "user")
+	c.Request = httptest.NewRequest(http.MethodPost, "/migration/data/preflight", strings.NewReader(string(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	PreflightDataMigration(c)
+	// A supported non-PG/MySQL pair now reaches read-only connection setup. The
+	// deliberately closed loopback port cannot create or modify a database.
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "此预检仅支持")
+	var jobs int64
+	require.NoError(t, store.DB.Model(&store.DataMigrationJob{}).Count(&jobs).Error)
+	require.Zero(t, jobs)
+}
+
 func TestBatchOptionalPGSchemaDoesNotReadFirstColumn(t *testing.T) {
 	f := excelize.NewFile()
 	defer f.Close()

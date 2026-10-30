@@ -97,6 +97,23 @@ async function exportedText(h) {
 }
 
 for (const view of views) {
+  test(`${view} exports saved partition mappings and leaf verification without changing SQL`, async () => {
+    const h = harness(view)
+    try {
+      h.page.report.value.partition_migration = {
+        ready: false, can_start: true, source_type: 'mysql', target_type: 'postgres', issues: [], tables: [{
+          source_table: 'MiXeD', target_table: 'mixed', status: 'succeeded', source_rows: { 'Src.P': 4 }, target_rows: { 'Dst.p': 9 }, baseline: { 'Dst.p': 5 },
+          plan: { mapping: [{ source_schema: 'Src', source_name: 'P', target_schema: 'Dst', target_name: 'p' }], statements: [{ SQL: 'CREATE TABLE "Dst"."p" PARTITION OF "Dst"."mixed" FOR VALUES FROM (0) TO (10)' }] },
+        }],
+      }
+      const text = await exportedText(h)
+      assert.match(text, /分区迁移计划、名称映射与逐叶核验/)
+      assert.match(text, /"source_name": "P"/)
+      assert.match(text, /"baseline"/)
+      assert.match(text, /FOR VALUES FROM \(0\) TO \(10\)/)
+    } finally { h.stop() }
+  })
+
   for (const status of ['done', 'failed', 'cancelled']) {
     test(`${view} exports the original start, finish, and cross-day duration for a ${status} task`, async () => {
       const h = harness(view)

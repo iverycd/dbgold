@@ -1,3 +1,4 @@
+import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -10,7 +11,7 @@ import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 function load(source, require) {
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, FormData, Blob }
+  const context = { exports: {}, require, AbortController, FormData, Blob }
   vm.runInNewContext(outputText, context)
   return context.exports
 }
@@ -36,7 +37,7 @@ test('Oracle to Dameng submits data, views and objects with their selected schem
         listConnectionViews: async (...args) => { lists.push(args); return { data: ['V_PARENT'] } },
       }
       case '@/api/migration': return {
-        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit,
+        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(),
         createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
         listConnectionTables: async (...args) => { lists.push(args); return { data: ['PARENT'] } },
       }

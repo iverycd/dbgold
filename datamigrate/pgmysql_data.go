@@ -10,6 +10,7 @@ import (
 	"hash"
 	"strings"
 
+	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/sqlsyntax"
 	"dbgold/datamigrate/target"
@@ -97,6 +98,38 @@ func (m *Migrator) eachPGPage(ctx context.Context, t source.PGTable, targetDB *s
 	}
 	if limit > 20000 {
 		limit = 20000
+	}
+	if s := m.partitionState; targetDB == nil && s != nil {
+		if p := s.tables[t.Info.TableName]; p != nil && p.Plan != nil {
+			if err := m.partitionCopyReady(t.Info.TableName); err != nil {
+				return err
+			}
+			if err := m.recheckPartitionSource(ctx, t.Info.TableName); err != nil {
+				return err
+			}
+			inspector, ok := m.writer.(target.PartitionInspector)
+			if !ok {
+				return fmt.Errorf("目标库缺少分区核验能力")
+			}
+			actual, err := inspector.InspectPartitionTable(ctx, p.TargetTable)
+			if err == nil {
+				err = partition.Equivalent(p.Plan.Target, actual)
+			}
+			if err != nil {
+				return fmt.Errorf("写入前分区核对失败: %w", err)
+			}
+			err = m.reader.(source.PartitionReader).StreamPartitionRows(ctx, t.Info.TableName, limit, func(cols, _ []string, rows [][]any) error {
+				converted, err := convertPGPage(t, cols, rows)
+				if err != nil {
+					return err
+				}
+				return fn(cols, converted)
+			})
+			if err == nil {
+				p.dataExecuted = true
+			}
+			return err
+		}
 	}
 	for offset := int64(0); ; offset += int64(limit) {
 		if e := ctx.Err(); e != nil {

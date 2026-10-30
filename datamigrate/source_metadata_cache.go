@@ -42,6 +42,11 @@ func (m *Migrator) sourceTableDDLInfo(ctx context.Context, table string) (*sourc
 		return cloneSourceTableDDLInfo(info), nil
 	}
 	info, err := m.reader.GetTableDDLInfo(ctx, table)
+	if info != nil && m.partitionState != nil {
+		if t := m.partitionState.tables[table]; t != nil {
+			info.Partition = source.ClonePartitionSpec(t.Source)
+		}
+	}
 	if err != nil {
 		return cloneSourceTableDDLInfo(info), err
 	}
@@ -62,6 +67,7 @@ func cloneSourceTableDDLInfo(info *source.TableDDLInfo) *source.TableDDLInfo {
 		return nil
 	}
 	copyInfo := *info
+	copyInfo.Partition = source.ClonePartitionSpec(info.Partition)
 	if info.Columns == nil {
 		return &copyInfo
 	}

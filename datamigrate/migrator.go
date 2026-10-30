@@ -19,7 +19,9 @@ import (
 
 // Config 迁移任务配置
 type Config struct {
-	OverwriteExisting bool `json:"OverwriteExisting,omitempty"`
+	// MigrationPurpose isolates CDC bootstrap from full partition migration.
+	MigrationPurpose  string `json:"MigrationPurpose,omitempty"`
+	OverwriteExisting bool   `json:"OverwriteExisting,omitempty"`
 	// ValidateData opts ordinary data jobs into full content validation.
 	ValidateData bool `json:"ValidateData,omitempty"`
 	// PreparationStartedAt includes connection setup in the preparation duration.
@@ -66,6 +68,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	partitionState         *partitionRunState
 	validationTables       []frozenValidationTable
 	validationScopeFrozen  bool
 	validationCopied       sync.Map
@@ -214,12 +217,17 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.resetSourceTableDDLCache()
+	defer m.clearSourceTableDDLCache()
+	m.partitionState = nil
+	m.dmPlans, m.dmUsable, m.dmBlocked = nil, nil, nil
 	if setter, ok := m.writer.(sourceTypeSetter); ok && m.isMySQLDameng() {
 		// Index coverage belongs to this run. Object-only migrations may reuse
 		// a writer without recreating any table, so reset at the run boundary.
 		setter.SetSourceType(m.reader.DBType())
 	}
 	m.validationTables, m.validationScopeFrozen = nil, false
+	defer m.closeValidationBaselines()
 	m.validationCopied = sync.Map{}
 	var dataValidation *validation.Report
 	if m.dataValidationEnabled() {
@@ -239,9 +247,11 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.dmPlans = nil
 	}
 	report := m.runWithRepair(ctx)
+	m.finishPartitions(ctx, &report)
 	if dataValidation != nil {
 		report.DataValidation = dataValidation
 		m.validateDataContent(ctx, &report)
+		m.validatePartitionContent(ctx, &report)
 	}
 	m.createMySQLDamengTriggers(ctx, &report)
 	m.finalizeDamengNativeEvents(ctx, &report)
@@ -267,8 +277,10 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	}
 	m.compatibilityFunctions = nil
 	m.dmSequenceBoundsLogged = nil
-	m.resetSourceTableDDLCache()
-	defer m.clearSourceTableDDLCache()
+	p := m.preparePartitions(ctx)
+	if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 {
+		return newMigrationReport()
+	}
 	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
 	m.prepareMySQLPGTriggers(ctx)
 	if m.mysqlDMTriggerRequested() {
@@ -339,7 +351,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		return report
 	}
 
-	allTables, err := m.reader.ListTables(ctx)
+	allTables, err := m.migrationTables(ctx)
 	if err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
 			return report
@@ -667,11 +679,20 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 	if err != nil {
 		return nil, "", err
 	}
+	stmts, err = m.partitionStatements(table, stmts)
+	if err != nil {
+		return nil, "", err
+	}
 	return stmts, dialect.JoinSQL(stmts), nil
 }
 
 // migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）
 func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
+	if s := m.partitionState; s != nil {
+		if t := s.tables[table]; t != nil && t.Plan != nil {
+			return m.migratePartitionData(ctx, table)
+		}
+	}
 	pks, err := m.reader.GetPrimaryKey(ctx, table)
 	if err != nil {
 		m.stopOracleDamengTask(ctx, err)
@@ -1154,6 +1175,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
+				if s := m.partitionState; s != nil && (s.blocked[fk.TableName] || s.blocked[fk.RefTable]) {
+					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖未通过分区预检的表")
+					continue
+				}
 				if m.isOracleDameng() && (m.dmBlocked[fk.TableName] || m.dmBlocked[fk.RefTable]) {
 					failedTable := fk.TableName
 					if m.dmBlocked[fk.RefTable] {
@@ -1442,7 +1467,7 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 		}
 		// Read-only discovery lets a fresh migrator reuse the same deterministic
 		// mapping. Actual target verification is restricted to view dependencies.
-		tables, err := m.reader.ListTables(ctx)
+		tables, err := m.migrationTables(ctx)
 		if err != nil {
 			return []ObjectResult{{Name: "视图依赖表", Error: err.Error()}}
 		}

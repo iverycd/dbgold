@@ -46,8 +46,8 @@ func PreflightDataMigration(c *gin.Context) {
 		return
 	}
 	native := isDamengNativePair(src.DBType, dst.DBType)
-	if !native && (!source.IsPGFamily(src.DBType) || dst.DBType != "mysql") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "此预检仅支持 PG 系 → MySQL 或达梦 → 达梦"})
+	if !isSupportedPair(src.DBType, dst.DBType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的源库与目标库迁移组合"})
 		return
 	}
 	if len(req.MigrateObjects) > 0 && len(req.ViewNames) > 0 {
@@ -76,11 +76,16 @@ func PreflightDataMigration(c *gin.Context) {
 		return
 	}
 	defer writer.Close()
-	cfg := datamigrate.Config{MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
+	cfg := datamigrate.Config{MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, CharInLength: req.CharInLength, UseNvarchar2: req.UseNvarchar2, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, MaxParallel: req.MaxParallel, IntraTableParallel: req.IntraTableParallel, ValidateData: req.ValidateData, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
 	m := datamigrate.NewMigrator(reader, writer, &datamigrate.Job{LogCh: make(chan string, 16)}, cfg)
 	if native {
 		c.JSON(http.StatusOK, m.PreflightDamengNative(c.Request.Context()))
 		return
 	}
-	c.JSON(http.StatusOK, m.PreflightPGMySQL(c.Request.Context()))
+	if source.IsPGFamily(src.DBType) && dst.DBType == "mysql" {
+		c.JSON(http.StatusOK, m.PreflightPGMySQL(c.Request.Context()))
+		return
+	}
+	p := m.PreflightPartitions(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{"ready": p.Ready, "partition_preflight": p})
 }

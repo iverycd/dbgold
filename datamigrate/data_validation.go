@@ -12,12 +12,14 @@ import (
 // The inventory is captured before table DDL. Validation must never silently
 // adopt a new source selection or column set after migration has finished.
 type frozenValidationTable struct {
-	name          string
-	target        string // optional native materialized-view storage mapping
-	metadata      validation.Table
-	err           error
-	rebasedRowIDs map[string]bool // only direct MV outputs with a proven completed native baseline
-	note          string
+	name               string
+	target             string // optional native materialized-view storage mapping
+	metadata           validation.Table
+	err                error
+	rebasedRowIDs      map[string]bool // only direct MV outputs with a proven completed native baseline
+	note               string
+	appendBaseline     *validation.AppendBaseline
+	partitionBaselines map[string]*validation.AppendBaseline
 }
 
 func (m *Migrator) dataValidationEnabled() bool {
@@ -47,6 +49,7 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 		return
 	}
 	m.validationScopeFrozen = true
+	m.closeValidationBaselines()
 	m.validationTables = make([]frozenValidationTable, 0, len(tables))
 	scanner, supported := validationSource(m.reader)
 	for _, table := range tables {
@@ -57,6 +60,9 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 			frozen.metadata, frozen.err = scanner.DescribeValidationTable(ctx, table)
 			frozen.metadata.Columns = slices.Clone(frozen.metadata.Columns)
 			frozen.metadata.PrimaryKey = slices.Clone(frozen.metadata.PrimaryKey)
+		}
+		if frozen.err == nil {
+			m.freezePartitionAppendContent(ctx, &frozen)
 		}
 		m.validationTables = append(m.validationTables, frozen)
 	}
@@ -99,7 +105,7 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 		case !srcOK || !dstOK:
 			table.Status, table.Error = validation.StatusUnsupported, "源库或目标库不支持原值内容读取"
 		case frozen.err != nil:
-			table.Status, table.Error = validation.StatusError, "冻结源列元数据失败: "+frozen.err.Error()
+			table.Status, table.Error = validation.StatusError, "冻结内容校验范围失败: "+frozen.err.Error()
 		default:
 			if _, copied := m.validationCopied.Load(frozen.name); !copied {
 				table.Status, table.Error = validation.StatusError, "该表数据迁移未完成，无法完成内容校验"
@@ -133,12 +139,18 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 							validationSource = &nativeRowIDProjectionScanner{Scanner: src, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
 							validationTarget = &nativeRowIDProjectionScanner{Scanner: dst, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
 						}
-						table = validation.Validate(ctx, validationSource, validationTarget, plan)
+						if frozen.appendBaseline != nil {
+							table = validation.ValidateAppend(ctx, validationSource, validationTarget, plan, frozen.appendBaseline)
+						} else {
+							table = validation.Validate(ctx, validationSource, validationTarget, plan)
+						}
 					}
 				}
 			}
 		}
-		table.Note = frozen.note
+		if frozen.note != "" {
+			table.Note = frozen.note
+		}
 		result.Tables = append(result.Tables, table)
 		if table.Status == validation.StatusPassed {
 			m.log.Dataf("内容校验 [%s]: 源=%d 目标=%d ... OK", frozen.name, table.SourceRows, table.TargetRows)

@@ -49,6 +49,10 @@ func (w *OscarWriter) DescribeValidationTable(ctx context.Context, table string)
 	return out, nil
 }
 func (w *OscarWriter) OpenValidationScan(ctx context.Context, table string, columns []validation.Column) (validation.RowStream, error) {
+	return w.openValidationScan(ctx, table, columns, w.dia.QualifyTable(w.schema, table))
+}
+
+func (w *OscarWriter) openValidationScan(ctx context.Context, table string, columns []validation.Column, from string) (validation.RowStream, error) {
 	b, err := w.validationBridge()
 	if err != nil {
 		return nil, err
@@ -77,7 +81,7 @@ func (w *OscarWriter) OpenValidationScan(ctx context.Context, table string, colu
 		}
 		expr[i] = validation.QuoteValidationIdent("oscar", c.Name)
 	}
-	q := "SELECT " + strings.Join(expr, ",") + " FROM " + w.dia.QualifyTable(w.schema, table)
+	q := "SELECT " + strings.Join(expr, ",") + " FROM " + from
 	id, err := b.OpenCursor(ctx, w.session, q)
 	if err != nil {
 		return nil, err

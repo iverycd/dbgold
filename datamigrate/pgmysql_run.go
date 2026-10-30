@@ -38,7 +38,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 	m.log.Info("=== PG → MySQL 结构预检（只读，不扫描业务数据）===")
 	plan := m.PreflightPGMySQL(ctx)
 	report.Preflight = plan
-	if !plan.Ready {
+	if !plan.Ready && (plan.PartitionPreflight == nil || !plan.PartitionPreflight.CanStart) {
 		for _, issue := range plan.Issues {
 			if issue.Severity == "error" {
 				m.log.Errorf("预检阻止 [%s]: %s", issue.Object.Name, issue.Reason)
@@ -210,10 +210,24 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			src, e1 := m.reader.CountRows(ctx, t.Info.TableName)
 			dst, e2 := m.writer.CountRows(ctx, m.objName(t.Info.TableName))
 			copied := copiedCounts[t.Info.TableName]
-			rc := TableRowCount{Table: m.objName(t.Info.TableName), Src: src, Dst: dst, Match: e1 == nil && e2 == nil && src == dst && src == copied}
+			// Partition data-only runs append to the frozen target. Compare the
+			// committed increment here; finishPartitions also proves every leaf.
+			increment := dst
+			if s := m.partitionState; m.cfg.Content == "data_only" && s != nil {
+				if p := s.tables[t.Info.TableName]; p != nil && p.Plan != nil {
+					for _, mapping := range p.Plan.Mapping {
+						baseline, ok := partitionRowCount(p.Baseline, mapping.TargetSchema, mapping.TargetName, mapping.TargetOrdinal)
+						if !ok && e2 == nil {
+							e2 = fmt.Errorf("缺少目标分区 %s 的追加基线", mapping.TargetName)
+						}
+						increment -= baseline
+					}
+				}
+			}
+			rc := TableRowCount{Table: m.objName(t.Info.TableName), Src: src, Dst: increment, Match: e1 == nil && e2 == nil && src == increment && src == copied}
 			report.RowCounts = append(report.RowCounts, rc)
 			if !rc.Match {
-				detail := fmt.Sprintf("行数校验失败：源=%d 目标=%d 已提交=%d 源错误=%v 目标错误=%v", src, dst, copied, e1, e2)
+				detail := fmt.Sprintf("行数校验失败：源=%d 目标本次行数=%d 已提交=%d 源错误=%v 目标错误=%v", src, increment, copied, e1, e2)
 				report.Data.Success--
 				report.Data.Failed++
 				report.Data.Items = append(report.Data.Items, ObjectResult{Name: t.Info.TableName, Error: detail})

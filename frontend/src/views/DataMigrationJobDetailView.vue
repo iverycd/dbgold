@@ -102,6 +102,7 @@
 
       <section class="detail-tabs-surface">
         <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
+        <PartitionPreflightPanel v-if="report?.partition_migration" :result="report.partition_migration" readonly />
         <AutoRepairPanel v-if="report?.auto_repairs?.length" :repairs="report.auto_repairs" />
         <a-alert v-if="reportError" type="warning" class="report-alert">
           {{ reportError }}
@@ -250,6 +251,7 @@
 <script setup lang="ts">
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
+import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
@@ -412,6 +414,7 @@ async function exportReport() {
   for (const line of formatAutoRepairs(report.value.auto_repairs)) lines.push(line)
   for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
+  if (report.value.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(report.value.partition_migration, null, 2), '')
   if (allRowCounts.value.length) {
     lines.push('', '=== 行数对比 ===')
     for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)

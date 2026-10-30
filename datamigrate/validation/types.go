@@ -56,6 +56,19 @@ type Scanner interface {
 	OpenValidationScan(context.Context, string, []Column) (RowStream, error)
 }
 
+// PartitionLocation identifies one frozen physical leaf, never a SQL fragment.
+type PartitionLocation struct {
+	Schema       string
+	Name         string
+	Ordinal      int
+	Subpartition bool
+	Native       bool
+}
+
+type PartitionScanner interface {
+	OpenPartitionValidationScan(context.Context, string, PartitionLocation, []Column) (RowStream, error)
+}
+
 // Next returns io.EOF after the last row. Returned byte slices only need to
 // remain valid until the next call. Scans are a single cursor, never OFFSET.
 type RowStream interface {

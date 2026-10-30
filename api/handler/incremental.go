@@ -396,7 +396,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	defer w.Close()
 	logJob := &datamigrate.Job{LogCh: make(chan string, 4096)}
 	journalDone := startIncrementalLogJournal(j.JobID, logJob)
-	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{PreparationStartedAt: preparationStartedAt, PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: dst.DBType})
+	m := datamigrate.NewMigrator(r, w, logJob, datamigrate.Config{MigrationPurpose: "cdc", PreparationStartedAt: preparationStartedAt, PageSize: 20000, MaxParallel: 1, IntraTableParallel: 1, Mode: j.MigrateMode, Filter: j.TableFilter, Content: "both", LowerCaseNames: j.LowerCaseNames, TargetSchema: j.TargetSchema, ChangeOwner: true, TargetDBType: dst.DBType})
 	report := m.Run(ctx)
 	close(logJob.LogCh)
 	<-journalDone
