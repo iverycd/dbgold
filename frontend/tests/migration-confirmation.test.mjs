@@ -179,9 +179,10 @@ test('confirmation submits once and blocks repeated clicks while the request or 
     const pending = p.confirmDataMigration()
     assert.equal(p.dataMigrationConfirmVisible.value, false)
     assert.equal(p.dataMigrationStarting.value, true)
-    assert.match(p.dataMigrate.logs[0], /正在提交迁移任务/)
+    assert.match(p.dataMigrate.logs[0], /正在检查迁移条件/)
     assert.equal(p.dataMigrate.currentJobId, '', 'submission feedback precedes the task ID and log stream')
     await reachedStart
+    assert.match(p.dataMigrate.logs.at(-1), /正在提交迁移任务/)
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)

@@ -311,14 +311,10 @@
             :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running || databaseSelectionBlocked('data')"
             @view-report="showPGTaskResult('data', 'report')" @view-logs="showPGTaskResult('data', 'logs')"
             @check="runPGCheck('data')" @exclude="excludePGObject('data', $event)" @restore="restorePGObject('data', $event)" />
-          <PartitionPreflightPanel v-if="!isDamengNative"
-            :result="isPGMySQLSelection('data') ? pgChecks.data?.partition_preflight : partitionCheck"
-            :busy="isPGMySQLSelection('data') ? pgBusy.data : partitionCheckBusy"
-            :disabled="dataMigrate.running || databaseSelectionBlocked('data') || !dataMigrate.srcConnId || !dataMigrate.dstConnId || !!dataMigrate.unsupportedMsg"
-            @check="isPGMySQLSelection('data') ? runPGCheck('data') : runPartitionCheck()" />
-
-          <section ref="dataResultsSection" tabindex="-1" v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId" class="migration-surface migration-results">
-            <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
+          <section ref="dataResultsSection" tabindex="-1" v-if="dataMigrate.running || dataMigrate.logs.length || dataMigrate.currentJobId || partitionCheckIssues || partitionCheckError" class="migration-surface migration-results">
+            <div class="migration-section-heading"><h3>执行结果</h3><span>{{ dataMigrationChecking ? '正在检查迁移条件' : dataMigrate.running ? '迁移进行中' : '查看日志与迁移报告' }}</span></div>
+            <a-alert v-if="partitionCheckError" type="error">{{ partitionCheckError }}。处理后再次点击开始迁移。</a-alert>
+            <PartitionPreflightPanel v-if="partitionCheckIssues" :result="partitionCheckIssues" />
             <a-tabs v-model:active-key="dataMigrateResultTab" :destroy-on-hide="false" :lazy-load="false">
               <a-tab-pane key="logs" title="执行日志">
                 <a-empty v-if="!dataMigrate.logs.length" description="等待迁移日志…" />
@@ -381,7 +377,7 @@
             </a-tabs>
           </section>
           <!-- 操作按钮 -->
-          <MigrationActionBar :status="dataMigrate.running ? '正在迁移，请关注执行日志' : dataMigrate.finished ? '执行已结束，请查看日志与报告' : '配置完成后可开始迁移'" :busy="dataMigrate.running">
+          <MigrationActionBar :status="dataMigrationChecking ? '正在检查迁移条件' : dataMigrate.running ? '正在迁移，请关注执行日志' : dataMigrate.finished ? '执行已结束，请查看日志与报告' : isDamengNative ? '配置完成后可开始迁移' : '开始迁移后将自动检查分区兼容性。'" :busy="dataMigrate.running">
             <a-button
               type="primary"
               :disabled="!canStartMigration"
@@ -389,7 +385,7 @@
               @click="requestDataMigration"
             >开始迁移</a-button>
             <a-button
-              v-if="dataMigrate.running"
+              v-if="dataMigrate.running && dataMigrate.currentJobId"
               status="danger"
               @click="cancelDataMigration"
             >停止迁移</a-button>
@@ -1047,6 +1043,7 @@ const dataMigrate = reactive({
 const tableFilterError = ref('')
 const dataMigrationConfirmVisible = ref(false)
 const dataMigrationStarting = ref(false)
+const dataMigrationChecking = ref(false)
 const dataExecutionRoute = ref<{
   src: Connection
   dst: Connection
@@ -1240,8 +1237,10 @@ async function startDataMigration() {
   }
   dataMigrate.running = true
   dataMigrate.finished = false
-  dataMigrate.logs = ['[INFO] 正在提交迁移任务…']
+  dataMigrationChecking.value = true
+  dataMigrate.logs = ['[INFO] 正在检查迁移条件…']
   dataMigrate.currentJobId = ''
+  dataMigrateResultTab.value = 'logs'
   pgSubmissions.data = null
   try {
     if (isPGMySQLSelection('data')) {
@@ -1252,16 +1251,25 @@ async function startDataMigration() {
         return
       }
     }
-    if (!isDamengNative.value && !isPGMySQLSelection('data') && !(await ensurePartitionCheck())?.can_start) {
-      dataMigrate.logs.push('[WARN] 分区预检未通过，尚未启动任务')
-      dataMigrate.running = false
-      return
+    if (!isDamengNative.value && !isPGMySQLSelection('data')) {
+      if (!(await ensurePartitionCheck())?.can_start) {
+        dataMigrate.logs.push(partitionCheckError.value
+          ? `[ERROR] ${partitionCheckError.value}，尚未启动任务。处理后再次点击开始迁移。`
+          : '[WARN] 分区兼容性检查未通过，尚未启动任务。处理后再次点击开始迁移。')
+        dataMigrate.running = false
+        return
+      }
     }
     if (isDamengNative.value && !(await runNativeCheck())?.ready) {
       dataMigrate.logs.push('[WARN] 达梦全对象预检未通过，尚未启动任务')
       dataMigrate.running = false
       return
     }
+    const blockedTables = dataPartitionCheck.value?.tables.filter(table => table.status === 'blocked') ?? []
+    if (blockedTables.length) {
+      dataMigrate.logs.push(`[WARN] 分区兼容性检查阻止 ${blockedTables.length} 张表：${blockedTables.map(table => table.source_table).join('、')}；将跳过这些表及其依赖对象，其余表继续迁移。`)
+    }
+    dataMigrationChecking.value = false
     const submitted = preparePGSubmission('data')
     if (selectedSrc.value && selectedDst.value) {
       dataExecutionRoute.value = {
@@ -1271,6 +1279,7 @@ async function startDataMigration() {
         dstSchema: dataMigrate.dstSchema,
       }
     }
+    dataMigrate.logs.push('[INFO] 正在提交迁移任务…')
     const res = await apiStartMigration(dataMigrationRequest())
     dataMigrate.currentJobId = res.data.job_id
     dataMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
@@ -1280,6 +1289,8 @@ async function startDataMigration() {
     dataMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
     dataMigrate.running = false
     dataMigrate.finished = true
+  } finally {
+    dataMigrationChecking.value = false
   }
 }
 
@@ -1321,6 +1332,7 @@ async function cancelDataMigration() {
 function resetDataMigration() {
   dataMigrate.running = false
   dataMigrate.finished = false
+  dataMigrationChecking.value = false
   dataMigrate.logs = []
   dataMigrate.currentJobId = ''
   dataExecutionRoute.value = null
@@ -2001,6 +2013,13 @@ const nativeCheckBusy = ref(false)
 let nativeCheckAbort: AbortController | null = null
 const partitionCheck = ref<PartitionPreflight | null>(null)
 const partitionCheckBusy = ref(false)
+const partitionCheckError = ref('')
+const dataPartitionCheck = computed(() => isDamengNative.value ? null
+  : isPGMySQLSelection('data') ? pgChecks.data?.partition_preflight ?? null : partitionCheck.value)
+const partitionCheckIssues = computed(() => {
+  const result = dataPartitionCheck.value
+  return result && (result.fatal_error || !result.ready || result.issues?.length || result.tables.some(table => table.error)) ? result : null
+})
 let partitionCheckAbort: AbortController | null = null
 let partitionCheckRequest = ''
 function clearPartitionCheck() {
@@ -2008,6 +2027,7 @@ function clearPartitionCheck() {
   partitionCheckAbort = null
   partitionCheck.value = null
   partitionCheckBusy.value = false
+  partitionCheckError.value = ''
   partitionCheckRequest = ''
 }
 function preflightCanStart(result: PGMySQLPreflight | null | undefined) {
@@ -2030,12 +2050,15 @@ async function runPartitionCheck() {
   try {
     const result = await preflightDataMigration<PartitionPreflightResponse>(request, controller.signal)
     if (controller.signal.aborted || databaseSelectionBlocked('data') || context !== databaseContextKey('data') || key !== JSON.stringify(dataMigrationRequest())) return
-    if (!result.data.partition_preflight) throw new Error('服务端未返回分区预检结果，请刷新后重试')
+    if (!result.data.partition_preflight) throw new Error('服务端未返回分区兼容性检查结果')
     partitionCheck.value = result.data.partition_preflight
     partitionCheckRequest = key
     return partitionCheck.value
   } catch (error: any) {
-    if (!controller.signal.aborted) Message.error(`分区预检失败：${error?.response?.data?.error ?? error.message}`)
+    if (!controller.signal.aborted) {
+      partitionCheckError.value = `分区兼容性检查失败：${error?.response?.data?.error ?? error?.message ?? '请检查连接后重试'}`
+      Message.error(partitionCheckError.value)
+    }
   } finally {
     if (partitionCheckAbort === controller) { partitionCheckAbort = null; partitionCheckBusy.value = false }
   }

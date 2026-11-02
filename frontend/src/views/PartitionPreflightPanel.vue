@@ -1,16 +1,15 @@
 <template>
   <section class="partition-preflight" aria-label="分区迁移预检与核验">
     <div class="partition-heading">
-      <div><h3>{{ readonly ? '分区迁移记录' : '分区迁移预检' }}</h3><p>{{ readonly ? '本次任务保存的分区计划、名称映射及核验结果' : '检查原生分区结构与目标路由是否能够等价保留' }}</p></div>
+      <div><h3>{{ readonly ? '分区迁移记录' : '分区兼容性检查结果' }}</h3><p>{{ readonly ? '本次任务保存的分区计划、名称映射及核验结果' : '开始迁移时自动检查原生分区结构与目标路由是否能够等价保留' }}</p></div>
       <a-space wrap>
-        <a-button v-if="!readonly" :loading="busy" :disabled="disabled" @click="$emit('check')">{{ result ? '重新预检' : '运行分区预检' }}</a-button>
         <a-button v-if="result" @click="download">导出分区记录</a-button>
       </a-space>
     </div>
-    <a-alert v-if="!readonly" type="info">预检不会修改数据库。无法等价保留的表及其依赖对象会被阻止，其余表可继续迁移；开始时会重新核对。迁移和校验期间请停止源库与目标库的业务写入及结构变更。</a-alert>
-    <a-alert v-if="result?.fatal_error" type="error">{{ result.fatal_error }}</a-alert>
+    <a-alert v-if="!readonly" type="info">开始迁移时会自动检查分区兼容性，检查本身不会修改数据库。迁移和校验期间请停止源库与目标库的业务写入及结构变更。</a-alert>
+    <a-alert v-if="result?.fatal_error" type="error">{{ result.fatal_error }}<template v-if="!readonly"> 请处理问题后再次点击“开始迁移”。</template></a-alert>
     <a-alert v-else-if="result && !result.ready" :type="result.can_start ? 'warning' : 'error'">
-      {{ readonly ? '本次执行前存在阻止项，请结合下方各表的执行和核验状态查看。' : result.can_start ? '部分表被阻止，可以开始迁移其余表。请展开明细核对受影响的表。' : '当前任务不能开始，请处理阻止原因后重新预检。' }}
+      {{ readonly ? '本次执行前存在阻止项，请结合下方各表的执行和核验状态查看。' : result.can_start ? '部分表已被阻止，将跳过受影响表及其依赖对象，其余表继续迁移。请展开明细核对受影响的表。' : '当前任务不能开始，请处理阻止原因后再次点击“开始迁移”。' }}
     </a-alert>
     <template v-if="result">
       <div class="partition-summary" aria-live="polite">
@@ -50,7 +49,6 @@
         </template>
       </a-table>
     </template>
-    <a-empty v-else-if="!busy" description="运行预检后查看分区结构、名称映射和阻止原因" />
   </section>
 </template>
 
@@ -58,8 +56,7 @@
 import { computed } from 'vue'
 import type { PartitionPreflight, PartitionTableResult } from '@/api/migration'
 
-const props = defineProps<{ result?: PartitionPreflight | null; busy?: boolean; disabled?: boolean; readonly?: boolean }>()
-defineEmits<{ check: [] }>()
+const props = defineProps<{ result?: PartitionPreflight | null; readonly?: boolean }>()
 const partitionCount = computed(() => props.result?.tables.filter(table => table.source).length ?? 0)
 const blockedCount = computed(() => props.result?.tables.filter(table => table.status === 'blocked').length ?? 0)
 const failedCount = computed(() => props.result?.tables.filter(table => table.status === 'failed' || table.status === 'incomplete').length ?? 0)
