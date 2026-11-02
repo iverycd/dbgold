@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	_ "github.com/sijms/go-ora/v2"
 )
@@ -16,6 +17,8 @@ type OracleReader struct {
 	db      *sql.DB
 	owner   string // 大写，对应连接配置的 Database 字段（Oracle 中等同于 schema/用户名）
 	version int    // Oracle 主版本号，用于分页语法选择（12+ 支持 OFFSET...FETCH）
+	// Immutable source column names, shared safely by concurrent page readers.
+	pageColumns sync.Map // map[string][]string
 }
 
 // NewOracle 创建并连接 Oracle Reader
@@ -28,29 +31,28 @@ func NewOracle(dsn, owner string, pool ConnPoolConfig) (*OracleReader, error) {
 	}
 	pool.applyTo(db)
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, err
 	}
 
-	r := &OracleReader{db: db, owner: strings.ToUpper(owner)}
-
-	// 查询 Oracle 主版本号，决定分页语法
-	var verStr string
-	if err := db.QueryRow(`SELECT VERSION FROM V$INSTANCE`).Scan(&verStr); err == nil {
-		// 版本格式如 "11.2.0.4.0" 或 "19.0.0.0.0"
-		parts := strings.SplitN(verStr, ".", 2)
-		if len(parts) > 0 {
-			r.version, _ = strconv.Atoi(parts[0])
-		}
-	}
-	if r.version == 0 {
-		r.version = 12 // 查询失败时默认使用现代语法
-	}
-
-	return r, nil
+	return &OracleReader{db: db, owner: strings.ToUpper(owner), version: detectOracleMajorVersion(db)}, nil
 }
 
-func (r *OracleReader) Close() error   { return r.db.Close() }
-func (r *OracleReader) DBType() string { return "oracle" }
+func detectOracleMajorVersion(db *sql.DB) int {
+	// Migration users may not have access to V$INSTANCE. ROWNUM works on both
+	// old and new servers; only opt into OFFSET/FETCH after a reliable result.
+	var verStr string
+	if err := db.QueryRow(`SELECT VERSION FROM V$INSTANCE`).Scan(&verStr); err == nil {
+		if version, err := strconv.Atoi(strings.SplitN(strings.TrimSpace(verStr), ".", 2)[0]); err == nil && version > 0 {
+			return version
+		}
+	}
+	return 11
+}
+
+func (r *OracleReader) Close() error            { return r.db.Close() }
+func (r *OracleReader) DBType() string          { return "oracle" }
+func (r *OracleReader) MigrationSchema() string { return r.owner }
 
 func (r *OracleReader) ListDatabases(ctx context.Context) ([]string, error) {
 	rows, err := r.db.QueryContext(ctx,
@@ -193,41 +195,69 @@ func (r *OracleReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error) 
 	return result, rows.Err()
 }
 
+func quoteOracleIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func (r *OracleReader) pageColumnNames(ctx context.Context, table string) ([]string, error) {
+	if names, ok := r.pageColumns.Load(table); ok {
+		return names.([]string), nil
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS WHERE OWNER = :1 AND TABLE_NAME = :2 ORDER BY COLUMN_ID`, r.owner, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("表 %s 没有可读取的列", table)
+	}
+	stored, _ := r.pageColumns.LoadOrStore(table, names)
+	return stored.([]string), nil
+}
+
 func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
-	var query string
-	if r.version >= 12 {
-		// 12c+ 支持 OFFSET...FETCH NEXT 语法
-		if len(pkCols) > 0 {
-			pkList := make([]string, len(pkCols))
-			for i, col := range pkCols {
-				pkList[i] = fmt.Sprintf(`"%s"`, col)
-			}
-			orderBy := strings.Join(pkList, ", ")
-			query = fmt.Sprintf(
-				`SELECT * FROM "%s"."%s" ORDER BY %s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY`,
-				r.owner, table, orderBy, offset, limit)
-		} else {
-			query = fmt.Sprintf(
-				`SELECT * FROM "%s"."%s" OFFSET %d ROWS FETCH NEXT %d ROWS ONLY`,
-				r.owner, table, offset, limit)
+	if offset < 0 || limit <= 0 || offset+limit < offset {
+		return nil, nil, nil, fmt.Errorf("无效分页范围")
+	}
+	orderBy := "ROWID"
+	if len(pkCols) > 0 {
+		pkList := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			pkList[i] = quoteOracleIdentifier(col)
 		}
-	} else {
-		// 11g 及以下：双层 ROWNUM 嵌套
-		endRow := offset + limit
-		if len(pkCols) > 0 {
-			pkList := make([]string, len(pkCols))
-			for i, col := range pkCols {
-				pkList[i] = fmt.Sprintf(`"%s"`, col)
-			}
-			orderBy := strings.Join(pkList, ", ")
-			query = fmt.Sprintf(
-				`SELECT * FROM (SELECT A.*, ROWNUM RNcolumn FROM (SELECT * FROM "%s"."%s" ORDER BY %s) A WHERE ROWNUM <= %d) WHERE RNcolumn > %d`,
-				r.owner, table, orderBy, endRow, offset)
-		} else {
-			query = fmt.Sprintf(
-				`SELECT * FROM (SELECT A.*, ROWNUM RNcolumn FROM (SELECT * FROM "%s"."%s") A WHERE ROWNUM <= %d) WHERE RNcolumn > %d`,
-				r.owner, table, endRow, offset)
+		orderBy = strings.Join(pkList, ", ")
+	}
+	base := "SELECT * FROM " + quoteOracleIdentifier(r.owner) + "." + quoteOracleIdentifier(table) + " ORDER BY " + orderBy
+	query := fmt.Sprintf("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", base, offset, limit)
+	if r.version < 12 {
+		names, err := r.pageColumnNames(ctx, table)
+		if err != nil {
+			return nil, nil, nil, err
 		}
+		projection := make([]string, len(names))
+		nameSet := make(map[string]bool, len(names))
+		for i, name := range names {
+			projection[i] = "DBG_PAGE." + quoteOracleIdentifier(name)
+			nameSet[name] = true
+		}
+		pseudo := "DBGOLD_PAGE_ROWNUM"
+		for nameSet[pseudo] {
+			pseudo += "_"
+		}
+		// Project only source columns so the synthetic row number cannot leak
+		// into the destination, even if the table has a real RNCOLUMN column.
+		query = fmt.Sprintf("SELECT %s FROM (SELECT DBG_INNER.*, ROWNUM %s FROM (%s) DBG_INNER WHERE ROWNUM <= %d) DBG_PAGE WHERE DBG_PAGE.%s > %d", strings.Join(projection, ", "), quoteOracleIdentifier(pseudo), base, offset+limit, quoteOracleIdentifier(pseudo), offset)
 	}
 
 	rows, err := r.db.QueryContext(ctx, query)
@@ -245,12 +275,6 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 		return nil, nil, nil, err
 	}
 
-	// 11g 分页时去掉末尾追加的 RNCOLUMN 伪列
-	if r.version < 12 && len(cols) > 0 && strings.ToUpper(cols[len(cols)-1]) == "RNCOLUMN" {
-		cols = cols[:len(cols)-1]
-		colTypes = colTypes[:len(colTypes)-1]
-	}
-
 	colTypeName := make([]string, len(colTypes))
 	for i, ct := range colTypes {
 		colTypeName[i] = strings.ToUpper(ct.DatabaseTypeName())
@@ -258,22 +282,14 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 
 	var result [][]interface{}
 	for rows.Next() {
-		// 11g 模式：scan 全部列（含 RNCOLUMN），再截断
-		scanCount := len(colTypes)
-		if r.version < 12 {
-			scanCount = len(cols) + 1 // 多一个 RNCOLUMN
-		}
-		vals := make([]interface{}, scanCount)
-		ptrs := make([]interface{}, scanCount)
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, nil, nil, err
 		}
-		// 截断 RNCOLUMN
-		vals = vals[:len(cols)]
-
 		for i, v := range vals {
 			if v == nil {
 				continue
@@ -421,6 +437,7 @@ func (r *OracleReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 		`SELECT c.CONSTRAINT_NAME,
 		        c.TABLE_NAME,
 		        cc.COLUMN_NAME,
+		        rc.OWNER AS REF_SCHEMA,
 		        rc.TABLE_NAME AS REF_TABLE,
 		        rcc.COLUMN_NAME AS REF_COLUMN,
 		        c.DELETE_RULE,
@@ -444,8 +461,8 @@ func (r *OracleReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 	fkMap := map[string]*FKInfo{}
 	var order []string
 	for rows.Next() {
-		var constraintName, tableName, col, refTable, refCol, onDelete, onUpdate string
-		if err := rows.Scan(&constraintName, &tableName, &col, &refTable, &refCol, &onDelete, &onUpdate); err != nil {
+		var constraintName, tableName, col, refSchema, refTable, refCol, onDelete, onUpdate string
+		if err := rows.Scan(&constraintName, &tableName, &col, &refSchema, &refTable, &refCol, &onDelete, &onUpdate); err != nil {
 			return nil, err
 		}
 		key := tableName + "." + constraintName
@@ -453,6 +470,7 @@ func (r *OracleReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 			fkMap[key] = &FKInfo{
 				TableName:      tableName,
 				ConstraintName: constraintName,
+				RefSchema:      refSchema,
 				RefTable:       refTable,
 				OnDelete:       onDelete,
 				OnUpdate:       onUpdate,

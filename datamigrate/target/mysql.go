@@ -80,14 +80,14 @@ func (w *MySQLWriter) execStatements(ctx context.Context, stmts []dialect.Statem
 		defer restore()
 		for _, s := range stmts {
 			if _, err = execObserved(ctx, conn, s.SQL); err != nil {
-				return err
+				return fmt.Errorf("执行 MySQL DDL [%s]: %w", s.SQL, err)
 			}
 		}
 		return nil
 	}
 	for _, s := range stmts {
 		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
-			return err
+			return fmt.Errorf("执行 MySQL DDL [%s]: %w", s.SQL, err)
 		}
 	}
 	return nil

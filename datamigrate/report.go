@@ -70,6 +70,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	TargetDependencies      []OracleMySQLDependencyResult        `json:"target_dependencies,omitempty"`
 	PartitionMigration      *PartitionPreflight                  `json:"partition_migration,omitempty"`
 	NativeSchema            *NativeSchemaReport                  `json:"native_schema,omitempty"`
 	DataValidation          *validation.Report                   `json:"dataValidation,omitempty"`
@@ -147,6 +148,13 @@ func newMigrationReport() MigrationReport {
 
 // HasFailures is shared by all job entrypoints; read/validation failures count.
 func (r MigrationReport) HasFailures() bool {
+	for _, dependency := range r.TargetDependencies {
+		for _, status := range []string{dependency.DropStatus, dependency.RestoreStatus} {
+			if status == "failed" || status == "unknown" || status == "blocked" || status == "running" {
+				return true
+			}
+		}
+	}
 	if r.PartitionMigration != nil {
 		if !r.PartitionMigration.Ready {
 			return true

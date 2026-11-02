@@ -169,7 +169,12 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	}
 	m.log.Infof("正在读取表结构，共 %d 张表…", len(participating))
 	progress := newRepairMetadataProgress(m.log, time.Now)
-	prewarmed, err := m.prewarmSourceTableDDL(ctx, participating, progress)
+	var prewarmed map[string]sourceTableDDLResult
+	// Oracle -> MySQL has already frozen all candidate metadata and target DDL
+	// before computing the executable FK scope. Never replace that snapshot here.
+	if m.oracleMySQL == nil {
+		prewarmed, err = m.prewarmSourceTableDDL(ctx, participating, progress)
+	}
 	if err != nil {
 		if m.stopOracleDamengTask(ctx, err) {
 			return
@@ -249,20 +254,33 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				}
 			}
 			o.Columns = slices.Clone(info.Columns)
+			if m.oracleMySQLSchemaMode() {
+				plan, planErr := m.planOracleMySQLTable(ctx, t, info)
+				if planErr != nil {
+					e = planErr
+				} else {
+					o.Columns = cloneSourceTableDDLInfo(&source.TableDDLInfo{Columns: plan.Columns}).Columns
+				}
+			}
 			for i, c := range info.Columns {
 				n := m.targetColumn(t, c.Name)
 				o.ColumnMapping[c.Name] = n
 				o.Columns[i].Name = n
-				o.Columns[i].DataType = m.writer.Dialect().MapType(c, m.reader.DBType(), dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+				if !m.oracleMySQLSchemaMode() {
+					o.Columns[i].DataType = m.writer.Dialect().MapType(c, m.reader.DBType(), dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+				}
 				if m.isOracleDameng() && strings.HasPrefix(o.Columns[i].DataType, "SYSGEO2.") {
 					o.Columns[i].TypeSchema = "SYSGEO2"
 				}
 			}
 			if prepareErr := oraclePrepareErrors[t]; prepareErr != nil {
 				e = fmt.Errorf("目标能力检查: %w", prepareErr)
-			} else if !m.cfg.objectMode() && m.cfg.Content != "data_only" && len(m.cfg.ViewNames) == 0 {
+			} else if e == nil && !m.cfg.objectMode() && m.cfg.Content != "data_only" && len(m.cfg.ViewNames) == 0 {
 				ss, _, e = m.buildCreateTableDDL(ctx, t)
 			}
+		}
+		if m.oracleMySQL != nil && m.oracleMySQL.blocked[t] != nil {
+			e, o.DiagnosticOnly = m.oracleMySQL.blocked[t], true
 		}
 		if e != nil {
 			if m.stopOracleDamengTask(ctx, e) {
@@ -314,7 +332,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	}
 	if want("primary_keys") {
 		finishStage = startRepairPreparationStage(m.log, "收集主键")
-		if values, e := m.reader.GetPrimaryKeys(ctx); e == nil {
+		if values, e := m.sourcePrimaryKeys(ctx); e == nil {
 			for _, v := range values {
 				v.IsPrimary = true
 				addIndex(v)
@@ -332,7 +350,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	}
 	if want("indexes") {
 		finishStage = startRepairPreparationStage(m.log, "收集索引")
-		if values, e := m.reader.GetIndexes(ctx); e == nil {
+		if values, e := m.sourceIndexes(ctx); e == nil {
 			for _, v := range values {
 				addIndex(v)
 			}
@@ -400,11 +418,14 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracleDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL()) {
+	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracleDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL() || m.oracleMySQL != nil) {
 		finishStage = startRepairPreparationStage(m.log, "收集外键")
-		if values, e := m.reader.GetForeignKeys(ctx); e == nil {
+		if values, e := m.sourceForeignKeys(ctx); e == nil {
 			for _, v := range values {
 				if !selected[v.TableName] {
+					continue
+				}
+				if m.oracleMySQL != nil && !m.oracleMySQLForeignKeyInScope(v) {
 					continue
 				}
 				src, ref, originalName := v.TableName, v.RefTable, v.ConstraintName
@@ -803,7 +824,20 @@ func (m *Migrator) repairTable(ctx context.Context, t string, ss []dialect.State
 		return err
 	})
 }
-func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) error {
+func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) (err error) {
+	defer func() {
+		if s := m.oracleMySQL; s != nil {
+			key := m.oracleMySQLTargetKey(v.TableName)
+			if err != nil {
+				s.keyFailed[key] = true
+			} else if v.IsPrimary || v.IsUnique {
+				if s.createdKeys[key] == nil {
+					s.createdKeys[key] = map[string]bool{}
+				}
+				s.createdKeys[key][repair.Hash(v.Columns)] = true
+			}
+		}
+	}()
 	k := "index"
 	if v.IsPrimary {
 		k = "primary_key"
@@ -1138,6 +1172,10 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 		}
 	}
 	for i := range r.objects {
+		if s := m.oracleMySQL; s != nil && r.objects[i].Kind == "table" && s.blocked[r.objects[i].SourceName] != nil {
+			r.objects[i].DiagnosticOnly = true
+			r.objects[i].Status = "blocked"
+		}
 		r.objects[i].OriginalStatus = r.objects[i].Status
 		r.objects[i].OriginalError = r.objects[i].Error
 	}

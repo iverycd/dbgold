@@ -66,6 +66,59 @@ function page(overrides = {}) {
 }
 const flush = async () => { await Vue.nextTick(); await Promise.resolve(); await Vue.nextTick() }
 
+test('Oracle source schemas load through the migration-unit API in all workflows without using the service name as a schema', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const requests = []
+    const schemas = ['APP', 'MixedCaseSchema', 'EMPTY_APP']
+    const { p, calls } = scope.run(() => page({ connections: {
+      listConnectionDatabases: async id => { requests.push(id); return { data: schemas } },
+    } }))
+    Object.assign(p.connections.value[0], { db_type: 'oracle', database: 'ORCLPDB1', username: 'LOGIN_USER' })
+    await flush()
+    for (const [state, load] of [
+      [p.dataMigrate, p.loadSrcDatabases],
+      [p.viewMigrate, p.vmLoadSrcDatabases],
+      [p.objMigrate, p.omLoadSrcDatabases],
+    ]) {
+      state.srcDatabase = 'ORCLPDB1'
+      await load(1)
+      assert.deepEqual(Array.from(state.srcDatabases), schemas)
+      assert.equal(state.srcDatabase, '')
+      assert.equal(p.connections.value[0].database, 'ORCLPDB1')
+    }
+    assert.deepEqual(requests, [1, 1, 1])
+    assert.equal(calls.schemas.length, 0)
+    assert.equal(calls.errors.length, 0)
+  } finally { scope.stop() }
+})
+
+test('Oracle source schema failures show the backend error and clear previous schema selections in all workflows', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const backendError = '读取 Oracle Schema 列表超时，请检查网络连接和数据库负载'
+    const { p, calls } = scope.run(() => page({ connections: {
+      listConnectionDatabases: async () => {
+        throw { response: { data: { error: backendError } }, message: 'Request failed with status code 504' }
+      },
+    } }))
+    Object.assign(p.connections.value[0], { db_type: 'oracle', database: 'ORCLPDB1' })
+    await flush()
+    for (const [state, load] of [
+      [p.dataMigrate, p.loadSrcDatabases],
+      [p.viewMigrate, p.vmLoadSrcDatabases],
+      [p.objMigrate, p.omLoadSrcDatabases],
+    ]) {
+      state.srcDatabase = 'PREVIOUS_APP'
+      state.srcDatabases = ['PREVIOUS_APP']
+      await load(1)
+      assert.equal(state.srcDatabase, '')
+      assert.equal(state.srcDatabases.length, 0)
+    }
+    assert.deepEqual(calls.errors, Array(3).fill(`获取源 Schema 失败: ${backendError}`))
+  } finally { scope.stop() }
+})
+
 test('saved source database synchronizes all workflows and discards old selections and preflight', async () => {
   const scope = Vue.effectScope()
   try {

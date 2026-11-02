@@ -68,6 +68,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	oracleMySQL            *oracleMySQLRunState
 	partitionState         *partitionRunState
 	validationTables       []frozenValidationTable
 	validationScopeFrozen  bool
@@ -217,6 +218,7 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.oracleMySQL = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	m.partitionState = nil
@@ -274,6 +276,9 @@ func (m *Migrator) logPreparationComplete(ctx context.Context) {
 func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	if m.isDamengNative() {
 		return m.runDamengNative(ctx)
+	}
+	if m.oracleMySQLSchemaMode() {
+		return m.runOracleMySQL(ctx)
 	}
 	m.compatibilityFunctions = nil
 	m.dmSequenceBoundsLogged = nil
@@ -675,7 +680,7 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 		return nil, "", err
 	}
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
-	stmts, err := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, info, m.reader.DBType(), opt, m.objName)
+	stmts, err := m.baseCreateTableStatements(ctx, table, info, opt)
 	if err != nil {
 		return nil, "", err
 	}
@@ -890,7 +895,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	selectedSet := make(map[string]bool, len(tables))
 	for _, t := range tables {
 		selectedSet[t] = true
-		if !m.dmBlocked[t] {
+		if !m.dmBlocked[t] && (m.oracleMySQL == nil || m.oracleMySQL.postEligible[t]) {
 			tableSet[t] = true
 		}
 	}
@@ -928,7 +933,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	}
 
 	if want("primary_keys") {
-		pks, err := m.reader.GetPrimaryKeys(ctx)
+		pks, err := m.sourcePrimaryKeys(ctx)
 		if err != nil {
 			if m.stopOracleDamengTask(ctx, err) {
 				return
@@ -1037,7 +1042,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	}
 
 	if want("indexes") {
-		indexes, err := m.reader.GetIndexes(ctx)
+		indexes, err := m.sourceIndexes(ctx)
 		if err != nil {
 			if m.stopOracleDamengTask(ctx, err) {
 				return
@@ -1150,9 +1155,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// 外键:
 	// - 非对象模式:沿用原逻辑,include 模式跳过(引用表可能不在迁移范围内)
 	// - 对象模式:用户明确要求迁外键(want),引用表视为已存在,不受 include 限制
-	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng() || m.isOracleDameng())
+	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng() || m.isOracleDameng() || m.oracleMySQL != nil)
 	if migrateFK {
-		fks, err := m.reader.GetForeignKeys(ctx)
+		fks, err := m.sourceForeignKeys(ctx)
 		if err != nil {
 			if m.stopOracleDamengTask(ctx, err) {
 				return
@@ -1162,6 +1167,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		} else {
 			filtered := make([]source.FKInfo, 0, len(fks))
 			for _, fk := range fks {
+				if m.oracleMySQL != nil && !m.oracleMySQLForeignKeyInScope(fk) {
+					continue
+				}
 				if m.isOracleDameng() && !selectedSet[fk.TableName] {
 					continue
 				}
@@ -1174,6 +1182,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, fk := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if s := m.oracleMySQL; s != nil && (!s.postEligible[fk.TableName] || !s.postEligible[fk.RefTable] || s.keyFailed[m.oracleMySQLTargetKey(m.objName(fk.TableName))] || s.keyFailed[m.oracleMySQLTargetKey(m.objName(fk.RefTable))] || !m.oracleMySQLReferenceKeyCreated(fk)) {
+					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键两端表的数据或关联键未成功迁移")
+					continue
 				}
 				if s := m.partitionState; s != nil && (s.blocked[fk.TableName] || s.blocked[fk.RefTable]) {
 					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖未通过分区预检的表")

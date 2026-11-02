@@ -250,6 +250,12 @@ func ListConnectionDatabases(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if conn.DBType == "oracle" {
+		// Source migration units are schemas, not the Oracle service name.
+		// Listing them must not initialize a migration reader or inspect every table.
+		listOracleSchemas(c, conn)
+		return
+	}
 	var reader source.Reader
 	switch conn.DBType {
 	case "mysql":
@@ -258,8 +264,6 @@ func ListConnectionDatabases(c *gin.Context) {
 		reader, err = source.NewSQLServer(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "dameng":
 		reader, err = source.NewDaMeng(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
-	case "oracle":
-		reader, err = source.NewOracle(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
 		reader, err = source.NewPostgresProduct(conn.DBType, pgCompatibleDriverName(conn.DBType), buildDSN(conn), "*", source.ConnPoolConfig{})

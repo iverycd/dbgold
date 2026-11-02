@@ -80,6 +80,7 @@ func partitionSourceReader(r source.Reader) source.Reader {
 // PreflightPartitions performs metadata and target catalog reads only. Run
 // builds its own plan; no client-supplied SQL or readiness is trusted.
 func (m *Migrator) PreflightPartitions(ctx context.Context) *PartitionPreflight {
+	m.oracleMySQL = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	m.partitionState = nil
@@ -269,7 +270,7 @@ func (m *Migrator) compilePartitionTable(ctx context.Context, t *PartitionTableR
 	if m.isPGMySQL() {
 		base, err = m.pgPartitionBaseStatements(ctx, t.SourceTable)
 	} else {
-		base, err = m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, baseInfo, m.reader.DBType(), dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
+		base, err = m.baseCreateTableStatements(ctx, t.SourceTable, baseInfo, dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
 	}
 	if err != nil {
 		return err
