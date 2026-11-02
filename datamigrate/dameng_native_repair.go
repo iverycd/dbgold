@@ -90,7 +90,8 @@ func (m *Migrator) executeNativeDrop(ctx context.Context, w damengnative.Writer,
 	return m.executeNativeSavedUnit(ctx, w, "drop-"+o.ID, o.DropSQL)
 }
 
-func (m *Migrator) executeNativeSavedUnit(ctx context.Context, w damengnative.Writer, id, sql string) error {
+func (m *Migrator) executeNativeSavedUnit(ctx context.Context, w damengnative.Writer, id, sql string) (err error) {
+	defer func() { m.stopMigrationTask(ctx, err) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -264,6 +265,9 @@ func (m *Migrator) collectNativeResults(report *MigrationReport, p *damengnative
 		}
 		if err != nil {
 			state = "failed"
+			if stage := nativeFailureStage(err); stage == "preflight" || stage == "dependency" {
+				state = "blocked"
+			}
 		}
 		if o.Managed {
 			continue
@@ -279,7 +283,7 @@ func (m *Migrator) collectNativeResults(report *MigrationReport, p *damengnative
 			for _, u := range o.Units {
 				ddl = append(ddl, u.SQL)
 			}
-			cat.Items = append(cat.Items, ObjectResult{Name: o.Name, TargetName: o.Name, TargetSchema: o.Schema, Table: o.Table, DDL: strings.Join(ddl, "\n"), Stage: "execute", Error: err.Error()})
+			cat.Items = append(cat.Items, ObjectResult{Name: o.Name, TargetName: o.Name, TargetSchema: o.Schema, Table: o.Table, DDL: strings.Join(ddl, "\n"), Stage: nativeFailureStage(err), Error: err.Error()})
 		}
 	}
 	// Managed inventory entries are represented by their parent's result, while
@@ -316,8 +320,9 @@ func (m *Migrator) collectNativeResults(report *MigrationReport, p *damengnative
 				continue
 			}
 			if state, ok := status[o.ID]; ok {
+				markNativeBlockedRecord(o, states[o.ID])
 				o.Status = state
-				if state == "failed" && o.Error == "" {
+				if (state == "failed" || state == "blocked") && o.Error == "" {
 					o.Error = "原生对象或关联数据未完成"
 				}
 			}

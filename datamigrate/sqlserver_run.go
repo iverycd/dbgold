@@ -43,6 +43,7 @@ func (m *Migrator) sqlServerOptions() error {
 func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	report := newMigrationReport()
 	failGlobal := func(e error) MigrationReport {
+		m.stopMigrationTask(ctx, migrationTaskFailure{err: e})
 		sqlServerResult(&report.Tables, "迁移准备", "", e)
 		m.log.Errorf("SQL Server 迁移准备失败: %v", e)
 		return report
@@ -73,24 +74,71 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	}
 	sort.Strings(tables)
 	m.freezeDataValidation(ctx, tables)
-	names := []string{}
-	for _, t := range tables {
-		names = append(names, m.objName(t))
+	failed := map[string]bool{}
+	blockTable := func(table, stage, ddl string, err error) {
+		if !failed[table] {
+			sqlServerResult(&report.Tables, table, ddl, err)
+			item := &report.Tables.Items[len(report.Tables.Items)-1]
+			item.Stage, item.Table = stage, table
+		}
+		failed[table] = true
+		m.blockMigrationTable(table, stage, err)
 	}
-	if e = inspector.CheckNames(ctx, names); e != nil {
-		return failGlobal(e)
+	for _, t := range tables {
+		if err := m.migrationTableError(t); err != nil {
+			blockTable(t, "preflight", "", err)
+		}
+	}
+	for {
+		names := []string{}
+		for _, t := range tables {
+			if !failed[t] {
+				names = append(names, m.objName(t))
+			}
+		}
+		if e = inspector.CheckNames(ctx, names); e == nil {
+			break
+		}
+		if m.stopMigrationTask(ctx, e) {
+			return report
+		}
+		var issue *target.SQLServerNameError
+		if !errors.As(e, &issue) || len(issue.Names) == 0 {
+			return failGlobal(e)
+		}
+		progress := false
+		for _, t := range tables {
+			if !failed[t] && slices.Contains(issue.Names, m.objName(t)) {
+				blockTable(t, "preflight", "", e)
+				progress = true
+			}
+		}
+		if !progress {
+			return failGlobal(e)
+		}
 	}
 	if count, err := m.reader.GetTriggerCount(ctx); err != nil {
+		if m.stopMigrationTask(ctx, err) {
+			return report
+		}
 		report.Triggers.Total = -1
 	} else {
 		report.Triggers.Total = count
 	}
 	rebuild := !m.cfg.objectMode() && m.cfg.Content != "data_only"
-	failed := map[string]bool{}
 	ddl := map[string][]dialect.Statement{}
 	sourceInfo := map[string]*source.TableDDLInfo{}
 	for _, t := range tables {
+		if ctx.Err() != nil {
+			return report
+		}
+		if failed[t] {
+			continue
+		}
 		info, err := m.sourceTableDDLInfo(ctx, t)
+		if err == nil && (info == nil || len(info.Columns) == 0) {
+			err = fmt.Errorf("表 %s 缺少列元数据", t)
+		}
 		var ss []dialect.Statement
 		if err == nil {
 			ss, err = dia.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{}, m.objName)
@@ -109,6 +157,15 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				cols = append(cols, copy.Columns[i].Name)
 			}
 			err = inspector.CheckNames(ctx, cols)
+			if err != nil {
+				if m.stopMigrationTask(ctx, err) {
+					return report
+				}
+				var issue *target.SQLServerNameError
+				if !errors.As(err, &issue) {
+					return failGlobal(err)
+				}
+			}
 			if err == nil {
 				dia.Tables[copy.TableName] = &copy
 				if !rebuild {
@@ -117,13 +174,16 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			}
 		}
 		if err != nil {
-			failed[t] = true
-			sqlServerResult(&report.Tables, t, "", err)
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
+			blockTable(t, "preflight", "", err)
 			continue
 		}
 		ddl[t] = ss
 	}
 	if rebuild {
+		completed := map[string]bool{}
 		selected := map[string]bool{}
 		for _, t := range tables {
 			if !failed[t] {
@@ -136,13 +196,18 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			if e == nil {
 				break
 			}
+			if m.stopMigrationTask(ctx, e) {
+				return report
+			}
 			var dep *target.SQLServerDependencyError
 			if errors.As(e, &dep) {
+				if !selected[dep.Table] {
+					return failGlobal(e)
+				}
 				delete(selected, dep.Table)
 				for _, t := range tables {
 					if m.objName(t) == dep.Table {
-						failed[t] = true
-						sqlServerResult(&report.Tables, t, "", e)
+						blockTable(t, "dependency", "", e)
 					}
 				}
 				continue
@@ -156,14 +221,25 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			}
 		}
 		for _, t := range tables {
-			if failed[t] {
+			if ctx.Err() != nil {
+				return report
+			}
+			if failed[t] || m.migrationTableBlocked(t) {
+				failed[t] = true
 				continue
 			}
 			e = m.repairTable(ctx, t, ddl[t])
-			sqlServerResult(&report.Tables, t, dialect.JoinSQL(ddl[t]), e)
 			if e != nil {
-				failed[t] = true
+				if m.stopMigrationTask(ctx, e) {
+					return report
+				}
+				blockTable(t, "execute", dialect.JoinSQL(ddl[t]), e)
+				if !m.protectRetainedMigrationTables(ctx, tables, &report, completed) {
+					return report
+				}
 			} else {
+				completed[t] = true
+				sqlServerResult(&report.Tables, t, dialect.JoinSQL(ddl[t]), nil)
 				m.log.DDLf("创建表 %s ... OK", t)
 			}
 		}
@@ -201,6 +277,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		m.logPreparationComplete(ctx)
 		migrateOne := func(t string) {
 			r := result{table: t}
+			if ctx.Err() != nil {
+				return
+			}
 			if m.cfg.Content == "data_only" {
 				r.before, r.err = m.writer.CountRows(ctx, m.objName(t))
 			}
@@ -229,18 +308,28 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			if r.err == nil {
 				r.dst, r.err = m.writer.CountRows(ctx, m.objName(t))
 			}
+			m.stopMigrationTask(ctx, r.err)
 			out <- r
 		}
+	dataLoop:
 		for _, t := range dataTables {
-			if failed[t] {
+			if failed[t] || m.migrationTableBlocked(t) {
 				continue
+			}
+			if ctx.Err() != nil {
+				break
 			}
 			if m.cfg.Content == "data_only" {
 				migrateOne(t)
 				continue
 			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				break dataLoop
+			}
 			wg.Add(1)
-			go func(t string) { defer wg.Done(); sem <- struct{}{}; defer func() { <-sem }(); migrateOne(t) }(t)
+			go func(t string) { defer wg.Done(); defer func() { <-sem }(); migrateOne(t) }(t)
 		}
 		wg.Wait()
 		close(out)
@@ -248,11 +337,15 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			sqlServerResult(&report.Data, r.table, "", r.err)
 			if r.err != nil {
 				dataFailed[r.table] = true
+				m.blockMigrationTable(r.table, "data", r.err)
 			} else {
 				report.RowCounts = append(report.RowCounts, TableRowCount{Table: r.table, Src: r.src, Dst: r.dst - r.before, Match: r.src == r.dst-r.before})
 			}
 		}
 		sort.Slice(report.RowCounts, func(i, j int) bool { return report.RowCounts[i].Table < report.RowCounts[j].Table })
+	}
+	if ctx.Err() != nil {
+		return report
 	}
 	want := func(kind string) bool {
 		if m.cfg.objectMode() {
@@ -290,10 +383,16 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			indexes, err = m.reader.GetIndexes(ctx)
 		}
 		if err != nil {
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
 			recordMetadataFailure(category, err)
 			continue
 		}
 		for _, i := range indexes {
+			if ctx.Err() != nil {
+				return report
+			}
 			if !eligible(i.TableName) {
 				continue
 			}
@@ -312,6 +411,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				}
 				err = m.repairIndex(ctx, i)
 			}
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
 			sqlServerResult(category, i.IndexName, dialect.JoinSQL(ss), err)
 			if err != nil {
 				item := &category.Items[len(category.Items)-1]
@@ -323,9 +425,15 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if want("sequences") || !m.cfg.objectMode() && m.cfg.Content == "data_only" {
 		seqs, err := m.reader.GetSequences(ctx)
 		if err != nil {
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
 			recordMetadataFailure(&report.Sequences, err)
 		} else {
 			for _, s := range seqs {
+				if ctx.Err() != nil {
+					return report
+				}
 				if !eligible(s.TableName) {
 					continue
 				}
@@ -337,6 +445,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				if err == nil {
 					err = m.repairSequence(ctx, s, "")
 				}
+				if m.stopMigrationTask(ctx, err) {
+					return report
+				}
 				sqlServerResult(&report.Sequences, s.TableName+"."+s.ColumnName, dialect.JoinSQL(ss), err)
 			}
 		}
@@ -344,9 +455,15 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if want("foreign_keys") {
 		fks, err := m.reader.GetForeignKeys(ctx)
 		if err != nil {
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
 			recordMetadataFailure(&report.Constraints, err)
 		} else {
 			for _, f := range fks {
+				if ctx.Err() != nil {
+					return report
+				}
 				if !eligible(f.TableName) {
 					continue
 				}
@@ -370,6 +487,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				if err == nil {
 					err = m.repairFK(ctx, f)
 				}
+				if m.stopMigrationTask(ctx, err) {
+					return report
+				}
 				sqlServerResult(&report.Constraints, f.ConstraintName, dialect.JoinSQL(ss), err)
 			}
 		}
@@ -377,9 +497,15 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if want("comments") {
 		comments, err := m.reader.GetComments(ctx)
 		if err != nil {
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
 			recordMetadataFailure(&report.Comments, err)
 		} else {
 			for _, c := range comments {
+				if ctx.Err() != nil {
+					return report
+				}
 				if !eligible(c.TableName) {
 					continue
 				}
@@ -389,6 +515,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				ss := dia.CommentStatements(m.cfg.TargetSchema, c)
 				if err == nil {
 					err = m.repairComment(ctx, c)
+				}
+				if m.stopMigrationTask(ctx, err) {
+					return report
 				}
 				sqlServerResult(&report.Comments, c.TableName+"."+c.ColumnName, dialect.JoinSQL(ss), err)
 			}

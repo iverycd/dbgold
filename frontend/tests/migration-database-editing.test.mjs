@@ -1,3 +1,4 @@
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -39,6 +40,7 @@ function page(overrides = {}) {
         case '@arco-design/web-vue': return { Message: { error: msg => calls.errors.push(msg), success() {}, warning() {} } }
         case '@/utils/connectionDatabase': return connectionDatabaseUtils
         case '@/composables/connectionDatabaseEditors': return editors
+        case '@/utils/migrationReport': return migrationReportUtils
         case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
         case '@/api/connections': return connectionAPI
         case '@/api/schema': return { downloadRoutines: async (...args) => calls.exports.push(args) }

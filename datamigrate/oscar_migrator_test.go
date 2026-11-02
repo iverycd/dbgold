@@ -157,13 +157,17 @@ func TestOscarMigratorUppercaseAcrossAllPhases(t *testing.T) {
 	}
 }
 
-func TestOscarNamingConflictsAbortBeforeTargetWrites(t *testing.T) {
+func TestOscarNamingConflictsIsolateAffectedTables(t *testing.T) {
 	for _, conflict := range []string{"table", "column", "index", "sequence", "view", "foreign key"} {
 		t.Run(conflict, func(t *testing.T) {
 			r := newOscarFixture()
+			r.tables = append(r.tables, "Audit")
+			r.ddl["Audit"] = &source.TableDDLInfo{TableName: "Audit", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}
+			r.rows["Audit"] = [][]interface{}{{int64(1)}}
 			switch conflict {
 			case "table":
 				r.tables = append(r.tables, "ORDERS")
+				r.ddl["ORDERS"] = &source.TableDDLInfo{TableName: "ORDERS", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}
 			case "column":
 				r.ddl["Orders"].Columns = append(r.ddl["Orders"].Columns, source.ColumnInfo{Name: "ID", DataType: "int"})
 			case "index":
@@ -184,9 +188,27 @@ func TestOscarNamingConflictsAbortBeforeTargetWrites(t *testing.T) {
 				failures = append(failures, category.Items...)
 			}
 			require.NotEmpty(t, failures)
-			require.Contains(t, failures[0].Error, "对象名冲突")
-			require.Empty(t, w.sql)
-			require.Empty(t, w.copied)
+			require.Contains(t, failures[0].Error, "冲突")
+			ddl := strings.Join(w.sql, "\n")
+			require.Contains(t, ddl, `CREATE TABLE "AUDIT"`)
+			healthy := []string{"AUDIT"}
+			switch conflict {
+			case "view":
+				healthy = append(healthy, "ORDERS", "ITEMS")
+				require.Equal(t, 2, report.Views.Failed)
+				require.NotContains(t, ddl, `CREATE OR REPLACE VIEW "VORDERS"`)
+			case "foreign key":
+				healthy = append(healthy, "ORDERS")
+				require.NotContains(t, ddl, `CREATE TABLE "ITEMS"`)
+			default:
+				healthy = append(healthy, "ITEMS")
+				require.NotContains(t, ddl, `CREATE TABLE "ORDERS"`)
+				require.NotContains(t, ddl, `DROP TABLE IF EXISTS "ORDERS"`)
+			}
+			require.ElementsMatch(t, healthy, w.copied)
+			require.ElementsMatch(t, healthy, w.counted)
+			require.Equal(t, len(healthy), report.Tables.Success)
+			require.Equal(t, len(healthy), report.Data.Success)
 		})
 	}
 }
@@ -198,8 +220,14 @@ func TestOscarViewConflictWithoutTablesIsReported(t *testing.T) {
 	m, _ := newTestMigrator(r, w)
 	m.cfg.TargetDBType = "oscar"
 	report := m.Run(context.Background())
-	require.Equal(t, 1, report.Views.Failed)
-	require.Equal(t, "FOO", report.Views.Items[0].Name)
+	require.Equal(t, 2, report.Views.Failed)
+	require.Len(t, report.Views.Items, 2)
+	for _, item := range report.Views.Items {
+		require.Equal(t, "FOO", item.Name)
+		require.Equal(t, "preflight", item.Stage)
+		require.Contains(t, item.Error, "view Foo")
+		require.Contains(t, item.Error, "view FOO")
+	}
 	require.Empty(t, w.sql)
 }
 
@@ -228,7 +256,16 @@ func TestOscarPreflightFailsClosedAndDetectsCrossObjectCollisions(t *testing.T) 
 		report := m.Run(context.Background())
 		require.Equal(t, 1, report.Sequences.Failed)
 		require.Contains(t, report.Sequences.Items[0].Error, "table SEQ_ORDERS_ID")
-		require.Empty(t, w.sql)
+		require.Contains(t, report.Sequences.Items[0].Error, "sequence Orders.id")
+		require.Equal(t, 2, report.Tables.Failed)
+		require.Equal(t, 1, report.Tables.Success)
+		require.ElementsMatch(t, []string{"ITEMS"}, w.copied)
+		ddl := strings.Join(w.sql, "\n")
+		require.Contains(t, ddl, `CREATE TABLE "ITEMS"`)
+		require.NotContains(t, ddl, `DROP TABLE IF EXISTS "ORDERS"`)
+		require.NotContains(t, ddl, `CREATE TABLE "ORDERS"`)
+		require.NotContains(t, ddl, `CREATE TABLE "SEQ_ORDERS_ID"`)
+		require.NotContains(t, ddl, `CREATE SEQUENCE`)
 	})
 }
 
@@ -271,4 +308,36 @@ func TestOscarViewOnlyConflictsAndOriginalSelection(t *testing.T) {
 	require.Len(t, result, 2)
 	require.NotEmpty(t, result[0].Error)
 	require.Empty(t, w.sql)
+}
+
+type failingOscarTableMetadataReader struct {
+	*oscarFixtureReader
+	table string
+}
+
+func (r failingOscarTableMetadataReader) GetTableDDLInfo(ctx context.Context, table string) (*source.TableDDLInfo, error) {
+	if table == r.table {
+		return nil, fmt.Errorf("table %s metadata denied", table)
+	}
+	return r.oscarFixtureReader.GetTableDDLInfo(ctx, table)
+}
+
+func TestOscarLocalMetadataFailureContinuesHealthyTablesAndViews(t *testing.T) {
+	r, w := newOscarFixture(), &recordingOscarWriter{}
+	r.views = append(r.views, source.ViewInfo{ViewName: "vItems", Definition: `SELECT id FROM Items`})
+	m, _ := newTestMigrator(failingOscarTableMetadataReader{oscarFixtureReader: r, table: "Orders"}, w)
+	m.cfg.TargetDBType = "oscar"
+	report := m.Run(context.Background())
+	require.Equal(t, 1, report.Tables.Failed)
+	require.Equal(t, 1, report.Tables.Success)
+	require.Equal(t, 1, report.Data.Success)
+	require.Equal(t, 1, report.Views.Success)
+	require.Equal(t, 1, report.Views.Failed)
+	require.Contains(t, report.Tables.Items[0].Error, "table Orders metadata denied")
+	require.ElementsMatch(t, []string{"ITEMS"}, w.copied)
+	ddl := strings.Join(w.sql, "\n")
+	require.Contains(t, ddl, `CREATE TABLE "ITEMS"`)
+	require.Contains(t, ddl, `"VITEMS"`)
+	require.NotContains(t, ddl, `CREATE TABLE "ORDERS"`)
+	require.NotContains(t, ddl, `"VORDERS"`)
 }

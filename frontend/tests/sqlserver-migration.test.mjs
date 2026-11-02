@@ -1,3 +1,4 @@
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
@@ -31,7 +32,8 @@ test('SQL Server is selectable in all three forms and submits fixed target defau
       case '@arco-design/web-vue': return { Message: { error: message => assert.fail(message), success() {}, warning() {} }, Modal: {} }
       case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
-      case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
+      case '@/utils/migrationReport': return migrationReportUtils
+        case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
       case '@/api/connections': return { listConnectionSchemas: async id => { schemaRequests.push(id); return { data: ['dbo', 'APP'] } } }
       case '@/api/migration': return { startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(), createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }) }
       default: return {}

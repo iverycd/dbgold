@@ -54,13 +54,18 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 	scanner, supported := validationSource(m.reader)
 	for _, table := range tables {
 		frozen := frozenValidationTable{name: table}
-		if !supported {
+		if err := m.migrationTableError(table); err != nil {
+			frozen.err = err
+		} else if ctx.Err() != nil {
+			frozen.err = context.Cause(ctx)
+		} else if !supported {
 			frozen.err = fmt.Errorf("源库 %s 不支持原值内容读取", m.reader.DBType())
 		} else {
 			frozen.metadata, frozen.err = scanner.DescribeValidationTable(ctx, table)
 			frozen.metadata.Columns = slices.Clone(frozen.metadata.Columns)
 			frozen.metadata.PrimaryKey = slices.Clone(frozen.metadata.PrimaryKey)
 		}
+		m.stopMigrationTask(ctx, frozen.err)
 		if frozen.err == nil {
 			m.freezePartitionAppendContent(ctx, &frozen)
 		}
@@ -102,6 +107,8 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 		switch {
 		case ctx.Err() != nil:
 			table.Status, table.Error = validation.StatusCancelled, "任务已取消，内容校验未完成"
+		case m.migrationTableBlocked(frozen.name):
+			table.Status, table.Error = validation.StatusError, "该表迁移失败，内容校验未执行: "+m.migrationTableError(frozen.name).Error()
 		case !srcOK || !dstOK:
 			table.Status, table.Error = validation.StatusUnsupported, "源库或目标库不支持原值内容读取"
 		case frozen.err != nil:

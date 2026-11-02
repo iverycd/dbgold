@@ -114,6 +114,7 @@ type AutoRepair struct {
 	Table       string `json:"table"`
 	TargetTable string `json:"target_table"`
 	Source      string `json:"source"`
+	SourceType  string `json:"source_type,omitempty"`
 	Target      string `json:"target"`
 	Reason      string `json:"reason"`
 	Status      string `json:"status"` // applied | reused

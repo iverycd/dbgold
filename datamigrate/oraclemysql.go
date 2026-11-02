@@ -403,6 +403,9 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 		}
 		activeTables = append(activeTables, table)
 		name := m.oracleMySQLTargetKey(m.objName(table))
+		if e := validateMySQLObjectName(m.objName(table), true); e != nil {
+			s.blocked[table] = e
+		}
 		if previous, exists := names[name]; exists && previous != table {
 			s.blocked[table], s.blocked[previous] = fmt.Errorf("目标表名称与 %s 冲突", previous), fmt.Errorf("目标表名称与 %s 冲突", table)
 		}
@@ -412,6 +415,20 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 			continue
 		}
 		stmts, _, e := m.buildCreateTableDDL(ctx, table)
+		if e != nil && m.stopMigrationTask(ctx, e) {
+			fatal("源表结构预检", e)
+			return
+		}
+		if e == nil {
+			if info, e2 := m.sourceTableDDLInfo(ctx, table); e2 == nil && info != nil {
+				for _, col := range info.Columns {
+					if nameErr := validateMySQLObjectName(m.objName(col.Name), false); nameErr != nil {
+						e = nameErr
+						break
+					}
+				}
+			}
+		}
 		if e != nil {
 			s.blocked[table] = e
 		} else {
@@ -430,6 +447,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 	ready := oracleMySQLExecutableTables(schema, names, s.blocked, s.targetSnapshot, s.lowerCaseNames)
 	for _, table := range activeTables {
 		if e := s.blocked[table]; e != nil {
+			m.blockMigrationTable(table, "preflight", e)
 			report.Tables.Failed++
 			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "preflight", Error: e.Error()})
 			m.log.Errorf("表 %s 预检未通过，未执行 DROP: %v", table, e)
@@ -506,16 +524,30 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 		if err := m.repairTable(ctx, table, stmts); err != nil {
 			report.Tables.Failed++
 			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "execute", DDL: dialect.JoinSQL(stmts), Error: err.Error()})
-			m.log.Errorf("表 %s DROP/CREATE 失败，停止后续重建: %v；SQL: %s", table, err, dialect.JoinSQL(stmts))
-			m.restoreOracleMySQLDependencies(target)
-			return
+			m.blockMigrationTable(table, "execute", err)
+			s.blocked[table] = err
+			m.log.Errorf("表 %s DROP/CREATE 失败，跳过该表继续迁移: %v；SQL: %s", table, err, dialect.JoinSQL(stmts))
+			if m.stopMigrationTask(ctx, err) {
+				m.restoreOracleMySQLDependencies(target)
+				return
+			}
+			continue
 		}
 		report.Tables.Success++
 		s.postEligible[table] = true
 		m.log.DDLf("创建表 %s ... OK", table)
 		if p := s.plans[table]; p != nil {
 			for _, column := range p.PromotedColumns {
-				report.AutoRepairs = append(report.AutoRepairs, AutoRepair{Type: "oracle_mysql_longtext", Table: table, TargetTable: m.objName(table), Source: column, Target: m.objName(column) + " LONGTEXT", Reason: "整表声明行宽超过 MySQL 65535 字节上限", Status: "applied"})
+				sourceType := ""
+				if info, err := m.sourceTableDDLInfo(ctx, table); err == nil && info != nil {
+					for _, col := range info.Columns {
+						if col.Name == column {
+							sourceType = source.FormatColumnType(col)
+							break
+						}
+					}
+				}
+				report.AutoRepairs = append(report.AutoRepairs, AutoRepair{SourceType: sourceType, Type: "oracle_mysql_longtext", Table: table, TargetTable: m.objName(table), Source: column, Target: m.objName(column) + " LONGTEXT", Reason: "整表声明行宽超过 MySQL 65535 字节上限", Status: "applied"})
 			}
 		}
 	}
@@ -531,6 +563,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 	if ctx.Err() != nil {
 		return
 	}
+	m.finalizeMySQLDependencies(target)
 	m.logMigrationCompletion("迁移完成：成功 %d 张，失败 %d 张", report.Tables.Success, report.Tables.Failed+report.Data.Failed)
 	return
 }
@@ -584,7 +617,13 @@ func (m *Migrator) copyOracleMySQLTables(ctx context.Context, tables []string, r
 		report.Data.Success++
 		m.markDataValidationCopied(table)
 		src, se := m.reader.CountRows(ctx, table)
+		if m.stopMigrationTask(ctx, se) {
+			return
+		}
 		dst, de := m.writer.CountRows(ctx, m.objName(table))
+		if m.stopMigrationTask(ctx, de) {
+			return
+		}
 		rc := TableRowCount{Table: m.objName(table), Src: src, Dst: dst, Match: se == nil && de == nil && src == dst}
 		report.RowCounts = append(report.RowCounts, rc)
 		if !rc.Match {
@@ -726,5 +765,32 @@ func (m *Migrator) restoreOracleMySQLDependencies(w oracleMySQLTarget) {
 			continue
 		}
 		_ = m.executeOracleMySQLDependency(ctx, w, i, true)
+	}
+}
+
+// Healthy replacement endpoints intentionally use source constraints, never the
+// old target definition. Failed/touched endpoints require manual review.
+func (m *Migrator) finalizeMySQLDependencies(w oracleMySQLTarget) {
+	s := m.oracleMySQL
+	healthy := map[string]bool{}
+	for table, ok := range s.postEligible {
+		if ok {
+			healthy[m.oracleMySQLTargetKey(m.objName(table))] = true
+		}
+	}
+	for i := range s.dependencies {
+		dep := &s.dependencies[i]
+		if dep.DropStatus != "succeeded" || healthy[m.oracleMySQLTargetKey(dep.ForeignKey.Table)] && healthy[m.oracleMySQLTargetKey(dep.ForeignKey.RefTable)] {
+			continue
+		}
+		if s.touched[m.oracleMySQLTargetKey(dep.ForeignKey.Table)] || s.touched[m.oracleMySQLTargetKey(dep.ForeignKey.RefTable)] {
+			dep.RestoreStatus = "blocked"
+			dep.Error = "关联表迁移失败且已尝试重建，未恢复旧约束；请核对记录中的恢复 SQL"
+			_ = m.saveOracleMySQLDependency(i)
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = m.executeOracleMySQLDependency(ctx, w, i, true)
+			cancel()
+		}
 	}
 }

@@ -40,33 +40,49 @@ func (m *Migrator) finalizeDamengNativeEvents(ctx context.Context, report *Migra
 	if len(events) == 0 && len(policies) == 0 {
 		return
 	}
-	if ctx.Err() != nil || report.HasFailures() || len(states) > 0 || !m.nativeReadyForEventActivation() {
-		native.Verification = append(native.Verification, nativeFailure("自动执行策略保持暂停", fmt.Errorf("迁移、对象核验或内容校验未全部完成，未恢复事件触发器启停状态与物化视图刷新策略")))
+	if ctx.Err() != nil || m.nativePersistenceFailed() {
 		return
 	}
 	w := m.writer.(damengnative.Writer)
-	if len(policies) > 0 {
-		if err := m.executeNativePhase(ctx, w, policies, "mv_restore", states); err != nil {
+	blockNativeHistoryGroups(p, states)
+	for _, object := range policies {
+		members := nativePolicyMembers(p, object)
+		if !m.nativeScopeReady(p.Objects, members, states) || !nativePolicyValidated(report, p, members) {
+			if states[object.ID] == nil {
+				states[object.ID] = nativeObjectFailure("dependency", fmt.Errorf("物化视图依赖组未完成核验，自动刷新保持暂停"))
+			}
+			continue
+		}
+		if err := m.executeNativePhase(ctx, w, []damengnative.Object{object}, "mv_restore", states); err != nil {
 			native.Verification = append(native.Verification, nativeFailure("物化视图刷新策略", err))
 			return
+		}
+		if states[object.ID] != nil {
+			continue
 		}
 		verifier, ok := w.(interface {
 			VerifyDamengNativeMaterializedPolicy(context.Context, damengnative.Object) error
 		})
+		var err error
 		if !ok {
-			native.Verification = append(native.Verification, nativeFailure("物化视图刷新策略", fmt.Errorf("写入器缺少原始刷新策略核验能力")))
-			return
+			err = fmt.Errorf("写入器缺少原始刷新策略核验能力")
+		} else {
+			err = verifier.VerifyDamengNativeMaterializedPolicy(ctx, object)
 		}
-		for _, object := range policies {
-			if err := verifier.VerifyDamengNativeMaterializedPolicy(ctx, object); err != nil {
-				err = errors.Join(err, m.markNativePolicyProofFailure(object.ID, err))
-				states[object.ID] = err
-				native.Verification = append(native.Verification, nativeFailure("物化视图刷新策略", err))
+		if err != nil {
+			err = errors.Join(err, m.markNativePolicyProofFailure(object.ID, err))
+			states[object.ID] = nativeObjectFailure("execute", err)
+			native.Verification = append(native.Verification, damengnative.Issue{ObjectID: object.ID, Kind: object.Kind, Name: object.Name, Severity: "error", Reason: err.Error()})
+			if m.stopMigrationTask(ctx, err) {
 				return
 			}
 		}
 	}
 	if len(events) == 0 {
+		return
+	}
+	if report.HasFailures() || len(states) > 0 || !m.nativeReadyForEventActivation() {
+		native.Verification = append(native.Verification, nativeFailure("自动执行策略保持暂停", fmt.Errorf("迁移、对象核验或内容校验未全部完成，未恢复事件触发器启停状态")))
 		return
 	}
 	finalizer, ok := w.(interface {

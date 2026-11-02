@@ -49,6 +49,7 @@ type nativeTestWriter struct {
 	statements       []string
 	copied           [][]any
 	fail             map[string]int
+	executeErrors    map[string]error
 	copyErr          error
 	disable, restore []damengnative.Unit
 	batchSizes       []int
@@ -75,6 +76,9 @@ func (w *nativeTestWriter) ExecuteDamengNative(ctx context.Context, sql string) 
 	if w.fail[sql] > 0 {
 		w.fail[sql]--
 		e = errors.New("dependent object unavailable")
+	}
+	if injected := w.executeErrors[sql]; injected != nil {
+		e = injected
 	}
 	if strings.HasPrefix(sql, "DROP TABLE") || strings.HasPrefix(sql, "TRUNCATE TABLE") {
 		w.copied = nil
@@ -143,14 +147,12 @@ func TestDamengNativeRunPreservesNamesDataAndFrozenUnits(t *testing.T) {
 }
 
 func TestDamengNativePreflightFailuresNeverMutate(t *testing.T) {
-	for _, name := range []string{"conflict", "unknown", "same_schema", "version", "settings", "partial", "metadata"} {
+	for _, name := range []string{"conflict", "same_schema", "version", "settings", "partial", "metadata"} {
 		t.Run(name, func(t *testing.T) {
 			m, r, w := nativeTestMigrator(Config{Mode: "all"})
 			switch name {
 			case "conflict":
 				w.snapshot.Objects = []damengnative.Object{{ID: "existing", Kind: "table", Schema: "Dst", Name: "Mixed", DropSQL: `DROP TABLE "Dst"."Mixed"`}}
-			case "unknown":
-				r.snapshot.Objects = append(r.snapshot.Objects, damengnative.Object{ID: "unknown", Kind: "unsupported", Name: "u", Schema: "Src"})
 			case "same_schema":
 				w.snapshot.Profile = r.snapshot.Profile
 			case "version":

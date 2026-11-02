@@ -116,7 +116,11 @@ func TestDataWriteDiagnosticsReachReportForSerialAndParallelPages(t *testing.T) 
 			require.Contains(t, item.Error, "表 Orders 第 2 页写入失败")
 			require.Contains(t, item.Error, where)
 			require.Contains(t, logs, item.Error)
-			require.Contains(t, logs, "迁移 Orders: 第 3 页 (2 行) ... OK")
+			if parallel == 1 {
+				require.NotContains(t, logs, "迁移 Orders: 第 3 页 (2 行) ... OK")
+			} else {
+				require.Contains(t, logs, "迁移 Orders: 第 3 页 (2 行) ... OK")
+			}
 			require.NotContains(t, logs, "迁移 Orders: 第 2 页 (2 行) ... OK")
 			// The persisted report must retain all diagnostics for later viewing.
 			encoded, err := json.Marshal(report)

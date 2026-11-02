@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -19,13 +20,16 @@ import (
 func (m *Migrator) isOracle() bool { return m.cfg.TargetDBType == "oracle" }
 
 type oracleViewPlan struct {
-	view source.ViewInfo
-	ddl  string
-	deps []string
-	err  error
+	sourceName string
+	view       source.ViewInfo
+	ddl        string
+	deps       []string
+	err        error
+	stage      string
 }
 type oraclePlan struct {
 	tables       []string
+	tableErrors  map[string]error
 	info         map[string]*source.TableDDLInfo
 	ddl          map[string][]dialect.Statement
 	pks, indexes []source.IndexInfo
@@ -77,9 +81,30 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 	}
 	sort.Strings(tables)
 	m.freezeDataValidation(ctx, tables)
-	p := &oraclePlan{tables: tables, info: map[string]*source.TableDDLInfo{}, ddl: map[string][]dialect.Statement{}}
+	p := &oraclePlan{tableErrors: map[string]error{}, tables: tables, info: map[string]*source.TableDDLInfo{}, ddl: map[string][]dialect.Statement{}}
+	rejectTarget := func(targetName string, e error) {
+		for _, t := range tables {
+			if m.objName(t) == targetName {
+				p.tableErrors[t] = e
+				m.blockMigrationTable(t, "preflight", e)
+			}
+		}
+	}
+	viewErrors := map[string]error{}
+	viewSources := map[string][]string{}
+	rejectView := func(targetName string, e error) bool {
+		changed := false
+		for _, name := range viewSources[targetName] {
+			changed = changed || viewErrors[name] == nil
+			viewErrors[name] = e
+			m.blockMigrationObject(ObjectRef{Kind: "view", Name: name}, e)
+		}
+		return changed
+	}
 	selected := map[string]bool{}
 	names := map[string]string{}
+	nameTables := map[string]string{}
+	nameKinds := map[string]string{}
 	objects := []target.OracleObject{}
 	add := func(kind, name, table, origin string) error {
 		if e := dialect.ValidateOracleName(name); e != nil {
@@ -91,9 +116,17 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		}
 		key := ns + "\x00" + name
 		if old, exists := names[key]; exists {
-			return fmt.Errorf("Oracle 名称冲突: %s 与 %s 映射为 %s", old, origin, name)
+			e := fmt.Errorf("Oracle 名称冲突: %s 与 %s 映射为 %s", old, origin, name)
+			rejectTarget(nameTables[key], e)
+			rejectTarget(table, e)
+			if nameKinds[key] == "VIEW" || kind == "VIEW" {
+				rejectView(name, e)
+			}
+			return e
 		}
 		names[key] = origin
+		nameTables[key] = table
+		nameKinds[key] = kind
 		objects = append(objects, target.OracleObject{Kind: kind, Name: name, Table: table})
 		return nil
 	}
@@ -103,61 +136,76 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, err
 		}
 		selected[table] = true
-		if err = add("TABLE", m.objName(table), m.objName(table), table); err != nil {
-			return nil, err
+		nameErr := add("TABLE", m.objName(table), m.objName(table), table)
+		if e := m.migrationTableError(table); e != nil {
+			p.tableErrors[table] = e
+			continue
 		}
-		info, e := m.sourceTableDDLInfo(ctx, table)
-		if e != nil {
-			return nil, fmt.Errorf("读取表 %s: %w", table, e)
-		}
-		if info == nil || len(info.Columns) == 0 {
-			return nil, fmt.Errorf("表 %s 无列元数据", table)
-		}
-		p.info[m.objName(table)] = info
-		colNames := map[string]bool{}
-		for _, c := range info.Columns {
-			name := m.objName(c.Name)
-			if err = dialect.ValidateOracleName(name); err != nil {
-				return nil, fmt.Errorf("表 %s: %w", table, err)
+		tableErr := func() error {
+			if nameErr != nil {
+				return nameErr
 			}
-			if colNames[name] {
-				return nil, fmt.Errorf("表 %s 的列名转大写后冲突: %s", table, name)
+			info, e := m.sourceTableDDLInfo(ctx, table)
+			if e != nil {
+				return fmt.Errorf("读取表 %s: %w", table, e)
 			}
-			colNames[name] = true
-			if !m.cfg.objectMode() {
-				mapped, e := typemap.OracleType(c, m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
-				if e != nil {
-					return nil, fmt.Errorf("表 %s: %w", table, e)
+			if info == nil || len(info.Columns) == 0 {
+				return fmt.Errorf("表 %s 无列元数据", table)
+			}
+			p.info[m.objName(table)] = info
+			colNames := map[string]bool{}
+			for _, c := range info.Columns {
+				name := m.objName(c.Name)
+				if err = dialect.ValidateOracleName(name); err != nil {
+					return fmt.Errorf("表 %s: %w", table, err)
 				}
-				if rebuild {
-					warn := ""
-					switch c.DataType {
-					case "enum", "set":
-						warn = "ENUM/SET 保存为字符串，取值范围约束未迁移"
-					case "varchar", "char":
-						if mapped == "CLOB" || mapped == "NCLOB" {
-							warn = "字符列超过 Oracle 安全容量，使用 " + mapped
+				if colNames[name] {
+					return fmt.Errorf("表 %s 的列名转大写后冲突: %s", table, name)
+				}
+				colNames[name] = true
+				if !m.cfg.objectMode() {
+					mapped, e := typemap.OracleType(c, m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
+					if e != nil {
+						return fmt.Errorf("表 %s: %w", table, e)
+					}
+					if rebuild {
+						warn := ""
+						switch c.DataType {
+						case "enum", "set":
+							warn = "ENUM/SET 保存为字符串，取值范围约束未迁移"
+						case "varchar", "char":
+							if mapped == "CLOB" || mapped == "NCLOB" {
+								warn = "字符列超过 Oracle 安全容量，使用 " + mapped
+							}
+						}
+						if warn != "" {
+							p.warnings = append(p.warnings, valueconv.MigrationWarning{Table: m.objName(table), Column: name, Reason: warn, Count: 1})
+						}
+						if c.Default != nil && (*c.Default == "" || ((c.DataType == "date" || c.DataType == "datetime" || c.DataType == "timestamp") && valueconv.OracleZeroDate(*c.Default))) {
+							p.warnings = append(p.warnings, valueconv.MigrationWarning{Table: m.objName(table), Column: name, Reason: "空字符串/零日期默认值转 NULL", Count: 1})
 						}
 					}
-					if warn != "" {
-						p.warnings = append(p.warnings, valueconv.MigrationWarning{Table: m.objName(table), Column: name, Reason: warn, Count: 1})
-					}
-					if c.Default != nil && (*c.Default == "" || ((c.DataType == "date" || c.DataType == "datetime" || c.DataType == "timestamp") && valueconv.OracleZeroDate(*c.Default))) {
-						p.warnings = append(p.warnings, valueconv.MigrationWarning{Table: m.objName(table), Column: name, Reason: "空字符串/零日期默认值转 NULL", Count: 1})
-					}
 				}
 			}
-		}
-		if rebuild {
-			stmts, e := d.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{CharInLength: true, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
-			if e != nil {
-				return nil, e
+			if rebuild {
+				stmts, e := d.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{CharInLength: true, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
+				if e != nil {
+					return e
+				}
+				stmts, e = m.partitionStatements(table, stmts)
+				if e != nil {
+					return e
+				}
+				p.ddl[table] = stmts
 			}
-			stmts, e = m.partitionStatements(table, stmts)
-			if e != nil {
-				return nil, e
+			return nil
+		}()
+		if tableErr != nil {
+			if m.stopMigrationTask(ctx, tableErr) {
+				return nil, tableErr
 			}
-			p.ddl[table] = stmts
+			p.tableErrors[table] = tableErr
+			m.blockMigrationTable(table, "preflight", tableErr)
 		}
 	}
 	// Tables are names to validate in every mode, but only rebuilt tables are DDL.
@@ -179,10 +227,10 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			i = oracleIndexNames(i, m.objName)
 			p.pks = append(p.pks, i)
 			if e = add("CONSTRAINT", d.IndexName(i), i.TableName, "主键 "+i.TableName); e != nil {
-				return nil, e
+				rejectTarget(i.TableName, e)
 			}
 			if e = add("INDEX", d.IndexName(i), i.TableName, "主键索引 "+i.TableName); e != nil {
-				return nil, e
+				rejectTarget(i.TableName, e)
 			}
 		}
 	}
@@ -198,7 +246,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			i = oracleIndexNames(i, m.objName)
 			p.indexes = append(p.indexes, i)
 			if e = add("INDEX", d.IndexName(i), i.TableName, "索引 "+i.TableName+"."+i.IndexName); e != nil {
-				return nil, e
+				rejectTarget(i.TableName, e)
 			}
 		}
 	}
@@ -213,14 +261,15 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			}
 			s.TableName, s.ColumnName = m.objName(s.TableName), m.objName(s.ColumnName)
 			if _, e = dialect.OracleSequenceStart(s); e != nil {
-				return nil, e
+				rejectTarget(s.TableName, e)
+				continue
 			}
 			p.sequences = append(p.sequences, s)
 			if e = add("SEQUENCE", d.SequenceName(s), s.TableName, "自增 "+s.TableName+"."+s.ColumnName); e != nil {
-				return nil, e
+				rejectTarget(s.TableName, e)
 			}
 			if e = add("TRIGGER", d.TriggerName(s), s.TableName, "自增触发器 "+s.TableName+"."+s.ColumnName); e != nil {
-				return nil, e
+				rejectTarget(s.TableName, e)
 			}
 		}
 	}
@@ -241,7 +290,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			f.RefColumns = oracleNames(f.RefColumns, m.objName)
 			p.fks = append(p.fks, f)
 			if e = add("CONSTRAINT", d.ForeignKeyName(f), f.TableName, "外键 "+f.TableName+"."+f.ConstraintName); e != nil {
-				return nil, e
+				rejectTarget(f.TableName, e)
 			}
 		}
 	}
@@ -262,25 +311,35 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 	}
 	if rebuild {
 		for _, index := range append(slices.Clone(p.pks), p.indexes...) {
-			if index.Unsupported != "" {
-				return nil, fmt.Errorf("表 %s 索引 %s: %s", index.TableName, index.IndexName, index.Unsupported)
+			if m.migrationTargetTableError(index.TableName) != nil {
+				continue
 			}
-			for _, column := range p.info[index.TableName].Columns {
+			if index.Unsupported != "" {
+				rejectTarget(index.TableName, fmt.Errorf("表 %s 索引 %s: %s", index.TableName, index.IndexName, index.Unsupported))
+				continue
+			}
+			info := p.info[index.TableName]
+			if info == nil {
+				rejectTarget(index.TableName, fmt.Errorf("表 %s 无列元数据，未检查索引 %s", index.TableName, index.IndexName))
+				continue
+			}
+			for _, column := range info.Columns {
 				if !slices.Contains(index.Columns, m.objName(column.Name)) {
 					continue
 				}
 				mapped, e := typemap.OracleType(column, m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
 				if e != nil {
-					return nil, e
+					rejectTarget(index.TableName, e)
+					continue
 				}
 				if mapped == "CLOB" || mapped == "NCLOB" || mapped == "BLOB" {
-					return nil, fmt.Errorf("表 %s 列 %s 映射为 %s，无法等价创建索引 %s", index.TableName, column.Name, mapped, index.IndexName)
+					rejectTarget(index.TableName, fmt.Errorf("表 %s 列 %s 映射为 %s，无法等价创建索引 %s", index.TableName, column.Name, mapped, index.IndexName))
 				}
 			}
 		}
 		for _, foreignKey := range p.fks {
 			if e := dialect.ValidateOracleForeignKey(foreignKey); e != nil {
-				return nil, fmt.Errorf("表 %s 外键 %s: %w", foreignKey.TableName, foreignKey.ConstraintName, e)
+				rejectTarget(foreignKey.TableName, fmt.Errorf("表 %s 外键 %s: %w", foreignKey.TableName, foreignKey.ConstraintName, e))
 			}
 		}
 	}
@@ -290,17 +349,29 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, e
 		}
 		for _, v := range views {
+			viewSources[m.objName(v.ViewName)] = append(viewSources[m.objName(v.ViewName)], v.ViewName)
+		}
+		for _, v := range views {
 			if e = validateOracleViewColumns(v, m.objName); e != nil {
-				return nil, e
+				rejectView(m.objName(v.ViewName), e)
 			}
 			if e = add("VIEW", m.objName(v.ViewName), "", "视图 "+v.ViewName); e != nil {
-				return nil, e
+				rejectView(m.objName(v.ViewName), e)
+				continue
 			}
 			for _, column := range v.Columns {
 				objects[len(objects)-1].Columns = append(objects[len(objects)-1].Columns, m.objName(column.Name))
 			}
 		}
 		p.views = m.planOracleViews(views)
+		for i := range p.views {
+			if p.views[i].err != nil {
+				rejectView(p.views[i].view.ViewName, p.views[i].err)
+			}
+			if e := viewErrors[p.views[i].sourceName]; e != nil {
+				p.views[i].err = e
+			}
+		}
 		if m.cfg.Mode == "exclude" {
 			excluded := map[string]bool{}
 			for _, t := range all {
@@ -321,8 +392,44 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 	if !ok {
 		return nil, fmt.Errorf("Oracle Writer 缺少目标预检能力")
 	}
-	if err = inspector.PreflightOracle(ctx, p.info, objects, p.sequences, rebuild, m.cfg.Content == "data_only"); err != nil {
-		return nil, err
+	for {
+		healthyInfo := map[string]*source.TableDDLInfo{}
+		for name, info := range p.info {
+			if m.migrationTargetTableError(name) == nil {
+				healthyInfo[name] = info
+			}
+		}
+		healthyObjects := slices.DeleteFunc(slices.Clone(objects), func(o target.OracleObject) bool {
+			return o.Table != "" && m.migrationTargetTableError(o.Table) != nil || o.Kind == "VIEW" && len(viewSources[o.Name]) > 0 && viewErrors[viewSources[o.Name][0]] != nil
+		})
+		healthySequences := slices.DeleteFunc(slices.Clone(p.sequences), func(seq source.SequenceInfo) bool { return m.migrationTargetTableError(seq.TableName) != nil })
+		if len(healthyInfo) == 0 && len(healthyObjects) == 0 {
+			break
+		}
+		err = inspector.PreflightOracle(ctx, healthyInfo, healthyObjects, healthySequences, rebuild, m.cfg.Content == "data_only")
+		if err == nil {
+			break
+		}
+		if m.stopMigrationTask(ctx, err) {
+			return nil, err
+		}
+		var local *target.OracleTablePreflightError
+		if errors.As(err, &local) {
+			if _, selected := healthyInfo[local.Table]; !selected {
+				return nil, err
+			}
+			rejectTarget(local.Table, err)
+			continue
+		}
+		var object *target.OracleObjectPreflightError
+		if !errors.As(err, &object) || object.Kind != "VIEW" || !rejectView(object.Name, err) {
+			return nil, err
+		}
+	}
+	for i := range p.views {
+		if e := viewErrors[p.views[i].sourceName]; e != nil {
+			p.views[i].err = e
+		}
 	}
 	return p, nil
 }
@@ -356,14 +463,18 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	if n, e := m.reader.GetTriggerCount(ctx); e == nil {
 		report.Triggers.Total = n
 	} else {
+		if m.stopMigrationTask(ctx, e) {
+			return report
+		}
 		report.Triggers.Total = -1
 	}
 	p, err := m.prepareOracle(ctx)
 	if err != nil {
+		m.stopMigrationTask(ctx, migrationTaskFailure{err: err})
 		m.log.Errorf("Oracle 迁移预检失败，未执行目标 DDL: %v", err)
 		report.Tables.Total = 1
 		report.Tables.Failed = 1
-		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "Oracle 迁移预检", Error: err.Error()})
+		report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: "Oracle 迁移预检", Stage: "task", Error: err.Error()})
 		return report
 	}
 	if ctx.Err() != nil {
@@ -371,17 +482,52 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	}
 	m.log.Infof("开始 MySQL → Oracle 迁移，共 %d 张表", len(p.tables))
 	failed := map[string]bool{}
+	for _, table := range p.tables {
+		e := p.tableErrors[table]
+		if e == nil {
+			continue
+		}
+		failed[m.objName(table)] = true
+		m.recordOracleResult(&report.Tables, m.objName(table), "", e)
+		item := &report.Tables.Items[len(report.Tables.Items)-1]
+		item.Stage, item.Table, item.SourceName = "preflight", table, table
+		item.TargetName, item.TargetTable, item.TargetSchema = m.objName(table), m.objName(table), m.cfg.TargetSchema
+	}
 	m.logPreparationComplete(ctx)
+	completed := map[string]bool{}
 	if !m.cfg.objectMode() && m.cfg.Content != "data_only" {
 		m.log.Info("=== 创建 Oracle 表结构 ===")
 		for _, t := range p.tables {
+			if failed[m.objName(t)] {
+				continue
+			}
 			if ctx.Err() != nil {
 				return report
 			}
 			e := m.repairTable(ctx, t, p.ddl[t])
 			m.recordOracleResult(&report.Tables, m.objName(t), dialect.JoinSQL(p.ddl[t]), e)
 			failed[m.objName(t)] = e != nil
+			if e != nil {
+				m.blockMigrationTable(t, "execute", e)
+				item := &report.Tables.Items[len(report.Tables.Items)-1]
+				item.Stage, item.Table, item.SourceName = "execute", t, t
+				item.TargetName, item.TargetTable, item.TargetSchema = m.objName(t), m.objName(t), m.cfg.TargetSchema
+			}
+			if m.stopMigrationTask(ctx, e) {
+				return report
+			}
+			if e != nil {
+				if !m.protectRetainedMigrationTables(ctx, p.tables, &report, completed) {
+					return report
+				}
+				for _, table := range p.tables {
+					if m.migrationTableBlocked(table) {
+						failed[m.objName(table)] = true
+					}
+				}
+			}
 			if e == nil {
+				completed[t] = true
 				for _, warning := range p.warnings {
 					if warning.Table == m.objName(t) {
 						report.Warnings = append(report.Warnings, warning)
@@ -395,7 +541,8 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		m.log.Info("=== 写入 Oracle 数据 ===")
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		sem := make(chan struct{}, m.cfg.MaxParallel)
+		sem := make(chan struct{}, max(1, m.cfg.MaxParallel))
+	dataLoop:
 		for _, table := range p.tables {
 			if failed[m.objName(table)] {
 				continue
@@ -406,10 +553,11 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				break
+				break dataLoop
 			}
 			if ctx.Err() != nil {
-				break
+				<-sem
+				break dataLoop
 			}
 			wg.Add(1)
 			go func(t string) {
@@ -423,6 +571,9 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				mu.Lock()
 				defer mu.Unlock()
 				dataOK[t] = ok
+				if !ok {
+					m.blockMigrationTable(t, "data", e)
+				}
 				if ok {
 					m.markDataValidationCopied(t)
 				}
@@ -430,6 +581,11 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			}(table)
 		}
 		wg.Wait()
+		for _, table := range p.tables {
+			if m.migrationTableBlocked(table) {
+				failed[m.objName(table)] = true
+			}
+		}
 	}
 	if ctx.Err() != nil {
 		return report
@@ -449,6 +605,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				stage = "unsupported"
 			}
 			err := m.repairIndex(ctx, i)
+			m.stopMigrationTask(ctx, err)
 			m.recordOracleResult(category, d.IndexName(i), ddl, err)
 			if err != nil {
 				item := &category.Items[len(category.Items)-1]
@@ -460,6 +617,8 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				return report
 			}
 			if failed[i.TableName] {
+				report.PrimaryKeys.Total++
+				m.recordBlockedObject(&report.PrimaryKeys, d.IndexName(i), sourceTables[i.TableName], "依赖表 "+i.TableName+" 迁移失败")
 				continue
 			}
 			recordIndex(&report.PrimaryKeys, i)
@@ -469,17 +628,24 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				return report
 			}
 			if failed[s.TableName] {
+				report.Sequences.Total++
+				m.recordBlockedObject(&report.Sequences, d.SequenceName(s), sourceTables[s.TableName], "依赖表 "+s.TableName+" 迁移失败")
 				continue
 			}
 			sql := dialect.JoinSQL(d.SequenceStatements(m.cfg.TargetSchema, s, ""))
 			e := m.repairSequence(ctx, s, "")
 			m.recordOracleResult(&report.Sequences, d.SequenceName(s), sql, e)
+			if m.stopMigrationTask(ctx, e) {
+				return report
+			}
 		}
 		for _, i := range p.indexes {
 			if ctx.Err() != nil {
 				return report
 			}
 			if failed[i.TableName] {
+				report.Indexes.Total++
+				m.recordBlockedObject(&report.Indexes, d.IndexName(i), sourceTables[i.TableName], "依赖表 "+i.TableName+" 迁移失败")
 				continue
 			}
 			recordIndex(&report.Indexes, i)
@@ -489,21 +655,30 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				return report
 			}
 			if failed[f.TableName] {
+				report.Constraints.Total++
+				m.recordBlockedObject(&report.Constraints, d.ForeignKeyName(f), sourceTables[f.TableName], "依赖表 "+f.TableName+" 迁移失败")
 				continue
 			}
 			var e error
 			if failed[f.RefTable] {
-				e = fmt.Errorf("引用表 %s 建表失败", f.RefTable)
+				report.Constraints.Total++
+				m.recordBlockedObject(&report.Constraints, d.ForeignKeyName(f), sourceTables[f.TableName], "引用表 "+f.RefTable+" 迁移失败")
+				continue
 			} else {
 				e = m.repairFK(ctx, f)
 			}
 			m.recordOracleResult(&report.Constraints, d.ForeignKeyName(f), dialect.JoinSQL(d.ForeignKeyStatements(m.cfg.TargetSchema, f)), e)
+			if m.stopMigrationTask(ctx, e) {
+				return report
+			}
 		}
 		for _, c := range p.comments {
 			if ctx.Err() != nil {
 				return report
 			}
 			if failed[c.TableName] {
+				report.Comments.Total++
+				m.recordBlockedObject(&report.Comments, c.TableName+"."+c.ColumnName, sourceTables[c.TableName], "依赖表 "+c.TableName+" 迁移失败")
 				continue
 			}
 			e := m.repairComment(ctx, c)
@@ -512,20 +687,26 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				name += "." + c.ColumnName
 			}
 			m.recordOracleResult(&report.Comments, name, dialect.JoinSQL(d.CommentStatements(m.cfg.TargetSchema, c)), e)
+			if m.stopMigrationTask(ctx, e) {
+				return report
+			}
 		}
 		for i := range p.views {
 			for _, dep := range p.views[i].deps {
 				if failed[m.objName(dep)] {
 					p.views[i].err = fmt.Errorf("依赖表 %s 建表失败", dep)
+					p.views[i].stage = "dependency"
 				}
 			}
 		}
 		for _, r := range m.executeOracleViews(ctx, p.views) {
-			var e error
+			report.Views.Total++
 			if r.Error != "" {
-				e = fmt.Errorf("%s", r.Error)
+				report.Views.Failed++
+				report.Views.Items = append(report.Views.Items, r)
+			} else {
+				report.Views.Success++
 			}
-			m.recordOracleResult(&report.Views, r.Name, r.DDL, e)
 		}
 	}
 	for _, t := range p.tables {
@@ -533,12 +714,19 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			continue
 		}
 		src, e1 := m.reader.CountRows(ctx, t)
+		if m.stopMigrationTask(ctx, e1) {
+			return report
+		}
 		dst, e2 := m.writer.CountRows(ctx, m.objName(t))
+		if m.stopMigrationTask(ctx, e2) {
+			return report
+		}
 		if e1 != nil || e2 != nil {
 			err := fmt.Errorf("行数校验失败，源端: %v; 目标端: %v", e1, e2)
 			report.Data.Success--
 			report.Data.Failed++
 			report.Data.Items = append(report.Data.Items, ObjectResult{Name: m.objName(t), Error: err.Error()})
+			m.blockMigrationTable(t, "validation", err)
 			m.log.Errorf("[%s] %v", t, err)
 			continue
 		}
@@ -562,9 +750,23 @@ func (m *Migrator) recordOracleResult(c *CategoryReport, name, ddl string, err e
 func (m *Migrator) planOracleViews(views []source.ViewInfo) []oracleViewPlan {
 	list := make([]oracleViewPlan, len(views))
 	names := map[string]bool{}
+	counts := map[string]int{}
+	for _, view := range views {
+		counts[m.objName(view.ViewName)]++
+	}
 	for i, v := range views {
+		sourceName := v.ViewName
 		names[m.objName(v.ViewName)] = true
 		sql, deps, e := oracleview.Convert(v.Definition, m.oracleSourceSchema(), m.cfg.TargetSchema, m.cfg.StripViewSchemas)
+		if err := validateOracleViewColumns(v, m.objName); err != nil {
+			e = err
+		}
+		if err := dialect.ValidateOracleName(m.objName(v.ViewName)); err != nil {
+			e = err
+		}
+		if counts[m.objName(v.ViewName)] > 1 {
+			e = fmt.Errorf("视图名称转大写后冲突: %s", m.objName(v.ViewName))
+		}
 		v.ViewName = m.objName(v.ViewName)
 		v.Columns = append([]source.ColumnInfo(nil), v.Columns...)
 		for ci := range v.Columns {
@@ -573,7 +775,7 @@ func (m *Migrator) planOracleViews(views []source.ViewInfo) []oracleViewPlan {
 		if e == nil {
 			v.Definition = sql
 		}
-		list[i] = oracleViewPlan{view: v, deps: deps, err: e, ddl: dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))}
+		list[i] = oracleViewPlan{sourceName: sourceName, view: v, deps: deps, err: e, ddl: dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))}
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].view.ViewName < list[j].view.ViewName })
 	out := []oracleViewPlan{}
@@ -616,18 +818,32 @@ func (m *Migrator) executeOracleViews(ctx context.Context, plans []oracleViewPla
 			break
 		}
 		e := v.err
+		stage := "execute"
+		if e != nil {
+			stage = "preflight"
+		}
+		if v.stage != "" {
+			stage = v.stage
+		}
 		for _, dep := range v.deps {
 			if failed[m.objName(dep)] {
 				e = fmt.Errorf("依赖视图 %s 迁移失败", dep)
+				stage = "dependency"
 			}
 		}
 		if e == nil {
 			e = m.repairView(ctx, v.view)
 		}
-		r := ObjectResult{Name: v.view.ViewName, DDL: v.ddl}
+		r := ObjectResult{Name: v.view.ViewName, SourceName: v.sourceName, TargetName: v.view.ViewName, TargetSchema: m.cfg.TargetSchema, DDL: v.ddl}
 		if e != nil {
 			r.Error = e.Error()
+			r.Stage = stage
 			failed[v.view.ViewName] = true
+			m.blockMigrationObject(ObjectRef{Kind: "view", Name: v.sourceName}, e)
+			if m.stopMigrationTask(ctx, e) {
+				out = append(out, r)
+				break
+			}
 		}
 		out = append(out, r)
 	}
@@ -636,51 +852,64 @@ func (m *Migrator) executeOracleViews(ctx context.Context, plans []oracleViewPla
 func (m *Migrator) migrateOracleViews(ctx context.Context, names []string) []ObjectResult {
 	views, err := m.readOracleViews(ctx)
 	if err != nil {
+		m.stopMigrationTask(ctx, err)
 		return []ObjectResult{{Name: "视图元数据", Error: err.Error()}}
 	}
 	selected := []source.ViewInfo{}
-	seen := map[string]bool{}
-	objects := []target.OracleObject{}
+	found := map[string]bool{}
 	for _, v := range views {
 		if !slices.Contains(names, v.ViewName) {
 			continue
 		}
-		n := m.objName(v.ViewName)
-		if err = validateOracleViewColumns(v, m.objName); err != nil {
-			return []ObjectResult{{Name: n, Error: err.Error()}}
-		}
-		if err = dialect.ValidateOracleName(n); err != nil {
-			return []ObjectResult{{Name: n, Error: err.Error()}}
-		}
-		if seen[n] {
-			return []ObjectResult{{Name: n, Error: "视图名称转大写后冲突"}}
-		}
-		seen[n] = true
+		found[v.ViewName] = true
 		selected = append(selected, v)
-		objects = append(objects, target.OracleObject{Kind: "VIEW", Name: n})
-		for _, column := range v.Columns {
-			objects[len(objects)-1].Columns = append(objects[len(objects)-1].Columns, m.objName(column.Name))
-		}
 	}
+	plans := m.planOracleViews(selected)
 	for _, name := range names {
-		found := false
-		for _, v := range selected {
-			if v.ViewName == name {
-				found = true
-			}
-		}
-		if !found {
-			return []ObjectResult{{Name: name, Error: "源视图不存在或不可见"}}
+		if !found[name] {
+			plans = append(plans, oracleViewPlan{sourceName: name, view: source.ViewInfo{ViewName: m.objName(name)}, err: fmt.Errorf("源视图不存在或不可见")})
 		}
 	}
 	w, ok := m.writer.(oracleInspector)
 	if !ok {
 		return []ObjectResult{{Name: "Oracle 预检", Error: "Writer 缺少预检能力"}}
 	}
-	if err = w.PreflightOracle(ctx, nil, objects, nil, false, false); err != nil {
-		return []ObjectResult{{Name: "Oracle 预检", Error: err.Error()}}
+	for {
+		objects := []target.OracleObject{}
+		for _, plan := range plans {
+			if plan.err != nil {
+				continue
+			}
+			object := target.OracleObject{Kind: "VIEW", Name: plan.view.ViewName}
+			for _, column := range plan.view.Columns {
+				object.Columns = append(object.Columns, column.Name)
+			}
+			objects = append(objects, object)
+		}
+		if len(objects) == 0 {
+			break
+		}
+		if err = w.PreflightOracle(ctx, nil, objects, nil, false, false); err == nil {
+			break
+		}
+		if m.stopMigrationTask(ctx, err) {
+			return []ObjectResult{{Name: "Oracle 预检", Stage: "task", Error: err.Error()}}
+		}
+		var issue *target.OracleObjectPreflightError
+		if !errors.As(err, &issue) || issue.Kind != "VIEW" {
+			return []ObjectResult{{Name: "Oracle 预检", Stage: "task", Error: err.Error()}}
+		}
+		changed := false
+		for i := range plans {
+			if plans[i].view.ViewName == issue.Name && plans[i].err == nil {
+				plans[i].err, changed = err, true
+			}
+		}
+		if !changed {
+			return []ObjectResult{{Name: "Oracle 预检", Stage: "task", Error: err.Error()}}
+		}
 	}
-	return m.executeOracleViews(ctx, m.planOracleViews(selected))
+	return m.executeOracleViews(ctx, plans)
 }
 
 func validateOracleViewColumns(v source.ViewInfo, name func(string) string) error {

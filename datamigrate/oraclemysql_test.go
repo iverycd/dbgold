@@ -311,17 +311,19 @@ func TestOracleMySQLCleanupFailureRestoresBeforeAnyTableDrop(t *testing.T) {
 	require.Equal(t, "failed", report.TargetDependencies[1].DropStatus)
 }
 
-func TestOracleMySQLCreateFailureRestoresOnlyUntouchedEndpoints(t *testing.T) {
+func TestOracleMySQLCreateFailureContinuesHealthyEndpoints(t *testing.T) {
 	m, _, w := oracleMySQLFixture(t, "P", "C", "S")
 	w.fks = []target.MySQLForeignKey{testOracleMySQLTargetFK("dst", "C", "dst", "P", "cp"), testOracleMySQLTargetFK("dst", "S", "dst", "S", "self")}
 	w.createFail = "P"
 	report := m.Run(context.Background())
 	require.True(t, report.HasFailures())
-	require.Empty(t, w.created)
-	require.Contains(t, w.events, w.fks[1].RestoreSQL)
+	require.Len(t, w.created, 2)
+	require.Equal(t, 2, report.Tables.Success)
+	require.Equal(t, 1, report.Tables.Failed)
+	require.NotContains(t, w.events, w.fks[1].RestoreSQL)
 	require.NotContains(t, w.events, w.fks[0].RestoreSQL)
 	require.Equal(t, "blocked", report.TargetDependencies[0].RestoreStatus)
-	require.Equal(t, "succeeded", report.TargetDependencies[1].RestoreStatus)
+	require.Equal(t, "not_required", report.TargetDependencies[1].RestoreStatus)
 	require.Empty(t, w.foreignKeys)
 }
 
@@ -518,4 +520,15 @@ func TestOracleMySQLPartitionDDLUsesSameWideTablePlan(t *testing.T) {
 			require.Equal(t, "VARCHAR2", object.SourceColumns[1].DataType)
 		}
 	}
+}
+
+func TestOracleMySQLTrailingSpaceTablePreflightSkipsOnlyInvalidName(t *testing.T) {
+	m, _, w := oracleMySQLFixture(t, "Bad ", "Good")
+	m.cfg.Mode = "all"
+	m.cfg.Filter = ""
+	report := m.Run(context.Background())
+	require.Equal(t, 1, report.Tables.Failed)
+	require.Equal(t, 1, report.Tables.Success)
+	require.NotContains(t, strings.Join(w.events, "\n"), "`Bad `")
+	require.Contains(t, strings.Join(w.events, "\n"), "`Good`")
 }

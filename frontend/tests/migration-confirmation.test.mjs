@@ -1,3 +1,4 @@
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 import { partitionPreflightResponse } from './helpers/partition-preflight.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import assert from 'node:assert/strict'
@@ -31,7 +32,8 @@ function page({ start, preflight, objectStart } = {}) {
         case '@arco-design/web-vue': return { Message: { error: msg => errors.push(msg) }, Modal: {} }
         case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
-      case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
+      case '@/utils/migrationReport': return migrationReportUtils
+        case '@/utils/migrationOptions': return { applyTargetMigrationDefaults() {} }
         case '@/api/migration': return {
           startDataMigration: async request => { starts.push(request); return start ? start(request) : { data: { job_id: 'new-job' } } },
           startObjectMigration: async request => objectStart ? objectStart(request) : { data: { job_id: 'object-job' } },

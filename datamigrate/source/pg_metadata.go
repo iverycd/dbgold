@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"database/sql"
+	"dbgold/datamigrate/failure"
 	"dbgold/datamigrate/sqlsyntax"
 	"fmt"
 	"strconv"
@@ -468,7 +469,7 @@ func (r *PostgresReader) pgForeignKeys(ctx context.Context) ([]FKInfo, error) {
 // ReadPGSnapshot reads all object identities before filtering. This makes missing
 // privileges and unsupported dependencies visible rather than an empty success.
 func (r *PostgresReader) ReadPGSnapshot(ctx context.Context) (*PGSnapshot, error) {
-	return r.readPGSnapshot(ctx, nil)
+	return r.readPGSnapshot(ctx, nil, false)
 }
 
 // ReadPGSnapshotForTables keeps the caller's frozen logical-root scope. Catalog
@@ -480,10 +481,22 @@ func (r *PostgresReader) ReadPGSnapshotForTables(ctx context.Context, tables []s
 	for _, table := range tables {
 		selected[table] = true
 	}
-	return r.readPGSnapshot(ctx, selected)
+	return r.readPGSnapshot(ctx, selected, false)
 }
 
-func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string]bool) (*PGSnapshot, error) {
+// ReadPGMigrationSnapshot preserves usable tables when a selected table has a
+// local metadata/privilege failure. The strict public snapshot stays unchanged.
+func (r *PostgresReader) ReadPGMigrationSnapshot(ctx context.Context, tables []string) (*PGSnapshot, error) {
+	var selected map[string]bool
+	if tables != nil {
+		selected = map[string]bool{}
+		for _, table := range tables {
+			selected[table] = true
+		}
+	}
+	return r.readPGSnapshot(ctx, selected, true)
+}
+func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string]bool, partial bool) (*PGSnapshot, error) {
 	snap := &PGSnapshot{Profile: r.profile}
 	found := make(map[string]bool, len(selected))
 	partition := "false"
@@ -528,8 +541,12 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 			t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Name: t.Info.TableName, Reason: "源表启用了行级安全策略，不能证明 SELECT 能读取完整数据"})
 		}
 		if !readable {
-			rows.Close()
-			return nil, fmt.Errorf("缺少表 %s 的 SELECT 权限", t.Info.TableName)
+			err := fmt.Errorf("缺少表 %s 的 SELECT 权限", t.Info.TableName)
+			if !partial {
+				rows.Close()
+				return nil, err
+			}
+			t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Table: t.Info.TableName, Name: t.Info.TableName, Reason: err.Error()})
 		}
 		snap.Tables = append(snap.Tables, t)
 	}
@@ -540,7 +557,10 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 	}
 	for name := range selected {
 		if !found[name] {
-			return nil, fmt.Errorf("选择的源表 %s 不存在或身份已变化", name)
+			if !partial {
+				return nil, fmt.Errorf("选择的源表 %s 不存在或身份已变化", name)
+			}
+			snap.Tables = append(snap.Tables, PGTable{Info: TableDDLInfo{TableName: name}, Unsupported: []PGObject{{Kind: "table", Name: name, Table: name, Reason: "选择的源表不存在或身份已变化"}}})
 		}
 	}
 	indexes, err := r.pgIndexes(ctx)
@@ -554,9 +574,17 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 	byName := map[string]*PGTable{}
 	for i := range snap.Tables {
 		t := &snap.Tables[i]
+		byName[t.Info.TableName] = t
+		if partial && len(t.Unsupported) > 0 {
+			continue
+		}
 		info, e := r.pgColumns(ctx, t.Info.TableName)
 		if e != nil {
-			return nil, e
+			if !partial || failure.IsTaskError(e) {
+				return nil, e
+			}
+			t.Unsupported = append(t.Unsupported, PGObject{Kind: "table", Name: t.Info.TableName, Table: t.Info.TableName, Reason: e.Error()})
+			continue
 		}
 		info.Comment = t.Info.Comment
 		t.Info = *info
@@ -672,8 +700,12 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 			return nil, err
 		}
 		if !def.Valid || strings.TrimSpace(def.String) == "" {
-			rows.Close()
-			return nil, fmt.Errorf("视图 %s 定义不可读取", v.ViewName)
+			if !partial {
+				rows.Close()
+				return nil, fmt.Errorf("视图 %s 定义不可读取", v.ViewName)
+			}
+			snap.Objects = append(snap.Objects, PGObject{Kind: "view", Name: v.ViewName, Reason: "视图定义不可读取"})
+			continue
 		}
 		v.Definition = strings.TrimRight(strings.TrimSpace(def.String), ";")
 		snap.Views = append(snap.Views, v)
@@ -686,11 +718,15 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 	for i := range snap.Views {
 		info, e := r.pgColumns(ctx, snap.Views[i].ViewName)
 		if e != nil {
-			return nil, e
+			if !partial || failure.IsTaskError(e) {
+				return nil, e
+			}
+			snap.Objects = append(snap.Objects, PGObject{Kind: "view", Name: snap.Views[i].ViewName, Reason: e.Error()})
+			continue
 		}
 		snap.Views[i].Columns = info.Columns
 	}
-	if err = r.loadPGSequencesForTables(ctx, snap, selected); err != nil {
+	if err = r.loadPGSequencesForTablesPartial(ctx, snap, selected, partial); err != nil {
 		return nil, err
 	}
 	return snap, nil
@@ -701,6 +737,9 @@ func (r *PostgresReader) loadPGSequences(ctx context.Context, snap *PGSnapshot) 
 }
 
 func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGSnapshot, selected map[string]bool) error {
+	return r.loadPGSequencesForTablesPartial(ctx, snap, selected, false)
+}
+func (r *PostgresReader) loadPGSequencesForTablesPartial(ctx context.Context, snap *PGSnapshot, selected map[string]bool, partial bool) error {
 	rows, err := r.db.QueryContext(ctx, `SELECT c.oid,n.nspname,c.relname FROM `+r.qcat("pg_class")+` c JOIN `+r.qcat("pg_namespace")+` n ON n.oid=c.relnamespace WHERE c.relkind='S' AND (n.nspname=$1 OR EXISTS (SELECT 1 FROM `+r.qcat("pg_depend")+` d JOIN `+r.qcat("pg_attrdef")+` a ON a.oid=d.objid JOIN `+r.qcat("pg_class")+` t ON t.oid=a.adrelid JOIN `+r.qcat("pg_namespace")+` tn ON tn.oid=t.relnamespace WHERE d.refobjid=c.oid AND tn.nspname=$1)) ORDER BY n.nspname,c.relname`, r.schema)
 	if err != nil {
 		return err
@@ -725,7 +764,7 @@ func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGS
 	}
 	for _, id := range ids {
 		var refs []pgSequenceReference
-		if selected != nil {
+		if selected != nil || partial {
 			var e error
 			refs, e = r.pgSequenceReferences(ctx, id.oid)
 			if e != nil {
@@ -733,7 +772,7 @@ func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGS
 			}
 			relevant := false
 			for _, ref := range refs {
-				if ref.s == r.schema && selected[ref.t] {
+				if ref.s == r.schema && (selected == nil || selected[ref.t]) {
 					relevant = true
 					break
 				}
@@ -752,7 +791,11 @@ func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGS
 		var last int64
 		var called bool
 		if err = r.db.QueryRowContext(ctx, `SELECT last_value,is_called FROM `+qn).Scan(&last, &called); err != nil {
-			return fmt.Errorf("读取序列 %s: %w", qn, err)
+			if !partial || failure.IsTaskError(err) || len(refs) == 0 {
+				return fmt.Errorf("读取序列 %s: %w", qn, err)
+			}
+			markPGSequenceFailure(snap, refs, err)
+			continue
 		}
 		if r.profile.Fields["pg_sequence.seqincrement"] {
 			err = r.db.QueryRowContext(ctx, `SELECT seqincrement,seqmin,seqmax,seqcycle FROM `+r.qcat("pg_sequence")+` WHERE seqrelid=$1`, id.oid).Scan(&seq.Increment, &seq.Min, &seq.Max, &seq.Cycle)
@@ -760,7 +803,11 @@ func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGS
 			err = r.db.QueryRowContext(ctx, `SELECT increment_by,min_value,max_value,is_cycled FROM `+qn).Scan(&seq.Increment, &seq.Min, &seq.Max, &seq.Cycle)
 		}
 		if err != nil {
-			return fmt.Errorf("读取序列属性 %s: %w", qn, err)
+			if !partial || failure.IsTaskError(err) || len(refs) == 0 {
+				return fmt.Errorf("读取序列属性 %s: %w", qn, err)
+			}
+			markPGSequenceFailure(snap, refs, err)
+			continue
 		}
 		seq.StartValue = last
 		if called {
@@ -770,7 +817,7 @@ func (r *PostgresReader) loadPGSequencesForTables(ctx context.Context, snap *PGS
 				seq.StartValue += seq.Increment
 			}
 		}
-		if selected == nil {
+		if selected == nil && !partial {
 			refs, err = r.pgSequenceReferences(ctx, id.oid)
 			if err != nil {
 				return err
@@ -864,4 +911,15 @@ func (r *PostgresReader) markPGOperatorClasses(ctx context.Context, byName map[s
 		return err
 	}
 	return nil
+}
+
+func markPGSequenceFailure(snap *PGSnapshot, refs []pgSequenceReference, err error) {
+	for _, ref := range refs {
+		for i := range snap.Tables {
+			t := &snap.Tables[i]
+			if t.Info.TableName == ref.t {
+				t.Unsupported = append(t.Unsupported, PGObject{Kind: "sequence", Table: ref.t, Name: ref.c, Reason: err.Error()})
+			}
+		}
+	}
 }

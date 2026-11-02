@@ -632,6 +632,18 @@ func (m *Migrator) planPGViews(p *PGMySQLPreflight, selected map[string]bool, ex
 			continue
 		}
 		compiled[v.ViewName] = translated{sql, deps}
+		refDeps := []ObjectRef{}
+		for _, dep := range deps {
+			if _, view := viewSet[dep]; view {
+				refDeps = append(refDeps, ObjectRef{Kind: "view", Name: dep})
+			} else {
+				refDeps = append(refDeps, tableRef(dep))
+			}
+		}
+		if p.dependencies == nil {
+			p.dependencies = map[ObjectRef][]ObjectRef{}
+		}
+		p.dependencies[ref] = refDeps
 	}
 	state := map[string]int{}
 	baseDeps := map[string]bool{}

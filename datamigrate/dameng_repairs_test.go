@@ -122,6 +122,9 @@ func TestDamengRepairAllWritePaths(t *testing.T) {
 				report := m.Run(context.Background())
 				require.False(t, report.HasFailures(), "%+v", report)
 				require.Len(t, report.AutoRepairs, 2)
+				for _, repair := range report.AutoRepairs {
+					require.Equal(t, "int", repair.SourceType)
+				}
 				require.Contains(t, w.created[0], `"ROW_ID_2" INT`)
 				require.Contains(t, w.created[0], `'ROWID value'`)
 				for table, pages := range w.columns {
@@ -171,6 +174,7 @@ func TestDamengRepairReuseAndFailureReporting(t *testing.T) {
 			require.Equal(t, "ROW_ID_2", w.boundsColumn)
 			for _, repair := range report.AutoRepairs {
 				require.Equal(t, "reused", repair.Status)
+				require.Equal(t, "int", repair.SourceType)
 			}
 		})
 	}
@@ -253,7 +257,7 @@ func TestDamengGenericViewReuseRejectsMissingTargetMapping(t *testing.T) {
 	}
 }
 
-func TestDamengRepairStillRejectsUnsafeStructureBeforeWrites(t *testing.T) {
+func TestDamengRepairRejectsUnsafeTableAndContinuesHealthyTable(t *testing.T) {
 	for _, failure := range []string{"column collision", "type", "table collision"} {
 		r, w, m := repairFixture("sqlserver")
 		switch failure {
@@ -267,7 +271,10 @@ func TestDamengRepairStillRejectsUnsafeStructureBeforeWrites(t *testing.T) {
 		}
 		report := m.Run(context.Background())
 		require.True(t, report.HasFailures())
-		require.Empty(t, w.created)
-		require.Empty(t, report.AutoRepairs)
+		require.Len(t, w.created, 1)
+		require.Contains(t, w.created[0], `"U"`)
+		require.NotContains(t, w.created[0], `"T"`)
+		require.Len(t, report.AutoRepairs, 1)
+		require.Equal(t, "U", report.AutoRepairs[0].Table)
 	}
 }

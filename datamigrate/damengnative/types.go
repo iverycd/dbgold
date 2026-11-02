@@ -206,16 +206,20 @@ type Writer interface {
 }
 
 type Preflight struct {
-	Kind        string    `json:"kind"`
-	Ready       bool      `json:"ready"`
-	Source      Profile   `json:"source"`
-	Target      Profile   `json:"target"`
-	Objects     []Object  `json:"objects"`
-	Conflicts   []Object  `json:"conflicts"`
-	Drops       []Object  `json:"drops"`
-	Issues      []Issue   `json:"issues"`
-	Fingerprint string    `json:"fingerprint"`
-	Snapshot    *Snapshot `json:"-"`
+	Kind          string            `json:"kind"`
+	Ready         bool              `json:"ready"`
+	CanStart      bool              `json:"can_start"`
+	Blocked       map[string]Issue  `json:"-"`
+	BlockedStages map[string]string `json:"-"`
+	TargetObjects []Object          `json:"-"`
+	Source        Profile           `json:"source"`
+	Target        Profile           `json:"target"`
+	Objects       []Object          `json:"objects"`
+	Conflicts     []Object          `json:"conflicts"`
+	Drops         []Object          `json:"drops"`
+	Issues        []Issue           `json:"issues"`
+	Fingerprint   string            `json:"fingerprint"`
+	Snapshot      *Snapshot         `json:"-"`
 }
 
 func Quote(name string) string             { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }

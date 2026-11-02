@@ -6,6 +6,7 @@ import ts from 'typescript'
 import * as Vue from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { parse, compileScript } from '@vue/compiler-sfc'
+import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/PGMySQLPreflightPanel.vue', import.meta.url), 'utf8'))
 function load(source, globals = {}) {
@@ -15,6 +16,7 @@ function load(source, globals = {}) {
       if (id === 'vue') return Vue
       if (id === '@arco-design/web-vue') return { Message: {} }
       if (id === '@/utils/clipboard') return {}
+      if (id === '@/utils/migrationReport') return migrationReportUtils
       throw new Error(`Unexpected import ${id}`)
     },
   }
@@ -75,4 +77,18 @@ test('compact preview and report summaries show attribution and counts without d
   assert.match(blocked, /阻止 1/)
   assert.match(blocked, /查看预检记录/)
   assert.doesNotMatch(blocked, /页面结构预检通过|查看执行日志|检查问题/)
+})
+
+test('partial preflight is visible in full and compact panels without marking it fully passed', async () => {
+  const result = { ...legacy, ready: false, can_start: true, check_scope: 'structure', issues: [{ severity: 'error', object: { kind: 'table', name: 'Bad' }, reason: 'bad type' }] }
+  const full = await render(result)
+  assert.match(full, /部分可执行/)
+  assert.match(full, /其余表继续迁移/)
+  assert.doesNotMatch(full, /结构预检通过/)
+  const compact = await render(result, { compact: true, summarySource: 'report' })
+  assert.match(compact, /执行前部分可执行/)
+  assert.match(compact, /text-warning/)
+  const blocked = await render({ ...result, can_start: false, partition_preflight: { can_start: true } })
+  assert.match(blocked, /预检未通过/)
+  assert.doesNotMatch(blocked, /部分可执行/)
 })

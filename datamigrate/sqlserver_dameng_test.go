@@ -52,7 +52,7 @@ func dmFixture() (*dmFixtureReader, *dmFixtureWriter) {
 func dmMigrator(r source.Reader, w *dmFixtureWriter) *Migrator {
 	return NewMigrator(r, w, &Job{LogCh: make(chan string, 1024)}, Config{PageSize: 10, MaxParallel: 1, TargetDBType: "dameng", TargetSchema: "APP", Content: "schema_only"})
 }
-func TestSQLServerDamengPreflightNoWrites(t *testing.T) {
+func TestSQLServerDamengPreflightIsolatesInvalidObjects(t *testing.T) {
 	for _, kind := range []string{"precision", "default", "collision", "index", "view", "foreign key"} {
 		t.Run(kind, func(t *testing.T) {
 			r, w := dmFixture()
@@ -75,7 +75,12 @@ func TestSQLServerDamengPreflightNoWrites(t *testing.T) {
 			m := dmMigrator(r, w)
 			report := m.Run(context.Background())
 			require.Greater(t, report.Tables.Failed+report.Views.Failed+report.Indexes.Failed+report.Constraints.Failed, 0)
-			require.Empty(t, w.created)
+			if kind == "view" {
+				require.Len(t, w.created, 1)
+				require.Contains(t, w.created[0], `"MIXED"`)
+			} else {
+				require.Empty(t, w.created)
+			}
 			require.Empty(t, w.copied)
 			require.Empty(t, w.views)
 		})
@@ -96,6 +101,26 @@ func TestSQLServerDamengSelectedObjectsAndNames(t *testing.T) {
 	require.Equal(t, "ID", w.indexes[0].Columns[0])
 	require.Empty(t, w.created)
 }
+
+func TestSQLServerDamengFailedTableRetainsSequenceDependencyReport(t *testing.T) {
+	r, w := dmFixture()
+	r.ddl["Mixed"].Columns[0].DataType = "geometry"
+	r.tables = append(r.tables, "Good")
+	r.ddl["Good"] = &source.TableDDLInfo{TableName: "Good", Columns: []source.ColumnInfo{{Name: "Id", DataType: "int"}}}
+	r.sequences = []source.SequenceInfo{
+		{TableName: "Mixed", ColumnName: "Id", IdentityInfo: &source.IdentityInfo{Seed: 1, Increment: 1}},
+		{TableName: "Good", ColumnName: "Id", IdentityInfo: &source.IdentityInfo{Seed: 1, Increment: 1}},
+	}
+	report := dmMigrator(r, w).Run(context.Background())
+	require.Equal(t, 1, report.Tables.Success)
+	require.Equal(t, 1, report.Tables.Failed)
+	require.Equal(t, 2, report.Sequences.Total)
+	require.Equal(t, 1, report.Sequences.Success)
+	require.Equal(t, 1, report.Sequences.Failed)
+	require.Len(t, report.Sequences.Items, 1)
+	require.Equal(t, "dependency", report.Sequences.Items[0].Stage)
+	require.Len(t, w.sequenceOwners, 1)
+}
 func TestSQLServerDamengViewsOrderedAndAtomicPreflight(t *testing.T) {
 	r, w := dmFixture()
 	r.views = []source.ViewInfo{{ViewName: "A", Definition: "CREATE VIEW dbo.A AS SELECT Id FROM dbo.Z"}, {ViewName: "Z", Definition: "CREATE VIEW dbo.Z AS SELECT Id, N'AbC' AS Txt FROM dbo.Mixed"}}
@@ -110,7 +135,8 @@ func TestSQLServerDamengViewsOrderedAndAtomicPreflight(t *testing.T) {
 	m = dmMigrator(r, w)
 	results := m.MigrateViews(context.Background(), []string{"Good", "Bad"})
 	require.NotEmpty(t, results[0].Error)
-	require.Empty(t, w.views)
+	require.Len(t, w.views, 1)
+	require.Equal(t, "GOOD", w.views[0].ViewName)
 }
 func TestSQLServerDamengExecutionErrorsAreReported(t *testing.T) {
 	r, w := dmFixture()

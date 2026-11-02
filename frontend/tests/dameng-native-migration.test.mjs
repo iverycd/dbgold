@@ -4,12 +4,13 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
-import { parse } from '@vue/compiler-sfc'
+import { parse, compileScript } from '@vue/compiler-sfc'
+import { renderToString } from '@vue/server-renderer'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 function execute(source, require = () => ({})) {
-  const context = { exports: {}, require, FormData, Blob }
+  const context = { exports: {}, require, FormData, Blob, AbortController }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
   return context.exports
 }
@@ -54,6 +55,53 @@ test('native extra objects remain reportable and verification errors require att
   assert.equal(migrationReportUtils.nativeSchemaNeedsAttention(report), false)
   report.native_schema.preflight = { ready: false }
   assert.equal(migrationReportUtils.nativeSchemaNeedsAttention(report), true)
+})
+
+test('native start accepts a partial preflight and refuses a task-level blocker', async () => {
+  for (const allowed of [true, false]) {
+    const scope = Vue.effectScope()
+    const starts = []
+    const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
+    const page = scope.run(() => execute(`${descriptor.scriptSetup.content}\nexport { connections, dataMigrate, startDataMigration };`, id => {
+      if (id === 'vue') return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
+      if (id === 'vue-router') return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
+      if (id === '@/utils/connectionDatabase') return connectionDatabaseUtils
+      if (id === '@/composables/connectionDatabaseEditors') return connectionDatabaseEditors
+      if (id === '@/utils/migrationOptions') return { applyTargetMigrationDefaults() {} }
+      if (id === '@/utils/migrationReport') return migrationReportUtils
+      if (id === '@arco-design/web-vue') return { Message: { error: message => assert.fail(message) } }
+      if (id === '@/api/migration') return {
+        preflightDamengNative: async () => ({ data: { ready: false, can_start: allowed } }),
+        startDataMigration: async request => { starts.push(request); return { data: { job_id: 'native-job' } } },
+        createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
+      }
+      return {}
+    }))
+    try {
+      page.connections.value = [{ id: 1, db_type: 'dameng' }, { id: 2, db_type: 'dameng' }]
+      Object.assign(page.dataMigrate, { srcConnId: 1, dstConnId: 2, srcDatabase: 'MixedOwner', dstSchema: 'TargetOwner' })
+      await Vue.nextTick()
+      await page.startDataMigration()
+      assert.equal(starts.length, allowed ? 1 : 0)
+    } finally { scope.stop() }
+  }
+})
+
+test('native partial preflight and blocked inventory have clear labels with ten rows per page', async () => {
+  const { descriptor } = parse(readFileSync(new URL('../src/views/DamengNativePreflightPanel.vue', import.meta.url), 'utf8'))
+  const component = execute(compileScript(descriptor, { id: 'native-partial-test', inlineTemplate: true }).content, id => id === 'vue' ? Vue : migrationReportUtils).default
+  const result = { kind: 'dameng_native', ready: false, can_start: true, source: {}, target: {}, objects: [{ id: 'T', name: 'Bad', kind: 'table', status: 'blocked', units: [] }], issues: [], drops: [], conflicts: [] }
+  const app = Vue.createSSRApp(component, { result })
+  const pages = []
+  for (const name of ['a-alert', 'a-button', 'a-tag', 'a-table-column']) app.component(name, { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) })
+  app.component('a-table', { props: ['data', 'pagination'], setup: (props, { slots }) => () => {
+    pages.push(props.pagination)
+    return Vue.h('div', slots.columns?.().flatMap(column => props.data.map(record => column.children?.cell?.({ record }) ?? [])))
+  } })
+  const html = await renderToString(app)
+  assert.match(html, /部分可执行/)
+  assert.match(html, /已跳过（依赖阻塞）/)
+  assert.equal(pages[0].pageSize, 10)
 })
 
 test('native batch overwrite serializes false by default and true when selected', async () => {

@@ -68,6 +68,7 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	tableState             migrationTableState
 	oracleMySQL            *oracleMySQLRunState
 	partitionState         *partitionRunState
 	validationTables       []frozenValidationTable
@@ -218,6 +219,14 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.tableState.mu.Lock()
+	m.tableState.failures = map[string]migrationTableFailure{}
+	m.tableState.objects = map[ObjectRef]error{}
+	m.tableState.mu.Unlock()
+	var cancel context.CancelCauseFunc
+	ctx, cancel = context.WithCancelCause(ctx)
+	defer cancel(nil)
+	ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
 	m.oracleMySQL = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
@@ -242,10 +251,6 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	defer func() { m.preparationStartedAt = time.Time{} }()
 
 	if m.isOracleDameng() {
-		var cancel context.CancelCauseFunc
-		ctx, cancel = context.WithCancelCause(ctx)
-		defer cancel(nil)
-		ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
 		m.dmPlans = nil
 	}
 	report := m.runWithRepair(ctx)
@@ -390,6 +395,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			return report
 		}
 	}
+	m.preflightMigrationNames(tables)
 	if m.isOscar() {
 		if err := m.preflightOscarNames(ctx, tables, allTables); err != nil {
 			m.log.Errorf("Oscar 对象命名预检失败，未执行目标 DDL: %v", err)
@@ -400,6 +406,16 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
+	for _, table := range tables {
+		if tablesFailed[table] {
+			m.blockMigrationTable(table, "preflight", fmt.Errorf("源表预检失败"))
+		}
+		if err := m.migrationTableError(table); err != nil && !tablesFailed[table] {
+			tablesFailed[table] = true
+			report.Tables.Failed++
+			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "preflight", Error: err.Error()})
+		}
+	}
 	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
 		for _, table := range tables {
 			if tablesFailed[table] {
@@ -417,7 +433,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		report.Tables.Total = max(len(tables), report.Tables.Total)
 		return report
 	}
-	if m.isSQLServerDameng() && (len(tablesFailed) > 0 || !m.preflightSQLServerDameng(ctx, tables, &report)) {
+	if m.isSQLServerDameng() && !m.preflightSQLServerDameng(ctx, tables, &report) {
 		report.Tables.Total = len(tables)
 		return report
 	}
@@ -425,6 +441,21 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		for _, table := range tables {
 			if !tablesFailed[table] {
 				m.recordDamengRepairs(&report, table, "reused")
+			}
+		}
+	}
+	for _, table := range tables {
+		if m.migrationTableBlocked(table) || m.dmBlocked[table] {
+			tablesFailed[table] = true
+			if !m.migrationTableBlocked(table) {
+				err := fmt.Errorf("源表预检失败")
+				for _, item := range report.Tables.Items {
+					if item.Name == table {
+						err = fmt.Errorf("%s", item.Error)
+						break
+					}
+				}
+				m.blockMigrationTable(table, "preflight", err)
 			}
 		}
 	}
@@ -454,49 +485,74 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		m.log.Warn("MySQL → 达梦: 日期列的零日期默认值和零日期数据统一替换为 1900-01-01 00:00:00，保留 NOT NULL 约束")
 	}
 
-	// Phase 1: 建表 DDL（串行）
+	// Freeze every table-local plan before the first DROP, so retained target
+	// dependencies can be checked against the final executable set.
+	preparedDDL := map[string][]dialect.Statement{}
+	preparedText := map[string]string{}
+	completed := map[string]bool{}
+	if !skipSchema {
+		for _, table := range tables {
+			if tablesFailed[table] || m.migrationTableBlocked(table) {
+				tablesFailed[table] = true
+				continue
+			}
+			stmts, ddl, err := m.buildCreateTableDDL(ctx, table)
+			if err != nil {
+				if m.stopMigrationTask(ctx, err) {
+					return report
+				}
+				m.blockMigrationTable(table, "preflight", err)
+				tablesFailed[table] = true
+				if m.dmBlocked != nil {
+					m.dmBlocked[table] = true
+				}
+				report.Tables.Failed++
+				result := objectResultForError(table, ddl, err)
+				result.Stage = "preflight"
+				report.Tables.Items = append(report.Tables.Items, result)
+				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
+				continue
+			}
+			preparedDDL[table], preparedText[table] = stmts, ddl
+		}
+		if !m.protectRetainedMigrationTables(ctx, tables, &report) {
+			return report
+		}
+	}
 	m.logPreparationComplete(ctx)
 	if skipSchema {
 		m.log.Info("=== Phase 1: 跳过创建表结构（仅迁移数据行模式）===")
 	} else {
 		m.log.Info("=== Phase 1: 创建表结构 ===")
 		for _, table := range tables {
-			if tablesFailed[table] {
+			if tablesFailed[table] || m.migrationTableBlocked(table) {
+				tablesFailed[table] = true
 				continue
 			}
 			if ctx.Err() != nil {
-				m.log.Warn("任务已取消")
 				return report
 			}
-			stmts, ddl, err := m.buildCreateTableDDL(ctx, table)
-			if err != nil {
-				if m.stopOracleDamengTask(ctx, err) {
-					return report
-				}
-				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
-				tablesFailed[table] = true
-				if m.dmBlocked != nil {
-					m.dmBlocked[table] = true
-				}
-				report.Tables.Failed++
-				report.Tables.Items = append(report.Tables.Items, objectResultForError(table, ddl, err))
-				continue
-			}
+			stmts, ddl := preparedDDL[table], preparedText[table]
 			if err := m.repairTable(ctx, table, stmts); err != nil {
 				if m.stopOracleDamengTask(ctx, err) {
 					return report
 				}
+				m.blockMigrationTable(table, "execute", err)
 				m.log.Errorf("创建表失败 [%s]: %v", table, err)
 				tablesFailed[table] = true
 				if m.dmBlocked != nil {
 					m.dmBlocked[table] = true
 				}
 				report.Tables.Failed++
-				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, DDL: ddl, Error: err.Error()})
+				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "execute", DDL: ddl, Error: err.Error()})
+				if !m.protectRetainedMigrationTables(ctx, tables, &report, completed) {
+					return report
+				}
 				continue
 			}
 			m.log.DDLf("创建表 %s ... OK", table)
 			report.Tables.Success++
+			completed[table] = true
 			m.recordDamengRepairs(&report, table, "applied")
 			if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
 				if err := m.repairOwner(ctx, "TABLE", m.objName(table), m.cfg.TargetSchema); err != nil {
@@ -506,6 +562,11 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		}
 	}
 
+	for _, table := range tables {
+		if m.migrationTableBlocked(table) {
+			tablesFailed[table] = true
+		}
+	}
 	// Phase 2: 迁移数据（并发）
 	report.Data.Total = len(tables) - len(tablesFailed)
 	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
@@ -550,24 +611,22 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				} else if !m.isOracleDameng() || ctx.Err() == nil {
 					report.Data.Failed++
 					report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
-					if m.isOracleDameng() {
-						dataFailed[tbl] = true
-					}
+					dataFailed[tbl] = true
+					m.blockMigrationTable(tbl, "data", fmt.Errorf("%s", firstErr))
 				}
 				mu.Unlock()
 			}(table)
 		}
 		wg.Wait()
 		for table := range dataFailed {
-			tablesFailed[table], m.dmBlocked[table] = true, true
+			tablesFailed[table] = true
+			if m.dmBlocked != nil {
+				m.dmBlocked[table] = true
+			}
 		}
 	}
 
 	if ctx.Err() != nil {
-		return report
-	}
-	if m.isSQLServerDameng() && (report.Tables.Failed > 0 || report.Data.Failed > 0) {
-		m.log.Errorf("表结构或数据迁移失败，停止附属对象创建")
 		return report
 	}
 
@@ -679,6 +738,9 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 	if err != nil {
 		return nil, "", err
 	}
+	if info == nil || len(info.Columns) == 0 {
+		return nil, "", fmt.Errorf("表 %s 缺少列元数据", table)
+	}
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
 	stmts, err := m.baseCreateTableStatements(ctx, table, info, opt)
 	if err != nil {
@@ -747,15 +809,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 			m.stopOracleDamengTask(ctx, err)
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)
-			if m.isOracle() || m.isSQLServer() || m.isOracleDameng() {
-				return false, message
-			}
-			if !hasError {
-				firstErr = message
-				hasError = true
-			}
-			offset += int64(m.cfg.PageSize)
-			continue
+			return false, message
 		}
 		m.log.Dataf("迁移 %s: 第 %d 页 (%d 行) ... OK", table, pageNum, len(rows))
 		if len(rows) < m.cfg.PageSize {
@@ -895,11 +949,21 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	selectedSet := make(map[string]bool, len(tables))
 	for _, t := range tables {
 		selectedSet[t] = true
-		if !m.dmBlocked[t] && (m.oracleMySQL == nil || m.oracleMySQL.postEligible[t]) {
+		if !m.migrationTableBlocked(t) && !m.dmBlocked[t] && (m.oracleMySQL == nil || m.oracleMySQL.postEligible[t]) {
 			tableSet[t] = true
 		}
 	}
+	if s := m.partitionState; s != nil {
+		for table, failed := range s.blocked {
+			if failed {
+				selectedSet[table] = true
+			}
+		}
+	}
 	blocked := func(category *CategoryReport, name, table, reason string) {
+		if err := m.migrationTableError(table); err != nil {
+			reason += ": " + err.Error()
+		}
 		category.Failed++
 		result := objectResultForError(name, "", fmt.Errorf("%s；未执行关联对象", reason))
 		result.Stage, result.Table = "dependency", table
@@ -911,7 +975,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	if m.cfg.Mode == "exclude" {
 		excludedSet = make(map[string]bool)
 		for _, t := range allTables {
-			if !tableSet[t] && (!m.isOracleDameng() || !selectedSet[t]) {
+			if !tableSet[t] && !selectedSet[t] {
 				excludedSet[t] = true
 			}
 		}
@@ -943,7 +1007,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(pks))
 			for _, pk := range pks {
-				if tableSet[pk.TableName] || m.isOracleDameng() && selectedSet[pk.TableName] {
+				if selectedSet[pk.TableName] {
 					filtered = append(filtered, pk)
 				}
 			}
@@ -952,7 +1016,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
-				if m.isOracleDameng() && m.dmBlocked[pk.TableName] {
+				if !tableSet[pk.TableName] {
 					blocked(&report.PrimaryKeys, pk.IndexName, pk.TableName, "依赖表 "+pk.TableName+" 迁移失败")
 					continue
 				}
@@ -998,7 +1062,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			m.log.Errorf("获取序列信息失败: %v", err)
 			recordMetadataFailure(&report.Sequences, err)
 		} else {
-			scope := tableSet
+			scope := selectedSet
 			if m.isOracleDameng() {
 				scope = selectedSet
 				for _, seq := range source.FilterNativeSequences(seqs, scope) {
@@ -1010,6 +1074,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			for _, seq := range filtered {
 				if ctx.Err() != nil {
 					return
+				}
+				if seq.Native == nil && selectedSet[seq.TableName] && !tableSet[seq.TableName] {
+					blocked(&report.Sequences, dialect.SequenceName(m.writer.Dialect(), m.targetSequence(seq)), seq.TableName, "依赖表 "+seq.TableName+" 迁移失败")
+					continue
 				}
 				seqCopy := m.targetSequence(m.prepareSourceSequence(ctx, seq))
 				if ctx.Err() != nil {
@@ -1052,7 +1120,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		} else {
 			filtered := make([]source.IndexInfo, 0, len(indexes))
 			for _, idx := range indexes {
-				if tableSet[idx.TableName] || m.isOracleDameng() && selectedSet[idx.TableName] {
+				if selectedSet[idx.TableName] {
 					filtered = append(filtered, idx)
 				}
 			}
@@ -1081,7 +1149,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
-				if m.isOracleDameng() && m.dmBlocked[idx.TableName] {
+				if !tableSet[idx.TableName] {
 					blocked(&report.Indexes, idx.IndexName, idx.TableName, "依赖表 "+idx.TableName+" 迁移失败")
 					continue
 				}
@@ -1170,7 +1238,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if m.oracleMySQL != nil && !m.oracleMySQLForeignKeyInScope(fk) {
 					continue
 				}
-				if m.isOracleDameng() && !selectedSet[fk.TableName] {
+				if !selectedSet[fk.TableName] {
 					continue
 				}
 				if excludedSet[fk.TableName] || excludedSet[fk.RefTable] {
@@ -1191,9 +1259,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖未通过分区预检的表")
 					continue
 				}
-				if m.isOracleDameng() && (m.dmBlocked[fk.TableName] || m.dmBlocked[fk.RefTable]) {
+				if !tableSet[fk.TableName] || selectedSet[fk.RefTable] && !tableSet[fk.RefTable] {
 					failedTable := fk.TableName
-					if m.dmBlocked[fk.RefTable] {
+					if selectedSet[fk.RefTable] && !tableSet[fk.RefTable] {
 						failedTable = fk.RefTable
 					}
 					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖表 "+failedTable+" 迁移失败")
@@ -1268,7 +1336,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			m.log.Errorf("获取视图信息失败: %v", err)
 			recordMetadataFailure(&report.Views, err)
 		} else {
-			report.Views.Total = len(views)
+			report.Views.Total += len(views)
 			if m.isOracleDameng() {
 				for _, result := range m.migrateOracleDamengViews(ctx, views, nil) {
 					if result.Error != "" {
@@ -1294,22 +1362,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				}
 				views = nil // already executed in dependency order
 			}
-			for _, v := range views {
-				if ctx.Err() != nil {
-					return
-				}
-				ddl, cerr := m.createOneView(ctx, v)
-				if cerr != nil {
-					report.Views.Failed++
-					report.Views.Items = append(report.Views.Items, ObjectResult{
-						Name:  m.objName(v.ViewName),
-						DDL:   ddl,
-						Error: cerr.Error(),
-					})
-				} else {
-					report.Views.Success++
-				}
-			}
+			m.migrateIndependentViews(ctx, views, &report.Views)
 		}
 	}
 
@@ -1339,7 +1392,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					return
 				}
 				if !tableSet[cm.TableName] {
-					if m.isOracleDameng() && selectedSet[cm.TableName] && m.dmBlocked[cm.TableName] {
+					if selectedSet[cm.TableName] {
 						report.Comments.Total++
 						name := m.objName(cm.TableName)
 						if cm.ColumnName != "" {

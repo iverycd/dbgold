@@ -248,10 +248,11 @@ export interface MigrationReport {
 }
 
 export interface AutoRepair {
-  type: 'column_rename'
+  type: 'column_rename' | 'oracle_mysql_longtext'
   table: string
   target_table: string
   source: string
+  source_type?: string
   target: string
   reason: string
   status: 'applied' | 'reused'
@@ -675,6 +676,7 @@ export interface PGMySQLPreflight {
   partition_preflight?: PartitionPreflight
   check_scope?: 'structure'
   ready: boolean
+  can_start?: boolean
   source: { product: string; version: string; mode: string; schema: string; verification: string }
   target: { version: string; database: string; target_charset?: string; target_collation: string; verification: string }
   issues: CompatibilityIssue[]
@@ -717,7 +719,7 @@ export interface PartitionPreflight {
   ready: boolean; can_start: boolean; source_type: string; target_type: string; fatal_error?: string
   issues: CompatibilityIssue[]; tables: PartitionTableResult[]
 }
-export interface PartitionPreflightResponse { ready: boolean; partition_preflight: PartitionPreflight }
+export interface PartitionPreflightResponse { ready: boolean; can_start?: boolean; partition_preflight: PartitionPreflight }
 
 export interface DamengNativeIssue { object_id?: string; kind?: string; name?: string; severity: string; reason: string }
 export interface DamengNativeObject {
@@ -727,6 +729,7 @@ export interface DamengNativeObject {
 export interface DamengNativeProfile { version: string; instance: string; schema: string; settings: Record<string, string> }
 export interface DamengNativePreflight {
   kind: 'dameng_native'; ready: boolean; source: DamengNativeProfile; target: DamengNativeProfile
+  can_start?: boolean
   objects: DamengNativeObject[]; conflicts: DamengNativeObject[]; drops: DamengNativeObject[]; issues: DamengNativeIssue[]; fingerprint: string
 }
 export const preflightDamengNative = (data: StartDataMigrationRequest, signal?: AbortSignal) =>

@@ -46,6 +46,7 @@ type PlannedObject struct {
 type PGMySQLPreflight struct {
 	PartitionPreflight *PartitionPreflight  `json:"partition_preflight,omitempty"`
 	Ready              bool                 `json:"ready"`
+	CanStart           bool                 `json:"can_start"`
 	Source             source.PGProfile     `json:"source"`
 	Target             target.MySQLProfile  `json:"target"`
 	Issues             []CompatibilityIssue `json:"issues"`
@@ -57,6 +58,13 @@ type PGMySQLPreflight struct {
 	tables             []source.PGTable
 	snapshot           *source.PGSnapshot
 	validationFKs      []source.FKInfo
+	blocked            map[ObjectRef]error
+	dependencies       map[ObjectRef][]ObjectRef
+	globalError        bool
+	viewOnly           bool
+	objectOnly         bool
+	targetDependencies []target.MySQLForeignKey
+	targetSnapshot     []target.MySQLForeignKey
 }
 type pgSnapshotReader interface {
 	ReadPGSnapshot(context.Context) (*source.PGSnapshot, error)
@@ -73,20 +81,40 @@ func (m *Migrator) isPGMySQL() bool {
 	return source.IsPGFamily(m.reader.DBType()) && m.writer.DBType() == "mysql"
 }
 func (p *PGMySQLPreflight) add(ref ObjectRef, reason string, excludable bool) {
-	p.Issues = append(p.Issues, CompatibilityIssue{Object: ref, Severity: "error", Reason: reason, Excludable: excludable, Suggestion: "调整源定义或明确排除对象后重新预检"})
+	p.Issues = append(p.Issues, CompatibilityIssue{Object: ref, Severity: "error", Reason: reason, Excludable: excludable, Suggestion: "受影响表及依赖对象将跳过；可调整定义后重新预检"})
+	p.blockIssue(ref, fmt.Errorf("%s", reason))
 }
 func (p *PGMySQLPreflight) warn(ref ObjectRef, reason string) {
 	p.Issues = append(p.Issues, CompatibilityIssue{Object: ref, Severity: "warning", Reason: reason, Suggestion: "迁移期间保持源库停写，并按此映射调整应用"})
 }
 func (p *PGMySQLPreflight) finish() {
-	p.Ready = true
-	for _, i := range p.Issues {
-		if i.Severity == "error" {
+	p.Ready = !p.globalError
+	for _, issue := range p.Issues {
+		if issue.Severity == "error" {
 			p.Ready = false
-			return
+		}
+	}
+	p.CanStart = false
+	if p.globalError {
+		return
+	}
+	if p.viewOnly || p.objectOnly {
+		for _, obj := range p.Objects {
+			if obj.Stage != "drop_dependency" && !p.objectBlocked(obj.Object) {
+				p.CanStart = true
+				break
+			}
+		}
+	} else {
+		for _, t := range p.tables {
+			if !p.objectBlocked(tableRef(t.Info.TableName)) {
+				p.CanStart = true
+				break
+			}
 		}
 	}
 }
+
 func tableRef(t string) ObjectRef { return ObjectRef{Kind: "table", Name: t} }
 func idxRef(idx source.IndexInfo) ObjectRef {
 	k := "index"
@@ -115,13 +143,14 @@ func (m *Migrator) wantPGObject(kind string) bool {
 // PreflightPGMySQL performs structure checks and SQL planning without scanning business rows.
 // It never calls Writer mutation methods. Run always builds a fresh plan.
 func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
-	p := &PGMySQLPreflight{CheckScope: "structure", Issues: []CompatibilityIssue{}, Objects: []PlannedObject{}, Excluded: append([]ObjectRef{}, m.cfg.ExcludedObjects...)}
+	p := &PGMySQLPreflight{blocked: map[ObjectRef]error{}, dependencies: map[ObjectRef][]ObjectRef{}, viewOnly: len(m.cfg.ViewNames) > 0, objectOnly: m.cfg.objectMode(), CheckScope: "structure", Issues: []CompatibilityIssue{}, Objects: []PlannedObject{}, Excluded: append([]ObjectRef{}, m.cfg.ExcludedObjects...)}
 	if _, ok := m.reader.(source.PartitionReader); ok {
 		p.PartitionPreflight = m.preparePartitions(ctx)
 	}
 	defer func() {
 		if pp := p.PartitionPreflight; pp != nil {
-			pp.CanStart = pp.CanStart && p.Ready
+			pp.CanStart = pp.CanStart && p.CanStart
+			p.CanStart = pp.CanStart
 			if !pp.Ready {
 				p.Ready = false
 				p.Issues = append(p.Issues, pp.Issues...)
@@ -152,7 +181,15 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 		return fail(err)
 	}
 	var snap *source.PGSnapshot
-	if scoped, enabled := r.(pgScopedSnapshotReader); enabled && m.partitionState != nil && p.PartitionPreflight != nil {
+	if tolerant, enabled := r.(interface {
+		ReadPGMigrationSnapshot(context.Context, []string) (*source.PGSnapshot, error)
+	}); enabled {
+		var chosen []string
+		if m.partitionState != nil && p.PartitionPreflight != nil {
+			chosen = m.pgMySQLSnapshotTables()
+		}
+		snap, err = tolerant.ReadPGMigrationSnapshot(ctx, chosen)
+	} else if scoped, enabled := r.(pgScopedSnapshotReader); enabled && m.partitionState != nil && p.PartitionPreflight != nil {
 		chosen := m.pgMySQLSnapshotTables()
 		if len(chosen) == 0 && len(m.partitionState.blocked) > 0 && len(m.cfg.ViewNames) == 0 {
 			p.PartitionPreflight.CanStart = false
@@ -220,6 +257,7 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	for _, ref := range m.cfg.ExcludedObjects {
 		if !available[ref] {
 			p.add(ref, "排除项不存在或不允许排除（不能排除列或从属自增属性）", false)
+			p.globalError = true
 		} else {
 			excluded[ref] = true
 		}
@@ -282,31 +320,44 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 	}
 	isExisting := m.cfg.Content == "data_only" || m.cfg.objectMode() || viewOnly
 	names := map[string]string{}
+	nameOwners := map[string]ObjectRef{}
 	registerName := func(space, name, origin string) {
-		for _, r := range name {
-			if r > 0xffff {
-				p.add(tableRef(origin), "MySQL 标识符不支持补充平面字符", false)
-				return
+		owner := tableRef(origin)
+		if strings.HasPrefix(space, "column:") || strings.HasPrefix(space, "index:") {
+			owner = tableRef(strings.SplitN(space, ":", 2)[1])
+		}
+		if space == "constraint" {
+			for _, table := range snap.Tables {
+				if strings.HasPrefix(origin, table.Info.TableName+".") {
+					owner = tableRef(table.Info.TableName)
+					break
+				}
 			}
 		}
-		if strings.HasSuffix(name, " ") || space == "relation" && strings.ContainsAny(name, "./\\") {
-			p.add(tableRef(origin), "目标对象名含 MySQL 不允许的字符或尾空格", false)
+		if space == "relation" {
+			for _, view := range snap.Views {
+				if view.ViewName == origin {
+					owner = ObjectRef{Kind: "view", Name: origin}
+					break
+				}
+			}
+		}
+		if err := validateMySQLObjectName(name, space == "relation"); err != nil {
+			p.add(owner, fmt.Sprintf("%s: %v", origin, err), false)
 			return
 		}
 
-		if utf8.RuneCountInString(name) > 64 || name == "" || strings.ContainsRune(name, 0) {
-			p.add(tableRef(origin), "目标标识符为空、含 NUL 或超过 64 字符", false)
-			return
-		}
 		key := name
 		if space != "relation" || p.Target.LowerCaseTableNames != 0 {
 			key = strings.ToLower(key)
 		}
 		key = space + ":" + key
 		if old, ok := names[key]; ok && old != origin {
-			p.add(tableRef(origin), fmt.Sprintf("目标名称与 %s 冲突", old), false)
+			p.add(owner, fmt.Sprintf("目标名称与 %s 冲突", old), false)
+			p.add(nameOwners[key], fmt.Sprintf("目标名称与 %s 冲突", origin), false)
 		} else {
 			names[key] = origin
+			nameOwners[key] = owner
 		}
 	}
 	dia := dialect.NewMySQL()
@@ -553,6 +604,19 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 			if excluded[ref] || skippedForeignKeys[ref] {
 				continue
 			}
+			if p.objectBlocked(tableRef(fk.TableName)) || p.objectBlocked(tableRef(fk.RefTable)) {
+				p.dependencies[ref] = append(p.dependencies[ref], tableRef(fk.TableName), tableRef(fk.RefTable))
+				if m.cfg.Content != "data_only" {
+					copy := fk
+					copy.TableName = m.objName(fk.TableName)
+					copy.RefTable = m.objName(fk.RefTable)
+					copy.ConstraintName = m.objName(fk.ConstraintName)
+					copy.Columns = mapNames(fk.Columns, m.objName)
+					copy.RefColumns = mapNames(fk.RefColumns, m.objName)
+					p.Objects = append(p.Objects, PlannedObject{ref, copy.ConstraintName, "foreign_key", dia.ForeignKeyStatements(p.Target.Database, copy)})
+				}
+				continue
+			}
 			if fk.Unsupported != "" || fk.RefSchema != snap.Profile.Schema || fk.OnDelete == "SET DEFAULT" || fk.OnUpdate == "SET DEFAULT" {
 				p.add(ref, "外键含不支持的动作、延迟语义或跨 schema 引用", true)
 				continue
@@ -609,23 +673,34 @@ func (m *Migrator) PreflightPGMySQL(ctx context.Context) *PGMySQLPreflight {
 		orderPGDataTables(p)
 	}
 	p.finish()
-	if p.Ready {
+	if p.CanStart {
 		if e := m.checkPGMySQLPrivileges(ctx, p, w.InspectionDB()); e != nil {
 			p.add(ObjectRef{Kind: "permission", Name: p.Target.Database}, e.Error(), false)
 			p.finish()
 		}
 	}
-	if p.Ready && !isExisting {
-		if err := validatePGTextDefaults(ctx, p, w.InspectionDB()); err != nil {
+	if p.CanStart && !isExisting {
+		for {
+			err := validatePGTextDefaults(ctx, p, w.InspectionDB())
+			if err == nil {
+				break
+			}
 			var objectErr *pgObjectError
-			if errors.As(err, &objectErr) {
+			if !m.stopMigrationTask(ctx, err) && errors.As(err, &objectErr) {
 				p.add(objectErr.Object, err.Error(), true)
 			} else {
 				p.add(ObjectRef{Kind: "target", Name: p.Target.Database}, err.Error(), false)
+				break
 			}
 			p.finish()
+			if !p.CanStart {
+				break
+			}
 		}
 	}
+	p.linkTableDependencies()
+	p.protectTargetDependencies(m)
+
 	// Stable execution order; dependency order among views is already topological.
 	order := map[string]int{"drop_dependency": 0, "table": 1, "index": 2, "sequence": 3, "check": 4, "foreign_key": 5, "comment": 6, "view": 7}
 	sort.SliceStable(p.Objects, func(i, j int) bool { return order[p.Objects[i].Stage] < order[p.Objects[j].Stage] })
@@ -826,7 +901,12 @@ func orderPGDataTables(p *PGMySQLPreflight) {
 	for _, t := range p.tables {
 		if e := visit(t.Info.TableName); e != nil {
 			p.add(tableRef(t.Info.TableName), e.Error(), false)
-			return
+			continue
+		}
+	}
+	for _, t := range p.tables {
+		if p.objectBlocked(tableRef(t.Info.TableName)) {
+			out = append(out, t)
 		}
 	}
 	p.tables = out

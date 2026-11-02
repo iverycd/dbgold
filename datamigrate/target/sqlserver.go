@@ -230,6 +230,23 @@ func (w *SQLServerWriter) CopyData(ctx context.Context, table string, cols, type
 	return tx.Commit()
 }
 
+// SQLServerNameError retains every original input spelling affected by a name
+// validation or target-collation conflict. Callers can block those identities
+// without guessing equivalence using case folding or trimming.
+type SQLServerNameError struct {
+	Names []string
+	Cause error
+}
+
+func (e *SQLServerNameError) Error() string {
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return "目标排序规则下对象名冲突: " + strings.Join(e.Names, ", ")
+}
+
+func (e *SQLServerNameError) Unwrap() error { return e.Cause }
+
 // CheckNames compares with the actual target collation (including accents and
 // case), rather than guessing equivalence using Go strings.ToLower.
 func (w *SQLServerWriter) CheckNames(ctx context.Context, names []string) error {
@@ -240,24 +257,35 @@ func (w *SQLServerWriter) CheckNames(ctx context.Context, names []string) error 
 	xmlText.WriteString("<names>")
 	for _, n := range names {
 		if e := dialect.ValidateSQLServerName(n); e != nil {
-			return e
+			return &SQLServerNameError{Names: []string{n}, Cause: e}
 		}
 		xmlText.WriteString("<n>")
 		if e := xml.EscapeText(&xmlText, []byte(n)); e != nil {
-			return e
+			return &SQLServerNameError{Names: []string{n}, Cause: e}
 		}
 		xmlText.WriteString("</n>")
 	}
 	xmlText.WriteString("</names>")
-	var duplicate string
-	e := w.db.QueryRowContext(ctx, `DECLARE @x xml=CAST(@p1 AS xml); SELECT TOP 1 n FROM (SELECT v.value('.', 'nvarchar(128)') COLLATE DATABASE_DEFAULT AS n FROM @x.nodes('/names/n') AS t(v)) q GROUP BY n HAVING COUNT(*)>1`, xmlText.String()).Scan(&duplicate)
-	if e == sql.ErrNoRows {
-		return nil
-	}
+	rows, e := w.db.QueryContext(ctx, `DECLARE @x xml=CAST(@p1 AS xml); SELECT n FROM (SELECT v.value('.', 'nvarchar(128)') AS n, COUNT(*) OVER (PARTITION BY v.value('.', 'nvarchar(128)') COLLATE DATABASE_DEFAULT) AS occurrences FROM @x.nodes('/names/n') AS t(v)) q WHERE occurrences>1`, xmlText.String())
 	if e != nil {
 		return e
 	}
-	return fmt.Errorf("目标排序规则下对象名冲突: %s", duplicate)
+	defer rows.Close()
+	var conflicts []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		conflicts = append(conflicts, name)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(conflicts) > 0 {
+		return &SQLServerNameError{Names: conflicts}
+	}
+	return nil
 }
 
 // ValidateExisting is required for append/object modes. Exact types and

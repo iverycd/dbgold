@@ -161,6 +161,9 @@ func (m *Migrator) fitPGMySQLRow(p *PGMySQLPreflight, t *source.PGTable) {
 
 func (m *Migrator) checkPGMySQLTextStructure(p *PGMySQLPreflight) {
 	for _, t := range p.tables {
+		if p.objectBlocked(tableRef(t.Info.TableName)) {
+			continue
+		}
 		rules := p.textRules[t.Info.TableName]
 		rowBytes := pgDeclaredRowBytes(t.Info.Columns, rules)
 		type columnSize struct {
@@ -224,6 +227,9 @@ func (m *Migrator) checkPGMySQLTextStructure(p *PGMySQLPreflight) {
 		}
 	}
 	for _, fk := range p.validationFKs {
+		if p.objectBlocked(tableRef(fk.TableName)) || p.objectBlocked(tableRef(fk.RefTable)) {
+			continue
+		}
 		for i, c := range fk.Columns {
 			a, b := p.textRules[fk.TableName][c], p.textRules[fk.RefTable][fk.RefColumns[i]]
 			if a.Charset != b.Charset || a.Collation != b.Collation {
@@ -364,6 +370,9 @@ func (m *Migrator) recheckPGMySQLText(ctx context.Context, p *PGMySQLPreflight, 
 	}
 	if m.cfg.Content == "data_only" || m.cfg.objectMode() || len(m.cfg.ViewNames) > 0 {
 		for _, t := range p.tables {
+			if p.objectBlocked(tableRef(t.Info.TableName)) {
+				continue
+			}
 			cols, err := loadMySQLColumns(ctx, db, p.Target.Database, m.objName(t.Info.TableName))
 			if err != nil {
 				return err
@@ -385,6 +394,9 @@ func (m *Migrator) recheckPGMySQLText(ctx context.Context, p *PGMySQLPreflight, 
 // Empty tables and schema-only runs still need representable string defaults.
 func validatePGTextDefaults(ctx context.Context, p *PGMySQLPreflight, db *sql.DB) error {
 	for _, t := range p.tables {
+		if p.objectBlocked(tableRef(t.Info.TableName)) {
+			continue
+		}
 		row := make([]any, len(t.Info.Columns))
 		for i, c := range t.Info.Columns {
 			if !pgTextColumn(c) || c.Default == nil {

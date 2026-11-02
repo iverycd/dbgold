@@ -1,5 +1,15 @@
 import type { DataValidationValue, DataValidationReport, CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
 
+// ready means every object passed. can_start also allows a healthy subset, and
+// an explicit top-level refusal always overrides a nested partition result.
+export function preflightCanStart(result?: { can_start?: boolean; partition_preflight?: { can_start?: boolean }; ready?: boolean } | null): boolean {
+  return result?.can_start ?? result?.partition_preflight?.can_start ?? result?.ready ?? false
+}
+
+export function preflightStatusLabel(result?: { can_start?: boolean; partition_preflight?: { can_start?: boolean }; ready?: boolean } | null): string {
+  return !result ? '待预检' : !preflightCanStart(result) ? '预检未通过' : result.ready ? '预检通过' : '部分可执行'
+}
+
 const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
 
 // Isolate the original MySQL KEY clause for this failed index. Split only at

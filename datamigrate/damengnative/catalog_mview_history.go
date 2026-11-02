@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"dbgold/datamigrate/failure"
 )
 
 // MaterializedHistorySQL is a frozen group descriptor, not an independently
@@ -715,4 +717,39 @@ func MaterializedPartitionBufferDDL(ddl, schema, name, partition string, columns
 	}
 	pos := ts[end].end
 	return ddl[:pos] + " PARTITION BY RANGE(" + Quote(key) + ") (PARTITION " + Quote(partition) + " VALUES LESS THAN(MAXVALUE)) " + ddl[pos:], nil
+}
+
+// The history planner freezes every FAST/FORCE sibling and every independent
+// MLOG together. If a local recipe cannot be built, withhold that known group
+// and the helpers appended by this attempt while preserving unrelated tables.
+func (r *catalogReader) recordMaterializedHistoryFailure(err error, before int) {
+	if failure.IsTaskError(err) {
+		r.issueError(nil, "物化历史计划无法读取: ", err)
+		return
+	}
+	affected := map[string]bool{}
+	carriers := map[string]bool{}
+	for i, o := range r.snapshot.Objects {
+		if i >= before || o.Materialized != nil && o.Materialized.Baseline || o.Kind == "materialized_view_log" && !o.Managed {
+			affected[o.ID] = true
+			if o.Materialized != nil {
+				carriers[o.Table] = true
+			}
+		}
+	}
+	for _, o := range r.snapshot.Objects {
+		if o.Kind == "table" && carriers[o.Name] {
+			affected[o.ID] = true
+		}
+	}
+	if len(affected) == 0 {
+		r.issue(nil, "无法确定物化历史失败对象归属: "+err.Error())
+		return
+	}
+	for i := range r.snapshot.Objects {
+		object := &r.snapshot.Objects[i]
+		if affected[object.ID] {
+			r.issue(object, "物化历史依赖组预检失败: "+err.Error())
+		}
+	}
 }

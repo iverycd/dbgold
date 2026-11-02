@@ -14,6 +14,40 @@ type OracleObject struct {
 	Columns           []string
 }
 
+// OracleTablePreflightError identifies a target conflict that can be isolated
+// while the complete remaining batch is checked again before any target write.
+type OracleTablePreflightError struct {
+	Table string
+	Err   error
+}
+
+func (e *OracleTablePreflightError) Error() string { return e.Err.Error() }
+func (e *OracleTablePreflightError) Unwrap() error { return e.Err }
+
+// OracleObjectPreflightError identifies an independent object, such as a view,
+// that must not be installed while unrelated tables and objects may proceed.
+type OracleObjectPreflightError struct {
+	Kind, Name string
+	Err        error
+}
+
+func (e *OracleObjectPreflightError) Error() string { return e.Err.Error() }
+func (e *OracleObjectPreflightError) Unwrap() error { return e.Err }
+
+func oracleObjectPreflightError(object OracleObject, err error) error {
+	if object.Table != "" {
+		return oracleTablePreflightError(object.Table, err)
+	}
+	return &OracleObjectPreflightError{Kind: object.Kind, Name: object.Name, Err: err}
+}
+
+func oracleTablePreflightError(table string, err error) error {
+	if table == "" || err == nil {
+		return err
+	}
+	return &OracleTablePreflightError{Table: table, Err: err}
+}
+
 // PreflightOracle only observes target state. A same-name sequence is reusable
 // only when the corresponding trigger proves its table/column provenance.
 func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*source.TableDDLInfo, objects []OracleObject, sequences []source.SequenceInfo, rebuild, dataOnly bool) error {
@@ -27,38 +61,41 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 		return nil
 	}
 	for name := range tables {
+		if tables[name] == nil {
+			return oracleTablePreflightError(name, fmt.Errorf("表 %s 缺少列元数据", name))
+		}
 		if err := validateName(name); err != nil {
-			return err
+			return oracleTablePreflightError(name, err)
 		}
 		for _, column := range tables[name].Columns {
 			if err := validateName(strings.ToUpper(column.Name)); err != nil {
-				return fmt.Errorf("表 %s: %w", name, err)
+				return oracleTablePreflightError(name, fmt.Errorf("表 %s: %w", name, err))
 			}
 			if rebuild && column.Default != nil {
 				if err := w.validateSQLText(*column.Default); err != nil {
-					return fmt.Errorf("表 %s 列 %s 默认值: %w", name, column.Name, err)
+					return oracleTablePreflightError(name, fmt.Errorf("表 %s 列 %s 默认值: %w", name, column.Name, err))
 				}
 			}
 		}
 		if dataOnly {
 			cols, err := w.loadColumns(ctx, name)
 			if err != nil {
-				return err
+				return oracleTablePreflightError(name, err)
 			}
 			for _, c := range tables[name].Columns {
 				if _, ok := cols[strings.ToUpper(c.Name)]; !ok {
-					return fmt.Errorf("仅数据迁移: 目标表 %s 缺少列 %s", name, strings.ToUpper(c.Name))
+					return oracleTablePreflightError(name, fmt.Errorf("仅数据迁移: 目标表 %s 缺少列 %s", name, strings.ToUpper(c.Name)))
 				}
 			}
 		}
 	}
 	for _, o := range objects {
 		if err := validateName(o.Name); err != nil {
-			return err
+			return oracleObjectPreflightError(o, err)
 		}
 		for _, column := range o.Columns {
 			if err := validateName(column); err != nil {
-				return fmt.Errorf("对象 %s: %w", o.Name, err)
+				return oracleObjectPreflightError(o, fmt.Errorf("对象 %s: %w", o.Name, err))
 			}
 		}
 	}
@@ -103,7 +140,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 	}
 	for _, s := range sequences {
 		if err = w.inspectSequence(ctx, s); err != nil {
-			return err
+			return oracleTablePreflightError(s.TableName, err)
 		}
 	}
 	for _, o := range objects {
@@ -114,7 +151,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			var table string
 			err = w.db.QueryRowContext(ctx, `SELECT TABLE_NAME FROM ALL_CONSTRAINTS WHERE OWNER=:1 AND CONSTRAINT_NAME=:2`, w.schema, o.Name).Scan(&table)
 			if err == nil && !(rebuild && table == o.Table) {
-				return fmt.Errorf("Oracle 约束名 %s 已存在于表 %s", o.Name, table)
+				return oracleTablePreflightError(o.Table, fmt.Errorf("Oracle 约束名 %s 已存在于表 %s", o.Name, table))
 			}
 			if err != nil && err != sql.ErrNoRows {
 				return err
@@ -125,7 +162,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			var owner, table string
 			err = w.db.QueryRowContext(ctx, `SELECT TABLE_OWNER,TABLE_NAME FROM ALL_INDEXES WHERE OWNER=:1 AND INDEX_NAME=:2`, w.schema, o.Name).Scan(&owner, &table)
 			if err == nil && !(rebuild && owner == w.schema && table == o.Table) {
-				return fmt.Errorf("Oracle 索引名 %s 已存在于 %s.%s", o.Name, owner, table)
+				return oracleTablePreflightError(o.Table, fmt.Errorf("Oracle 索引名 %s 已存在于 %s.%s", o.Name, owner, table))
 			}
 			if err != nil && err != sql.ErrNoRows {
 				return err
@@ -138,7 +175,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			return err
 		}
 		if err == nil && (kind != o.Kind || o.Kind == "TABLE" && !rebuild) {
-			return fmt.Errorf("Oracle 名称 %s 已被 %s 占用", o.Name, kind)
+			return oracleObjectPreflightError(o, fmt.Errorf("Oracle 名称 %s 已被 %s 占用", o.Name, kind))
 		}
 		if o.Kind == "TABLE" && err == nil && rebuild {
 			rows, e := w.db.QueryContext(ctx, `SELECT c.OWNER,c.TABLE_NAME,c.CONSTRAINT_NAME FROM ALL_CONSTRAINTS c JOIN ALL_CONSTRAINTS p ON c.R_OWNER=p.OWNER AND c.R_CONSTRAINT_NAME=p.CONSTRAINT_NAME WHERE p.OWNER=:1 AND p.TABLE_NAME=:2 AND c.CONSTRAINT_TYPE='R'`, w.schema, o.Name)
@@ -153,7 +190,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 				}
 				if _, ok := tables[table]; !ok || owner != w.schema {
 					rows.Close()
-					return fmt.Errorf("重建 %s 会删除迁移范围外的外键 %s.%s，请先处理依赖", o.Name, owner, name)
+					return oracleTablePreflightError(o.Name, fmt.Errorf("重建 %s 会删除迁移范围外的外键 %s.%s，请先处理依赖", o.Name, owner, name))
 				}
 			}
 			e = rows.Err()

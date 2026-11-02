@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"syscall"
 
 	"gitee.com/chunanyong/dm"
+	mysql "github.com/go-sql-driver/mysql"
 	oranetwork "github.com/sijms/go-ora/v2/network"
 )
 
@@ -25,6 +27,7 @@ func IsTaskError(err error) bool {
 		context.Canceled, context.DeadlineExceeded, driver.ErrBadConn,
 		sql.ErrConnDone, net.ErrClosed, io.EOF, io.ErrUnexpectedEOF,
 		io.ErrClosedPipe, oranetwork.ErrConnReset,
+		mysql.ErrInvalidConn, mysql.ErrMalformPkt, mysql.ErrPktSync, mysql.ErrPktSyncMul,
 		syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ENOTCONN,
 		syscall.EPIPE, syscall.ETIMEDOUT, syscall.ECONNREFUSED,
 		syscall.EHOSTUNREACH, syscall.ENETUNREACH,
@@ -36,6 +39,17 @@ func IsTaskError(err error) bool {
 	var scope interface{ OracleDamengCapabilityScope() string }
 	if errors.As(err, &scope) && scope.OracleDamengCapabilityScope() == "task" {
 		return true
+	}
+	var migrationScope interface{ MigrationFailureScope() string }
+	if errors.As(err, &migrationScope) && migrationScope.MigrationFailureScope() == "task" {
+		return true
+	}
+	var sqlState interface{ SQLState() string }
+	if errors.As(err, &sqlState) {
+		code := sqlState.SQLState()
+		if strings.HasPrefix(code, "08") || strings.HasPrefix(code, "28") || code == "57P01" || code == "57P02" || code == "57P03" {
+			return true
+		}
 	}
 	var op *net.OpError
 	var dns *net.DNSError

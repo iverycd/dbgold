@@ -153,7 +153,7 @@ func (m *Migrator) recordDamengRepairs(report *MigrationReport, table, status st
 			continue
 		}
 		r := AutoRepair{Type: "column_rename", Table: table, TargetTable: strings.ToUpper(table), Source: c.Name,
-			Target: p.columns[c.Name], Reason: "达梦禁用列名", Status: status}
+			SourceType: source.FormatColumnType(c), Target: p.columns[c.Name], Reason: "达梦禁用列名", Status: status}
 		if m.cfg.TargetSchema != "" {
 			r.TargetTable = strings.ToUpper(m.cfg.TargetSchema) + "." + r.TargetTable
 		}

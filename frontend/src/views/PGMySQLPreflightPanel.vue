@@ -3,7 +3,7 @@
     <div v-if="compact" class="preflight-summary">
       <div class="preflight-summary-content">
         <div class="preflight-summary-stats" aria-live="polite">
-          <strong :class="result ? (result.ready ? 'text-success' : 'text-danger') : ''">{{ summaryStatus }}</strong>
+          <strong :class="statusClass">{{ summaryStatus }}</strong>
           <span>阻止 {{ result ? errorCount : '—' }}</span>
           <span>提示 {{ result ? warningCount : '—' }}</span>
         </div>
@@ -25,8 +25,8 @@
     </div>
     <a-alert v-if="!readonly" type="info" class="preflight-notice">
       预检只读检查对象结构、默认值和执行条件，不扫描全量业务数据。请在迁移和校验期间停止源库写入及结构变更。
-      预检结果在配置未变化时复用，后端仍会在执行前重新检查。分区表的局部阻止项只跳过该表及依赖，是否可迁移其余表以开始迁移时的自动分区检查结果为准；其他兼容阻止项仍会阻止启动。
-      数据在复制或创建约束时验证；失败会停止迁移，已建表和已提交批次可能保留。
+      预检结果在配置未变化时复用，后端仍会在执行前重新检查。单表兼容性或建表失败会跳过该表及依赖对象，其余表继续迁移；任务级错误会停止任务。
+      数据在复制或创建约束时验证；已建表和已提交批次可能保留。
     </a-alert>
     <a-alert v-else type="info" class="preflight-notice">查看报告不会重新执行预检。<template v-if="structureCheck">此记录仅包含结构预检，不代表全量数据校验通过。</template></a-alert>
     <div v-if="excluded.length" class="preflight-excluded">
@@ -36,12 +36,13 @@
       </a-tag>
     </div>
     <div class="preflight-stats" aria-live="polite">
-      <div class="preflight-stat"><span>检查状态</span><strong :class="busy ? '' : result ? (result.ready ? 'text-success' : 'text-danger') : ''">{{ busy ? '结构检查中' : result ? (result.ready ? (structureCheck ? '结构预检通过' : '预检通过') : '存在阻止项') : '待预检' }}</strong></div>
+      <div class="preflight-stat"><span>检查状态</span><strong :class="busy ? '' : statusClass">{{ busy ? '结构检查中' : result?.ready && preflightCanStart(result) && structureCheck ? '结构预检通过' : preflightStatusLabel(result) }}</strong></div>
       <div class="preflight-stat"><span>阻止项</span><strong :class="{ 'text-danger': errorCount > 0 }">{{ result ? errorCount : '—' }}</strong></div>
       <div class="preflight-stat"><span>提示项</span><strong>{{ result ? warningCount : '—' }}</strong></div>
       <div class="preflight-stat"><span>{{ structureCheck ? '计划对象数' : '已检查行数' }}</span><strong>{{ result ? (structureCheck ? result.objects.length : result.rows_checked).toLocaleString() : '—' }}</strong></div>
     </div>
     <template v-if="result">
+      <a-alert v-if="!result.ready && preflightCanStart(result)" type="warning">部分可执行：将跳过受影响表及其依赖对象，其余表继续迁移。</a-alert>
       <a-collapse class="preflight-versions">
         <a-collapse-item key="versions" header="数据库版本与兼容信息">
           <dl class="preflight-metadata">
@@ -106,12 +107,14 @@
 import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { copyText } from '@/utils/clipboard'
+import { preflightCanStart, preflightStatusLabel } from '@/utils/migrationReport'
 import type { MigrationObjectRef, PGMySQLPreflight } from '@/api/migration'
 const props = withDefaults(defineProps<{ result?: PGMySQLPreflight | null; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
 const structureCheck = computed(() => props.result ? props.result.check_scope === 'structure' : !props.readonly)
+const statusClass = computed(() => !props.result ? '' : !preflightCanStart(props.result) ? 'text-danger' : props.result.ready ? 'text-success' : 'text-warning')
 const summaryStatus = computed(() => props.summarySource === 'report'
-  ? (props.result?.ready ? '执行前预检通过' : '执行前预检未通过')
-  : (props.result ? (props.result.ready ? '页面结构预检通过' : '页面结构预检未通过') : '暂无页面预检结果'))
+  ? `执行前${preflightStatusLabel(props.result)}`
+  : (props.result ? `页面结构${preflightStatusLabel(props.result)}` : '暂无页面预检结果'))
 defineEmits<{ check: []; exclude: [item: MigrationObjectRef]; restore: [item: MigrationObjectRef]; 'view-report': []; 'view-logs': [] }>()
 const activeTab = ref('issues')
 const severity = ref('all')
@@ -170,7 +173,7 @@ h3, p { margin: 0; } h3 { font-size: 16px; font-weight: 600; } p { margin-top: 6
 .preflight-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-border-2); overflow: hidden; margin-bottom: 20px; }
 .preflight-stat { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; background: var(--color-bg-2); }
 .preflight-stat span { font-size: 12px; color: var(--color-text-3); } .preflight-stat strong { font-size: 22px; line-height: 1.4; font-variant-numeric: tabular-nums; }
-.text-success { color: #15803d; } .text-danger { color: #dc2626; }
+.text-success { color: #15803d; } .text-danger { color: #dc2626; } .text-warning { color: #b45309; }
 .preflight-versions { margin-bottom: 12px; } .preflight-metadata { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 12px; font-size: 13px; line-height: 1.7; margin: 0; }
 .preflight-metadata dt { color: var(--color-text-3); } .preflight-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .preflight-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }

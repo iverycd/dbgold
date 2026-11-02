@@ -62,8 +62,6 @@ func TestPGPreflightBlocksBeforeAnyMutation(t *testing.T) {
 			w := &pgPlanWriter{db: db}
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema.SCHEMATA`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 			mock.ExpectQuery(`SELECT TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME`).WillReturnRows(sqlmock.NewRows([]string{"s", "t", "c", "rs", "rt"}))
-			mock.ExpectQuery(`SELECT ENGINE,TABLE_TYPE`).WillReturnRows(sqlmock.NewRows([]string{"e", "t"}))
-			mock.ExpectQuery(`SELECT TABLE_NAME,VIEW_DEFINITION`).WillReturnRows(sqlmock.NewRows([]string{"name", "def"}))
 			m := NewMigrator(r, w, &Job{LogCh: make(chan string, 128)}, Config{Mode: "all", TargetDBType: "mysql", Content: "both"})
 			report := m.Run(context.Background())
 			if !report.HasFailures() || report.Preflight.Ready || w.mutations != 0 {

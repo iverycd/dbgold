@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"gitee.com/chunanyong/dm"
+	mysql "github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 	oranetwork "github.com/sijms/go-ora/v2/network"
 	"github.com/stretchr/testify/require"
 )
@@ -119,4 +121,23 @@ func TestMigrationTaskFailureFindsLaterJoinedCause(t *testing.T) {
 		require.True(t, isMigrationTaskError(fmt.Errorf("预检: %w", err)))
 	}
 	require.False(t, isMigrationTaskError(errors.Join(&oranetwork.OracleError{ErrCode: 904}, &dm.DmError{ErrCode: -5515})))
+}
+
+func TestMigrationMySQLProtocolAndPGSessionErrorsStopEveryRoute(t *testing.T) {
+	for _, err := range []error{
+		mysql.ErrInvalidConn, mysql.ErrMalformPkt, mysql.ErrPktSync, mysql.ErrPktSyncMul,
+		&pq.Error{Code: "08006"}, &pq.Error{Code: "57P01"}, &pq.Error{Code: "57P02"},
+		&pq.Error{Code: "57P03"}, &pq.Error{Code: "28P01"},
+		migrationTaskFailure{err: errors.New("object checkpoint unavailable")},
+	} {
+		require.True(t, isMigrationTaskError(fmt.Errorf("DDL: %w", err)), "%T: %v", err, err)
+	}
+	for _, err := range []error{
+		&mysql.MySQLError{Number: 1103, Message: "Incorrect table name"},
+		&mysql.MySQLError{Number: 1064, Message: "syntax error"},
+		&mysql.MySQLError{Number: 1118, Message: "Row size too large"},
+		&pq.Error{Code: "42501"}, &pq.Error{Code: "22003"}, &pq.Error{Code: "57014"},
+	} {
+		require.False(t, isMigrationTaskError(err), "%T: %v", err, err)
+	}
 }

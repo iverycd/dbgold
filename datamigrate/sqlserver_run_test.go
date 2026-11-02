@@ -2,6 +2,7 @@ package datamigrate
 
 import (
 	"context"
+	"database/sql/driver"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -33,11 +34,29 @@ type sqlServerRecordingWriter struct {
 	existingErr, copyErr string
 	blocked              string
 	validated            int
+	nameCheck            func([]string) error
+	createErrors         map[string]error
+	createAttempts       []string
 }
 
-func (w *sqlServerRecordingWriter) Dialect() dialect.Dialect                   { return w.dia }
-func (w *sqlServerRecordingWriter) DBType() string                             { return "sqlserver" }
-func (w *sqlServerRecordingWriter) CheckNames(context.Context, []string) error { return nil }
+func (w *sqlServerRecordingWriter) Dialect() dialect.Dialect { return w.dia }
+func (w *sqlServerRecordingWriter) DBType() string           { return "sqlserver" }
+func (w *sqlServerRecordingWriter) CheckNames(_ context.Context, names []string) error {
+	if w.nameCheck != nil {
+		return w.nameCheck(names)
+	}
+	return nil
+}
+func (w *sqlServerRecordingWriter) CreateTable(ctx context.Context, statements []dialect.Statement) error {
+	ddl := dialect.JoinSQL(statements)
+	w.createAttempts = append(w.createAttempts, ddl)
+	for name, err := range w.createErrors {
+		if strings.Contains(ddl, "CREATE TABLE [dbo].["+name+"]") {
+			return err
+		}
+	}
+	return w.recordingOscarWriter.CreateTable(ctx, statements)
+}
 func (w *sqlServerRecordingWriter) ValidateExisting(context.Context, *source.TableDDLInfo) error {
 	w.validated++
 	if w.existingErr != "" {
@@ -142,6 +161,8 @@ func TestSQLServerUnsupportedTablePreserved(t *testing.T) {
 	require.Equal(t, 1, report.Tables.Success)
 	require.NotContains(t, strings.Join(w.sql, "\n"), "DROP TABLE [dbo].[Orders]")
 	require.Contains(t, report.Tables.Items[0].Error, "json")
+	require.True(t, m.migrationTableBlocked("Orders"))
+	require.False(t, m.migrationTableBlocked("Items"))
 }
 func TestSQLServerExternalDependencyDoesNotStopIndependentTable(t *testing.T) {
 	_, w, m := sqlServerFixture()
@@ -151,6 +172,81 @@ func TestSQLServerExternalDependencyDoesNotStopIndependentTable(t *testing.T) {
 	require.Equal(t, 1, report.Tables.Success)
 	require.NotContains(t, strings.Join(w.sql, "\n"), "DROP TABLE [dbo].[Orders]")
 }
+func TestSQLServerTargetCollationConflictsBlockBothSourcesOnly(t *testing.T) {
+	r, w, m := sqlServerFixture()
+	r.tables = append(r.tables, "ORDERS")
+	w.nameCheck = func(names []string) error {
+		if slices.Contains(names, "Orders") && slices.Contains(names, "ORDERS") {
+			return &target.SQLServerNameError{Names: []string{"Orders", "ORDERS"}}
+		}
+		return nil
+	}
+	report := m.Run(context.Background())
+	require.Equal(t, 2, report.Tables.Failed)
+	require.Equal(t, 1, report.Tables.Success)
+	require.True(t, m.migrationTableBlocked("Orders"))
+	require.True(t, m.migrationTableBlocked("ORDERS"))
+	require.False(t, m.migrationTableBlocked("Items"))
+	sql := strings.Join(w.sql, "\n")
+	require.Contains(t, sql, "CREATE TABLE [dbo].[Items]")
+	require.NotContains(t, sql, "DROP TABLE [dbo].[Orders]")
+	require.NotContains(t, sql, "DROP TABLE [dbo].[ORDERS]")
+	require.Equal(t, 1, report.Data.Success)
+	for _, item := range report.Tables.Items {
+		require.Equal(t, "preflight", item.Stage)
+	}
+}
+
+func TestSQLServerUnknownNameInspectionFailureStopsBeforeWrites(t *testing.T) {
+	_, w, m := sqlServerFixture()
+	w.nameCheck = func([]string) error { return fmt.Errorf("target collation unavailable") }
+	report := m.Run(context.Background())
+	require.True(t, report.HasFailures())
+	require.Empty(t, w.sql)
+	require.Empty(t, w.copied)
+}
+
+func TestSQLServerColumnNameInspectionFailureKeepsUnknownScopeGlobal(t *testing.T) {
+	_, w, m := sqlServerFixture()
+	w.nameCheck = func(names []string) error {
+		if slices.Contains(names, "Items") || slices.Contains(names, "Orders") {
+			return nil
+		}
+		return fmt.Errorf("target collation unavailable during column check")
+	}
+	report := m.Run(context.Background())
+	require.True(t, report.HasFailures())
+	require.Empty(t, w.sql)
+	require.Empty(t, w.copied)
+}
+
+func TestSQLServerCreateFailureScopeControlsLaterTables(t *testing.T) {
+	for _, task := range []bool{false, true} {
+		t.Run(fmt.Sprint(task), func(t *testing.T) {
+			_, w, m := sqlServerFixture()
+			cause := error(fmt.Errorf("invalid table DDL"))
+			if task {
+				cause = driver.ErrBadConn
+			}
+			w.createErrors = map[string]error{"Items": cause}
+			report := m.Run(context.Background())
+			require.True(t, report.HasFailures())
+			if task {
+				require.Len(t, w.createAttempts, 1)
+				require.Empty(t, w.copied)
+				require.Zero(t, report.Tables.Success)
+			} else {
+				require.Len(t, w.createAttempts, 2)
+				require.Equal(t, 1, report.Tables.Success)
+				require.Equal(t, 1, report.Tables.Failed)
+				require.True(t, m.migrationTableBlocked("Items"))
+				require.False(t, m.migrationTableBlocked("Orders"))
+				require.Equal(t, []string{"Orders"}, w.copied)
+			}
+		})
+	}
+}
+
 func TestSQLServerViewDependencyOrderingAndCycles(t *testing.T) {
 	r, w, m := sqlServerFixture()
 	r.views = []source.ViewInfo{{ViewName: "A", Definition: "SELECT * FROM Z"}, {ViewName: "Z", Definition: "SELECT * FROM Orders"}}

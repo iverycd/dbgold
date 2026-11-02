@@ -91,7 +91,7 @@ func TestDamengNativeEventStateLiteralMapsWithoutRewritingSource(t *testing.T) {
 
 func addNativeTestMVPolicy(r *nativeTestReader) string {
 	const policy = `ALTER MATERIALIZED VIEW "Dst"."Mv" REFRESH COMPLETE ON DEMAND`
-	r.snapshot.Objects = append(r.snapshot.Objects, damengnative.Object{ID: "mv", Kind: "materialized_view", Schema: "Src", Name: "Mv", Materialized: &damengnative.MaterializedState{Query: `SELECT "Value" FROM "Src"."Mixed"`, RefreshMethod: "COMPLETE", RefreshRule: "ON DEMAND"}, Units: []damengnative.Unit{
+	r.snapshot.Objects = append(r.snapshot.Objects, damengnative.Object{ID: "mv", Kind: "materialized_view", Schema: "Src", Name: "Mv", Dependencies: []string{"source-table"}, Materialized: &damengnative.MaterializedState{Query: `SELECT "Value" FROM "Src"."Mixed"`, RefreshMethod: "COMPLETE", RefreshRule: "ON DEMAND"}, Units: []damengnative.Unit{
 		{SQL: `CREATE MATERIALIZED VIEW "Src"."Mv" NEVER REFRESH AS SELECT "Value" FROM "Src"."Mixed"`, Phase: "after_data"},
 		{SQL: `ALTER MATERIALIZED VIEW "Src"."Mv" REFRESH COMPLETE ON DEMAND`, Phase: "mv_restore"},
 	}})

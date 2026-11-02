@@ -71,11 +71,29 @@ func recordOscarPreflightError(report *MigrationReport, err error) {
 func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []string) error {
 	relations := make(oscarNames)
 	selected := make(map[string]bool, len(tables))
+	origins := map[string]ObjectRef{}
+	block := func(ref ObjectRef, err error) {
+		if ref.Kind == "table" {
+			m.blockMigrationTable(ref.Name, "preflight", err)
+		} else if ref.Table != "" {
+			m.blockMigrationTable(ref.Table, "preflight", err)
+		} else {
+			m.blockMigrationObject(ref, err)
+		}
+	}
+	register := func(name, origin string, ref ObjectRef) {
+		origins[origin] = ref
+		if err := relations.add(name, origin); err != nil {
+			block(ref, err)
+			var conflict *oscarNameConflict
+			if errors.As(err, &conflict) {
+				block(origins[conflict.previous], err)
+			}
+		}
+	}
 	for _, table := range tables {
 		selected[table] = true
-		if err := relations.add(m.objName(table), "table "+table); err != nil {
-			return err
-		}
+		register(m.objName(table), "table "+table, tableRef(table))
 	}
 	for _, table := range tables {
 		if err := ctx.Err(); err != nil {
@@ -84,17 +102,22 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 		if m.cfg.objectMode() {
 			continue
 		}
-		info, err := m.reader.GetTableDDLInfo(ctx, table)
+		info, err := m.sourceTableDDLInfo(ctx, table)
 		if err != nil {
-			return fmt.Errorf("检查表 %s 的列名: %w", table, err)
+			if m.stopMigrationTask(ctx, err) {
+				return err
+			}
+			m.blockMigrationTable(table, "preflight", fmt.Errorf("检查表 %s 的列名: %w", table, err))
+			continue
 		}
 		if info == nil {
-			return fmt.Errorf("检查表 %s 的列名: 缺少表元数据", table)
+			m.blockMigrationTable(table, "preflight", fmt.Errorf("检查表 %s 的列名: 缺少表元数据", table))
+			continue
 		}
 		columns := make(oscarNames)
 		for _, col := range info.Columns {
 			if err := columns.add(m.objName(col.Name), table+"."+col.Name); err != nil {
-				return err
+				m.blockMigrationTable(table, "preflight", err)
 			}
 		}
 	}
@@ -114,12 +137,11 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 			if !selected[pk.TableName] {
 				continue
 			}
+			owner := pk.TableName
 			origin := "primary key " + pk.TableName + "." + pk.IndexName
 			pk.TableName, pk.IndexName = m.objName(pk.TableName), m.objName(pk.IndexName)
 			pk.IsPrimary = true
-			if err := relations.add(dialect.IndexName(d, pk), origin); err != nil {
-				return err
-			}
+			register(dialect.IndexName(d, pk), origin, ObjectRef{Kind: "primary_key", Table: owner, Name: pk.IndexName})
 		}
 	}
 	if want("indexes") {
@@ -131,11 +153,10 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 			if !selected[idx.TableName] {
 				continue
 			}
+			owner := idx.TableName
 			origin := "index " + idx.TableName + "." + idx.IndexName
 			idx.TableName, idx.IndexName = m.objName(idx.TableName), m.objName(idx.IndexName)
-			if err := relations.add(dialect.IndexName(d, idx), origin); err != nil {
-				return err
-			}
+			register(dialect.IndexName(d, idx), origin, ObjectRef{Kind: "index", Table: owner, Name: idx.IndexName})
 		}
 	}
 	if want("sequences") {
@@ -147,11 +168,10 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 			if !selected[seq.TableName] {
 				continue
 			}
+			owner := seq.TableName
 			origin := "sequence " + seq.TableName + "." + seq.ColumnName
 			seq.TableName, seq.ColumnName = m.objName(seq.TableName), m.objName(seq.ColumnName)
-			if err := relations.add(dialect.SequenceName(d, seq), origin); err != nil {
-				return err
-			}
+			register(dialect.SequenceName(d, seq), origin, ObjectRef{Kind: "sequence", Table: owner, Name: seq.ColumnName})
 		}
 	}
 	if want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include") {
@@ -175,7 +195,7 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 				constraints[table] = make(oscarNames)
 			}
 			if err := constraints[table].add(m.objName(fk.ConstraintName), "foreign key "+fk.TableName+"."+fk.ConstraintName); err != nil {
-				return err
+				m.blockMigrationTable(fk.TableName, "preflight", err)
 			}
 		}
 	}
@@ -185,9 +205,7 @@ func (m *Migrator) preflightOscarNames(ctx context.Context, tables, allTables []
 			return fmt.Errorf("Oscar 视图命名预检无法读取源元数据: %w", err)
 		}
 		for _, view := range views {
-			if err := relations.add(m.objName(view.ViewName), "view "+view.ViewName); err != nil {
-				return err
-			}
+			register(m.objName(view.ViewName), "view "+view.ViewName, ObjectRef{Kind: "view", Name: view.ViewName})
 		}
 	}
 	return ctx.Err()

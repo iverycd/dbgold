@@ -103,7 +103,10 @@
       <section class="detail-tabs-surface">
         <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
         <PartitionPreflightPanel v-if="report?.partition_migration" :result="report.partition_migration" readonly />
-        <AutoRepairPanel v-if="report?.auto_repairs?.length" :repairs="report.auto_repairs" />
+        <div v-if="report?.auto_repairs?.length" class="auto-repair-summary" aria-label="自动修复汇总">
+          <span>自动修复涉及 <strong>{{ autoRepairTableCount }}</strong> 张表、<strong>{{ report.auto_repairs.length }}</strong> 项字段调整</span>
+          <a-button type="text" size="small" @click="activeTab = 'auto-repairs'">查看明细</a-button>
+        </div>
         <a-alert v-if="reportError" type="warning" class="report-alert">
           {{ reportError }}
         </a-alert>
@@ -142,6 +145,11 @@
               </a-table>
             </div>
             <a-empty v-else :description="reportError || '报告尚未生成'" />
+          </a-tab-pane>
+
+          <a-tab-pane v-if="report?.auto_repairs?.length" key="auto-repairs">
+            <template #title>自动修复明细（{{ report.auto_repairs.length }}）</template>
+            <div class="tab-content"><AutoRepairPanel :key="jobID" :repairs="report.auto_repairs" /></div>
           </a-tab-pane>
 
           <a-tab-pane v-if="failedItems.length" key="failures">
@@ -256,7 +264,7 @@ import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPane
 import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
-import { formatAutoRepairs } from '@/utils/autoRepairs'
+import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
@@ -297,6 +305,7 @@ let loadVersion = 0
 const jobID = computed(() => String(route.params.jobId || ''))
 const timingSummary = computed(() => migrationTimingSummary(job.value))
 const categoryRows = computed(() => report.value ? reportCategories(report.value) : [])
+const autoRepairTableCount = computed(() => groupAutoRepairs(report.value?.auto_repairs).length)
 const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isInformational))
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))
 const objectSuccessCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + row.success, 0))
@@ -439,6 +448,9 @@ async function exportReport() {
 function backToHistory() { router.push({ path: '/history', query: { tab: 'data' } }) }
 
 onMounted(load)
+watch(() => report.value?.auto_repairs?.length, count => {
+  if (!count && activeTab.value === 'auto-repairs') activeTab.value = 'overview'
+})
 watch(jobID, () => {
   loadVersion++
   requestRunning = false
@@ -489,6 +501,8 @@ onUnmounted(() => {
 .risk-content p { margin: 4px 0 0; color: var(--fg-secondary); line-height: 1.55; }
 .detail-tabs-surface { min-height: 380px; }
 .report-alert { margin-bottom: 12px; }
+.auto-repair-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; padding: 8px 12px; margin-bottom: 12px; border-radius: 4px; background: var(--bg-surface2); color: var(--fg-secondary); font-size: 13px; }
+.auto-repair-summary strong { color: var(--fg-primary); font-variant-numeric: tabular-nums; }
 .tab-content { padding-top: 8px; }
 .tab-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 0 0 18px; }
 .tab-toolbar p { margin: 5px 0 0; color: var(--fg-muted); }

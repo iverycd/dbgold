@@ -962,7 +962,7 @@ import { copyText } from '@/utils/clipboard'
 import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
-import { compatibilityReportGroups } from '@/utils/migrationReport'
+import { compatibilityReportGroups, preflightCanStart } from '@/utils/migrationReport'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
@@ -1252,7 +1252,7 @@ async function startDataMigration() {
       }
     }
     if (!isDamengNative.value && !isPGMySQLSelection('data')) {
-      if (!(await ensurePartitionCheck())?.can_start) {
+      if (!preflightCanStart(await ensurePartitionCheck())) {
         dataMigrate.logs.push(partitionCheckError.value
           ? `[ERROR] ${partitionCheckError.value}，尚未启动任务。处理后再次点击开始迁移。`
           : '[WARN] 分区兼容性检查未通过，尚未启动任务。处理后再次点击开始迁移。')
@@ -1260,7 +1260,7 @@ async function startDataMigration() {
         return
       }
     }
-    if (isDamengNative.value && !(await runNativeCheck())?.ready) {
+    if (isDamengNative.value && !preflightCanStart(await runNativeCheck())) {
       dataMigrate.logs.push('[WARN] 达梦全对象预检未通过，尚未启动任务')
       dataMigrate.running = false
       return
@@ -1535,7 +1535,7 @@ async function handleMigrateViews() {
   viewMigrate.results = []
   viewMigrate.compatibilityFunctions = undefined
   try {
-    if (isPGMySQLSelection('views') && !(await ensurePGCheck('views'))?.ready) return
+    if (isPGMySQLSelection('views') && !preflightCanStart(await ensurePGCheck('views'))) return
     const res = await apiMigrateViews({
       excluded_objects: pgExclusions.views,
       src_conn_id: viewMigrate.srcConnId!,
@@ -1710,7 +1710,7 @@ async function startObjectMigration() {
   try {
     if (isPGMySQLSelection('objects')) {
       objMigrate.logs.push('[INFO] 正在执行迁移预检…')
-      if (!(await ensurePGCheck('objects'))?.ready) {
+      if (!preflightCanStart(await ensurePGCheck('objects'))) {
         objMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
         objMigrate.running = false
         return
@@ -2030,12 +2030,9 @@ function clearPartitionCheck() {
   partitionCheckError.value = ''
   partitionCheckRequest = ''
 }
-function preflightCanStart(result: PGMySQLPreflight | null | undefined) {
-  return result?.partition_preflight ? result.partition_preflight.can_start : !!result?.ready
-}
 async function ensurePartitionCheck() {
   await nextTick()
-  if (partitionCheck.value?.can_start && partitionCheckRequest === JSON.stringify(dataMigrationRequest())) return partitionCheck.value
+  if (preflightCanStart(partitionCheck.value) && partitionCheckRequest === JSON.stringify(dataMigrationRequest())) return partitionCheck.value
   return runPartitionCheck()
 }
 async function runPartitionCheck() {

@@ -33,12 +33,28 @@ func pgCategory(r *MigrationReport, kind string) *CategoryReport {
 		return &r.Data
 	}
 }
-func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
-	report := newMigrationReport()
+func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
+	report = newMigrationReport()
 	m.log.Info("=== PG → MySQL 结构预检（只读，不扫描业务数据）===")
 	plan := m.PreflightPGMySQL(ctx)
 	report.Preflight = plan
-	if !plan.Ready && (plan.PartitionPreflight == nil || !plan.PartitionPreflight.CanStart) {
+	for _, table := range plan.tables {
+		ref := tableRef(table.Info.TableName)
+		if err := plan.blockedDependency(ref, map[ObjectRef]bool{}); err != nil {
+			m.blockMigrationTable(ref.Name, "preflight", err)
+		}
+	}
+	schemaRun := !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 && m.cfg.Content != "data_only"
+	if schemaRun {
+		report.Tables.Total = len(plan.tables)
+		for _, t := range plan.tables {
+			if err := plan.blockedDependency(tableRef(t.Info.TableName), map[ObjectRef]bool{}); err != nil {
+				report.Tables.Failed++
+				report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: t.Info.TableName, Table: t.Info.TableName, Stage: "preflight", Error: err.Error()})
+			}
+		}
+	}
+	if !plan.CanStart {
 		for _, issue := range plan.Issues {
 			if issue.Severity == "error" {
 				m.log.Errorf("预检阻止 [%s]: %s", issue.Object.Name, issue.Reason)
@@ -57,6 +73,40 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 		m.log.Errorf("执行前复核失败: %v", err)
 		return report
 	}
+	var dependencyTarget oracleMySQLTarget
+	completed := false
+	if len(plan.targetDependencies) > 0 {
+		dependencyTarget, _ = m.writer.(oracleMySQLTarget)
+		if dependencyTarget == nil {
+			plan.add(ObjectRef{Kind: "target", Name: plan.Target.Database}, "目标 Writer 缺少旧外键恢复能力", false)
+			plan.finish()
+			return report
+		}
+		state := m.oracleMySQLState()
+		state.lowerCaseNames = plan.Target.LowerCaseTableNames
+		for _, fk := range plan.targetDependencies {
+			state.dependencies = append(state.dependencies, OracleMySQLDependencyResult{ForeignKey: fk, DropStatus: "pending", RestoreStatus: "not_required"})
+		}
+		defer func() {
+			if !completed {
+				m.restoreOracleMySQLDependencies(dependencyTarget)
+			}
+			report.TargetDependencies = append([]OracleMySQLDependencyResult{}, state.dependencies...)
+		}()
+		if err := m.registerOracleMySQLDependencies(); err != nil {
+			m.stopMigrationTask(ctx, err)
+			return report
+		}
+		for i := range state.dependencies {
+			if err := m.executeOracleMySQLDependency(ctx, dependencyTarget, i, false); err != nil {
+				report.Constraints.Total++
+				report.Constraints.Failed++
+				report.Constraints.Items = append(report.Constraints.Items, ObjectResult{Name: state.dependencies[i].ForeignKey.ConstraintName, Stage: "drop_dependency", Error: err.Error()})
+				m.stopMigrationTask(ctx, err)
+				return report
+			}
+		}
+	}
 	for _, issue := range plan.Issues {
 		if issue.Severity == "warning" {
 			m.log.Warnf("%s", issue.Reason)
@@ -66,15 +116,15 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 	m.logPreparationComplete(ctx)
 	copiedCounts := map[string]int64{}
 	autoMax := map[string]map[string]int64{}
-	execute := func(obj PlannedObject) bool {
+	execute := func(obj PlannedObject) error {
 		cat := pgCategory(&report, obj.Object.Kind)
-		if obj.Stage != "drop_dependency" {
+		if obj.Stage != "drop_dependency" && !(schemaRun && obj.Object.Kind == "table") {
 			cat.Total++
 		}
 		if e := ctx.Err(); e != nil {
 			cat.Failed++
 			cat.Items = append(cat.Items, ObjectResult{Name: obj.Object.Name, Error: e.Error()})
-			return false
+			return e
 		}
 		err := m.repairPlanned(ctx, obj) // common statement execution; no regeneration
 		if err != nil {
@@ -85,7 +135,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			}
 			cat.Items = append(cat.Items, ObjectResult{Name: obj.Object.Name, DDL: dialect.JoinSQL(obj.Statements), Error: detail})
 			m.log.Errorf("执行失败 [%s]: %v", obj.Object.Name, err)
-			return false
+			return err
 		}
 		if obj.Stage != "drop_dependency" {
 			cat.Success++
@@ -94,19 +144,38 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			}
 		}
 		m.log.DDLf("%s %s ... OK", obj.Object.Kind, obj.Object.Name)
-		return true
+		return nil
 	}
 	for _, obj := range plan.Objects {
-		if obj.Stage == "drop_dependency" || obj.Stage == "table" {
-			if !execute(obj) {
+		if obj.Stage != "table" {
+			continue
+		}
+		if plan.objectBlocked(obj.Object) {
+			continue
+		}
+		if m.oracleMySQL != nil {
+			m.oracleMySQL.touched[m.oracleMySQLTargetKey(obj.Target)] = true
+		}
+		if err := execute(obj); err != nil {
+			plan.blocked[obj.Object] = err
+			m.blockMigrationTable(obj.Object.Name, "execute", err)
+			if m.stopMigrationTask(ctx, err) {
 				return report
 			}
+			continue
+		}
+		if m.oracleMySQL != nil {
+			m.oracleMySQL.postEligible[obj.Object.Name] = true
 		}
 	}
+
 	if !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 && m.cfg.Content != "data_only" {
 		// Indexes embedded into CREATE TABLE and inline comments are real migrated
 		// objects too; they must appear in the totals without duplicate execution.
 		for _, t := range plan.tables {
+			if plan.objectBlocked(tableRef(t.Info.TableName)) {
+				continue
+			}
 			for _, idx := range t.Indexes {
 				inline := true
 				for _, o := range plan.Objects {
@@ -134,6 +203,9 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 	}
 	if !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 && m.cfg.Content != "schema_only" {
 		for _, t := range plan.tables {
+			if plan.objectBlocked(tableRef(t.Info.TableName)) {
+				continue
+			}
 			if err := ctx.Err(); err != nil {
 				report.Data.Failed++
 				report.Data.Items = append(report.Data.Items, ObjectResult{Name: t.Info.TableName, Error: err.Error()})
@@ -189,6 +261,14 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 		if obj.Stage == "drop_dependency" || obj.Stage == "table" {
 			continue
 		}
+		if err := plan.blockedDependency(obj.Object, map[ObjectRef]bool{}); err != nil {
+			m.recordPGBlockedObject(obj, err, plan.dependencies[obj.Object]...)
+			cat := pgCategory(&report, obj.Object.Kind)
+			cat.Total++
+			cat.Failed++
+			cat.Items = append(cat.Items, ObjectResult{Name: obj.Object.Name, Table: obj.Object.Table, Stage: "dependency", DDL: dialect.JoinSQL(obj.Statements), Error: "依赖对象未成功迁移：" + err.Error()})
+			continue
+		}
 		if obj.Stage == "sequence" {
 			stmts, err := m.pgExecutionSequence(ctx, plan, obj.Object, autoMax)
 			if err != nil {
@@ -197,18 +277,34 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 				detail := fmt.Sprintf("表 %s，已提交 %d 行；自增调整失败：%v", obj.Object.Table, copiedCounts[obj.Object.Table], err)
 				report.Sequences.Items = append(report.Sequences.Items, ObjectResult{Name: obj.Object.Name, Error: detail})
 				m.log.Errorf("%s", detail)
-				return report
+				if m.stopMigrationTask(ctx, err) {
+					return report
+				}
+				plan.blocked[obj.Object] = err
+				continue
 			}
 			obj.Statements = stmts
 		}
-		if !execute(obj) {
-			return report
+		if err := execute(obj); err != nil {
+			if m.stopMigrationTask(ctx, err) {
+				return report
+			}
+			plan.blocked[obj.Object] = err
 		}
 	}
 	if !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 && m.cfg.Content != "schema_only" {
 		for _, t := range plan.tables {
+			if plan.objectBlocked(tableRef(t.Info.TableName)) {
+				continue
+			}
 			src, e1 := m.reader.CountRows(ctx, t.Info.TableName)
+			if m.stopMigrationTask(ctx, e1) {
+				return report
+			}
 			dst, e2 := m.writer.CountRows(ctx, m.objName(t.Info.TableName))
+			if m.stopMigrationTask(ctx, e2) {
+				return report
+			}
 			copied := copiedCounts[t.Info.TableName]
 			// Partition data-only runs append to the frozen target. Compare the
 			// committed increment here; finishPartitions also proves every leaf.
@@ -235,6 +331,10 @@ func (m *Migrator) runPGMySQL(ctx context.Context) MigrationReport {
 			}
 		}
 	}
+	if dependencyTarget != nil {
+		m.finalizeMySQLDependencies(dependencyTarget)
+	}
+	completed = true
 	m.logMigrationCompletion("PG → MySQL 迁移结束，表 %d，数据 %d", report.Tables.Success, report.Data.Success)
 	return report
 }

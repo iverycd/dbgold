@@ -97,6 +97,31 @@ for (const [kind, stateKey, launchKey] of [
   ['views', 'viewMigrate', 'handleMigrateViews'],
   ['objects', 'objMigrate', 'startObjectMigration'],
 ]) {
+  test(`${kind}: partial checks are reusable while an explicit task refusal overrides partition permission`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      let allowed = true
+      const checks = [], starts = []
+      const p = scope.run(() => page(async request => {
+        checks.push(request)
+        return { data: { ready: false, can_start: allowed, partition_preflight: { can_start: true, tables: [] } } }
+      }, starts))
+      await select(p)
+      Object.assign(p[stateKey], { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'target' })
+      if (kind !== 'data') p[stateKey].selected = ['Mixed']
+      if (kind === 'objects') p[stateKey].objects = ['indexes']
+      await Vue.nextTick()
+      await p.runPGCheck(kind)
+      await p[launchKey]()
+      assert.equal(starts.length, 1)
+      assert.equal(checks.length, 1, 'a partial successful check is reused')
+      allowed = false
+      await p.runPGCheck(kind)
+      await p[launchKey]()
+      assert.equal(starts.length, 1, 'top-level refusal must block every launch entry')
+    } finally { scope.stop() }
+  })
+
   test(`${kind}: launch reuses a successful preview only while configuration is unchanged`, async () => {
     const scope = Vue.effectScope()
     try {

@@ -38,6 +38,9 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 	p.textRules = map[string]map[string]target.MySQLTextRules{}
 	ruleCache := map[string]target.MySQLTextRules{p.Target.TargetCollation: p.Target.TextRules()}
 	for _, t := range p.tables {
+		if p.objectBlocked(tableRef(t.Info.TableName)) {
+			continue
+		}
 		p.textRules[t.Info.TableName] = map[string]target.MySQLTextRules{}
 		for _, c := range t.Info.Columns {
 			if pgTextColumn(c) {
@@ -46,38 +49,83 @@ func (m *Migrator) inspectPGMySQLTarget(ctx context.Context, p *PGMySQLPreflight
 		}
 	}
 	targets := map[string]string{}
+	allTargets := map[string]string{}
+	key := func(name string) string { return oracleMySQLTargetKey(name, p.Target.LowerCaseTableNames) }
 	for _, t := range p.tables {
-		targets[m.objName(t.Info.TableName)] = t.Info.TableName
+		allTargets[key(m.objName(t.Info.TableName))] = t.Info.TableName
 	}
-	// Existing foreign keys may prevent DROP or reference rows outside this plan.
-	rows, err := db.QueryContext(ctx, `SELECT TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=? GROUP BY TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME`, p.Target.Database)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var sch, t, c, rs, rt string
-		if err = rows.Scan(&sch, &t, &c, &rs, &rt); err != nil {
-			rows.Close()
+	var oldKeys []target.MySQLForeignKey
+	if full, ok := m.writer.(interface {
+		OracleMySQLForeignKeys(context.Context) ([]target.MySQLForeignKey, error)
+	}); ok && !existing {
+		var err error
+		oldKeys, err = full.OracleMySQLForeignKeys(ctx)
+		if err != nil {
 			return err
 		}
-		if _, hit := targets[rt]; !hit {
-			continue
+	} else {
+		rows, err := db.QueryContext(ctx, `SELECT TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=? GROUP BY TABLE_SCHEMA,TABLE_NAME,CONSTRAINT_NAME,REFERENCED_TABLE_SCHEMA,REFERENCED_TABLE_NAME`, p.Target.Database)
+		if err != nil {
+			return err
 		}
-		if !existing {
-			if _, internal := targets[t]; !internal || sch != p.Target.Database {
-				p.add(ObjectRef{Kind: "foreign_key", Table: t, Name: c}, "目标表存在迁移范围外的入向外键，不能删除", false)
-			} else {
-				sql := "ALTER TABLE " + sqlsyntax.QuoteIdent(sch) + "." + sqlsyntax.QuoteIdent(t) + " DROP FOREIGN KEY " + sqlsyntax.QuoteIdent(c)
-				p.Objects = append(p.Objects, PlannedObject{ObjectRef{"foreign_key", t, c}, c, "drop_dependency", []dialect.Statement{{SQL: sql}}})
+		for rows.Next() {
+			var fk target.MySQLForeignKey
+			if err = rows.Scan(&fk.Schema, &fk.Table, &fk.ConstraintName, &fk.RefSchema, &fk.RefTable); err != nil {
+				rows.Close()
+				return err
+			}
+			oldKeys = append(oldKeys, fk)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if !existing {
+		p.targetSnapshot = oldKeys
+		// A retained child protects its parent, transitively. No target mutation
+		// is allowed to invalidate a table skipped by this migration.
+		changed := true
+		for changed {
+			changed = false
+			for _, fk := range oldKeys {
+				parent, selected := allTargets[key(fk.RefTable)]
+				if key(fk.RefSchema) != key(p.Target.Database) || !selected || p.objectBlocked(tableRef(parent)) {
+					continue
+				}
+				child, selected := allTargets[key(fk.Table)]
+				if key(fk.Schema) != key(p.Target.Database) || !selected || p.objectBlocked(tableRef(child)) {
+					p.add(tableRef(parent), fmt.Sprintf("目标表被保留的 %s.%s 外键 %s 引用，未执行 DROP", fk.Schema, fk.Table, fk.ConstraintName), false)
+					changed = true
+				}
 			}
 		}
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
+	for name, original := range allTargets {
+		if !p.objectBlocked(tableRef(original)) {
+			targets[name] = original
+		}
 	}
+	if !existing {
+		for _, fk := range oldKeys {
+			_, child := targets[key(fk.Table)]
+			_, parent := targets[key(fk.RefTable)]
+			if key(fk.Schema) == key(p.Target.Database) && key(fk.RefSchema) == key(p.Target.Database) && child && parent {
+				if fk.DropSQL == "" || fk.RestoreSQL == "" {
+					return fmt.Errorf("目标外键 %s 缺少完整恢复定义", fk.ConstraintName)
+				}
+				p.targetDependencies = append(p.targetDependencies, fk)
+			}
+		}
+	}
+	var rows *sql.Rows
+	var err error
+
 	for _, t := range p.tables {
+		if p.objectBlocked(tableRef(t.Info.TableName)) {
+			continue
+		}
 		name := m.objName(t.Info.TableName)
 		ref := tableRef(t.Info.TableName)
 		var engine sql.NullString
@@ -626,6 +674,9 @@ func (m *Migrator) inspectPGTargetNamesAndViews(ctx context.Context, p *PGMySQLP
 	planned := map[string]ObjectRef{}
 	views := map[string]bool{}
 	for _, o := range p.Objects {
+		if p.objectBlocked(o.Object) {
+			continue
+		}
 		if o.Stage == "check" || o.Stage == "foreign_key" {
 			planned[strings.ToLower(o.Target)] = o.Object
 		}
@@ -645,7 +696,7 @@ func (m *Migrator) inspectPGTargetNamesAndViews(ctx context.Context, p *PGMySQLP
 				return e
 			}
 			if ref, hit := planned[strings.ToLower(name)]; hit {
-				_, rebuilt := targets[table]
+				_, rebuilt := targets[oracleMySQLTargetKey(table, p.Target.LowerCaseTableNames)]
 				if existing || !rebuilt {
 					p.add(ref, "目标约束名已存在，不能覆盖其他表或重复创建", true)
 				}
@@ -683,16 +734,26 @@ func (m *Migrator) inspectPGTargetNamesAndViews(ctx context.Context, p *PGMySQLP
 				continue
 			}
 			tokens, err := sqlsyntax.Lex(def.String)
-			dependent := !def.Valid || err != nil
+			if !def.Valid || err != nil {
+				rows.Close()
+				return fmt.Errorf("目标保留视图 %s 的依赖无法验证", name)
+			}
+			dependencies := map[string]bool{}
+			key := func(s string) string { return oracleMySQLTargetKey(s, p.Target.LowerCaseTableNames) }
 			for i, t := range tokens {
-				if i+2 < len(tokens) && t.Value == p.Target.Database && tokens[i+1].Is(".") {
-					if _, ok := targets[tokens[i+2].Value]; ok {
-						dependent = true
+				if i+2 < len(tokens) && key(t.Value) == key(p.Target.Database) && tokens[i+1].Is(".") {
+					if original, ok := targets[key(tokens[i+2].Value)]; ok {
+						dependencies[original] = true
+					}
+				}
+				if (t.Is("FROM") || t.Is("JOIN")) && i+1 < len(tokens) {
+					if original, ok := targets[key(tokens[i+1].Value)]; ok {
+						dependencies[original] = true
 					}
 				}
 			}
-			if dependent {
-				p.add(ObjectRef{Kind: "view", Name: name}, "目标存在未纳入重建计划的依赖视图（或定义无法验证），请先处理其依赖", false)
+			for original := range dependencies {
+				p.add(tableRef(original), "目标存在保留的依赖视图 "+name+"，未重建关联表", false)
 			}
 		}
 		e = rows.Err()
@@ -713,6 +774,9 @@ func (m *Migrator) checkPGMySQLPrivileges(ctx context.Context, p *PGMySQLPreflig
 		required["INSERT"] = true
 	}
 	for _, o := range p.Objects {
+		if p.objectBlocked(o.Object) {
+			continue
+		}
 		switch o.Stage {
 		case "table":
 			required["CREATE"] = true

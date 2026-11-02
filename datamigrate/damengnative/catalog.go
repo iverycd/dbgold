@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"dbgold/datamigrate/failure"
 )
 
 // ResolveSchema uses catalog spelling. Only an exact match or one unambiguous
@@ -167,6 +169,7 @@ type catalogReader struct {
 	constraints  map[string]string
 	definitions  bool
 	verification bool
+	taskError    error
 }
 
 // ReadCatalog inventories every schema-owned dictionary object before extracting
@@ -214,9 +217,16 @@ func readCatalog(ctx context.Context, db *sql.DB, schema string, definitions, ve
 	}
 	if definitions {
 		r.extractDefinitions()
+		if r.taskError != nil {
+			return nil, r.taskError
+		}
 		if !verification {
+			beforeHistory := len(r.snapshot.Objects)
 			if err = r.prepareMaterializedHistory(); err != nil {
-				r.issue(nil, err.Error())
+				r.recordMaterializedHistoryFailure(err, beforeHistory)
+				if r.taskError != nil {
+					return nil, r.taskError
+				}
 			}
 		}
 	}
@@ -241,6 +251,20 @@ func (r *catalogReader) issue(o *Object, reason string) {
 	}
 	r.snapshot.Issues = append(r.snapshot.Issues, i)
 }
+
+// Preserve structured connection/cancellation causes before rendering a local
+// metadata issue. Catalog discovery cannot safely continue on a lost session.
+func (r *catalogReader) catalogErrorObject(o *Object, err error) *Object {
+	if failure.IsTaskError(err) {
+		r.taskError = err
+		return nil
+	}
+	return o
+}
+func (r *catalogReader) issueError(o *Object, prefix string, err error) {
+	r.issue(r.catalogErrorObject(o, err), prefix+err.Error())
+}
+
 func (r *catalogReader) add(rawID int64, o Object) int {
 	key := o.Kind + "\x00" + o.Name
 	if i, ok := r.index[key]; ok {
@@ -605,6 +629,9 @@ func (r *catalogReader) readDependencies() error {
 
 func (r *catalogReader) readTables() error {
 	for _, o := range r.snapshot.Objects {
+		if r.taskError != nil {
+			return r.taskError
+		}
 		if o.Kind != "table" || o.Managed {
 			continue
 		}
@@ -619,13 +646,16 @@ func (r *catalogReader) readTables() error {
 		}
 		query := `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),sc.INFO2,NVL(ci.INFO1,0),c.DATA_TYPE_OWNER FROM ALL_TAB_COLUMNS c JOIN SYS.SYSOBJECTS o ON o.NAME=c.TABLE_NAME AND o.SCHID=(SELECT ID FROM SYS.SYSOBJECTS WHERE TYPE$='SCH' AND NAME=c.OWNER) JOIN SYS.SYSCOLUMNS sc ON sc.ID=o.ID AND sc.NAME=c.COLUMN_NAME LEFT JOIN SYS.SYSCOLINFOS ci ON ci.ID=o.ID AND ci.COLID=sc.COLID WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`
 		rows, err := r.db.QueryContext(r.ctx, query, r.schema, sourceName)
+		if failure.IsTaskError(err) {
+			return err
+		}
 		if err != nil { // DATA_TYPE_OWNER is absent in some DM8 dictionary builds;
 			// ordinary scalar tables remain usable, and unknown CLASSn types will
 			// fail the target's explicit type capability check.
 			rows, err = r.db.QueryContext(r.ctx, strings.Replace(query, "c.DATA_TYPE_OWNER", "CAST(NULL AS VARCHAR(128))", 1), r.schema, sourceName)
 		}
 		if err != nil {
-			r.issue(&o, "列元数据读取失败: "+err.Error())
+			r.issueError(&o, "列元数据读取失败: ", err)
 			continue
 		}
 		for rows.Next() {
@@ -654,11 +684,11 @@ func (r *catalogReader) readTables() error {
 		scanErr := rows.Err()
 		rows.Close()
 		if err != nil {
-			r.issue(&o, "列元数据读取失败: "+err.Error())
+			r.issueError(&o, "列元数据读取失败: ", err)
 			continue
 		}
 		if scanErr != nil {
-			r.issue(&o, "列元数据读取失败: "+scanErr.Error())
+			r.issueError(&o, "列元数据读取失败: ", scanErr)
 			continue
 		}
 		if len(t.Columns) == 0 {
@@ -667,15 +697,15 @@ func (r *catalogReader) readTables() error {
 		}
 		if i, ok := r.index[o.Kind+"\x00"+o.Name]; ok {
 			if err = restoreNativeXMLAttributes(&r.snapshot.Objects[i], &t); err != nil {
-				r.issue(&r.snapshot.Objects[i], "XMLTYPE 原生列属性恢复失败: "+err.Error())
+				r.issueError(&r.snapshot.Objects[i], "XMLTYPE 原生列属性恢复失败: ", err)
 			}
 		}
 		if err = r.freezeNativeCopyDefaults(o, &t, sourceName); err != nil {
-			r.issue(&o, "原生复制默认值读取失败: "+err.Error())
+			r.issueError(&o, "原生复制默认值读取失败: ", err)
 		}
 		if r.definitions {
 			if err = r.db.QueryRowContext(r.ctx, `SELECT COUNT(*) FROM `+Qualified(r.schema, sourceName)).Scan(&t.Rows); err != nil {
-				r.issue(&o, "源数据行数不可读: "+err.Error())
+				r.issueError(&o, "源数据行数不可读: ", err)
 			}
 			if !r.immutableMaterializedStaging(t.Name) {
 				r.identityRestore(&o, &t)
@@ -683,7 +713,7 @@ func (r *catalogReader) readTables() error {
 			r.validateLOBLengths(&o, &t, sourceName)
 			if i, ok := r.index[o.Kind+"\x00"+o.Name]; ok && !r.verification {
 				if err = r.freezeNativeBFiles(&r.snapshot.Objects[i], t, sourceName); err != nil {
-					r.issue(&r.snapshot.Objects[i], "BFILE 外部资源读取失败: "+err.Error())
+					r.issueError(&r.snapshot.Objects[i], "BFILE 外部资源读取失败: ", err)
 				}
 			}
 		} else {
@@ -692,13 +722,13 @@ func (r *catalogReader) readTables() error {
 		if r.definitions && !r.verification && t.SourceName == "" && !o.Generated {
 			if i, ok := r.index["table\x00"+o.Name]; ok {
 				if err = r.freezeIntervalPartitions(&r.snapshot.Objects[i], t); err != nil {
-					r.issue(&r.snapshot.Objects[i], "间隔分区恢复计划提取失败: "+err.Error())
+					r.issueError(&r.snapshot.Objects[i], "间隔分区恢复计划提取失败: ", err)
 				}
 			}
 		}
 		r.snapshot.Tables = append(r.snapshot.Tables, t)
 	}
-	return nil
+	return r.taskError
 }
 
 func (r *catalogReader) validateLOBLengths(o *Object, t *Table, sourceName string) {
@@ -714,7 +744,7 @@ func (r *catalogReader) validateLOBLengths(o *Object, t *Table, sourceName strin
 		var length sql.NullInt64
 		query := "SELECT MAX(DBMS_LOB.GETLENGTH(" + Quote(c.Name) + ")) FROM " + Qualified(r.schema, sourceName)
 		if err := r.db.QueryRowContext(r.ctx, query).Scan(&length); err != nil {
-			r.issue(o, "列 "+c.Name+" 的 LOB 长度无法只读核验: "+err.Error())
+			r.issueError(o, "列 "+c.Name+" 的 LOB 长度无法只读核验: ", err)
 			continue
 		}
 		if length.Valid && (length.Int64 < 0 || length.Int64 > math.MaxInt32) {
@@ -761,7 +791,7 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 			sourceName = Qualified(r.schema, t.SourceName)
 		}
 		if err := r.db.QueryRowContext(r.ctx, q, sourceName, sourceName, sourceName).Scan(&seed, &increment, &current); err != nil {
-			r.issue(o, "自增列状态读取失败: "+err.Error())
+			r.issueError(o, "自增列状态读取失败: ", err)
 			return
 		}
 		s, e1 := strconv.ParseInt(seed.String, 10, 64)
@@ -778,7 +808,7 @@ func (r *catalogReader) identityRestore(o *Object, t *Table) {
 		}
 		cur, err := r.partitionIdentityCurrent(allocatorTable, c.Name, cur, step)
 		if err != nil {
-			r.issue(o, "分区自增列活动序列读取失败: "+err.Error())
+			r.issueError(o, "分区自增列活动序列读取失败: ", err)
 			return
 		}
 		next := cur + step

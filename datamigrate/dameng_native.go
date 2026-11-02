@@ -20,8 +20,12 @@ func (m *Migrator) isDamengNative() bool {
 // under the existing target-scope lock, before recording or executing any DROP.
 func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Preflight {
 	p := &damengnative.Preflight{Kind: "dameng_native", Objects: []damengnative.Object{}, Conflicts: []damengnative.Object{}, Drops: []damengnative.Object{}, Issues: []damengnative.Issue{}}
+	defer finalizeNativePreflight(p)
 	issue := func(kind, name, reason string) {
 		p.Issues = append(p.Issues, damengnative.Issue{Kind: kind, Name: name, Severity: "error", Reason: reason})
+	}
+	objectIssue := func(o damengnative.Object, reason string) {
+		p.Issues = append(p.Issues, damengnative.Issue{ObjectID: o.ID, Kind: o.Kind, Name: o.Name, Severity: "error", Reason: reason})
 	}
 	if !m.isDamengNative() {
 		issue("task", "迁移组合", "此预检仅支持达梦 → 达梦")
@@ -58,6 +62,7 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		return p
 	}
 	p.Target = dst.Profile
+	p.TargetObjects = append([]damengnative.Object{}, dst.Objects...)
 	p.Issues = append(p.Issues, dst.Issues...)
 	if p.Source.Schema == "" || p.Target.Schema == "" {
 		issue("schema", "模式", "源模式和用户预建的目标模式必须存在")
@@ -93,12 +98,12 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			if c.Writable {
 				writable++
 				if err := target.ValidateDamengNativeColumn(c); err != nil {
-					issue("column", t.Name+"."+c.Name, err.Error())
+					p.Issues = append(p.Issues, damengnative.Issue{ObjectID: t.ObjectID, Kind: "column", Name: t.Name + "." + c.Name, Severity: "error", Reason: err.Error()})
 				}
 			}
 		}
 		if writable == 0 && t.Rows > 0 {
-			issue("table", t.Name, "非空表没有可写入列，无法无损复制源数据")
+			p.Issues = append(p.Issues, damengnative.Issue{ObjectID: t.ObjectID, Kind: "table", Name: t.Name, Severity: "error", Reason: "非空表没有可写入列，无法无损复制源数据"})
 		}
 	}
 	for _, o := range snap.Objects {
@@ -109,12 +114,12 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		if o.Interval != nil {
 			mapped.Interval, err = damengnative.RewriteIntervalPartitions(o.Interval, p.Source.Schema, p.Target.Schema)
 			if err != nil {
-				issue(o.Kind, o.Name, err.Error())
+				objectIssue(o, err.Error())
 			}
 			if _, ok := w.(interface {
 				RestoreDamengNativeIntervalPartitions(context.Context, damengnative.Object, damengnative.Unit) error
 			}); !ok {
-				issue(o.Kind, o.Name, "目标写入器缺少既有间隔分区恢复能力")
+				objectIssue(o, "目标写入器缺少既有间隔分区恢复能力")
 			}
 		}
 		if o.Materialized != nil {
@@ -123,25 +128,25 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			materialized.RowIDColumns = append([]int{}, o.Materialized.RowIDColumns...)
 			materialized.Query, _, err = damengnative.RewriteSchema(materialized.Query, p.Source.Schema, p.Target.Schema)
 			if err != nil {
-				issue(o.Kind, o.Name, err.Error())
+				objectIssue(o, err.Error())
 			}
 			mapped.Materialized = &materialized
 			if materialized.History != nil {
 				mapped.Materialized.History, err = damengnative.RewriteMaterializedHistory(materialized.History, p.Source.Schema, p.Target.Schema)
 				if err != nil {
-					issue(o.Kind, o.Name, err.Error())
+					objectIssue(o, err.Error())
 				}
 				if _, ok := w.(interface {
 					RestoreDamengNativeMaterializedHistory(context.Context, damengnative.Object, damengnative.Unit) error
 				}); !ok {
-					issue(o.Kind, o.Name, "目标写入器缺少陈旧快照及增量日志整体恢复能力")
+					objectIssue(o, "目标写入器缺少陈旧快照及增量日志整体恢复能力")
 				}
 			}
 			if materialized.Baseline {
 				if _, ok := w.(interface {
 					RebaseDamengNativeMaterialized(context.Context, damengnative.Object) error
 				}); !ok {
-					issue(o.Kind, o.Name, "目标写入器缺少带前后多重集核验的物化视图基线初始化能力")
+					objectIssue(o, "目标写入器缺少带前后多重集核验的物化视图基线初始化能力")
 				}
 			}
 		}
@@ -160,7 +165,7 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 			}
 			unit, warnings, e := damengnative.RewriteUnit(u, p.Source.Schema, p.Target.Schema)
 			if e != nil {
-				issue(o.Kind, o.Name, e.Error())
+				objectIssue(o, e.Error())
 				continue
 			}
 			mapped.Units[i] = unit
@@ -177,14 +182,14 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		}
 		mapped.DropSQL, _, err = damengnative.RewriteSchema(o.DropSQL, p.Source.Schema, p.Target.Schema)
 		if err != nil {
-			issue(o.Kind, o.Name, err.Error())
+			objectIssue(o, err.Error())
 		}
 		mapped.CompileSQL, _, err = damengnative.RewriteSchema(o.CompileSQL, p.Source.Schema, p.Target.Schema)
 		if err != nil {
-			issue(o.Kind, o.Name, err.Error())
+			objectIssue(o, err.Error())
 		}
 		if !o.Managed && len(o.Units) == 0 {
-			issue(o.Kind, o.Name, "没有可回放的原生 DDL，不能遗漏该对象")
+			objectIssue(o, "没有可回放的原生 DDL，不能遗漏该对象")
 		}
 		if o.EventTrigger {
 			if _, ok := w.(interface {
@@ -192,7 +197,7 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 				WithDamengNativeEventFinalization(context.Context, func(context.Context) error) error
 				SetDamengNativeEventState(context.Context, damengnative.Object, damengnative.Unit) error
 			}); !ok {
-				issue(o.Kind, o.Name, "目标写入器缺少事件触发器安装与最终启用生命周期")
+				objectIssue(o, "目标写入器缺少事件触发器安装与最终启用生命周期")
 			}
 		}
 		p.Objects = append(p.Objects, mapped)
@@ -202,7 +207,7 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 	for _, o := range dst.Objects {
 		targetNames[o.Schema+"\x00"+o.Name] = true
 		if len(p.Objects) > 0 && o.Kind == "trigger" && !o.Managed && o.EventTrigger && (strings.EqualFold(o.Status, "ENABLED") || o.Status == "Y" || o.Status == "1") {
-			issue(o.Kind, o.Name, "目标存在无法证明为表 DML 触发器的启用触发器，禁止迁移期间执行 DDL 事件副作用")
+			issue("task", o.Name, "目标存在无法证明为表 DML 触发器的启用触发器，禁止迁移期间执行 DDL 事件副作用")
 		}
 		if !o.Managed {
 			targetObjects[nativeCollisionKey(o)] = o
@@ -213,9 +218,9 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		if conflict, ok := targetObjects[nativeCollisionKey(o)]; ok && !o.Managed && !nativeDerived(o.Kind) {
 			p.Conflicts = append(p.Conflicts, conflict)
 			if !m.cfg.OverwriteExisting {
-				issue(o.Kind, o.Name, "目标存在同名对象；请处理冲突或启用覆盖创建")
+				objectIssue(o, "目标存在同名对象；请处理冲突或启用覆盖创建")
 			} else if conflict.DropSQL == "" {
-				issue(o.Kind, o.Name, "同名目标对象没有可验证的删除语句")
+				objectIssue(o, "同名目标对象没有可验证的删除语句")
 			} else if !plannedDrops[conflict.ID] {
 				p.Drops = append(p.Drops, conflict)
 				plannedDrops[conflict.ID] = true
@@ -230,10 +235,14 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 					CheckDamengNativeReference(context.Context, damengnative.Reference) error
 				}); ok {
 					if e := checker.CheckDamengNativeReference(ctx, ref); e != nil {
-						issue(o.Kind, o.Name, e.Error())
+						if m.stopMigrationTask(ctx, e) {
+							issue("task", o.Name, e.Error())
+							return p
+						}
+						objectIssue(o, e.Error())
 					}
 				} else {
-					issue(o.Kind, o.Name, fmt.Sprintf("缺少外部依赖 %s.%s；请在目标端提前准备", ref.Schema, ref.Name))
+					objectIssue(o, fmt.Sprintf("缺少外部依赖 %s.%s；请在目标端提前准备", ref.Schema, ref.Name))
 				}
 			}
 		}
@@ -264,7 +273,13 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 		}
 		for _, dep := range o.Dependencies {
 			if plannedDrops[dep] {
-				issue(o.Kind, o.Name, "目标独有对象依赖待覆盖对象，不能安全覆盖")
+				for _, replacement := range p.Objects {
+					for _, drop := range p.Drops {
+						if drop.ID == dep && nativeCollisionKey(drop) == nativeCollisionKey(replacement) {
+							objectIssue(replacement, "目标独有对象 "+o.Name+" 依赖待覆盖对象，不能安全覆盖")
+						}
+					}
+				}
 			}
 		}
 	}
@@ -287,7 +302,7 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 				for _, unit := range table.Restore {
 					sql, _, e := damengnative.RewriteSchema(unit.SQL, p.Source.Schema, p.Target.Schema)
 					if e != nil {
-						issue(checks[i].Kind, checks[i].Name, e.Error())
+						objectIssue(checks[i], e.Error())
 						continue
 					}
 					checks[i].Units = append(checks[i].Units, damengnative.Unit{SQL: sql, Phase: "restore"})
@@ -305,8 +320,16 @@ func (m *Migrator) PreflightDamengNative(ctx context.Context) *damengnative.Pref
 	for i, j := 0, len(p.Drops)-1; i < j; i, j = i+1, j-1 {
 		p.Drops[i], p.Drops[j] = p.Drops[j], p.Drops[i]
 	}
-	if !damengnative.HasErrors(p.Issues) {
-		p.Issues = append(p.Issues, preflightDamengNativeValues(ctx, r, snap)...)
+	finalizeNativePreflight(p)
+	if p.CanStart {
+		eligible := *snap
+		eligible.Tables = nil
+		for _, table := range snap.Tables {
+			if _, blocked := p.Blocked[table.ObjectID]; !blocked {
+				eligible.Tables = append(eligible.Tables, table)
+			}
+		}
+		p.Issues = append(p.Issues, preflightDamengNativeValues(ctx, r, &eligible)...)
 	}
 	p.Ready = !damengnative.HasErrors(p.Issues) && ctx.Err() == nil
 	if ctx.Err() != nil {
@@ -371,7 +394,11 @@ func preflightDamengNativeValues(ctx context.Context, r damengnative.Reader, sna
 			err = errors.Join(err, scan.Close())
 		}
 		if err != nil {
-			issues = append(issues, damengnative.Issue{ObjectID: table.ObjectID, Kind: "data", Name: table.Name, Severity: "error", Reason: "复杂类型无损读取/绑定预检失败: " + err.Error()})
+			id := table.ObjectID
+			if isMigrationTaskError(err) {
+				id = ""
+			}
+			issues = append(issues, damengnative.Issue{ObjectID: id, Kind: "data", Name: table.Name, Severity: "error", Reason: "复杂类型无损读取/绑定预检失败: " + err.Error()})
 		}
 	}
 	return issues
@@ -458,11 +485,11 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	report.NativeSchema = &NativeSchemaReport{Preflight: p, Inventory: append([]damengnative.Object{}, p.Objects...), Categories: []NativeCategoryReport{}, Verification: []damengnative.Issue{}}
 	for i := range report.NativeSchema.Inventory {
 		report.NativeSchema.Inventory[i].Status = "pending"
-		if !p.Ready {
+		if _, blocked := p.Blocked[report.NativeSchema.Inventory[i].ID]; blocked || !p.CanStart {
 			report.NativeSchema.Inventory[i].Status = "blocked"
 		}
 	}
-	if !p.Ready {
+	if !p.CanStart {
 		for _, issue := range p.Issues {
 			if issue.Severity != "warning" {
 				m.log.Errorf("达梦原生预检 [%s]: %s", issue.Name, issue.Reason)
@@ -474,12 +501,15 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	r := m.reader.(damengnative.Reader)
 	w := m.writer.(damengnative.Writer)
 	if err := m.prepareDamengNativeRepair(p); err != nil {
+		m.stopMigrationTask(ctx, err)
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("修复清单", err))
 		return report
 	}
+	states := nativePreflightStates(p)
+	m.syncNativeBlockedTables(p, states)
 	tables := make([]string, 0, len(p.Snapshot.Tables))
 	for _, t := range p.Snapshot.Tables {
-		if t.Shadow {
+		if t.Shadow || states[t.ObjectID] != nil {
 			continue
 		}
 		tables = append(tables, nativeSourceTable(t))
@@ -497,11 +527,18 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	}
 	m.logPreparationComplete(ctx)
 	m.log.Info("=== 达梦原生迁移：覆盖与基础对象 ===")
-	states := map[string]error{}
 	for _, drop := range p.Drops {
+		if nativeDropBlocked(p, drop, states) {
+			continue
+		}
 		if err := m.executeNativeDrop(ctx, w, drop); err != nil {
-			report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure(drop.Name, err))
-			return report
+			if m.stopMigrationTask(ctx, err) {
+				report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure(drop.Name, err))
+				m.collectNativeResults(&report, p, states)
+				return report
+			}
+			nativeBlockDrop(p, drop, states, err)
+			m.syncNativeBlockedTables(p, states)
 		}
 	}
 	if err := m.executeNativePhase(ctx, w, p.Objects, "before_data", states); err != nil {
@@ -514,6 +551,7 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		m.collectNativeResults(&report, p, states)
 		return report
 	}
+	m.syncNativeBlockedTables(p, states)
 	m.log.Info("=== 达梦原生迁移：复制原始数据 ===")
 	type result struct {
 		table damengnative.Table
@@ -531,6 +569,9 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for _, t := range p.Snapshot.Tables {
+		if states[t.ObjectID] != nil {
+			continue
+		}
 		wg.Add(1)
 		go func(t damengnative.Table) {
 			defer wg.Done()
@@ -542,12 +583,12 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 				return
 			}
 			n, e := copyDamengNativeTable(ctx, r, w, t, p.Target.Schema, m.cfg.PageSize, nil)
+			m.stopMigrationTask(ctx, e)
 			results <- result{table: t, rows: n, err: e}
 		}(t)
 	}
 	wg.Wait()
 	close(results)
-	dataFailed := false
 	for res := range results {
 		t := res.table
 		name := nativeSourceTable(t)
@@ -556,13 +597,15 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		dstRows := int64(-1)
 		if err == nil {
 			dstRows, err = m.writer.CountRows(ctx, t.Name)
+			m.stopMigrationTask(ctx, err)
 			if err == nil && (res.rows != t.Rows || dstRows != t.Rows) {
 				err = fmt.Errorf("行数不同: 冻结源=%d 已复制=%d 目标=%d", t.Rows, res.rows, dstRows)
 			}
 		}
 		report.RowCounts = append(report.RowCounts, TableRowCount{Table: name, Src: t.Rows, Dst: dstRows, Match: err == nil})
 		if err != nil {
-			dataFailed = true
+			states[t.ObjectID] = nativeObjectFailure("execute", err)
+			m.blockMigrationTable(name, "execute", err)
 			report.Data.Failed++
 			report.Data.Items = append(report.Data.Items, ObjectResult{Name: name, TargetName: t.Name, Stage: "execute", Error: err.Error()})
 			m.log.Errorf("复制 [%s] 失败: %v", name, err)
@@ -572,12 +615,14 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 			m.log.Dataf("复制 [%s]: %d 行", name, res.rows)
 		}
 		if e := m.setNativeDataStatus(t.ObjectID, err); e != nil {
-			dataFailed = true
+			m.stopMigrationTask(ctx, e)
 			report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure(name, e))
 		}
 	}
 	sort.Slice(report.RowCounts, func(i, j int) bool { return report.RowCounts[i].Table < report.RowCounts[j].Table })
-	if dataFailed {
+	propagateNativeFailures(p.Objects, states)
+	m.syncNativeBlockedTables(p, states)
+	if ctx.Err() != nil || m.nativePersistenceFailed() {
 		m.collectNativeResults(&report, p, states)
 		return report
 	}
@@ -585,46 +630,59 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	for _, phase := range []string{"after_data", "restore"} {
 		if err := m.executeNativePhase(ctx, w, p.Objects, phase, states); err != nil {
 			report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure(phase, err))
-			break
+			m.collectNativeResults(&report, p, states)
+			return report
 		}
 	}
 	for _, t := range p.Snapshot.Tables {
+		if states[t.ObjectID] != nil {
+			continue
+		}
 		for _, u := range t.Restore {
 			sql, _, err := damengnative.RewriteSchema(u.SQL, p.Source.Schema, p.Target.Schema)
 			if err == nil {
 				err = m.executeNativeSavedUnit(ctx, w, t.ObjectID, sql)
 			}
 			if err != nil {
-				states[t.ObjectID] = err
-				report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure(t.Name, err))
+				states[t.ObjectID] = nativeObjectFailure("execute", err)
+				if m.stopMigrationTask(ctx, err) {
+					m.collectNativeResults(&report, p, states)
+					return report
+				}
+				report.NativeSchema.Verification = append(report.NativeSchema.Verification, damengnative.Issue{ObjectID: t.ObjectID, Kind: "table", Name: t.Name, Severity: "error", Reason: err.Error()})
 			}
 		}
 	}
 	// Successful CREATE does not prove that a procedural object compiled.
 	for _, o := range p.Objects {
-		if o.Kind == "trigger" {
+		if o.Kind == "trigger" || states[o.ID] != nil {
 			continue
 		}
 		if o.CompileSQL != "" {
 			if err := m.executeNativeSavedUnit(ctx, w, o.ID, o.CompileSQL); err != nil {
-				states[o.ID] = err
+				states[o.ID] = nativeObjectFailure("execute", err)
+				if m.stopMigrationTask(ctx, err) {
+					m.collectNativeResults(&report, p, states)
+					return report
+				}
 			}
 		}
 	}
 	if err := m.executeNativePhase(ctx, w, p.Objects, "mv_prepare", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化视图基线准备", err))
+		m.collectNativeResults(&report, p, states)
+		return report
 	}
 	if err := m.executeNativePhase(ctx, w, p.Objects, "mv_rebase", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("物化视图增量基线", err))
+		m.collectNativeResults(&report, p, states)
+		return report
 	}
 	// History recovery is one frozen group: every base table, snapshot staging
 	// table and log staging table must be loaded before any baseline is changed.
 	// A failed group keeps all business hooks and automatic refreshes paused.
 	if nativeHasMaterializedHistory(p.Objects) {
-		if len(states) > 0 || damengnative.HasErrors(report.NativeSchema.Verification) {
-			m.collectNativeResults(&report, p, states)
-			return report
-		}
+		blockNativeHistoryGroups(p, states)
 		if err := m.executeNativePhase(ctx, w, p.Objects, "mv_history", states); err != nil {
 			report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("陈旧物化快照与增量日志", err))
 			m.collectNativeResults(&report, p, states)
@@ -639,25 +697,48 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	m.markNativeRowIDValidation(p, states)
 	if err := m.executeNativePhase(ctx, w, p.Objects, "triggers", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("触发器", err))
+		m.collectNativeResults(&report, p, states)
+		return report
 	}
 	if err := m.executeNativePhase(ctx, w, p.Objects, "event_create", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("事件触发器禁用安装", err))
+		m.collectNativeResults(&report, p, states)
+		return report
 	}
 	for _, o := range p.Objects {
-		if o.Kind == "trigger" && o.CompileSQL != "" {
+		if o.Kind == "trigger" && o.CompileSQL != "" && states[o.ID] == nil {
 			if err := m.executeNativeSavedUnit(ctx, w, o.ID, o.CompileSQL); err != nil {
-				states[o.ID] = err
+				states[o.ID] = nativeObjectFailure("execute", err)
+				if m.stopMigrationTask(ctx, err) {
+					m.collectNativeResults(&report, p, states)
+					return report
+				}
 			}
 		}
 	}
+	propagateNativeFailures(p.Objects, states)
+	m.syncNativeBlockedTables(p, states)
 	if err := m.executeNativePhase(ctx, w, p.Objects, "trigger_restore", states); err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("触发器原始状态", err))
+		m.collectNativeResults(&report, p, states)
+		return report
 	}
 	// Imported event hooks remain disabled throughout every target query and
 	// optional full data comparison. Their original states are restored in Run
 	// only after validateDataContent has finished successfully.
 	verify := *p.Snapshot
-	verify.Objects = append([]damengnative.Object{}, p.Snapshot.Objects...)
+	verify.Objects = nil
+	verify.Tables = nil
+	for _, object := range p.Snapshot.Objects {
+		if states[object.ID] == nil {
+			verify.Objects = append(verify.Objects, object)
+		}
+	}
+	for _, table := range p.Snapshot.Tables {
+		if states[table.ObjectID] == nil {
+			verify.Tables = append(verify.Tables, table)
+		}
+	}
 	for i := range verify.Objects {
 		if verify.Objects[i].EventTrigger {
 			verify.Objects[i].Status = "DISABLED"
@@ -666,6 +747,10 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 	issues, err := w.VerifyDamengNative(ctx, &verify)
 	if err != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("目标核验", err))
+		if m.stopMigrationTask(ctx, err) {
+			m.collectNativeResults(&report, p, states)
+			return report
+		}
 	}
 	report.NativeSchema.Verification = append(report.NativeSchema.Verification, issues...)
 	if ctx.Err() != nil {
@@ -719,7 +804,14 @@ func (m *Migrator) executeNativePhase(ctx context.Context, w damengnative.Writer
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			propagateNativeFailures(objects, states)
+			if states[item.o.ID] != nil {
+				continue
+			}
 			if err := m.executeNativeSavedUnit(ctx, w, item.o.ID, item.sql); err != nil {
+				if m.stopMigrationTask(ctx, err) || m.nativePersistenceFailed() {
+					return err
+				}
 				last[item.o.ID] = err
 				next = append(next, item)
 			} else {
@@ -731,12 +823,11 @@ func (m *Migrator) executeNativePhase(ctx context.Context, w damengnative.Writer
 			return nil
 		}
 		if !progress {
-			var errs []error
 			for id, e := range last {
-				states[id] = e
-				errs = append(errs, e)
+				states[id] = nativeObjectFailure("execute", e)
 			}
-			return errors.Join(errs...)
+			propagateNativeFailures(objects, states)
+			return nil
 		}
 		pending = next
 	}

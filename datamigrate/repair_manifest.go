@@ -91,7 +91,7 @@ func (m *Migrator) flushRepairObjectLocked(o repair.Object) error {
 }
 
 func (m *Migrator) recordRepairSaveErrorLocked(err error) error {
-	err = fmt.Errorf("保存迁移对象执行记录失败: %w", err)
+	err = migrationTaskFailure{fmt.Errorf("保存迁移对象执行记录失败: %w", err)}
 	if m.repairs.sinkErr == nil {
 		m.repairs.sinkErr = err
 	}
@@ -592,7 +592,17 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 
 // captureRepairCall keeps the original writer behavior; its observer sees physical units,
 // including PL/SQL blocks and rolled-back transaction statements.
-func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []dialect.Statement, fn func(context.Context) error) error {
+func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []dialect.Statement, fn func(context.Context) error) (callErr error) {
+	defer func() {
+		cause := callErr
+		if m.repairs != nil {
+			m.repairs.mu.Lock()
+			err := m.repairs.sinkErr
+			m.repairs.mu.Unlock()
+			cause = errors.Join(cause, err)
+		}
+		m.stopMigrationTask(ctx, cause)
+	}()
 	if m.repairs == nil {
 		return fn(ctx)
 	}
@@ -1171,6 +1181,7 @@ func (m *Migrator) finishRepair(_ context.Context, report *MigrationReport) {
 			}
 		}
 	}
+	m.reconcileMigrationFailures(r.objects)
 	for i := range r.objects {
 		if s := m.oracleMySQL; s != nil && r.objects[i].Kind == "table" && s.blocked[r.objects[i].SourceName] != nil {
 			r.objects[i].DiagnosticOnly = true

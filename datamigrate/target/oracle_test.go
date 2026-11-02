@@ -177,6 +177,10 @@ func TestOraclePreflightPrivilegeAndExistingObjects(t *testing.T) {
 	m.ExpectQuery("SELECT OBJECT_TYPE FROM ALL_OBJECTS").WithArgs("APP", "V").WillReturnRows(sqlmock.NewRows([]string{"OBJECT_TYPE"}).AddRow("TABLE"))
 	err = w.PreflightOracle(context.Background(), nil, []OracleObject{{Kind: "VIEW", Name: "V"}}, nil, false, false)
 	require.ErrorContains(t, err, "TABLE")
+	var objectIssue *OracleObjectPreflightError
+	require.ErrorAs(t, err, &objectIssue)
+	require.Equal(t, "VIEW", objectIssue.Kind)
+	require.Equal(t, "V", objectIssue.Name)
 	require.NoError(t, m.ExpectationsWereMet())
 }
 func TestOracleReadTargetMetadataAndFloatBinding(t *testing.T) {
@@ -208,7 +212,55 @@ func TestOraclePreflightChecksColumnCharset(t *testing.T) {
 	err := w.PreflightOracle(context.Background(), map[string]*source.TableDDLInfo{"T": {Columns: []source.ColumnInfo{{Name: "中文"}}}}, nil, nil, true, false)
 	require.ErrorContains(t, err, "表 T")
 	require.ErrorContains(t, err, "目标字符集")
+	var tableIssue *OracleTablePreflightError
+	require.ErrorAs(t, err, &tableIssue)
+	require.Equal(t, "T", tableIssue.Table)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestOraclePreflightScopesNilMetadataAndViewCharset(t *testing.T) {
+	t.Run("missing table metadata", func(t *testing.T) {
+		w, mock := oracleMockWriter(t)
+		err := w.PreflightOracle(context.Background(), map[string]*source.TableDDLInfo{"T": nil}, nil, nil, true, false)
+		var issue *OracleTablePreflightError
+		require.ErrorAs(t, err, &issue)
+		require.Equal(t, "T", issue.Table)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+	t.Run("view charset", func(t *testing.T) {
+		w, mock := oracleMockWriter(t)
+		w.codec = converters.NewStringConverter(1)
+		err := w.PreflightOracle(context.Background(), nil, []OracleObject{{Kind: "VIEW", Name: "中文"}}, nil, false, false)
+		var issue *OracleObjectPreflightError
+		require.ErrorAs(t, err, &issue)
+		require.Equal(t, "VIEW", issue.Kind)
+		require.Equal(t, "中文", issue.Name)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestOraclePreflightIncomingForeignKeysUseWholeRemainingBatch(t *testing.T) {
+	for _, childSelected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "whole batch", false: "retained child"}[childSelected], func(t *testing.T) {
+			w, mock := oracleMockWriter(t)
+			tables := map[string]*source.TableDDLInfo{"P": {}}
+			if childSelected {
+				tables["C"] = &source.TableDDLInfo{}
+			}
+			mock.ExpectQuery("SELECT PRIVILEGE FROM SESSION_PRIVS").WillReturnRows(sqlmock.NewRows([]string{"PRIVILEGE"}).AddRow("CREATE ANY TABLE"))
+			mock.ExpectQuery("SELECT OBJECT_TYPE FROM ALL_OBJECTS").WithArgs("APP", "P").WillReturnRows(sqlmock.NewRows([]string{"OBJECT_TYPE"}).AddRow("TABLE"))
+			mock.ExpectQuery("SELECT c.OWNER,c.TABLE_NAME,c.CONSTRAINT_NAME").WithArgs("APP", "P").WillReturnRows(sqlmock.NewRows([]string{"OWNER", "TABLE_NAME", "CONSTRAINT_NAME"}).AddRow("APP", "C", "OLD_FK"))
+			err := w.PreflightOracle(context.Background(), tables, []OracleObject{{Kind: "TABLE", Name: "P", Table: "P"}}, nil, true, false)
+			if childSelected {
+				require.NoError(t, err)
+			} else {
+				var issue *OracleTablePreflightError
+				require.ErrorAs(t, err, &issue)
+				require.Equal(t, "P", issue.Table)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestOracleAllNullArrayKeepsTargetTypes(t *testing.T) {

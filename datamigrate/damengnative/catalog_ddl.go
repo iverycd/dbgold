@@ -29,6 +29,9 @@ func (r *catalogReader) extractDefinitions() {
 	// Establish generated storage ownership before touching any internal table
 	// or timer definition, regardless of their object-ID allocation order.
 	for i, o := range r.snapshot.Objects {
+		if r.taskError != nil {
+			return
+		}
 		if o.Kind != "materialized_view" || o.Managed {
 			continue
 		}
@@ -36,14 +39,17 @@ func (r *catalogReader) extractDefinitions() {
 		_, _, r.snapshot.Objects[i].DropSQL, r.snapshot.Objects[i].CompileSQL = ddlOptions(o)
 		ddl, err := r.getDDL("MATERIALIZED_VIEW", o.Name)
 		if err != nil {
-			r.issue(&r.snapshot.Objects[i], "读取物化视图 DDL 失败: "+err.Error())
+			r.issueError(&r.snapshot.Objects[i], "读取物化视图 DDL 失败: ", err)
 			continue
 		}
 		if err = r.materializedSnapshot(i, ddl); err != nil {
-			r.issue(&r.snapshot.Objects[i], err.Error())
+			r.issueError(&r.snapshot.Objects[i], "", err)
 		}
 	}
 	for i := 0; i < len(r.snapshot.Objects); i++ {
+		if r.taskError != nil {
+			return
+		}
 		if materialized[i] {
 			continue
 		}
@@ -69,9 +75,9 @@ func (r *catalogReader) extractDefinitions() {
 		ddl, err := r.getDDL(kind, o.Name)
 		if err != nil {
 			if o.Kind == "db_link" {
-				r.issue(o, "读取 DBLink 原生定义失败（服务端详情已脱敏）")
+				r.issue(r.catalogErrorObject(o, err), "读取 DBLink 原生定义失败（服务端详情已脱敏）")
 			} else {
-				r.issue(o, "读取原生 DDL 失败: "+err.Error())
+				r.issueError(o, "读取原生 DDL 失败: ", err)
 			}
 			continue
 		}
@@ -85,14 +91,14 @@ func (r *catalogReader) extractDefinitions() {
 			continue
 		}
 		if _, err = nativeTokens(ddl); err != nil {
-			r.issue(o, err.Error())
+			r.issueError(o, "", err)
 			continue
 		}
 		if o.Kind == "table" {
 			originalDDL := ddl
 			ddl, foundations, delayed, err := r.freezeTableKeyAndValidationPlan(o.Name, ddl)
 			if err != nil {
-				r.issue(o, err.Error())
+				r.issueError(o, "", err)
 				continue
 			}
 			prepared := append(append([]Unit{}, foundations...), delayed...)
@@ -100,7 +106,7 @@ func (r *catalogReader) extractDefinitions() {
 			r.checkExistingIndexReferences(o, ddl)
 			base, deferred, err := deferForeignKeys(ddl, r.schema, o.Name)
 			if err != nil {
-				r.issue(o, err.Error())
+				r.issueError(o, "", err)
 				continue
 			}
 			base = r.stripGeneratedConstraintNames(o.Name, base)
@@ -115,7 +121,7 @@ func (r *catalogReader) extractDefinitions() {
 			}
 			deferred, err = r.freezeTableForeignKeys(o.Name, len(deferred))
 			if err != nil {
-				r.issue(o, err.Error())
+				r.issueError(o, "", err)
 				continue
 			}
 			for _, unit := range deferred {
@@ -127,13 +133,13 @@ func (r *catalogReader) extractDefinitions() {
 		} else if o.Kind == "sequence" {
 			ddl, err = r.sequenceDDL(o, ddl)
 			if err != nil {
-				r.issue(o, err.Error())
+				r.issueError(o, "", err)
 				continue
 			}
 			o.Units = append(o.Units, Unit{SQL: ddl, Phase: phase})
 		} else if o.Kind == "materialized_view" {
 			if err = r.materializedSnapshot(i, ddl); err != nil {
-				r.issue(&r.snapshot.Objects[i], err.Error())
+				r.issueError(&r.snapshot.Objects[i], "", err)
 			}
 		} else {
 			if o.Kind == "trigger" && (o.EventTrigger || nativeTriggerIsEvent(ddl)) {
@@ -146,7 +152,7 @@ func (r *catalogReader) extractDefinitions() {
 				}
 				ddl, err = DisabledEventTriggerDDL(ddl)
 				if err != nil {
-					r.issue(o, err.Error())
+					r.issueError(o, "", err)
 					continue
 				}
 				phase = "event_create"
@@ -156,7 +162,7 @@ func (r *catalogReader) extractDefinitions() {
 		if o.Kind == "trigger" {
 			var status string
 			if err = r.db.QueryRowContext(r.ctx, `SELECT STATUS FROM ALL_TRIGGERS WHERE OWNER=? AND TRIGGER_NAME=?`, r.schema, o.Name).Scan(&status); err != nil {
-				r.issue(o, "触发器启用状态不可读取: "+err.Error())
+				r.issueError(o, "触发器启用状态不可读取: ", err)
 			} else {
 				switch strings.ToUpper(strings.TrimSpace(status)) {
 				case "DISABLED", "DISABLE", "N", "0":
@@ -672,7 +678,7 @@ func (r *catalogReader) readCommentsAndGrants() error {
 		}
 		units, err := splitSimpleDDL(ddl.String)
 		if err != nil {
-			r.issue(&r.snapshot.Objects[i], "对象授权 DDL 不可安全分句: "+err.Error())
+			r.issueError(&r.snapshot.Objects[i], "对象授权 DDL 不可安全分句: ", err)
 			continue
 		}
 		for _, unit := range units {
@@ -681,7 +687,7 @@ func (r *catalogReader) readCommentsAndGrants() error {
 			// to its exact stored name before mapping the selected Schema.
 			unit, err = bindNativeGrantObject(unit, r.schema, parent.Name)
 			if err != nil {
-				r.issue(&r.snapshot.Objects[i], err.Error())
+				r.issueError(&r.snapshot.Objects[i], "", err)
 				break
 			}
 			r.snapshot.Objects[i].Units = append(r.snapshot.Objects[i].Units, Unit{SQL: unit, Phase: "after_data"})

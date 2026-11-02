@@ -64,22 +64,48 @@ func (s *sqlServerDamengSnapshot) GetComments(context.Context) ([]source.Comment
 
 func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string, report *MigrationReport) bool {
 	snapshot := &sqlServerDamengSnapshot{Reader: m.reader, tables: map[string]*source.TableDDLInfo{}}
-	ready := true
+	globalOK := true
+	tableIssue := func(cat *CategoryReport, name, table string, err error) {
+		if m.stopMigrationTask(ctx, err) {
+			globalOK = false
+			return
+		}
+		if !m.migrationTableBlocked(table) {
+			report.Tables.Failed++
+			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "preflight", Error: err.Error()})
+		}
+		m.blockMigrationTable(table, "preflight", err)
+		if m.dmBlocked == nil {
+			m.dmBlocked = map[string]bool{}
+		}
+		m.dmBlocked[table] = true
+		m.log.Errorf("SQL Server → 达梦预检 [%s]: %v", name, err)
+	}
 	issue := func(cat *CategoryReport, name string, err error) {
-		ready = false
+		globalOK = false
+		m.stopMigrationTask(ctx, err)
 		cat.Total++
 		cat.Failed++
-		cat.Items = append(cat.Items, objectResultForError(name, "", err))
+		cat.Items = append(cat.Items, ObjectResult{Name: name, Stage: "preflight", Error: err.Error()})
 		m.log.Errorf("SQL Server → 达梦预检 [%s]: %v", name, err)
 	}
 	names := map[string]string{}
-	checkName := func(name, origin string, namespace map[string]string) error {
+	owners := map[string]string{}
+	viewOrigins := map[string]string{}
+	checkName := func(name, origin string, namespace map[string]string, table string) error {
+		owners[origin] = table
 		if e := tsqldameng.ValidName(name); e != nil {
 			return e
 		}
 		key := strings.ToUpper(name)
 		if prev, ok := namespace[key]; ok {
-			return fmt.Errorf("大写命名冲突: %s 与 %s → %s", prev, origin, key)
+			err := fmt.Errorf("大写命名冲突: %s 与 %s → %s", prev, origin, key)
+			if previous := owners[prev]; previous != "" {
+				tableIssue(&report.Tables, prev, previous, err)
+			} else if view := viewOrigins[prev]; view != "" {
+				m.blockMigrationObject(ObjectRef{Kind: "view", Name: view}, err)
+			}
+			return err
 		}
 		namespace[key] = origin
 		return nil
@@ -91,7 +117,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 	if m.cfg.objectMode() {
 		for _, t := range m.cfg.TableNames {
 			if !selected[t] {
-				issue(&report.Tables, t, fmt.Errorf("不在 dbo 可迁移表范围"))
+				tableIssue(&report.Tables, t, t, fmt.Errorf("不在 dbo 可迁移表范围"))
 			}
 		}
 	}
@@ -106,11 +132,11 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 	opt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
 	for _, t := range tables {
 		if e := ctx.Err(); e != nil {
-			issue(&report.Tables, t, e)
+			tableIssue(&report.Tables, t, t, e)
 			return false
 		}
-		if e := checkName(t, "表 "+t, names); e != nil {
-			issue(&report.Tables, t, e)
+		if e := checkName(t, "表 "+t, names, t); e != nil {
+			tableIssue(&report.Tables, t, t, e)
 		}
 		var info *source.TableDDLInfo
 		var e error
@@ -120,11 +146,11 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			info, e = m.reader.GetTableDDLInfo(ctx, t)
 		}
 		if e != nil {
-			issue(&report.Tables, t, e)
+			tableIssue(&report.Tables, t, t, e)
 			continue
 		}
 		if info == nil {
-			issue(&report.Tables, t, fmt.Errorf("缺少列元数据"))
+			tableIssue(&report.Tables, t, t, fmt.Errorf("缺少列元数据"))
 			continue
 		}
 		snapshot.tables[t] = info
@@ -133,27 +159,27 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 				ValidateSQLServerDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error
 			}); ok {
 				if e := validator.ValidateSQLServerDamengExisting(ctx, m.damengTargetInfo(info), opt); e != nil {
-					issue(&report.Tables, t, e)
+					tableIssue(&report.Tables, t, t, e)
 				}
 			}
 		}
 		cols := map[string]string{}
 		for _, c := range info.Columns {
-			if e := checkName(m.targetColumn(t, c.Name), t+"."+c.Name, cols); e != nil {
-				issue(&report.Tables, t, e)
+			if e := checkName(m.targetColumn(t, c.Name), t+"."+c.Name, cols, t); e != nil {
+				tableIssue(&report.Tables, t, t, e)
 			}
 			if e := typemap.ValidateSQLServerDamengColumn(c); e != nil {
-				issue(&report.Tables, t, e)
+				tableIssue(&report.Tables, t, t, e)
 			}
 			if !m.cfg.objectMode() && m.cfg.Content != "data_only" && c.Default != nil {
 				if _, e := tsqldameng.Default(*c.Default); e != nil {
-					issue(&report.Tables, t+"."+c.Name, e)
+					tableIssue(&report.Tables, t+"."+c.Name, t, e)
 				}
 			}
 		}
 		if !m.cfg.objectMode() && m.cfg.Content != "data_only" {
 			if _, e := m.writer.Dialect().CreateTableStatements(m.cfg.TargetSchema, m.damengTargetInfo(info), "sqlserver", opt, m.objName); e != nil {
-				issue(&report.Tables, t, e)
+				tableIssue(&report.Tables, t, t, e)
 			}
 		}
 	}
@@ -162,6 +188,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 	pks, e := m.reader.GetPrimaryKeys(ctx)
 	if e != nil {
 		issue(&report.PrimaryKeys, "主键元数据", e)
+		return false
 	}
 	validateIndex := func(idx source.IndexInfo) error {
 		if idx.Unsupported != "" {
@@ -197,9 +224,9 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 	for _, p := range pks {
 		if selected[p.TableName] {
 			snapshot.pks = append(snapshot.pks, p)
-			if want("primary_keys") && m.cfg.Content != "data_only" {
+			if want("primary_keys") && m.cfg.Content != "data_only" && !m.migrationTableBlocked(p.TableName) {
 				if e := validateIndex(p); e != nil {
-					issue(&report.PrimaryKeys, p.TableName, e)
+					tableIssue(&report.PrimaryKeys, p.TableName, p.TableName, e)
 				}
 			}
 		}
@@ -208,30 +235,36 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 		seqs, e := m.reader.GetSequences(ctx)
 		if e != nil {
 			issue(&report.Sequences, "自增元数据", e)
+			return false
 		}
 		for _, seq := range seqs {
 			if !selected[seq.TableName] {
 				continue
 			}
+			position := len(snapshot.seqs)
+			snapshot.seqs = append(snapshot.seqs, seq)
+			if m.migrationTableBlocked(seq.TableName) {
+				continue
+			}
 			if seq.Unsupported != "" {
-				issue(&report.Sequences, seq.TableName, fmt.Errorf("%s", seq.Unsupported))
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, fmt.Errorf("%s", seq.Unsupported))
 				continue
 			}
 			id := seq.IdentityInfo
 			if id == nil {
-				issue(&report.Sequences, seq.TableName, fmt.Errorf("缺少自增种子/步长元数据"))
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, fmt.Errorf("缺少自增种子/步长元数据"))
 				continue
 			}
 			bounds, ok := m.reader.(interface {
 				IdentityBounds(context.Context, string, string) (*int64, *int64, error)
 			})
 			if !ok {
-				issue(&report.Sequences, seq.TableName, fmt.Errorf("读取器不支持自增边界检查"))
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, fmt.Errorf("读取器不支持自增边界检查"))
 				continue
 			}
 			lo, hi, e := bounds.IdentityBounds(ctx, seq.TableName, seq.ColumnName)
 			if e != nil {
-				issue(&report.Sequences, seq.TableName, e)
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, e)
 				continue
 			}
 			if m.cfg.objectMode() || m.cfg.Content == "data_only" {
@@ -240,7 +273,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 				}); ok {
 					targetLow, targetHigh, err := b.SQLServerDamengIdentityBounds(ctx, m.objName(seq.TableName), m.targetColumn(seq.TableName, seq.ColumnName))
 					if err != nil {
-						issue(&report.Sequences, seq.TableName, err)
+						tableIssue(&report.Sequences, seq.TableName, seq.TableName, err)
 						continue
 					}
 					if targetLow != nil && (lo == nil || *targetLow < *lo) {
@@ -253,7 +286,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			}
 			next, e := tsqldameng.IdentityNext(id.Seed, id.Increment, id.Last, lo, hi)
 			if e != nil {
-				issue(&report.Sequences, seq.TableName, e)
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, e)
 				continue
 			}
 			info := snapshot.tables[seq.TableName]
@@ -279,11 +312,11 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 				}
 			}
 			if e != nil {
-				issue(&report.Sequences, seq.TableName, e)
+				tableIssue(&report.Sequences, seq.TableName, seq.TableName, e)
 				continue
 			}
 			seq.StartValue = next
-			snapshot.seqs = append(snapshot.seqs, seq)
+			snapshot.seqs[position] = seq
 		}
 	}
 	if m.cfg.Content != "data_only" {
@@ -291,16 +324,17 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			indexes, e := m.reader.GetIndexes(ctx)
 			if e != nil {
 				issue(&report.Indexes, "索引元数据", e)
+				return false
 			}
 			for _, idx := range indexes {
 				if !selected[idx.TableName] {
 					continue
 				}
-				if e := checkName(idx.TableName+"_"+idx.IndexName, "索引 "+idx.TableName+"."+idx.IndexName, names); e != nil {
-					issue(&report.Indexes, idx.IndexName, e)
+				if e := checkName(idx.TableName+"_"+idx.IndexName, "索引 "+idx.TableName+"."+idx.IndexName, names, idx.TableName); e != nil {
+					tableIssue(&report.Indexes, idx.IndexName, idx.TableName, e)
 				}
-				if e := validateIndex(idx); e != nil {
-					issue(&report.Indexes, idx.TableName+"."+idx.IndexName, e)
+				if e := validateIndex(idx); e != nil && !m.migrationTableBlocked(idx.TableName) {
+					tableIssue(&report.Indexes, idx.TableName+"."+idx.IndexName, idx.TableName, e)
 				}
 				snapshot.indexes = append(snapshot.indexes, idx)
 			}
@@ -310,27 +344,28 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			fks, e := m.reader.GetForeignKeys(ctx)
 			if e != nil {
 				issue(&report.Constraints, "外键元数据", e)
+				return false
 			}
 			for _, f := range fks {
 				if !selected[f.TableName] {
 					continue
 				}
-				if e := validateIndex(source.IndexInfo{TableName: f.TableName, Columns: f.Columns}); e != nil {
-					issue(&report.Constraints, f.ConstraintName, e)
+				if e := validateIndex(source.IndexInfo{TableName: f.TableName, Columns: f.Columns}); e != nil && !m.migrationTableBlocked(f.TableName) {
+					tableIssue(&report.Constraints, f.ConstraintName, f.TableName, e)
 				}
-				if selected[f.RefTable] {
+				if selected[f.RefTable] && !m.migrationTableBlocked(f.RefTable) {
 					if e := validateIndex(source.IndexInfo{TableName: f.RefTable, Columns: f.RefColumns}); e != nil {
-						issue(&report.Constraints, f.ConstraintName, e)
+						tableIssue(&report.Constraints, f.ConstraintName, f.TableName, e)
 					}
 				}
 				if f.Unsupported != "" {
-					issue(&report.Constraints, f.ConstraintName, fmt.Errorf("%s", f.Unsupported))
+					tableIssue(&report.Constraints, f.ConstraintName, f.TableName, fmt.Errorf("%s", f.Unsupported))
 				}
 				if !m.cfg.objectMode() && !selected[f.RefTable] {
-					issue(&report.Constraints, f.ConstraintName, fmt.Errorf("引用表 %s 不在迁移范围", f.RefTable))
+					tableIssue(&report.Constraints, f.ConstraintName, f.TableName, fmt.Errorf("引用表 %s 不在迁移范围", f.RefTable))
 				}
-				if e := checkName(f.ConstraintName, "外键 "+f.TableName+"."+f.ConstraintName, names); e != nil {
-					issue(&report.Constraints, f.ConstraintName, e)
+				if e := checkName(f.ConstraintName, "外键 "+f.TableName+"."+f.ConstraintName, names, f.TableName); e != nil {
+					tableIssue(&report.Constraints, f.ConstraintName, f.TableName, e)
 				}
 				snapshot.fks = append(snapshot.fks, f)
 			}
@@ -339,6 +374,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			comments, e := m.reader.GetComments(ctx)
 			if e != nil {
 				issue(&report.Comments, "注释元数据", e)
+				return false
 			}
 			for _, c := range comments {
 				if selected[c.TableName] {
@@ -350,12 +386,25 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			views, e := m.reader.GetViews(ctx)
 			if e != nil {
 				issue(&report.Views, "视图元数据", e)
+				return false
 			}
 			for _, v := range views {
-				if e := checkName(v.ViewName, "视图 "+v.ViewName, names); e != nil {
-					issue(&report.Views, v.ViewName, e)
+				viewOrigins["视图 "+v.ViewName] = v.ViewName
+				if e := checkName(v.ViewName, "视图 "+v.ViewName, names, ""); e != nil {
+					m.blockMigrationObject(ObjectRef{Kind: "view", Name: v.ViewName}, e)
 				}
 			}
+			validViews := []source.ViewInfo{}
+			for _, v := range views {
+				if e := m.migrationObjectError(ObjectRef{Kind: "view", Name: v.ViewName}); e != nil {
+					report.Views.Total++
+					report.Views.Failed++
+					report.Views.Items = append(report.Views.Items, ObjectResult{Name: v.ViewName, Stage: "preflight", Error: e.Error()})
+				} else {
+					validViews = append(validViews, v)
+				}
+			}
+			views = validViews
 			if m.hasDamengRenames() {
 				// Mapping-related view failures are isolated in post-DDL; valid
 				// tables must still be allowed to migrate.
@@ -363,16 +412,18 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			} else {
 				ordered, errs := m.prepareSQLServerDamengViews(views, selected)
 				for _, e := range errs {
-					issue(&report.Views, e.Name, fmt.Errorf("%s", e.Error))
+					report.Views.Total++
+					report.Views.Failed++
+					report.Views.Items = append(report.Views.Items, e)
 				}
 				snapshot.views = ordered
 			}
 		}
 	}
-	if ready {
+	if globalOK && ctx.Err() == nil {
 		m.reader = snapshot
 	}
-	return ready
+	return globalOK && ctx.Err() == nil
 }
 
 func (m *Migrator) prepareSQLServerDamengViews(views []source.ViewInfo, tables map[string]bool) ([]source.ViewInfo, []ObjectResult) {
@@ -467,10 +518,7 @@ func (m *Migrator) migrateSQLServerDamengViews(ctx context.Context, names []stri
 			errs = append(errs, ObjectResult{Name: n, Error: "不在 dbo 视图范围"})
 		}
 	}
-	if len(errs) > 0 {
-		return errs
-	}
-	results := []ObjectResult{}
+	results := append([]ObjectResult{}, errs...)
 	for _, v := range ordered {
 		ddl, e := m.createOneView(ctx, v)
 		result := ObjectResult{Name: m.objName(v.ViewName), DDL: ddl}

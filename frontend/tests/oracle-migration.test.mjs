@@ -33,6 +33,7 @@ test('Oracle is selectable in all three forms and submits fixed target defaults'
       case '@arco-design/web-vue': return { Message: { error: message => assert.fail(message), success() {}, warning() {} }, Modal: {} }
       case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
+      case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/migrationOptions': return { applyTargetMigrationDefaults }
       case '@/api/connections': return { listConnectionSchemas: async id => { schemaRequests.push(id); return { data: ['APP', 'EMPTY_APP'] } } }
       case '@/api/migration': return { startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(), createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }) }

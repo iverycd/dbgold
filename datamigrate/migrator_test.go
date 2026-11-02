@@ -67,6 +67,13 @@ type mockWriter struct {
 func (m *mockWriter) DBType() string           { return "postgres" }
 func (m *mockWriter) Dialect() dialect.Dialect { return dialect.NewPostgres("postgres") }
 func (m *mockWriter) Close() error             { return nil }
+
+// Fixtures describe an empty independent destination unless a test overrides
+// this capability with explicit retained target dependencies.
+func (m *mockWriter) InspectMigrationDependencies(context.Context) (target.MigrationDependencies, error) {
+	return target.MigrationDependencies{Schema: "fixture"}, nil
+}
+
 func (m *mockWriter) CreateTable(_ context.Context, stmts []dialect.Statement) error {
 	if m.createTableFail {
 		return fmt.Errorf("create table failed")

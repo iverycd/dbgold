@@ -34,7 +34,10 @@
       </div>
       <a-alert v-if="dataValidationNeedsAttention(report.dataValidation)" type="warning" style="margin-bottom: 12px">数据内容校验未全部通过，请在“数据内容校验”中核查差异与失败原因。</a-alert>
       <a-alert v-if="nativeSchemaNeedsAttention(report)" type="error" style="margin-bottom:12px">达梦 Schema 预检或对象完整性核对未通过，请查看下方全对象清单和问题明细。</a-alert>
-      <AutoRepairPanel v-if="report.auto_repairs?.length" :repairs="report.auto_repairs" />
+      <div v-if="report.auto_repairs?.length" class="auto-repair-summary" aria-label="自动修复汇总">
+        <span>自动修复涉及 <strong>{{ autoRepairTableCount }}</strong> 张表、<strong>{{ report.auto_repairs.length }}</strong> 项字段调整</span>
+        <a-button type="text" size="small" @click="activeTab = 'auto-repairs'">查看明细</a-button>
+      </div>
       <a-tabs v-model:active-key="activeTab" :lazy-load="false" :destroy-on-hide="false">
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
@@ -160,6 +163,11 @@
           </a-table>
         </a-tab-pane>
 
+        <a-tab-pane v-if="report.auto_repairs?.length" key="auto-repairs">
+          <template #title>自动修复明细（{{ report.auto_repairs.length }}）</template>
+          <AutoRepairPanel :key="jobID" :repairs="report.auto_repairs" />
+        </a-tab-pane>
+
         <!-- ===== 行数对比 ===== -->
         <a-tab-pane v-if="hasRowCounts" key="rowcount">
           <template #title>
@@ -228,7 +236,7 @@
       <PartitionPreflightPanel v-if="report.partition_migration" :result="report.partition_migration" readonly />
       <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
         <a-collapse v-model:active-key="preflightActiveKeys">
-          <a-collapse-item key="preflight" :header="`迁移前预检记录（${report.preflight.ready ? '已通过' : '未通过'}）`">
+          <a-collapse-item key="preflight" :header="`迁移前预检记录（${preflightStatusLabel(report.preflight)}）`">
             <PGMySQLPreflightPanel :result="report.preflight" :excluded="report.preflight.excluded" readonly />
           </a-collapse-item>
         </a-collapse>
@@ -243,8 +251,8 @@ import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
-import { formatAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming } from '@/utils/migrationReport'
+import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
+import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -314,6 +322,7 @@ async function showPreflight() {
 defineExpose({ showPreflight })
 
 const tableRows = computed(() => report.value ? reportCategories(report.value) : [])
+const autoRepairTableCount = computed(() => groupAutoRepairs(report.value?.auto_repairs).length)
 
 const hasRowCounts = computed(() => (report.value?.rowCounts?.length ?? 0) > 0)
 const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? [])
@@ -446,6 +455,9 @@ async function copyDDL(ddl: string) {
 }
 
 onMounted(loadReport)
+watch(() => report.value?.auto_repairs?.length, count => {
+  if (!count && activeTab.value === 'auto-repairs') activeTab.value = 'overview'
+})
 watch(() => props.jobID, loadReport)
 onUnmounted(() => { reportRequest++ })
 </script>
@@ -477,6 +489,8 @@ onUnmounted(() => { reportRequest++ })
 }
 .failure-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .report-repair-summary { margin: -8px 0 20px; color: var(--color-text-2); font-size: 13px; }
+.auto-repair-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; padding: 8px 12px; margin-bottom: 12px; border-radius: 4px; background: var(--color-fill-1); color: var(--color-text-2); font-size: 13px; }
+.auto-repair-summary strong { color: var(--color-text-1); font-variant-numeric: tabular-nums; }
 .failure-error {
   color: #f53f3f;
   margin-bottom: 4px;

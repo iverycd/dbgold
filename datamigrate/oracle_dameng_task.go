@@ -16,16 +16,19 @@ func (m *Migrator) cancelOracleDamengTask(ctx context.Context, err error) {
 }
 
 func (m *Migrator) stopOracleDamengTask(ctx context.Context, err error) bool {
-	if !m.isOracleDameng() || !isMigrationTaskError(err) {
-		return false
-	}
-	m.cancelOracleDamengTask(ctx, err)
-	return true
+	return m.stopMigrationTask(ctx, err)
 }
 
 func (m *Migrator) recordOracleDamengTaskFailure(ctx context.Context, report *MigrationReport) {
-	if !m.isOracleDameng() || ctx.Err() == nil {
+	if ctx.Err() == nil {
 		return
+	}
+	for _, category := range []CategoryReport{report.Tables, report.Data, report.PrimaryKeys, report.Indexes, report.Constraints, report.Views, report.Sequences, report.Comments} {
+		for _, item := range category.Items {
+			if item.Stage == "task" {
+				return
+			}
+		}
 	}
 	err := context.Cause(ctx)
 	m.log.Errorf("任务级错误，停止后续迁移: %v", err)

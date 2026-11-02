@@ -8,6 +8,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,44 @@ func TestSQLServerDependenciesAreBounded(t *testing.T) {
 	require.ErrorAs(t, e, &dep)
 	require.Equal(t, "T", dep.Table)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestSQLServerNameConflictsReturnAllOriginalSpellings(t *testing.T) {
+	w, mock := sqlServerMock(t)
+	names := []string{"Café", "Cafe", "Other", "Orders", "ORDERS"}
+	mock.ExpectQuery("DECLARE @x xml").WithArgs("<names><n>Café</n><n>Cafe</n><n>Other</n><n>Orders</n><n>ORDERS</n></names>").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow("Café").AddRow("Cafe").AddRow("Orders").AddRow("ORDERS"))
+	err := w.CheckNames(context.Background(), names)
+	var issue *SQLServerNameError
+	require.ErrorAs(t, err, &issue)
+	require.Equal(t, []string{"Café", "Cafe", "Orders", "ORDERS"}, issue.Names)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSQLServerNameValidationAndInspectionFailuresHaveKnownScope(t *testing.T) {
+	t.Run("invalid source name", func(t *testing.T) {
+		w, mock := sqlServerMock(t)
+		name := strings.Repeat("x", 129)
+		err := w.CheckNames(context.Background(), []string{name, "Healthy"})
+		var issue *SQLServerNameError
+		require.ErrorAs(t, err, &issue)
+		require.Equal(t, []string{name}, issue.Names)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+	t.Run("global inspection failure", func(t *testing.T) {
+		w, mock := sqlServerMock(t)
+		mock.ExpectQuery("DECLARE @x xml").WillReturnError(errors.New("collation metadata unavailable"))
+		err := w.CheckNames(context.Background(), []string{"Healthy"})
+		var issue *SQLServerNameError
+		require.Error(t, err)
+		require.False(t, errors.As(err, &issue))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+	t.Run("valid names", func(t *testing.T) {
+		w, mock := sqlServerMock(t)
+		mock.ExpectQuery("DECLARE @x xml").WillReturnRows(sqlmock.NewRows([]string{"n"}))
+		require.NoError(t, w.CheckNames(context.Background(), []string{"Mixed", "Other"}))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 func TestSQLServerSeedErrorsReported(t *testing.T) {
 	w, m := sqlServerMock(t)
