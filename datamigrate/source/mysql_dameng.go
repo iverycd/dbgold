@@ -67,8 +67,10 @@ func (r *MySQLReader) damengIndexes(ctx context.Context) ([]IndexInfo, error) {
 			reason = "函数/表达式索引"
 		case prefix.Valid:
 			reason = "前缀索引"
+		case strings.EqualFold(method, "FULLTEXT"):
+			// FULLTEXT keys have no B-tree ordering; COLLATION is normally NULL.
 		case !strings.EqualFold(method, "BTREE"):
-			reason = "全文、空间或其他非 BTREE 索引"
+			reason = "空间或其他非 BTREE 索引"
 		case !strings.EqualFold(collation.String, "A") && !strings.EqualFold(collation.String, "D"):
 			reason = "排序方向未知的索引"
 		}
@@ -79,11 +81,22 @@ func (r *MySQLReader) damengIndexes(ctx context.Context) ([]IndexInfo, error) {
 			idx.Columns, idx.Descending = nil, nil
 		} else if idx.Unsupported == "" {
 			idx.Columns = append(idx.Columns, column.String)
-			idx.Descending = append(idx.Descending, strings.EqualFold(collation.String, "D"))
+			if !strings.EqualFold(method, "FULLTEXT") {
+				idx.Descending = append(idx.Descending, strings.EqualFold(collation.String, "D"))
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	// Validate only after collecting all keys, so a composite FULLTEXT index
+	// cannot accidentally be migrated as a usable single-column definition.
+	for i := range indexes {
+		idx := &indexes[i]
+		if strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" && len(idx.Columns) > 1 {
+			idx.Unsupported = "暂不支持 MySQL 多列全文索引的自动转换，达梦 CONTEXT INDEX 仅支持单个文本列，请根据源端定义手工适配"
+			idx.Columns, idx.Descending = nil, nil
+		}
 	}
 	return indexes, nil
 }

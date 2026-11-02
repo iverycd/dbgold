@@ -131,6 +131,47 @@ func TestDaMengIndexAndFK_Golden(t *testing.T) {
 	}
 }
 
+func TestDaMengFulltextIndexStatements(t *testing.T) {
+	d := NewDaMeng()
+	for _, tc := range []struct {
+		name, schema string
+		index        source.IndexInfo
+		want         string
+	}{
+		{
+			name: "single text column", schema: "App",
+			index: source.IndexInfo{TableName: "Articles", IndexName: "IdxBody", Columns: []string{"Body"}, Method: "FULLTEXT"},
+			want:  `CREATE CONTEXT INDEX "ARTICLES_IDXBODY" ON "APP"."ARTICLES" ("BODY") SYNC TRANSACTION`,
+		},
+		{
+			name: "no B-tree attributes", schema: "App",
+			index: source.IndexInfo{TableName: "Articles", IndexName: "IdxBody", Columns: []string{"Body"}, Method: "fulltext", IsUnique: true, Descending: []bool{true}},
+			want:  `CREATE CONTEXT INDEX "ARTICLES_IDXBODY" ON "APP"."ARTICLES" ("BODY") SYNC TRANSACTION`,
+		},
+		{
+			name: "quoted identifiers", schema: `Mixed"Schema`,
+			index: source.IndexInfo{TableName: `Mixed"Table`, IndexName: `By"Body`, Columns: []string{`Body"Text`}, Method: "FullText"},
+			want:  `CREATE CONTEXT INDEX "MIXED""TABLE_BY""BODY" ON "MIXED""SCHEMA"."MIXED""TABLE" ("BODY""TEXT") SYNC TRANSACTION`,
+		},
+		{
+			name:  "current schema",
+			index: source.IndexInfo{TableName: "Articles", IndexName: "IdxBody", Columns: []string{"Body"}, Method: "FULLTEXT"},
+			want:  `CREATE CONTEXT INDEX "ARTICLES_IDXBODY" ON "ARTICLES" ("BODY") SYNC TRANSACTION`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JoinSQL(d.IndexStatements(tc.schema, tc.index)); got != tc.want {
+				t.Errorf("fulltext mismatch:\n got: %s\nwant: %s", got, tc.want)
+			}
+		})
+	}
+	// The new method branch must leave ordinary key directions unchanged.
+	ordinary := source.IndexInfo{TableName: "Articles", IndexName: "ByTitle", Columns: []string{"Title"}, Method: "BTREE", Descending: []bool{true}}
+	if got := JoinSQL(d.IndexStatements("App", ordinary)); got != `CREATE INDEX "ARTICLES_BYTITLE" ON "APP"."ARTICLES" ("TITLE" DESC)` {
+		t.Errorf("ordinary index changed: %s", got)
+	}
+}
+
 func TestDaMengCaps(t *testing.T) {
 	c := NewDaMeng().Caps()
 	if c.UsesSequences {

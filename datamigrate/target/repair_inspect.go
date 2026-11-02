@@ -248,6 +248,9 @@ func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repai
 		return verification("unknown", "索引 DDL 已编辑，需要核对修订后的定义")
 	}
 	idx := obj.Index
+	if a.family == "dameng" && strings.EqualFold(idx.Method, "FULLTEXT") {
+		return verification("unknown", "达梦全文索引需核对 CONTEXT INDEX 定义及填充状态，不能通过普通 B 树索引目录确认成功")
+	}
 	name := obj.TargetName
 	table := idx.TableName
 	if obj.Table != "" {

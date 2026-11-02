@@ -215,7 +215,9 @@ func (w *DaMengWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) er
 	if idx.Unsupported != "" {
 		return fmt.Errorf("%s", idx.Unsupported)
 	}
-	if w.srcType == "mysql" {
+	// CONTEXT indexes cannot provide B-tree coverage, even for the same column.
+	// Keep their execution and observations outside the ordinary-index cache.
+	if w.srcType == "mysql" && !strings.EqualFold(idx.Method, "FULLTEXT") {
 		return w.createMySQLDamengIndex(ctx, idx)
 	}
 	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))

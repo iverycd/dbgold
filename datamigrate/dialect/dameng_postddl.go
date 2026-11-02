@@ -171,10 +171,11 @@ func (d *DaMengDialect) SequenceStatements(schema string, seq source.SequenceInf
 // 注意:达梦索引名在 schema 内全局唯一(不同于 MySQL 的表级作用域),
 // 故非主键索引名加「表名_」前缀去重,避免多表同名索引(如 row_id、ix_tmp_autoinc)冲突。
 func (d *DaMengDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
+	fulltext := !idx.IsPrimary && strings.EqualFold(idx.Method, "FULLTEXT")
 	quotedCols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
 		quotedCols[i] = d.QuoteIdent(c)
-		if !idx.IsPrimary && i < len(idx.Descending) && idx.Descending[i] {
+		if !idx.IsPrimary && !fulltext && i < len(idx.Descending) && idx.Descending[i] {
 			quotedCols[i] += " DESC"
 		}
 	}
@@ -184,6 +185,8 @@ func (d *DaMengDialect) IndexStatements(schema string, idx source.IndexInfo) []S
 	switch {
 	case idx.IsPrimary:
 		sql = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", qn, cols)
+	case fulltext:
+		sql = fmt.Sprintf(`CREATE CONTEXT INDEX %s ON %s (%s) SYNC TRANSACTION`, d.QuoteIdent(d.uniqueIndexName(idx)), qn, cols)
 	case idx.IsUnique:
 		sql = fmt.Sprintf(`CREATE UNIQUE INDEX %s ON %s (%s)`, d.QuoteIdent(d.uniqueIndexName(idx)), qn, cols)
 	default:

@@ -12,8 +12,9 @@ import (
 	"dbgold/datamigrate/target"
 )
 
-var repairDDLHead = regexp.MustCompile(`(?is)^\s*(?:CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?(?:\s+UNIQUE)?(?:\s+(?:CLUSTERED|NONCLUSTERED))?\s+(TABLE|VIEW|INDEX|SEQUENCE|TRIGGER)|ALTER\s+(TABLE|VIEW|SEQUENCE)|COMMENT\s+ON\s+(TABLE|COLUMN)|DROP\s+(INDEX|VIEW|SEQUENCE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`)
+var repairDDLHead = regexp.MustCompile(`(?is)^\s*(?:CREATE\s+CONTEXT\s+(INDEX)|CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?(?:\s+UNIQUE)?(?:\s+(?:CLUSTERED|NONCLUSTERED))?\s+(TABLE|VIEW|INDEX|SEQUENCE|TRIGGER)|ALTER\s+(TABLE|VIEW|SEQUENCE)|COMMENT\s+ON\s+(TABLE|COLUMN)|DROP\s+(INDEX|VIEW|SEQUENCE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`)
 var repairIndexOn = regexp.MustCompile(`(?is)\bON\s+`)
+var repairContextIndexOn = regexp.MustCompile(`(?is)^\s*ON\s+`)
 var repairExecutableComment = regexp.MustCompile(`(?is)/\*\s*!|/\*[mM]!`)
 var repairVisibilityComment = regexp.MustCompile(`(?i)/\*![0-9]+\s+(?:INVISIBLE|VISIBLE)\s*\*/`)
 var repairLiteralImmediate = regexp.MustCompile(`(?is)^\s*EXECUTE\s+IMMEDIATE\s+'((?:''|[^'])*)'\s*;`)
@@ -206,6 +207,10 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 		if len(tokens) == 0 {
 			return fmt.Errorf("SQL不能为空")
 		}
+		contextIndex := len(tokens) >= 3 && tokens[0] == "CREATE" && tokens[1] == "CONTEXT" && tokens[2] == "INDEX"
+		if contextIndex && dbType != "dameng" {
+			return fmt.Errorf("CONTEXT INDEX 修复仅支持达梦目标")
+		}
 		triggerBody := false
 		for _, t := range tokens[:min(len(tokens), 5)] {
 			if t == "TRIGGER" {
@@ -291,6 +296,11 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 		}
 		if kind == "index" && (strings.EqualFold(tokens[0], "CREATE") || repairIndexOn.MatchString(tail)) {
 			loc := repairIndexOn.FindStringIndex(tail)
+			if contextIndex {
+				// The generated CONTEXT form places ON immediately after the
+				// index name. Do not trust an ON hidden in a comment or literal.
+				loc = repairContextIndexOn.FindStringIndex(tail)
+			}
 			if loc == nil {
 				return fmt.Errorf("索引DDL缺少所属表")
 			}
