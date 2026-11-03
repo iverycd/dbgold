@@ -2,6 +2,7 @@ package mysqldmtrigger
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -79,6 +80,87 @@ func TestUUIDAssignmentSupportsLocalAndMultipleSetTargets(t *testing.T) {
 	require.Equal(t, 2, strings.Count(p.TriggerSQL, "SYS_GUID()"), "separate assignments each generate their own value")
 }
 
+func TestBareUUIDAssignmentConvertsWholeRHSWithScalarWrappers(t *testing.T) {
+	for _, tc := range []struct{ name, rhs string }{
+		{"direct", "UUID()"},
+		{"case_and_space", "uUiD ( )"},
+		{"parentheses", "(((UUID())))"},
+		{"scalar_select", "(SELECT UUID())"},
+		{"nested_scalar_select", "((SELECT ((SELECT (UUID())))))"},
+		{"ordinary_comment", "(SELECT /* FROM SQL_CACHE */ UUID())"},
+	} {
+		for _, emptyStringIsNull := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/empty_is_null=%t", tc.name, emptyStringIsNull), func(t *testing.T) {
+				info, tables, opt := uuidAssignmentFixture("SET NEW.RowGuid=" + tc.rhs)
+				tables[info.TableName].Columns[0].Length = 36
+				opt.Capabilities.EmptyStringIsNull = emptyStringIsNull
+				p, err := Convert(info, tables, opt)
+				require.NoError(t, err)
+				require.NoError(t, ValidatePlan(p))
+				require.Equal(t, info, p.Source)
+				require.Nil(t, p.Options.CharacterMetadata)
+				require.Equal(t, []string{"CASEDATA"}, p.Dependencies)
+				require.Contains(t, p.TriggerSQL, "DECLARE\n\"DBGOLD_UUID_1\" VARCHAR(32);\nBEGIN\n\"DBGOLD_UUID_1\" := LOWER(RAWTOHEX(SYS_GUID()));\n")
+				require.Contains(t, p.TriggerSQL, `:NEW."ROWTOKEN" := SUBSTR("DBGOLD_UUID_1",1,8) || '-' || SUBSTR("DBGOLD_UUID_1",9,4) || '-' || SUBSTR("DBGOLD_UUID_1",13,4) || '-' || SUBSTR("DBGOLD_UUID_1",17,4) || '-' || SUBSTR("DBGOLD_UUID_1",21,12);`)
+				require.Equal(t, 1, strings.Count(p.TriggerSQL, "SYS_GUID()"))
+				require.NotContains(t, p.TriggerSQL, "SELECT")
+				require.NotContains(t, p.TriggerSQL, "DEFINER")
+				require.NotContains(t, strings.ToUpper(p.TriggerSQL), "UUID()")
+				p.TriggerSQL = strings.Replace(p.TriggerSQL, `SUBSTR("DBGOLD_UUID_1",21,12)`, `SUBSTR("DBGOLD_UUID_1",21,11)`, 1)
+				require.Error(t, ValidatePlan(p))
+			})
+		}
+	}
+}
+
+func TestBareUUIDAssignmentConvertsScreenshotDefinition(t *testing.T) {
+	body := "BEGIN\n\nSET NEW.ROWGUID=UUID();\n\nEND"
+	info := source.TriggerInfo{
+		Schema: "Src", TableName: "jwjd_jyzd_jq", Name: "JWJD_JYZD_JQ_trigger",
+		Timing: "BEFORE", Event: "INSERT", Body: body, SQLMode: "STRICT_TRANS_TABLES",
+		SourceDDL: "CREATE DEFINER=`root`@`%` TRIGGER `JWJD_JYZD_JQ_trigger` BEFORE INSERT ON `jwjd_jyzd_jq` FOR EACH ROW " + body,
+	}
+	tables := map[string]*source.TableDDLInfo{
+		info.TableName: {TableName: info.TableName, Columns: []source.ColumnInfo{{Name: "ROWGUID", DataType: "varchar", Length: 36}}},
+	}
+	p, err := Convert(info, tables, Options{Schema: "Dest"})
+	require.NoError(t, err)
+	require.NoError(t, ValidatePlan(p))
+	require.Equal(t, info, p.Source)
+	require.Contains(t, p.TriggerSQL, `CREATE TRIGGER "DEST"."JWJD_JYZD_JQ_TRIGGER" BEFORE INSERT ON "DEST"."JWJD_JYZD_JQ" FOR EACH ROW`)
+	require.Contains(t, p.TriggerSQL, `:NEW."ROWGUID" := SUBSTR(`)
+	require.Equal(t, 1, strings.Count(p.TriggerSQL, "SYS_GUID()"))
+}
+
+func TestBareUUIDAssignmentSupportsLocalAndOrderedMultipleSetTargets(t *testing.T) {
+	info, tables, opt := uuidAssignmentFixture("BEGIN DECLARE v VARCHAR(36); SET v=UUID(), NEW.RowGuid=v, v=UUID(), NEW.RowGuid=v; END")
+	tables[info.TableName].Columns[0].Length = 36
+	p, err := Convert(info, tables, opt)
+	require.NoError(t, err)
+	require.NoError(t, ValidatePlan(p))
+	require.Equal(t, 2, strings.Count(p.TriggerSQL, "SYS_GUID()"))
+	variables := regexp.MustCompile(`"DBGOLD_UUID_\d+" VARCHAR\(32\);`).FindAllString(p.TriggerSQL, -1)
+	require.Len(t, variables, 2)
+	require.NotEqual(t, variables[0], variables[1], "each assignment must scope its own generated UUID")
+	firstValue := strings.Index(p.TriggerSQL, "SYS_GUID()")
+	firstRead := strings.Index(p.TriggerSQL, `:NEW."ROWTOKEN" := DBGOLD_VAR_1;`)
+	secondValue := strings.LastIndex(p.TriggerSQL, "SYS_GUID()")
+	secondRead := strings.LastIndex(p.TriggerSQL, `:NEW."ROWTOKEN" := DBGOLD_VAR_1;`)
+	require.Positive(t, firstRead)
+	require.Less(t, firstValue, firstRead)
+	require.Less(t, firstRead, secondValue)
+	require.Less(t, secondValue, secondRead)
+	require.Equal(t, 2, strings.Count(p.TriggerSQL, `"DBGOLD_VAR_1" := SUBSTR(`))
+
+	info, tables, opt = uuidAssignmentFixture("SET NEW.RowGuid=UUID(), NEW.RowGuid=UUID()")
+	tables[info.TableName].Columns[0].Length = 36
+	p, err = Convert(info, tables, opt)
+	require.NoError(t, err)
+	require.NoError(t, ValidatePlan(p))
+	require.Equal(t, 2, strings.Count(p.TriggerSQL, "SYS_GUID()"))
+	require.Equal(t, 2, strings.Count(p.TriggerSQL, `:NEW."ROWTOKEN" := SUBSTR(`))
+}
+
 func TestUUIDAssignmentRejectsQueriesAndPartialPatterns(t *testing.T) {
 	for _, tc := range []struct{ name, rhs string }{
 		{"table", "(SELECT " + compactUUIDSourceExpression + " FROM jwjd_ajspxx)"},
@@ -107,8 +189,6 @@ func TestUUIDAssignmentRejectsQueriesAndPartialPatterns(t *testing.T) {
 		{"other_replacement", "REPLACE(UUID(), '-', 'x')"},
 		{"computed_search", "REPLACE(UUID(), CHAR(45), '')"},
 		{"null_search", "REPLACE(UUID(), NULL, '')"},
-		{"uuid_bare", "UUID()"},
-		{"uuid_scalar_select", "(SELECT UUID())"},
 		{"concat", "CONCAT(" + compactUUIDSourceExpression + ", 'x')"},
 		{"ifnull", "IFNULL(" + compactUUIDSourceExpression + ", 'x')"},
 		{"case", "CASE WHEN TRUE THEN " + compactUUIDSourceExpression + " ELSE 'x' END"},
@@ -128,20 +208,59 @@ func TestUUIDAssignmentRejectsQueriesAndPartialPatterns(t *testing.T) {
 	}
 }
 
-func TestUUIDAssignmentDoesNotEnableOtherExpressionContexts(t *testing.T) {
-	for _, body := range []string{
-		"BEGIN DECLARE v VARCHAR(32) DEFAULT " + compactUUIDSourceExpression + "; SET NEW.RowGuid=v; END",
-		"INSERT INTO Audit(RowGuid) VALUES(" + compactUUIDSourceExpression + ")",
-		"BEGIN IF " + compactUUIDSourceExpression + " = 'x' THEN SET NEW.Amount=1; END IF; END",
-		"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT=" + compactUUIDSourceExpression,
+func TestBareUUIDAssignmentRejectsQueriesAndPartialPatterns(t *testing.T) {
+	for _, rhs := range []string{
+		"(SELECT UUID() FROM jwjd_ajspxx)",
+		"(SELECT UUID() FROM DUAL)",
+		"(SELECT UUID() WHERE TRUE)",
+		"(SELECT MAX(UUID()))",
+		"(SELECT UUID() GROUP BY 1)",
+		"(SELECT UUID() HAVING TRUE)",
+		"(SELECT UUID() ORDER BY 1)",
+		"(SELECT UUID() LIMIT 1)",
+		"(SELECT UUID() UNION SELECT UUID())",
+		"(SELECT UUID() AS id)",
+		"(SELECT UUID(), 1)",
+		"(SELECT DISTINCT UUID())",
+		"(SELECT ALL UUID())",
+		"(SELECT SQL_NO_CACHE UUID())",
+		"(SELECT SQL_CACHE UUID())",
+		"(SELECT SQL_SMALL_RESULT UUID())",
+		"(SELECT /*+ MAX_EXECUTION_TIME(1) */ UUID())",
+		"UUID(1)",
+		"Src.UUID()",
+		"CONCAT(UUID(), 'x')",
+		"IFNULL(UUID(), 'x')",
+		"CASE WHEN TRUE THEN UUID() ELSE 'x' END",
+		"UUID() = 'x'",
+		"UUID() + 1",
 	} {
-		t.Run(body, func(t *testing.T) {
-			info, tables, opt := uuidAssignmentFixture(body)
-			tables["Audit"] = &source.TableDDLInfo{TableName: "Audit", Columns: []source.ColumnInfo{{Name: "RowGuid", DataType: "varchar", Length: 32}}}
+		t.Run(rhs, func(t *testing.T) {
+			info, tables, opt := uuidAssignmentFixture("BEGIN SET NEW.Amount=1; SET NEW.RowGuid=" + rhs + "; END")
+			tables[info.TableName].Columns[0].Length = 36
 			p, err := Convert(info, tables, opt)
 			require.Error(t, err)
 			require.Empty(t, p.TriggerSQL)
 		})
+	}
+}
+
+func TestUUIDAssignmentDoesNotEnableOtherExpressionContexts(t *testing.T) {
+	for _, rhs := range []string{compactUUIDSourceExpression, "UUID()"} {
+		for _, body := range []string{
+			"BEGIN DECLARE v VARCHAR(36) DEFAULT " + rhs + "; SET NEW.RowGuid=v; END",
+			"INSERT INTO Audit(RowGuid) VALUES(" + rhs + ")",
+			"BEGIN IF " + rhs + " = 'x' THEN SET NEW.Amount=1; END IF; END",
+			"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT=" + rhs,
+		} {
+			t.Run(body, func(t *testing.T) {
+				info, tables, opt := uuidAssignmentFixture(body)
+				tables["Audit"] = &source.TableDDLInfo{TableName: "Audit", Columns: []source.ColumnInfo{{Name: "RowGuid", DataType: "varchar", Length: 36}}}
+				p, err := Convert(info, tables, opt)
+				require.Error(t, err)
+				require.Empty(t, p.TriggerSQL)
+			})
+		}
 	}
 }
 
@@ -163,13 +282,16 @@ func TestUUIDAssignmentRetainsTargetAndSQLModeValidation(t *testing.T) {
 		}},
 		{"unsupported_sql_mode", func(info *source.TriggerInfo, _ map[string]*source.TableDDLInfo) { info.SQLMode = "PIPES_AS_CONCAT" }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			info, tables, opt := uuidAssignmentFixture("SET NEW.RowGuid=" + compactUUIDSourceExpression)
-			tc.change(&info, tables)
-			p, err := Convert(info, tables, opt)
-			require.Error(t, err)
-			require.Empty(t, p.TriggerSQL)
-		})
+		for _, rhs := range []string{compactUUIDSourceExpression, "UUID()"} {
+			t.Run(tc.name+"/"+rhs, func(t *testing.T) {
+				info, tables, opt := uuidAssignmentFixture("SET NEW.RowGuid=" + rhs)
+				tables[info.TableName].Columns[0].Length = 36
+				tc.change(&info, tables)
+				p, err := Convert(info, tables, opt)
+				require.Error(t, err)
+				require.Empty(t, p.TriggerSQL)
+			})
+		}
 	}
 	for _, mode := range []string{"", "STRICT_TRANS_TABLES", "ANSI_QUOTES,NO_BACKSLASH_ESCAPES,IGNORE_SPACE"} {
 		t.Run("supported_mode/"+mode, func(t *testing.T) {
@@ -194,5 +316,14 @@ func TestUUIDAssignmentPreservesExistingV1Program(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, p.Version)
 	require.Equal(t, "CREATE TRIGGER \"DEST\".\"ORDERAUDIT\" BEFORE UPDATE ON \"DEST\".\"ORDERDATA\" FOR EACH ROW\nBEGIN\n  /* dbgold:mysql-dameng-trigger:v1 */\n:NEW.\"AMOUNTVALUE\" := (:NEW.\"AMOUNTVALUE\" + 1);\nEND;", p.TriggerSQL)
+	require.NoError(t, ValidatePlan(p))
+}
+
+func TestUUIDAssignmentPreservesExistingCompactV1Program(t *testing.T) {
+	info, tables, opt := uuidAssignmentFixture("SET NEW.RowGuid=" + compactUUIDSourceExpression)
+	p, err := Convert(info, tables, opt)
+	require.NoError(t, err)
+	require.Equal(t, 1, p.Version)
+	require.Equal(t, "CREATE TRIGGER \"DEST\".\"TRI_JWJD_AJSPXX_ROWGUID\" BEFORE INSERT ON \"DEST\".\"CASEDATA\" FOR EACH ROW\nBEGIN\n  /* dbgold:mysql-dameng-trigger:v1 */\n:NEW.\"ROWTOKEN\" := LOWER(RAWTOHEX(SYS_GUID()));\nEND;", p.TriggerSQL)
 	require.NoError(t, ValidatePlan(p))
 }

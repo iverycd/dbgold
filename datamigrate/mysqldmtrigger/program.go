@@ -572,7 +572,7 @@ func (c *converter) setStatement() (string, error) {
 		if e != nil {
 			return "", e
 		}
-		v, e := c.assignmentExpression(s)
+		v, uuidVariable, e := c.assignmentExpression(s)
 		if e != nil {
 			return "", e
 		}
@@ -586,7 +586,14 @@ func (c *converter) setStatement() (string, error) {
 				return "", e
 			}
 		}
+		if uuidVariable != "" {
+			name := quote(uuidVariable)
+			b.WriteString("DECLARE\n" + name + " VARCHAR(32);\nBEGIN\n" + name + " := LOWER(RAWTOHEX(SYS_GUID()));\n")
+		}
 		b.WriteString(target + " := " + value + ";\n")
+		if uuidVariable != "" {
+			b.WriteString("END;\n")
+		}
 		if !c.at(",") {
 			break
 		}

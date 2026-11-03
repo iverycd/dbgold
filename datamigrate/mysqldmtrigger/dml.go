@@ -68,21 +68,62 @@ func (c *converter) dml(s string) (string, error) {
 	}
 	switch n := n.(type) {
 	case *ast.InsertStmt:
-		if n.IsReplace || n.IgnoreErr || n.Setlist || n.Priority != mysql.NoPriority || len(n.OnDuplicate) > 0 || len(n.TableHints) > 0 || len(n.PartitionNames) > 0 || len(n.Columns) == 0 {
-			return "", fmt.Errorf("INSERT 只支持明确列清单的 VALUES/SELECT，不支持 IGNORE/REPLACE/冲突更新")
+		switch {
+		case n.IsReplace:
+			return "", fmt.Errorf("REPLACE 需要人工适配")
+		case n.IgnoreErr:
+			return "", fmt.Errorf("INSERT IGNORE 需要人工适配")
+		case n.Setlist:
+			return "", fmt.Errorf("INSERT SET 需要人工适配")
+		case n.Priority != mysql.NoPriority:
+			return "", fmt.Errorf("INSERT 优先级修饰符需要人工适配")
+		case len(n.OnDuplicate) > 0:
+			return "", fmt.Errorf("INSERT ON DUPLICATE KEY UPDATE 冲突更新需要人工适配")
+		case len(n.TableHints) > 0:
+			return "", fmt.Errorf("INSERT 优化器提示需要人工适配")
+		case len(n.PartitionNames) > 0:
+			return "", fmt.Errorf("INSERT PARTITION 分区限定需要人工适配")
+		case len(n.Columns) == 0 && n.Select != nil:
+			return "", fmt.Errorf("INSERT SELECT 必须指定明确列清单")
+		case len(n.Columns) == 0 && len(n.Lists) != 1:
+			return "", fmt.Errorf("无列清单 INSERT 仅支持单行 VALUES")
 		}
 		t, e := c.tableReference(n.Table, false)
 		if e != nil {
 			return "", e
 		}
+		var sourceNames []string
+		if len(n.Columns) == 0 {
+			// Reader metadata preserves source ordinal order. MySQL does not
+			// include invisible columns in an INSERT's implicit column list.
+			for _, col := range t.Columns {
+				invisible := false
+				for _, extra := range strings.Fields(col.Extra) {
+					if strings.EqualFold(extra, "INVISIBLE") {
+						invisible = true
+						break
+					}
+				}
+				if !invisible {
+					sourceNames = append(sourceNames, col.Name)
+				}
+			}
+			if len(sourceNames) == 0 {
+				return "", fmt.Errorf("表 %s 缺少可用于推导 INSERT 列清单的可见列元数据", t.TableName)
+			}
+		} else {
+			for _, cn := range n.Columns {
+				if cn.Table.O != "" || cn.Schema.O != "" {
+					return "", fmt.Errorf("INSERT 列不能带表限定")
+				}
+				sourceNames = append(sourceNames, cn.Name.O)
+			}
+		}
 		var cols []*source.ColumnInfo
 		var names []string
 		seen := map[string]bool{}
-		for _, cn := range n.Columns {
-			if cn.Table.O != "" || cn.Schema.O != "" {
-				return "", fmt.Errorf("INSERT 列不能带表限定")
-			}
-			col, e := c.column(t, cn.Name.O)
+		for _, name := range sourceNames {
+			col, e := c.column(t, name)
 			if e != nil {
 				return "", e
 			}
