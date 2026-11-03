@@ -461,10 +461,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					continue
 				}
 				src := v.TableName
-				v.TableName = m.objName(src)
-				if v.ColumnName != "" {
-					v.ColumnName = m.targetColumn(src, v.ColumnName)
-				}
+				v = m.targetComment(v)
 				name := v.TableName
 				if v.ColumnName != "" {
 					name += "." + v.ColumnName
@@ -933,11 +930,8 @@ func (m *Migrator) repairFK(ctx context.Context, v source.FKInfo) error {
 	return m.captureRepairCall(ctx, repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, TargetName: v.ConstraintName, ForeignKey: &v}, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateForeignKey(c, v) })
 }
 func (m *Migrator) repairComment(ctx context.Context, v source.CommentInfo) error {
-	n := v.TableName
-	if v.ColumnName != "" {
-		n += "." + v.ColumnName
-	}
-	return m.captureRepairCall(ctx, repair.Object{Kind: "comment", Name: n, Table: v.TableName, TargetName: n, Comment: &v}, m.writer.Dialect().CommentStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateComment(c, v) })
+	ss, err := m.prepareComment(ctx, v)
+	return m.repairPreparedComment(ctx, v, ss, err)
 }
 func (m *Migrator) repairView(ctx context.Context, v source.ViewInfo) error {
 	return m.captureRepairCall(ctx, repair.Object{Kind: "view", Name: v.ViewName, TargetName: v.ViewName}, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateView(c, v) })

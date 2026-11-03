@@ -89,7 +89,7 @@ function appFor(h, props, bindings = {}) {
 function panelHarness(records = repairs) {
   const scope = Vue.effectScope()
   const props = Vue.reactive({ repairs: records })
-  const h = scope.run(() => execute('components/AutoRepairPanel', 'groups, autoRepairStatus, autoRepairType, currentPage, expandedRowKeys, detailPage, toggleGroup, changePage', props))
+  const h = scope.run(() => execute('components/AutoRepairPanel', 'groups, autoRepairSourceType, autoRepairStatus, autoRepairType, currentPage, expandedRowKeys, detailPage, toggleGroup, changePage', props))
   return { ...h, props, get app() { return appFor(h, props) }, stop: () => scope.stop() }
 }
 
@@ -120,6 +120,27 @@ test('source column types render separately and old reports show an explicit mis
     assert.match(exported, /ROWID varchar\(6000\) → ROW_ID_2/)
     assert.match(exported, /TrxId NUMBER\(18,2\) → TRX_ID/)
     assert.match(exported, /Legacy → LEGACY.*源列类型未记录/)
+  } finally { h.stop() }
+})
+
+const commentRepair = {
+  type: 'oracle_mysql_comment_truncate', table: 'Orders', target_table: 'orders',
+  source: 'Title', target: 'title', reason: '列注释由 1200 字符截断为 1024 字符', status: 'applied',
+}
+
+test('comment truncations show an inapplicable source type and preserve the truncation reason', async () => {
+  const h = panelHarness([commentRepair])
+  try {
+    h.values.toggleGroup(h.values.groups.value[0].key)
+    const html = await renderToString(h.app)
+    assert.match(html, /字段与注释调整/)
+    assert.match(html, /Title[\s\S]*不适用[\s\S]*title[\s\S]*注释截断/)
+    assert.match(html, /列注释由 1200 字符截断为 1024 字符/)
+    assert.doesNotMatch(html, /未记录/)
+    assert.equal(autoRepairUtils.autoRepairSourceType({ ...commentRepair, source_type: 'VARCHAR2(200)' }), '不适用')
+    const exported = autoRepairUtils.formatAutoRepairs([commentRepair]).join('\n')
+    assert.match(exported, /Title → title；注释截断；列注释由 1200 字符截断为 1024 字符；本次已修复；源列类型不适用/)
+    assert.doesNotMatch(exported, /源列类型未记录/)
   } finally { h.stop() }
 })
 
@@ -315,6 +336,12 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
       h.values.report.value.auto_repairs = [{ ...repairs[0], source_type: 'VARCHAR2(6000)' }]
       await h.values.exportReport()
       assert.match(await h.downloads[3].text(), /ROWID VARCHAR2\(6000\) → ROW_ID_2/)
+      h.values.report.value.auto_repairs = [commentRepair]
+      await h.values.exportReport()
+      const commentExport = await h.downloads[4].text()
+      assert.match(commentExport, /Title → title；注释截断；列注释由 1200 字符截断为 1024 字符/)
+      assert.match(commentExport, /源列类型不适用/)
+      assert.doesNotMatch(commentExport, /源列类型未记录/)
     } finally { scope.stop() }
   })
 }

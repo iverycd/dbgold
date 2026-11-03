@@ -88,6 +88,13 @@ func (w *MySQLWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) er
 }
 
 func (w *MySQLWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
+	if w.srcType == "oracle" {
+		statements, err := w.PrepareComment(ctx, cm)
+		if err != nil {
+			return err
+		}
+		return w.ExecuteCommentStatements(ctx, statements)
+	}
 	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
 }
 

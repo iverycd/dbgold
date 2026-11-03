@@ -2,6 +2,7 @@ package target
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 
@@ -20,6 +21,9 @@ func TestRepairMySQLCommentPreservesCompleteColumnDefinition(t *testing.T) {
 	got, err = repairMySQLColumnComment(ddl, "T", "Id", "identity")
 	require.NoError(t, err)
 	require.Equal(t, "`Id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'identity'", got)
+	got, err = repairMySQLColumnComment(ddl, "T", "ID", "identity")
+	require.NoError(t, err)
+	require.Equal(t, "`Id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'identity'", got)
 	got, err = repairMySQLColumnComment(ddl, "T", "computed", "generated")
 	require.NoError(t, err)
 	require.Equal(t, "`computed` varchar(60) GENERATED ALWAYS AS (concat(`Va``lue`, ',COMMENT ', 'suffix')) STORED COMMENT 'generated'", got)
@@ -30,6 +34,7 @@ func TestRepairMySQLCommentRejectsAmbiguousDefinitions(t *testing.T) {
 		"CREATE VIEW `T` AS SELECT 1",
 		"CREATE TABLE `Other` (`v` int)",
 		"CREATE TABLE `T` (`v` int, `v` int)",
+		"CREATE TABLE `T` (`v` int, `V` int)",
 		"CREATE TABLE `T` (`v` int COMMENT 'a' COMMENT 'b')",
 		"CREATE TABLE `T` (`v` varchar(20) DEFAULT 'unclosed)",
 		"CREATE TABLE `T` (`v` int COMMENT (SELECT 1))",
@@ -53,6 +58,52 @@ func TestGenerateRepairMySQLCommentReadsActualDefinition(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []dialect.Statement{{SQL: "ALTER TABLE `app`.`T` MODIFY COLUMN `Id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'key'"}}, units)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestGenerateRepairMySQLCommentChecksTargetTableCaseRules(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		shown      string
+		caseMode   int
+		probeError bool
+		wantError  bool
+	}{
+		{name: "case mode 1 permits folded table", shown: "orders", caseMode: 1},
+		{name: "case mode 2 permits folded table", shown: "orders", caseMode: 2},
+		{name: "case mode 0 rejects folded table", shown: "orders", caseMode: 0, wantError: true},
+		{name: "invalid case mode rejects folded table", shown: "orders", caseMode: 3, wantError: true},
+		{name: "nonmatching table rejected", shown: "other", caseMode: 1, wantError: true},
+		{name: "case rule unavailable", shown: "orders", probeError: true, wantError: true},
+		{name: "exact table needs no case mode query", shown: "Orders"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			w := &MySQLWriter{db: db, schema: "app", dia: dialect.NewMySQL()}
+			mock.ExpectExec(regexp.QuoteMeta("SET SESSION sql_mode='', sql_quote_show_create=1")).WillReturnResult(sqlmock.NewResult(0, 0))
+			ddl := "CREATE TABLE `" + tc.shown + "` (`Id` bigint NOT NULL, PRIMARY KEY (`Id`)) ENGINE=InnoDB"
+			mock.ExpectQuery(regexp.QuoteMeta("SHOW CREATE TABLE `app`.`Orders`")).WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tc.shown, ddl))
+			if tc.shown != "Orders" {
+				query := mock.ExpectQuery(regexp.QuoteMeta("SELECT @@lower_case_table_names"))
+				if tc.probeError {
+					query.WillReturnError(errors.New("case mode unavailable"))
+				} else {
+					query.WillReturnRows(sqlmock.NewRows([]string{"lower_case_table_names"}).AddRow(tc.caseMode))
+				}
+			}
+			mock.ExpectClose()
+			units, err := GenerateRepairComment(context.Background(), w, source.CommentInfo{TableName: "Orders", ColumnName: "ID", Comment: "key"})
+			if tc.wantError {
+				require.Error(t, err)
+				require.Nil(t, units)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, []dialect.Statement{{SQL: "ALTER TABLE `app`.`Orders` MODIFY COLUMN `Id` bigint NOT NULL COMMENT 'key'"}}, units)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestGenerateRepairCommentDoesNotExecuteDDL(t *testing.T) {

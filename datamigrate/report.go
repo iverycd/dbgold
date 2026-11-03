@@ -108,7 +108,7 @@ type NativeSchemaReport struct {
 	pendingStates map[string]error
 }
 
-// AutoRepair is emitted only after successful CREATE or existing-column validation.
+// AutoRepair is emitted only after a successful adjustment or existing-column validation.
 type AutoRepair struct {
 	Type        string `json:"type"`
 	Table       string `json:"table"`

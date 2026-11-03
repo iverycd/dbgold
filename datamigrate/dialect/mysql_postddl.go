@@ -101,8 +101,8 @@ func (d *MySQLDialect) ViewStatements(schema string, view source.ViewInfo) []Sta
 // CommentStatements MySQL 不支持 COMMENT ON 语句。
 //   - 表注释:ALTER TABLE ... COMMENT = '...' 可行,不需列类型。
 //   - 列注释:必须用 ALTER TABLE ... MODIFY COLUMN <col> <type> COMMENT '...' 重写整列定义,
-//     需要列的完整类型,而 CommentInfo 不携带类型信息。本次作为已知限制不实现,返回空切片,
-//     由调用方(migrator)跳过、不计入失败。
+//     CommentInfo 不携带完整列定义，静态方言返回空切片。
+//     Oracle -> MySQL 通过 Writer 的动态准备能力读取目标定义后生成。
 func (d *MySQLDialect) CommentStatements(schema string, cm source.CommentInfo) []Statement {
 	if cm.ColumnName != "" {
 		return []Statement{}

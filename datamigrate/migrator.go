@@ -1369,8 +1369,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 		}
 	}
 
-	// 注释(表注释 + 列注释)。注意:MySQL 目标库的列注释暂不支持(需列类型重建列定义),
-	// 此类语句 CommentStatements 返回空,这里跳过、不计入 Total/Failed。
+	// 注释(表注释 + 列注释)。Oracle -> MySQL 在此时读取目标完整列定义。
 	if want("comments") {
 		readStarted := time.Now()
 		comments, err := m.reader.GetComments(ctx)
@@ -1405,14 +1404,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 					continue
 				}
-				cmCopy := cm
-				cmCopy.TableName = m.objName(cm.TableName)
-				if cm.ColumnName != "" {
-					cmCopy.ColumnName = m.targetColumn(cm.TableName, cm.ColumnName)
-				}
-				ddl := dialect.JoinSQL(m.writer.Dialect().CommentStatements(m.cfg.TargetSchema, cmCopy))
-				if ddl == "" {
-					// 目标库不支持该类注释(如 MySQL 列注释),跳过不计数
+				cmCopy := m.targetComment(cm)
+				ss, preparationErr := m.prepareComment(ctx, cmCopy)
+				ddl := dialect.JoinSQL(ss)
+				if preparationErr == nil && ddl == "" {
+					// 未启用动态注释能力的目标仍沿用原有支持范围。
 					continue
 				}
 				name := cmCopy.TableName
@@ -1420,7 +1416,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					name = fmt.Sprintf("%s.%s", cmCopy.TableName, cmCopy.ColumnName)
 				}
 				report.Comments.Total++
-				if err := m.repairComment(ctx, cmCopy); err != nil {
+				if err := m.repairPreparedComment(ctx, cmCopy, ss, preparationErr); err != nil {
 					if m.stopOracleDamengTask(ctx, err) {
 						return
 					}
@@ -1434,6 +1430,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				} else {
 					m.log.DDLf("创建注释 %s ... OK", name)
 					report.Comments.Success++
+					m.recordOracleMySQLCommentTruncation(report, cm, cmCopy)
 				}
 			}
 		}

@@ -248,7 +248,7 @@ export interface MigrationReport {
 }
 
 export interface AutoRepair {
-  type: 'column_rename' | 'oracle_mysql_longtext'
+  type: 'column_rename' | 'oracle_mysql_longtext' | 'oracle_mysql_comment_truncate'
   table: string
   target_table: string
   source: string

@@ -108,10 +108,11 @@ func oracleMySQLLiveCleanup(t *testing.T, db *sql.DB, schema string, tables []st
 
 type oracleMySQLLiveReader struct {
 	source.Reader
-	tables []source.TableDDLInfo
-	keys   []source.IndexInfo
-	fks    []source.FKInfo
-	data   map[string][][]any
+	tables   []source.TableDDLInfo
+	keys     []source.IndexInfo
+	fks      []source.FKInfo
+	data     map[string][][]any
+	comments []source.CommentInfo
 }
 
 func (*oracleMySQLLiveReader) DBType() string          { return "oracle" }
@@ -159,8 +160,8 @@ func (*oracleMySQLLiveReader) GetSequences(context.Context) ([]source.SequenceIn
 	return nil, nil
 }
 func (*oracleMySQLLiveReader) GetViews(context.Context) ([]source.ViewInfo, error) { return nil, nil }
-func (*oracleMySQLLiveReader) GetComments(context.Context) ([]source.CommentInfo, error) {
-	return nil, nil
+func (r *oracleMySQLLiveReader) GetComments(context.Context) ([]source.CommentInfo, error) {
+	return slices.Clone(r.comments), nil
 }
 func (*oracleMySQLLiveReader) GetTriggerCount(context.Context) (int, error) { return 0, nil }
 func (*oracleMySQLLiveReader) ListDatabases(context.Context) ([]string, error) {

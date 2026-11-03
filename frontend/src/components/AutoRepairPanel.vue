@@ -1,7 +1,7 @@
 <template>
   <section v-if="repairs.length" class="auto-repair-panel" aria-label="自动修复明细">
     <a-alert type="info">
-      以下为已自动修复或经校验复用的字段调整，请据此核对业务 SQL 中的字段引用与类型。
+      以下为已自动修复或经校验复用的字段与注释调整，请据此核对业务 SQL 中的字段引用、类型及迁移后的注释内容。
     </a-alert>
     <a-table
       :data="groups"
@@ -53,7 +53,7 @@
                 <template #cell="{ record: item }"><code>{{ item.source }}</code></template>
               </a-table-column>
               <a-table-column title="源列类型" :width="180">
-                <template #cell="{ record: item }"><code>{{ item.source_type || '未记录' }}</code></template>
+                <template #cell="{ record: item }"><code>{{ autoRepairSourceType(item) }}</code></template>
               </a-table-column>
               <a-table-column title="目标结果" :width="220">
                 <template #cell="{ record: item }"><code>{{ item.target }}</code></template>
@@ -78,7 +78,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { AutoRepair } from '@/api/migration'
-import { autoRepairStatus, autoRepairType, groupAutoRepairs } from '@/utils/autoRepairs'
+import { autoRepairSourceType, autoRepairStatus, autoRepairType, groupAutoRepairs } from '@/utils/autoRepairs'
 
 const props = defineProps<{ repairs: AutoRepair[] }>()
 const groups = computed(() => groupAutoRepairs(props.repairs).map(group => {

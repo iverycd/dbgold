@@ -52,9 +52,15 @@ func GenerateRepairComment(ctx context.Context, w Writer, cm source.CommentInfo)
 		return nil, err
 	}
 	if shown != cm.TableName {
-		return nil, fmt.Errorf("SHOW CREATE 返回的目标表身份不一致")
+		var caseMode int
+		if err = conn.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&caseMode); err != nil {
+			return nil, fmt.Errorf("核验 MySQL 目标表大小写规则: %w", err)
+		}
+		if (caseMode != 1 && caseMode != 2) || !strings.EqualFold(shown, cm.TableName) {
+			return nil, fmt.Errorf("SHOW CREATE 返回的目标表身份不一致")
+		}
 	}
-	definition, err := repairMySQLColumnComment(ddl, cm.TableName, cm.ColumnName, cm.Comment)
+	definition, err := repairMySQLColumnComment(ddl, shown, cm.ColumnName, cm.Comment)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +199,7 @@ func repairMySQLColumnComment(ddl, table, column, comment string) (string, error
 		if !boundary {
 			continue
 		}
-		if start < i && ts[start].kind == 'q' && ts[start].value == column {
+		if start < i && ts[start].kind == 'q' && strings.EqualFold(ts[start].value, column) {
 			matches++
 			cols = ts[start:i]
 			end = ts[i].start

@@ -205,6 +205,16 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			continue
 		}
 		candidate := regenerateRepairCandidate(w, cfg, obj, o, p.ColumnMapping)
+		if r.DBType() == "oracle" && w.DBType() == "mysql" && candidate.Comment != nil && candidate.Comment.ColumnName != "" {
+			planner, ok := w.(preparedCommentWriter)
+			if !ok {
+				return p, fmt.Errorf("目标 Writer 缺少 MySQL 注释准备和执行能力")
+			}
+			candidate, err = prepareOracleMySQLRecoveryComment(ctx, planner, o, candidate)
+			if err != nil {
+				return p, err
+			}
+		}
 		p.Related = append(p.Related, candidate)
 	}
 	slices.SortStableFunc(p.Related, func(a, b repair.Object) int { return repairKindOrder(a.Kind) - repairKindOrder(b.Kind) })
