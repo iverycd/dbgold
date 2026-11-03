@@ -85,6 +85,81 @@ func TestMySQLDamengTriggersCreatedAfterDataWithFrozenLedger(t *testing.T) {
 	}
 }
 
+type mysqlDMRowGUIDReader struct{ *triggerCharacterTestReader }
+
+func (r *mysqlDMRowGUIDReader) ReadPage(_ context.Context, table string, _ []string, offset, _ int64) ([]string, []string, [][]interface{}, error) {
+	if offset > 0 {
+		return nil, nil, nil, nil
+	}
+	return []string{"Id", "RowGuid"}, []string{"INT", "VARCHAR"}, r.rows[table], nil
+}
+
+type mysqlDMRowGUIDWriter struct {
+	*mysqlDMTriggerWriter
+	rows [][]interface{}
+}
+
+func (w *mysqlDMRowGUIDWriter) CopyData(ctx context.Context, table string, columns, types []string, rows [][]interface{}) error {
+	for _, row := range rows {
+		w.rows = append(w.rows, append([]interface{}(nil), row...))
+	}
+	return w.dmFixtureWriter.CopyData(ctx, table, columns, types, rows)
+}
+
+func TestMySQLDamengRowGUIDTriggerPreservesHistoricalRows(t *testing.T) {
+	for _, objectsOnly := range []bool{false, true} {
+		name := "after historical data"
+		if objectsOnly {
+			name = "triggers only"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, r, w := mysqlDMTriggerFixture(t)
+			r.ddl["OrderData"].Columns = []source.ColumnInfo{{Name: "Id", DataType: "int"}, {Name: "RowGuid", DataType: "varchar", Length: 32}}
+			historical := [][]interface{}{{1, "0123456789ABCDEF0123456789ABCDEF"}, {2, "fedcba9876543210fedcba9876543210"}}
+			r.rows["OrderData"] = historical
+			r.triggers[0].Name = "FillRowGuid"
+			r.triggers[0].Body = "BEGIN\nSET NEW.RowGuid = (\nSELECT REPLACE(UUID(), '-', '')\n);\nEND"
+			r.triggers[0].SourceDDL = "CREATE TRIGGER FillRowGuid BEFORE INSERT ON OrderData FOR EACH ROW " + r.triggers[0].Body
+			reader := &mysqlDMRowGUIDReader{triggerCharacterTestReader: &triggerCharacterTestReader{triggerTestReader: r, characterErr: errors.New("source character metadata unavailable")}}
+			writer := &mysqlDMRowGUIDWriter{mysqlDMTriggerWriter: w}
+			m.reader, m.writer = reader, writer
+			m.cfg.CaptureRepair = true
+			if objectsOnly {
+				m.cfg.Content, m.cfg.Objects, m.cfg.TableNames = "schema_only", []string{"triggers"}, []string{"OrderData"}
+			}
+			w.beforeInstall = func() {
+				if objectsOnly {
+					require.Empty(t, writer.rows)
+					require.Empty(t, w.created)
+				} else {
+					require.Equal(t, historical, writer.rows, "historical RowGuid values must load unchanged before the trigger is installed")
+				}
+			}
+			report := m.Run(context.Background())
+			require.Zero(t, report.Triggers.Failed, "%+v", report.Triggers.Items)
+			require.Equal(t, 1, report.Triggers.Success)
+			require.Equal(t, 1, reader.characterReads, "unavailable character metadata must not block UUID generation")
+			require.Len(t, w.plans, 1)
+			require.Nil(t, w.plans[0].Options.CharacterMetadata)
+			require.Contains(t, w.plans[0].TriggerSQL, `:NEW."ROWGUID" := LOWER(RAWTOHEX(SYS_GUID()));`)
+			require.Equal(t, 1, strings.Count(w.plans[0].TriggerSQL, "SYS_GUID()"))
+			require.Equal(t, r.triggers[0].SourceDDL, w.plans[0].Source.SourceDDL)
+			triggerObjects := 0
+			for _, object := range report.RepairManifest.Objects {
+				if object.Kind == "trigger" {
+					triggerObjects++
+					require.Equal(t, "succeeded", object.Status)
+					require.False(t, object.DiagnosticOnly)
+					require.NotNil(t, object.MySQLDamengTrigger)
+					require.Len(t, object.Units, 1)
+					require.Equal(t, "succeeded", object.Units[0].Status)
+				}
+			}
+			require.Equal(t, 1, triggerObjects)
+		})
+	}
+}
+
 func TestMySQLDamengTriggerOrderAndIndependentFailure(t *testing.T) {
 	for _, failure := range []string{"unsupported", "execute"} {
 		t.Run(failure, func(t *testing.T) {

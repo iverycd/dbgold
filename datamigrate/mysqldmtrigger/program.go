@@ -572,7 +572,7 @@ func (c *converter) setStatement() (string, error) {
 		if e != nil {
 			return "", e
 		}
-		v, e := c.expression(s, nil)
+		v, e := c.assignmentExpression(s)
 		if e != nil {
 			return "", e
 		}

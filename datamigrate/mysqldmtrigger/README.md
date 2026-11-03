@@ -11,6 +11,7 @@
 - 单表 INSERT、UPDATE、DELETE，明确列清单的 INSERT SELECT。
 - SELECT INTO 局部变量及基本 COUNT/SUM/AVG/MIN/MAX 聚合；查询零行保持变量原值，多行报错。
 - 有明确类型的数值、逻辑和白名单字符串、时间函数。
+- 完整 SET 赋值右侧的 `REPLACE(UUID(), '-', '')`，可带普通括号或无 FROM 的单表达式 SELECT 包装，转换为每次只调用一次的 `LOWER(RAWTOHEX(SYS_GUID()))`。保留 32 位小写十六进制唯一标识用途，不保留 MySQL UUID v1 的时间/版本语义；不依赖目标将空字符串视为 NULL 与否。裸 UUID 或复杂表达式中的 UUID 仍需人工适配。
 - SIGNAL SQLSTATE '45000' 的业务异常；目标错误号改为达梦应用错误号。
 
 同表、同时机、同事件的触发器通过 ACTION_ORDER 和达梦 FOLLOWS 保留顺序。前序未安装时，后续记录依赖阻塞，其他独立触发器继续处理。

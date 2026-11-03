@@ -70,22 +70,37 @@ func (c *converter) predicate(v expression) (string, error) {
 	return "", fmt.Errorf("条件的字符或日期隐式布尔转换需要人工适配")
 }
 func (c *converter) expression(s string, t *source.TableDDLInfo) (expression, error) {
-	n, err := c.parse("SELECT " + s)
+	n, err := c.parseExpression(s)
 	if err != nil {
 		return expression{}, err
 	}
+	return c.expr(n, t)
+}
+
+func (c *converter) parseExpression(s string) (ast.ExprNode, error) {
+	n, err := c.parse("SELECT " + s)
+	if err != nil {
+		return nil, err
+	}
 	q, ok := n.(*ast.SelectStmt)
-	if !ok || q.From != nil || q.Where != nil || q.GroupBy != nil || q.Having != nil || q.OrderBy != nil || q.Limit != nil || q.LockInfo != nil || q.With != nil || q.SelectIntoOpt != nil || len(q.WindowSpecs) > 0 || len(q.TableHints) > 0 || q.Distinct || q.Fields == nil || len(q.Fields.Fields) != 1 || q.Kind != ast.SelectStmtKindSelect || q.AfterSetOperator != nil || len(q.Lists) > 0 {
-		return expression{}, fmt.Errorf("需要不含查询的单个标量表达式")
+	if !ok {
+		return nil, fmt.Errorf("需要不含查询的单个标量表达式")
+	}
+	return scalarSelectExpression(q)
+}
+
+func scalarSelectExpression(q *ast.SelectStmt) (ast.ExprNode, error) {
+	if q == nil || q.From != nil || q.Where != nil || q.GroupBy != nil || q.Having != nil || q.OrderBy != nil || q.Limit != nil || q.LockInfo != nil || q.With != nil || q.SelectIntoOpt != nil || len(q.WindowSpecs) > 0 || len(q.TableHints) > 0 || q.Distinct || q.Fields == nil || len(q.Fields.Fields) != 1 || q.Kind != ast.SelectStmtKindSelect || q.AfterSetOperator != nil || len(q.Lists) > 0 {
+		return nil, fmt.Errorf("需要不含查询的单个标量表达式")
 	}
 	if opts := q.SelectStmtOpts; opts != nil && (opts.Distinct || opts.ExplicitAll || opts.SQLBigResult || opts.SQLBufferResult || !opts.SQLCache || opts.SQLSmallResult || opts.CalcFoundRows || opts.StraightJoin || opts.Priority != mysql.NoPriority || len(opts.TableHints) > 0) {
-		return expression{}, fmt.Errorf("表达式不支持 SELECT 修饰符")
+		return nil, fmt.Errorf("表达式不支持 SELECT 修饰符")
 	}
 	f := q.Fields.Fields[0]
 	if f.Expr == nil || f.WildCard != nil || f.AsName.O != "" {
-		return expression{}, fmt.Errorf("表达式不支持星号或别名")
+		return nil, fmt.Errorf("表达式不支持星号或别名")
 	}
-	return c.expr(f.Expr, t)
+	return f.Expr, nil
 }
 func (c *converter) expr(n ast.ExprNode, t *source.TableDDLInfo) (expression, error) {
 	bad := func(s string) (expression, error) { return expression{}, fmt.Errorf("%s", s) }
