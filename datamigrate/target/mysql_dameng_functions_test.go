@@ -45,10 +45,11 @@ func TestDamengNativeBusinessFunctionsPreserveSchemaAndDependencyCase(t *testing
 		m.ExpectQuery("SELECT STATUS FROM ALL_OBJECTS").WithArgs("DstMixed", spec.name).
 			WillReturnRows(sqlmock.NewRows([]string{"STATUS"}).AddRow("VALID"))
 	}
+	expectDMProceduresReused(m, w.schema)
 	report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), map[string]string{"Frame_Ou": "different table failed"})
 	require.NoError(t, err)
 	require.Equal(t, 1, report.Created)
-	require.Equal(t, 6, report.Reused)
+	require.Equal(t, 8, report.Reused)
 	for _, item := range report.Items {
 		if item.Status == "reused" {
 			require.Empty(t, item.DDL)
@@ -84,12 +85,13 @@ func TestMySQLDamengBusinessFunctionsCreateAndSkip(t *testing.T) {
 		m.ExpectQuery("SELECT STATUS FROM ALL_OBJECTS").WithArgs("APP", spec.name).
 			WillReturnRows(sqlmock.NewRows([]string{"STATUS"}).AddRow("VALID"))
 	}
+	expectDMProceduresReused(m, w.schema)
 	report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), nil)
 	require.NoError(t, err)
-	require.Equal(t, 7, report.Total)
+	require.Equal(t, 9, report.Total)
 	require.Equal(t, 6, report.Created)
-	require.Equal(t, 1, report.Reused)
-	require.Equal(t, 7, report.Success)
+	require.Equal(t, 3, report.Reused)
+	require.Equal(t, 9, report.Success)
 	require.Zero(t, report.Failed)
 	skipped := dmFunctionResult(t, report, "GETITEMTEXT")
 	require.Empty(t, skipped.DDL)
@@ -127,6 +129,7 @@ func TestMySQLDamengBusinessFunctionsContinueAfterObjectFailures(t *testing.T) {
 			m.ExpectQuery("SELECT STATUS FROM ALL_OBJECTS").WillReturnRows(sqlmock.NewRows([]string{"STATUS"}).AddRow("VALID"))
 		}
 	}
+	expectDMProceduresReused(m, w.schema)
 	report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), nil)
 	require.Error(t, err)
 	require.Equal(t, 5, report.Failed)
@@ -137,6 +140,9 @@ func TestMySQLDamengBusinessFunctionsContinueAfterObjectFailures(t *testing.T) {
 	require.Contains(t, dmFunctionResult(t, report, "GETQUESTIONTEXT").Error, "4:2 invalid column")
 	require.Contains(t, dmFunctionResult(t, report, "GETUSERNAMEBYUSERGUID").Error, sql.ErrNoRows.Error())
 	for _, item := range report.Items {
+		if item.Kind == "procedure" {
+			continue
+		}
 		require.NotEmpty(t, item.DDL)
 	}
 }
@@ -150,10 +156,11 @@ func TestMySQLDamengBusinessFunctionsBlockedDependencyAndExistingSkip(t *testing
 			expectDMFunctionExists(m, spec.name, 1) // User explicitly asked to skip even stale functions.
 		}
 	}
+	expectDMProceduresReused(m, w.schema)
 	report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), map[string]string{"FRAME_OU": "CREATE TABLE failed"})
 	require.ErrorContains(t, err, "CREATE TABLE failed")
 	require.Equal(t, 1, report.Failed)
-	require.Equal(t, 6, report.Reused)
+	require.Equal(t, 8, report.Reused)
 }
 
 func TestMySQLDamengBusinessFunctionsStopOnTaskFailure(t *testing.T) {
@@ -172,7 +179,7 @@ func TestMySQLDamengBusinessFunctionsStopOnTaskFailure(t *testing.T) {
 			}
 			report, err := w.EnsureMySQLDamengBusinessFunctions(ctx, nil)
 			require.Error(t, err)
-			require.Equal(t, 7, report.Failed)
+			require.Equal(t, 9, report.Failed)
 			require.Contains(t, dmFunctionResult(t, report, "FUN_GETPY").Error, "任务已终止")
 		})
 	}
@@ -265,9 +272,10 @@ func TestMySQLDamengFunGetPyWithoutBusinessTables(t *testing.T) {
 						WillReturnRows(sqlmock.NewRows([]string{"LINE", "POSITION", "TEXT"}).AddRow(8, 20, "NLSSORT unavailable"))
 				}
 			}
+			expectDMProceduresReused(m, w.schema)
 			report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), nil)
 			require.Error(t, err) // Six unrelated dependency failures remain visible.
-			require.Equal(t, 7, report.Total)
+			require.Equal(t, 9, report.Total)
 			item := dmFunctionResult(t, report, "FUN_GETPY")
 			if status == "invalid" {
 				require.Equal(t, 7, report.Failed)

@@ -13,7 +13,8 @@ import (
 // SQL. blockedTables uses destination identifiers and prevents binding a new
 // function to stale tables left behind by a failed migration.
 // The historical MySQL-prefixed optional API is retained for compatibility;
-// all supported sources targeting Dameng now use the same reviewed routines.
+// all supported sources targeting Dameng use the same seven functions and two
+// procedures. The report distinguishes them using each item's Kind.
 type MySQLDamengBusinessFunctionInitializer interface {
 	EnsureMySQLDamengBusinessFunctions(context.Context, map[string]string) (*CompatibilityFunctionsReport, error)
 }
@@ -99,21 +100,21 @@ func (w *DaMengWriter) dmBusinessFunctionDDL(spec dmBusinessFunction) string {
 }
 
 func (w *DaMengWriter) EnsureMySQLDamengBusinessFunctions(ctx context.Context, blockedTables map[string]string) (*CompatibilityFunctionsReport, error) {
-	specs := dmBusinessFunctions()
+	specs := dmBusinessRoutines()
 	report := &CompatibilityFunctionsReport{}
 	var errs []error
 	var stopped error
 	for _, spec := range specs {
-		item := CompatibilityFunctionResult{Name: spec.name, Kind: "function", Schema: w.schema,
-			Signature: spec.name + "(" + spec.parameters + ")", Status: "failed", DDL: w.dmBusinessFunctionDDL(spec)}
+		item := CompatibilityFunctionResult{Name: spec.name, Kind: spec.kind, Schema: w.schema,
+			Signature: spec.name + "(" + spec.parameters + ")", Status: "failed", DDL: w.dmBusinessRoutineDDL(spec)}
 		if ctx.Err() != nil {
 			stopped = ctx.Err()
 		}
 		var err error
 		if stopped != nil {
-			err = fmt.Errorf("任务已终止，未创建函数: %w", stopped)
+			err = fmt.Errorf("任务已终止，未创建%s: %w", spec.label(), stopped)
 		} else {
-			err = w.ensureMySQLDamengBusinessFunction(ctx, spec, blockedTables, &item)
+			err = w.ensureDMBusinessRoutine(ctx, spec, blockedTables, &item)
 		}
 		if err != nil {
 			item.Error = err.Error()
@@ -129,9 +130,14 @@ func (w *DaMengWriter) EnsureMySQLDamengBusinessFunctions(ctx context.Context, b
 }
 
 func (w *DaMengWriter) ensureMySQLDamengBusinessFunction(ctx context.Context, spec dmBusinessFunction, blocked map[string]string, item *CompatibilityFunctionResult) error {
+	return w.ensureDMBusinessRoutine(ctx, dmBusinessRoutine{dmBusinessFunction: spec, kind: "function"}, blocked, item)
+}
+
+func (w *DaMengWriter) ensureDMBusinessRoutine(ctx context.Context, spec dmBusinessRoutine, blocked map[string]string, item *CompatibilityFunctionResult) error {
+	objectType, label := strings.ToUpper(spec.kind), spec.label()
 	var exists int
-	if err := w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=? AND OBJECT_TYPE='FUNCTION'`, w.schema, spec.name).Scan(&exists); err != nil {
-		return fmt.Errorf("检查同名函数: %w", err)
+	if err := w.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=? AND OBJECT_TYPE='`+objectType+`'`, w.schema, spec.name).Scan(&exists); err != nil {
+		return fmt.Errorf("检查同名%s: %w", label, err)
 	}
 	if exists > 0 {
 		item.Status, item.DDL = "reused", ""
@@ -140,24 +146,24 @@ func (w *DaMengWriter) ensureMySQLDamengBusinessFunction(ctx context.Context, sp
 	}
 	for _, dep := range spec.dependencies {
 		if reason := blocked[dep.table]; reason != "" {
-			return fmt.Errorf("依赖表 %s.%s 迁移失败，未创建函数: %s", w.schema, dep.table, reason)
+			return fmt.Errorf("依赖表 %s.%s 迁移失败，未创建%s: %s", w.schema, dep.table, label, reason)
 		}
-		if err := w.checkDMBusinessDependency(ctx, dep); err != nil {
+		if err := w.checkDMBusinessDependency(ctx, dep, label); err != nil {
 			return err
 		}
 	}
 	// DMSQL is one execution unit. No DELIMITER, client slash, or splitting.
 	if _, err := w.db.ExecContext(ctx, item.DDL); err != nil {
-		return fmt.Errorf("创建函数 %s: %w", spec.name, err)
+		return fmt.Errorf("创建%s %s: %w", label, spec.name, err)
 	}
 	var status string
-	if err := w.db.QueryRowContext(ctx, `SELECT STATUS FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=? AND OBJECT_TYPE='FUNCTION'`, w.schema, spec.name).Scan(&status); err != nil {
-		return fmt.Errorf("检查函数编译状态: %w", err)
+	if err := w.db.QueryRowContext(ctx, `SELECT STATUS FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=? AND OBJECT_TYPE='`+objectType+`'`, w.schema, spec.name).Scan(&status); err != nil {
+		return fmt.Errorf("检查%s编译状态: %w", label, err)
 	}
 	if strings.TrimSpace(status) != "VALID" {
-		rows, err := w.db.QueryContext(ctx, `SELECT LINE,POSITION,TEXT FROM ALL_ERRORS WHERE OWNER=? AND NAME=? AND TYPE='FUNCTION' ORDER BY SEQUENCE`, w.schema, spec.name)
+		rows, err := w.db.QueryContext(ctx, `SELECT LINE,POSITION,TEXT FROM ALL_ERRORS WHERE OWNER=? AND NAME=? AND TYPE='`+objectType+`' ORDER BY SEQUENCE`, w.schema, spec.name)
 		if err != nil {
-			return fmt.Errorf("函数编译状态 %s，读取编译错误失败: %w", status, err)
+			return fmt.Errorf("%s编译状态 %s，读取编译错误失败: %w", label, status, err)
 		}
 		defer rows.Close()
 		var details []string
@@ -169,16 +175,16 @@ func (w *DaMengWriter) ensureMySQLDamengBusinessFunction(ctx context.Context, sp
 			}
 			details = append(details, fmt.Sprintf("%d:%d %s", line, pos, detail))
 		}
-		return errors.Join(fmt.Errorf("函数编译状态 %s: %s", status, strings.Join(details, "; ")), rows.Err())
+		return errors.Join(fmt.Errorf("%s编译状态 %s: %s", label, status, strings.Join(details, "; ")), rows.Err())
 	}
 	item.Status = "created"
 	return nil
 }
 
-func (w *DaMengWriter) checkDMBusinessDependency(ctx context.Context, dep dmBusinessDependency) error {
+func (w *DaMengWriter) checkDMBusinessDependency(ctx context.Context, dep dmBusinessDependency, label string) error {
 	rows, err := w.db.QueryContext(ctx, `SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS WHERE OWNER=? AND TABLE_NAME=?`, w.schema, dep.table)
 	if err != nil {
-		return fmt.Errorf("读取函数依赖 %s.%s: %w", w.schema, dep.table, err)
+		return fmt.Errorf("读取%s依赖 %s.%s: %w", label, w.schema, dep.table, err)
 	}
 	defer rows.Close()
 	columns := map[string]bool{}
@@ -193,11 +199,11 @@ func (w *DaMengWriter) checkDMBusinessDependency(ctx context.Context, dep dmBusi
 		return err
 	}
 	if len(columns) == 0 {
-		return fmt.Errorf("函数依赖表 %s.%s 不存在或不可见", w.schema, dep.table)
+		return fmt.Errorf("%s依赖表 %s.%s 不存在或不可见", label, w.schema, dep.table)
 	}
 	for _, column := range dep.columns {
 		if !columns[column] {
-			return fmt.Errorf("函数依赖列 %s.%s.%s 不存在或不可见", w.schema, dep.table, column)
+			return fmt.Errorf("%s依赖列 %s.%s.%s 不存在或不可见", label, w.schema, dep.table, column)
 		}
 	}
 	return nil

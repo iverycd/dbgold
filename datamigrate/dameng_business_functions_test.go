@@ -15,9 +15,12 @@ import (
 )
 
 func damengFunctionFixtureReport(schema string) *target.CompatibilityFunctionsReport {
-	r := &target.CompatibilityFunctionsReport{Total: 7, Success: 7, Reused: 7}
+	r := &target.CompatibilityFunctionsReport{Total: 9, Success: 9, Reused: 9}
 	for _, name := range []string{"GETCHILDOULIST", "GETITEMTEXT", "GETOUNAMEBYUSERGUID", "GETQUESTIONTEXT", "GETUSERNAMEBYUSERGUID", "SELECTALLUSERCOUNT", "FUN_GETPY"} {
 		r.Items = append(r.Items, target.CompatibilityFunctionResult{Name: name, Schema: schema, Kind: "function", Status: "reused", DefinitionWarning: "已存在，跳过，未校验定义"})
+	}
+	for _, name := range []string{"EPOINT_PROC_ALTER", "GETCURRENTNUMBER"} {
+		r.Items = append(r.Items, target.CompatibilityFunctionResult{Name: name, Schema: schema, Kind: "procedure", Status: "reused", DefinitionWarning: "已存在，跳过，未校验定义"})
 	}
 	return r
 }
@@ -73,7 +76,7 @@ func TestDamengBusinessFunctionsAllCrossDatabaseSources(t *testing.T) {
 				w.onInstall = func(map[string]string) { require.NotEmpty(t, w.created, "install follows table DDL") }
 				report := m.Run(context.Background())
 				require.Equal(t, 1, w.calls)
-				require.Equal(t, 7, report.CompatibilityFunctions.Reused)
+				require.Equal(t, 9, report.CompatibilityFunctions.Reused)
 				require.False(t, report.HasFailures(), "%+v", report)
 			})
 		}
@@ -92,8 +95,12 @@ func (w *nativeFunctionWriter) EnsureMySQLDamengBusinessFunctions(ctx context.Co
 	}
 	r, _ := w.nativeTestWriter.EnsureMySQLDamengBusinessFunctions(ctx, blocked)
 	if w.err != nil {
-		r.Failed, r.Reused, r.Success = 1, 6, 6
-		r.Items[0].Status, r.Items[0].Error = "failed", w.err.Error()
+		r.Failed, r.Reused, r.Success = 1, 8, 8
+		for i := range r.Items {
+			if r.Items[i].Name == "EPOINT_PROC_ALTER" {
+				r.Items[i].Status, r.Items[i].Error = "failed", w.err.Error()
+			}
+		}
 	}
 	return r, w.err
 }
@@ -108,7 +115,7 @@ func TestDamengBusinessFunctionsNativeBeforeEvents(t *testing.T) {
 		require.Equal(t, 1, countFunctionCalls(w.lifecycle))
 		require.Less(t, slices.Index(w.lifecycle, "verify"), slices.Index(w.lifecycle, "business_functions"))
 		require.Len(t, report.NativeSchema.Inventory, 2, "business routines do not alter the source inventory")
-		require.Equal(t, 7, report.CompatibilityFunctions.Total)
+		require.Equal(t, 9, report.CompatibilityFunctions.Total)
 		if failure == nil {
 			require.False(t, report.HasFailures(), "%+v", report)
 			require.Less(t, slices.Index(w.lifecycle, "business_functions"), slices.Index(w.lifecycle, "final_session"))
@@ -219,7 +226,7 @@ func TestDamengBusinessFunctionsNativeContinuesAfterTableFailure(t *testing.T) {
 	report := m.Run(context.Background())
 	require.True(t, report.HasFailures())
 	require.Equal(t, 1, countFunctionCalls(w.lifecycle))
-	require.Equal(t, 7, report.CompatibilityFunctions.Reused)
+	require.Equal(t, 9, report.CompatibilityFunctions.Reused)
 }
 
 type nativeFunctionValidationReader struct {
@@ -252,25 +259,34 @@ func TestDamengBusinessFunctionsNativeAfterContentValidation(t *testing.T) {
 	require.Equal(t, damengnative.EventTriggerStateSQL("Dst", "Hook", true), base.lifecycle[len(base.lifecycle)-1])
 }
 
-func TestDamengBusinessFunctionsFollowNativeFunctionCopy(t *testing.T) {
+func TestDamengBusinessRoutinesFollowNativeCopies(t *testing.T) {
 	m, r, base := nativeTestMigrator(Config{Mode: "all", CaptureRepair: true})
 	r.snapshot.Objects = append(r.snapshot.Objects, damengnative.Object{
 		ID: "source-function", Kind: "function", Schema: "Src", Name: "FUN_GETPY",
 		Units: []damengnative.Unit{{SQL: `CREATE FUNCTION "Src"."FUN_GETPY" RETURN INT AS BEGIN RETURN 197; END;`, Phase: "after_data"}},
 	})
+	r.snapshot.Objects = append(r.snapshot.Objects, damengnative.Object{
+		ID: "source-procedure", Kind: "procedure", Schema: "Src", Name: "EPOINT_PROC_ALTER",
+		Units: []damengnative.Unit{{SQL: `CREATE PROCEDURE "Src"."EPOINT_PROC_ALTER" AS BEGIN NULL; END;`, Phase: "after_data"}},
+	})
 	m.writer = &nativeFunctionWriter{nativeTestWriter: base, onInstall: func(map[string]string) {
 		require.Contains(t, base.statements, `CREATE FUNCTION "Dst"."FUN_GETPY" RETURN INT AS BEGIN RETURN 197; END;`)
+		require.Contains(t, base.statements, `CREATE PROCEDURE "Dst"."EPOINT_PROC_ALTER" AS BEGIN NULL; END;`)
 	}}
 	report := m.Run(context.Background())
 	require.False(t, report.HasFailures(), "%+v", report)
 	require.Equal(t, 1, countFunctionCalls(base.lifecycle))
-	require.Equal(t, 7, report.CompatibilityFunctions.Reused)
-	require.Len(t, report.NativeSchema.Inventory, 2)
-	var functions int
+	require.Equal(t, 9, report.CompatibilityFunctions.Reused)
+	require.Len(t, report.NativeSchema.Inventory, 3)
+	var functions, procedures int
 	for _, category := range report.NativeSchema.Categories {
 		if category.Kind == "function" {
 			functions += category.Success
 		}
+		if category.Kind == "procedure" {
+			procedures += category.Success
+		}
 	}
 	require.Equal(t, 1, functions, "native function copies retain their own statistics")
+	require.Equal(t, 1, procedures, "native procedure copies retain their own statistics")
 }

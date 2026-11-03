@@ -628,3 +628,28 @@ test('seventeen compatibility items group all three procedures with mixed status
   assert.ok(html.includes('createpvi permission denied'))
   assert.doesNotMatch(html, /FUNCTION_BODY/)
 })
+
+test('Dameng seven functions and two procedures retain separate results, OUT signature and original DDL', async () => {
+  const r = report(empty())
+  const functions = ['GETCHILDOULIST', 'GETITEMTEXT', 'GETOUNAMEBYUSERGUID', 'GETQUESTIONTEXT', 'GETUSERNAMEBYUSERGUID', 'SELECTALLUSERCOUNT', 'FUN_GETPY'].map(name => ({ name, kind: 'function', schema: 'APP', status: 'reused', ddl: '', definition_warning: '已存在，跳过，未校验定义' }))
+  const ddl = "CREATE PROCEDURE APP.GETCURRENTNUMBER(NumberName_ nvarchar2,NumberFlag_ nvarchar2,FlowNumberLen number,CurrentNumber out nvarchar2)\nas\nbegin\n  dbms_output.put_line(' maxValues is null;');\n  commit;\nend;"
+  const procedures = [
+    { name: 'EPOINT_PROC_ALTER', signature: 'EPOINT_PROC_ALTER()', kind: 'procedure', schema: 'APP', status: 'reused', ddl: '', definition_warning: '已存在，跳过，未校验定义' },
+    { name: 'GETCURRENTNUMBER', signature: 'GETCURRENTNUMBER(NumberName_ nvarchar2,NumberFlag_ nvarchar2,FlowNumberLen number,CurrentNumber out nvarchar2)', kind: 'procedure', schema: 'APP', status: 'failed', ddl, error: '存储过程编译状态 INVALID: 8:3 invalid column' },
+  ]
+  r.compatibility_functions = { total: 9, success: 8, failed: 1, created: 0, reused: 8, items: [...functions, ...procedures] }
+  const rows = reportCategories(r).filter(row => row.isCompatibility)
+  assert.deepEqual(Array.from(rows, row => [row.key, row.total, row.success, row.failed]), [['compatibility_functions', 7, 7, 0], ['compatibility_procedures', 2, 1, 1]])
+  const text = formatReportCategories(r).join('\n')
+  assert.ok(text.includes(ddl.split('\n').map(line => `      ${line}`).join('\n')))
+  assert.match(text, /APP.EPOINT_PROC_ALTER[^\n]*：已存在，跳过，未校验定义/)
+  const panel = createCompatibilityPanel()
+  const app = createSSRApp({ render: () => h(panel, { report: rows[1].compatibilityReport, kind: 'procedure' }) })
+  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button', 'a-pagination']) app.component(name, passthrough)
+  const html = await renderToString(app)
+  assert.ok(html.includes(procedures[1].signature))
+  assert.ok(html.includes(procedures[1].error))
+  assert.ok(html.includes('已存在，跳过，未校验定义'))
+  assert.doesNotMatch(html, /FUN_GETPY/)
+})

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // General fixtures model an already provisioned destination. Dedicated tests
 // below and in target exercise installation, missing dependencies and failures.
 func (w *mockWriter) EnsureMySQLDamengBusinessFunctions(context.Context, map[string]string) (*target.CompatibilityFunctionsReport, error) {
-	return &target.CompatibilityFunctionsReport{Total: 7, Success: 7, Reused: 7}, nil
+	return damengFunctionFixtureReport("APP"), nil
 }
 
 type dmFunctionWriter struct {
@@ -154,19 +155,19 @@ func TestMySQLDamengBusinessFunctionsCarryBlockedTables(t *testing.T) {
 }
 
 // Existing real-DB fixtures migrate unrelated randomly named tables. The six
-// fixed application routines may therefore fail on missing business tables,
+// fixed application functions and two procedures may fail on missing tables,
 // but no other installation or migration error is accepted by these tests.
 func requireMySQLDMFixtureReport(t *testing.T, report MigrationReport, functionsExpected bool) {
 	t.Helper()
 	if functionsExpected {
 		require.NotNil(t, report.CompatibilityFunctions)
 		functions := report.CompatibilityFunctions
-		require.Equal(t, 7, functions.Total)
-		require.Len(t, functions.Items, 7)
+		require.Equal(t, 9, functions.Total)
+		require.Len(t, functions.Items, 9)
 		require.Equal(t, functions.Failed > 0, report.HasFailures(), "%+v", report)
 		for _, item := range functions.Items {
 			if item.Status == "failed" {
-				require.Contains(t, item.Error, "函数依赖", "%+v", item)
+				require.Contains(t, item.Error, "依赖", "%+v", item)
 				require.Contains(t, item.Error, "不存在或不可见", "%+v", item)
 			}
 		}
@@ -188,7 +189,7 @@ func cleanupMySQLDMFixtureFunctions(t *testing.T, db *sql.DB, report MigrationRe
 	defer cancel()
 	for _, item := range report.CompatibilityFunctions.Items {
 		if item.Status == "created" {
-			_, err := db.ExecContext(ctx, "DROP FUNCTION "+dialect.NewDaMeng().QualifyTable(item.Schema, item.Name))
+			_, err := db.ExecContext(ctx, "DROP "+strings.ToUpper(item.Kind)+" "+dialect.NewDaMeng().QualifyTable(item.Schema, item.Name))
 			if err != nil {
 				t.Errorf("cleanup created function %s.%s: %v", item.Schema, item.Name, err)
 			}

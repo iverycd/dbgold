@@ -41,6 +41,8 @@ func TestMySQLDamengBusinessFunctionsIntegration(t *testing.T) {
 		{"frame_user", "userguid VARCHAR(50), ouguid VARCHAR(50), displayname VARCHAR(50)"},
 		{"code_main", "codeid INT, codename VARCHAR(50)"},
 		{"code_items", "codeid INT, itemvalue VARCHAR(50), itemtext VARCHAR(50)"},
+		{"api_manage_config", "apiguid VARCHAR(50)"},
+		{"code_maxnumber", "numbername VARCHAR(50), currentvalue VARCHAR(50), numberflag VARCHAR(50)"},
 	}
 	for _, table := range tables {
 		var n int
@@ -58,6 +60,11 @@ func TestMySQLDamengBusinessFunctionsIntegration(t *testing.T) {
 		require.NoError(t, w.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=?", w.schema, spec.name).Scan(&n))
 		require.Zero(t, n, "target routine already exists: %s", spec.name)
 	}
+	for _, spec := range dmBusinessProcedures() {
+		var n int
+		require.NoError(t, w.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=?", w.schema, spec.name).Scan(&n))
+		require.Zero(t, n, "target routine already exists: %s", spec.name)
+	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
@@ -66,6 +73,9 @@ func TestMySQLDamengBusinessFunctionsIntegration(t *testing.T) {
 				_, _ = src.ExecContext(cleanup, "DROP FUNCTION IF EXISTS "+sq(strings.ToLower(spec.name)))
 			}
 			_, _ = w.db.ExecContext(cleanup, "DROP FUNCTION "+w.qualifiedTable(spec.name))
+		}
+		for _, spec := range dmBusinessProcedures() {
+			_, _ = w.db.ExecContext(cleanup, "DROP PROCEDURE "+w.qualifiedTable(spec.name))
 		}
 		for _, table := range tables {
 			_, _ = src.ExecContext(cleanup, "DROP TABLE IF EXISTS "+sq(table.name))
@@ -102,7 +112,7 @@ func TestMySQLDamengBusinessFunctionsIntegration(t *testing.T) {
 	exec(w.db, "CREATE FUNCTION "+w.qualifiedTable("GETITEMTEXT")+" RETURN VARCHAR(50) AS BEGIN RETURN 'existing marker'; END;")
 	report, err := w.EnsureMySQLDamengBusinessFunctions(ctx, nil)
 	require.NoError(t, err)
-	require.Equal(t, 6, report.Created)
+	require.Equal(t, 8, report.Created)
 	require.Equal(t, 1, report.Reused)
 	var marker string
 	require.NoError(t, w.db.QueryRowContext(ctx, "SELECT "+w.qualifiedTable("GETITEMTEXT")+"() FROM DUAL").Scan(&marker))
@@ -111,7 +121,7 @@ func TestMySQLDamengBusinessFunctionsIntegration(t *testing.T) {
 	report, err = w.EnsureMySQLDamengBusinessFunctions(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, report.Created)
-	require.Equal(t, 6, report.Reused)
+	require.Equal(t, 8, report.Reused)
 
 	// Reference implementations preserve the screenshot's SELECT INTO behavior.
 	lookup := func(query string) string {
@@ -233,7 +243,7 @@ RETURN SUBSTRING(v_result,3); END`},
 	require.ErrorContains(t, err, "cycle detected")
 	report, err = w.EnsureMySQLDamengBusinessFunctions(ctx, nil)
 	require.NoError(t, err)
-	require.Equal(t, 7, report.Reused)
+	require.Equal(t, 9, report.Reused)
 	require.Zero(t, report.Created)
 	for _, item := range report.Items {
 		require.Equal(t, "已存在，跳过，未校验定义", item.DefinitionWarning)
