@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"dbgold/datamigrate/dialect"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
@@ -17,6 +19,42 @@ import (
 func expectDMFunctionExists(m sqlmock.Sqlmock, name string, count int) {
 	m.ExpectQuery(regexp.QuoteMeta(`SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER=? AND OBJECT_NAME=? AND OBJECT_TYPE='FUNCTION'`)).
 		WithArgs("APP", name).WillReturnRows(sqlmock.NewRows([]string{"N"}).AddRow(count))
+}
+
+func TestDamengNativeBusinessFunctionsPreserveSchemaAndDependencyCase(t *testing.T) {
+	base, m := mockDM(t)
+	base.schema = "DstMixed"
+	base.dia = &damengNativeDialect{DaMengDialect: dialect.NewDaMeng()}
+	w := &DaMengNativeWriter{DaMengWriter: base}
+	for _, spec := range dmBusinessFunctions() {
+		exists := 1
+		if spec.name == "GETCHILDOULIST" {
+			exists = 0
+		}
+		m.ExpectQuery("SELECT COUNT.*FROM ALL_OBJECTS").WithArgs("DstMixed", spec.name).
+			WillReturnRows(sqlmock.NewRows([]string{"N"}).AddRow(exists))
+		if exists == 1 {
+			continue // Includes functions already copied from the native source.
+		}
+		m.ExpectQuery("SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS").WithArgs("DstMixed", "FRAME_OU").
+			WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("OUGUID").AddRow("PARENTOUGUID"))
+		ddl := w.dmBusinessFunctionDDL(spec)
+		require.Contains(t, ddl, `CREATE FUNCTION "DstMixed"."GETCHILDOULIST"`)
+		require.Contains(t, ddl, `"DstMixed"."FRAME_OU"`)
+		m.ExpectExec(regexp.QuoteMeta(ddl)).WillReturnResult(sqlmock.NewResult(0, 0))
+		m.ExpectQuery("SELECT STATUS FROM ALL_OBJECTS").WithArgs("DstMixed", spec.name).
+			WillReturnRows(sqlmock.NewRows([]string{"STATUS"}).AddRow("VALID"))
+	}
+	report, err := w.EnsureMySQLDamengBusinessFunctions(context.Background(), map[string]string{"Frame_Ou": "different table failed"})
+	require.NoError(t, err)
+	require.Equal(t, 1, report.Created)
+	require.Equal(t, 6, report.Reused)
+	for _, item := range report.Items {
+		if item.Status == "reused" {
+			require.Empty(t, item.DDL)
+			require.Equal(t, "已存在，跳过，未校验定义", item.DefinitionWarning)
+		}
+	}
 }
 
 func expectDMFunctionDependencies(m sqlmock.Sqlmock, spec dmBusinessFunction) {

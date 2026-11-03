@@ -147,7 +147,7 @@ func TestDamengNativeIntegration(t *testing.T) {
 		r, e := source.NewDaMengNative(srcDSN, srcSchema, source.ConnPoolConfig{})
 		require.NoError(t, e)
 		defer r.Close()
-		w, e := target.NewDaMengNative(dstDSN, dstSchema, target.ConnPoolConfig{})
+		w, e := newNativeIntegrationWriter(t, dstDSN, dstSchema, target.ConnPoolConfig{})
 		require.NoError(t, e)
 		defer w.Close()
 		job := &Job{LogCh: make(chan string, 4096)}
@@ -165,6 +165,7 @@ func TestDamengNativeIntegration(t *testing.T) {
 	require.True(t, preview.Ready, "%+v", preview.Issues)
 	require.Empty(t, preview.Drops)
 	require.False(t, report.HasFailures(), "%+v", report.NativeSchema)
+	require.Equal(t, 7, report.CompatibilityFunctions.Reused)
 	require.NotNil(t, report.NativeSchema)
 	var afterBoundary string
 	require.NoError(t, src.QueryRowContext(ctx, `SELECT CAST(LAST_NUMBER AS VARCHAR(80)) FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER=? AND SEQUENCE_NAME=?`, srcSchema, seq).Scan(&afterBoundary))

@@ -226,6 +226,7 @@ func (m *Migrator) stripViewSchemas(def string) string {
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	m.mainMigrationFinished = false
+	m.compatibilityFunctions = nil
 	m.oracleMySQLAuto = nil
 	if r, ok := m.reader.(interface{ ResetOracleMySQLAutoIncrements() }); ok {
 		r.ResetOracleMySQLAutoIncrements()
@@ -273,8 +274,8 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.validatePartitionContent(ctx, &report)
 	}
 	m.createMySQLDamengTriggers(ctx, &report)
+	m.finishDamengBusinessFunctions(ctx, &report)
 	m.finalizeDamengNativeEvents(ctx, &report)
-	m.finishMySQLDamengBusinessFunctions(ctx, &report)
 	m.recordOracleDamengTaskFailure(ctx, &report)
 	if m.cfg.CaptureRepair {
 		m.finishRepair(ctx, &report)
@@ -299,7 +300,6 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	if m.oracleMySQLSchemaMode() {
 		return m.runOracleMySQL(ctx)
 	}
-	m.compatibilityFunctions = nil
 	m.dmSequenceBoundsLogged = nil
 	p := m.preparePartitions(ctx)
 	if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 {

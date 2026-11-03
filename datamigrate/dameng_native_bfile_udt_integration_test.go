@@ -105,7 +105,7 @@ func TestDamengNativeIntegrationNestedBFileResources(t *testing.T) {
 	r, err := source.NewDaMengNative(sd, ss, source.ConnPoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer r.Close()
-	w, err := target.NewDaMengNative(dd, ds, target.ConnPoolConfig{})
+	w, err := newNativeIntegrationWriter(t, dd, ds, target.ConnPoolConfig{})
 	require.NoError(t, err)
 	defer w.Close()
 	var saved RepairManifest

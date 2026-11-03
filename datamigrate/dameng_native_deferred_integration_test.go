@@ -80,7 +80,7 @@ func TestDamengNativeDeferredMaterializedIntegration(t *testing.T) {
 			r, e := source.NewDaMengNative(srcDSN, srcSchema, source.ConnPoolConfig{})
 			require.NoError(t, e)
 			defer r.Close()
-			w, e := target.NewDaMengNative(dstDSN, dstSchema, target.ConnPoolConfig{})
+			w, e := newNativeIntegrationWriter(t, dstDSN, dstSchema, target.ConnPoolConfig{})
 			require.NoError(t, e)
 			defer w.Close()
 			m := NewMigrator(r, w, &Job{LogCh: make(chan string, 8192)}, Config{Mode: "all", Content: "both", TargetDBType: "dameng", TargetSchema: dstSchema, CaptureRepair: true, ValidateData: true, MaxParallel: 2})

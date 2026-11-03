@@ -79,7 +79,7 @@ func TestDamengNativeForceWithoutLogUnionIntegration(t *testing.T) {
 	r, err := source.NewDaMengNative(srcDSN, srcSchema, source.ConnPoolConfig{})
 	require.NoError(t, err)
 	defer r.Close()
-	w, err := target.NewDaMengNative(dstDSN, dstSchema, target.ConnPoolConfig{})
+	w, err := newNativeIntegrationWriter(t, dstDSN, dstSchema, target.ConnPoolConfig{})
 	require.NoError(t, err)
 	defer w.Close()
 	var manifest RepairManifest

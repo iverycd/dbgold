@@ -118,6 +118,7 @@ func TestOracleDamengIntegration(t *testing.T) {
 	execSource("CREATE TABLE " + sq(virtualTable) + " (ID NUMBER(18), VIRTUAL_ID NUMBER GENERATED ALWAYS AS (ID+1) VIRTUAL)")
 
 	run := func(t *testing.T, content, filter string) MigrationReport {
+		provisionDamengFixtureFunctions(t, dstDSN, dstSchema)
 		r, e := source.NewOracleForDameng(srcDSN, srcSchema, source.ConnPoolConfig{})
 		require.NoError(t, e)
 		defer r.Close()

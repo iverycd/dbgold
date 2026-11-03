@@ -89,9 +89,9 @@ func TestMySQLDamengBusinessFunctionsScope(t *testing.T) {
 		})
 	}
 	m, _ := newTestMigrator(&mockReader{}, &mockWriter{})
-	require.False(t, m.mysqlDMBusinessFunctionsRequested(), "PG does not install DM routines")
+	require.False(t, m.damengBusinessFunctionsRequested(), "PG does not install DM routines")
 	r, w := dmFixture()
-	require.False(t, dmMigrator(r, w).mysqlDMBusinessFunctionsRequested(), "SQL Server does not install MySQL routines")
+	require.True(t, dmMigrator(r, w).damengBusinessFunctionsRequested(), "SQL Server also installs Dameng routines")
 }
 
 func TestMySQLDamengBusinessFunctionFailuresPreserveMigration(t *testing.T) {
@@ -132,7 +132,7 @@ func TestMySQLDamengBusinessFunctionsSkipEarlyFailureAndCancellation(t *testing.
 			case "early return":
 				m.mainMigrationFinished = false
 				r := newMigrationReport()
-				m.finishMySQLDamengBusinessFunctions(ctx, &r)
+				m.finishDamengBusinessFunctions(ctx, &r)
 				require.Zero(t, w.called)
 				return
 			}
@@ -149,7 +149,7 @@ func TestMySQLDamengBusinessFunctionsCarryBlockedTables(t *testing.T) {
 	m.mainMigrationFinished = true
 	m.blockMigrationTable("Frame_Ou", "create", errors.New("create table failed"))
 	report := newMigrationReport()
-	m.finishMySQLDamengBusinessFunctions(context.Background(), &report)
+	m.finishDamengBusinessFunctions(context.Background(), &report)
 	require.Equal(t, "create table failed", w.blocked["FRAME_OU"])
 }
 

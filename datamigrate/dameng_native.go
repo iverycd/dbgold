@@ -757,6 +757,7 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("任务", ctx.Err()))
 	}
 	report.NativeSchema.pendingPlan, report.NativeSchema.pendingStates = p, states
+	m.mainMigrationFinished = true
 	return report
 }
 

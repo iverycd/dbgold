@@ -111,7 +111,7 @@ func TestDamengNativeNonlinearIntervalIntegration(t *testing.T) {
 			r, e := source.NewDaMengNative(sd, ss, source.ConnPoolConfig{})
 			require.NoError(t, e)
 			defer r.Close()
-			w, e := target.NewDaMengNative(dd, ds, target.ConnPoolConfig{})
+			w, e := newNativeIntegrationWriter(t, dd, ds, target.ConnPoolConfig{})
 			require.NoError(t, e)
 			defer w.Close()
 			var saved RepairManifest

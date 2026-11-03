@@ -76,7 +76,7 @@ func TestDamengNativeDBLinkIntegration(t *testing.T) {
 	r, err := source.NewDaMengNative(values["SOURCE_DSN"], values["SOURCE_SCHEMA"], source.ConnPoolConfig{})
 	require.NoError(t, err)
 	defer r.Close()
-	w, err := target.NewDaMengNative(values["TARGET_DSN"], values["TARGET_SCHEMA"], target.ConnPoolConfig{})
+	w, err := newNativeIntegrationWriter(t, values["TARGET_DSN"], values["TARGET_SCHEMA"], target.ConnPoolConfig{})
 	require.NoError(t, err)
 	defer w.Close()
 	job := &Job{LogCh: make(chan string, 1024)}

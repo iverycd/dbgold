@@ -8,16 +8,17 @@ import (
 	"dbgold/datamigrate/target"
 )
 
-func (m *Migrator) mysqlDMBusinessFunctionsRequested() bool {
+func (m *Migrator) damengBusinessFunctionsRequested() bool {
 	return m.cfg.MigrationPurpose != "cdc" &&
 		!m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 &&
-		(m.cfg.Content == "" || m.cfg.Content == "both" || m.cfg.Content == "schema_only") && m.isMySQLDameng()
+		(m.cfg.Content == "" || m.cfg.Content == "both" || m.cfg.Content == "schema_only") && m.writer.DBType() == "dameng"
 }
 
-func (m *Migrator) finishMySQLDamengBusinessFunctions(ctx context.Context, report *MigrationReport) {
-	if !m.mainMigrationFinished || ctx.Err() != nil || !m.mysqlDMBusinessFunctionsRequested() {
+func (m *Migrator) finishDamengBusinessFunctions(ctx context.Context, report *MigrationReport) {
+	if !m.mainMigrationFinished || ctx.Err() != nil || !m.damengBusinessFunctionsRequested() {
 		return
 	}
+	defer func() { m.compatibilityFunctions = report.CompatibilityFunctions }()
 	if m.repairs != nil {
 		m.repairs.mu.Lock()
 		err := m.repairs.sinkErr
@@ -34,21 +35,38 @@ func (m *Migrator) finishMySQLDamengBusinessFunctions(ctx context.Context, repor
 		return
 	}
 	blocked := map[string]string{}
+	// Native source identities may differ from their exact destination names.
+	// Never fold quoted native names: Frame_Ou and FRAME_OU are distinct tables.
+	nativeNames := map[string]string{}
+	if native := report.NativeSchema; native != nil && native.Preflight != nil && native.Preflight.Snapshot != nil {
+		for _, table := range native.Preflight.Snapshot.Tables {
+			nativeNames[nativeSourceTable(table)] = table.Name
+		}
+	}
+	targetName := func(name string) string {
+		if report.NativeSchema != nil {
+			if mapped, ok := nativeNames[name]; ok {
+				return mapped
+			}
+			return name
+		}
+		return strings.ToUpper(m.objName(name)) // DaMengDialect quotes uppercase names.
+	}
 	m.tableState.mu.RLock()
 	for table, state := range m.tableState.failures {
-		blocked[strings.ToUpper(table)] = state.err.Error()
+		blocked[targetName(table)] = state.err.Error()
 	}
 	m.tableState.mu.RUnlock()
 	if s := m.partitionState; s != nil {
 		for name, table := range s.tables {
 			if s.blocked[name] {
-				blocked[strings.ToUpper(table.TargetTable)] = table.Error
+				blocked[targetName(table.TargetTable)] = table.Error
 			}
 		}
 	}
-	m.log.Info("=== 创建 MySQL→达梦业务函数 ===")
+	m.log.Info("=== 创建达梦业务函数 ===")
 	result, err := initializer.EnsureMySQLDamengBusinessFunctions(ctx, blocked)
-	report.CompatibilityFunctions, m.compatibilityFunctions = result, result
+	report.CompatibilityFunctions = result
 	if result != nil {
 		for _, item := range result.Items {
 			if item.Status == "failed" {

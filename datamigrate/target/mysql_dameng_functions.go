@@ -12,6 +12,8 @@ import (
 // This capability installs reviewed application routines, not arbitrary source
 // SQL. blockedTables uses destination identifiers and prevents binding a new
 // function to stale tables left behind by a failed migration.
+// The historical MySQL-prefixed optional API is retained for compatibility;
+// all supported sources targeting Dameng now use the same reviewed routines.
 type MySQLDamengBusinessFunctionInitializer interface {
 	EnsureMySQLDamengBusinessFunctions(context.Context, map[string]string) (*CompatibilityFunctionsReport, error)
 }
