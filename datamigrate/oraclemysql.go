@@ -414,6 +414,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 		}
 		return
 	}
+	m.initializeOracleMySQLAuto(ctx, tables)
 	// Retain bounded source metadata prewarming, but do it before freezing target
 	// plans. Partition compilation may already own a frozen cache entry.
 	var pending []string
@@ -474,6 +475,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 			s.statements[table] = stmts
 		}
 	}
+	m.validateOracleMySQLAutoForeignKeys(ctx)
 	report.Tables.Total = len(activeTables)
 	if len(activeTables) > 0 {
 		s.targetSnapshot, err = target.OracleMySQLForeignKeys(ctx)

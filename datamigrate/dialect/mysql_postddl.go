@@ -2,6 +2,7 @@ package dialect
 
 import (
 	"fmt"
+	"math/big"
 	"regexp"
 	"strings"
 
@@ -14,7 +15,6 @@ import (
 // SequenceStatements 修正自增列种子。
 // MySQL 无独立 SEQUENCE 对象,自增已在建表时以 AUTO_INCREMENT 列声明,
 // 这里只生成 ALTER TABLE ... AUTO_INCREMENT=n 修正下一个自增起始值。
-// 若该列实际不是自增列,执行会报错,由 Writer 容错忽略。
 func (d *MySQLDialect) SequenceStatements(schema string, seq source.SequenceInfo, _ string) []Statement {
 	start := seq.StartValue
 	if start < 1 {
@@ -22,6 +22,13 @@ func (d *MySQLDialect) SequenceStatements(schema string, seq source.SequenceInfo
 	}
 	sql := fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d",
 		d.QualifyTable(schema, seq.TableName), start)
+	if seq.OracleMySQL != nil && seq.StartValueText != "" {
+		// Source metadata is validated before this planned reference is emitted.
+		// Execution refreshes MAX(ID) and the target's current counter.
+		if n, ok := new(big.Int).SetString(seq.StartValueText, 10); ok && n.Sign() > 0 {
+			sql = fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %s", d.QualifyTable(schema, seq.TableName), n.String())
+		}
+	}
 	return []Statement{{SQL: sql}}
 }
 

@@ -862,6 +862,24 @@ func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, ow
 	if v.Unsupported != "" {
 		return m.captureSequenceCall(ctx, v, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
 	}
+	if v.OracleMySQL != nil && m.writer.DBType() == "mysql" {
+		w, ok := m.writer.(oracleMySQLAutoWriter)
+		if !ok {
+			return fmt.Errorf("目标 Writer 缺少自增校准能力")
+		}
+		ss, start, prepareErr := w.PrepareOracleMySQLAutoIncrement(ctx, v)
+		if prepareErr != nil {
+			ss = m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner)
+		}
+		err := m.captureSequenceCall(ctx, v, ss, func(c context.Context) error {
+			if prepareErr != nil {
+				return prepareErr
+			}
+			return w.ExecuteOracleMySQLAutoIncrement(c, v, ss, start)
+		})
+		m.recordOracleMySQLCalibration(v, start, err)
+		return err
+	}
 	return m.captureSequenceCall(ctx, v, m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner), func(c context.Context) error { return m.writer.CreateSequence(c, v, owner) })
 }
 

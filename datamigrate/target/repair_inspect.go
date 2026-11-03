@@ -121,6 +121,27 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("failed", "目标 schema 与原对象不一致")
 	}
 	kind := repairKind(obj.Kind)
+	if mysql, ok := w.(*MySQLWriter); ok && kind == "sequence" && obj.Sequence != nil && obj.Sequence.OracleMySQL != nil {
+		if repairDefinitionEdited(obj) {
+			return verification("unknown", "自增校准 SQL 已编辑，需恢复自动校准方案")
+		}
+		_, start, e := mysql.PrepareOracleMySQLAutoIncrement(ctx, *obj.Sequence)
+		if e != nil {
+			return repair.Verification{Status: "failed", Message: e.Error()}, e
+		}
+		current, e := mysql.oracleMySQLAutoCounter(ctx, schema, obj.Sequence.TableName)
+		if e != nil {
+			return repair.Verification{Status: "unknown", Message: e.Error()}, e
+		}
+		want, e := repairInteger(start)
+		if e != nil {
+			return repair.Verification{}, e
+		}
+		if current.Cmp(want) < 0 {
+			return verification("failed", "目标自增列存在，但仍需校准至 "+start)
+		}
+		return verification("succeeded", "目标自增列完整，当前起点不低于源序列进度且已越过目标最大 ID")
+	}
 	if dm, ok := w.(*DaMengWriter); ok && kind == "sequence" && obj.Sequence != nil && obj.Sequence.Native != nil && !repairDefinitionEdited(obj) {
 		plan, e := dm.planOracleDamengSequence(ctx, *obj.Sequence)
 		if e != nil {

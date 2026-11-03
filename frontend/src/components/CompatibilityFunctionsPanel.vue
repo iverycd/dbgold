@@ -5,20 +5,22 @@
       <span>总数 {{ report.total }}</span><span>成功 {{ report.success }}</span>
       <span>失败 {{ report.failed }}</span><span>新建 {{ report.created }}</span><span>复用 {{ report.reused }}</span>
     </a-space>
-    <article v-for="item in report.items" :key="`${item.schema}.${item.signature || item.name}`">
+    <article v-for="item in visibleItems" :key="`${item.schema}.${item.signature || item.name}`">
       <div class="function-heading">
         <strong>{{ item.schema }}.{{ item.signature || `${item.name}()` }}</strong>
-        <a-tag :color="item.status === 'failed' ? 'red' : item.status === 'reused' ? 'blue' : 'green'">{{ functionStatus[item.status] }}</a-tag>
+        <a-tag :color="item.status === 'failed' ? 'red' : item.status === 'reused' ? 'blue' : 'green'">{{ item.status === 'reused' && item.definition_warning === '已存在，跳过，未校验定义' ? '已存在，跳过' : functionStatus[item.status] }}</a-tag>
         <a-button v-if="item.ddl" size="mini" type="text" @click="copyDDL(item.ddl)">复制 DDL</a-button>
       </div>
       <div v-if="item.generator">底层函数：{{ item.generator }}</div>
       <a-alert v-if="item.error" type="error">{{ item.error }}</a-alert>
+      <p v-if="item.definition_warning">{{ item.definition_warning }}</p>
       <details v-if="item.ddl" class="sql-details">
         <summary>查看 DDL</summary>
         <pre>{{ item.ddl }}</pre>
       </details>
-      <p v-else>{{ item.definition_warning || (kind === 'procedure' ? '尚未生成存储过程 DDL' : '尚未生成函数 DDL') }}</p>
+      <p v-else-if="!item.definition_warning">{{ kind === 'procedure' ? '尚未生成存储过程 DDL' : '尚未生成函数 DDL' }}</p>
     </article>
+    <a-pagination v-if="report.items.length > 10" v-model:current="page" :total="report.items.length" :page-size="10" />
     <article v-for="extension in report.extensions || []" :key="extension.name">
       <strong>扩展 {{ extension.schema }}.{{ extension.name }}</strong>：{{ extensionStatus[extension.status] }}
       <a-button v-if="extension.sql" size="mini" type="text" @click="copyDDL(extension.sql)">复制 SQL</a-button>
@@ -32,10 +34,14 @@
 </template>
 
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { CompatibilityFunctionsReport } from '@/api/migration'
 import { copyText } from '@/utils/clipboard'
-defineProps<{ report: CompatibilityFunctionsReport; kind?: 'function' | 'procedure' }>()
+const props = defineProps<{ report: CompatibilityFunctionsReport; kind?: 'function' | 'procedure' }>()
+const page = ref(1)
+const visibleItems = computed(() => props.report.items.slice((page.value - 1) * 10, page.value * 10))
+watch(() => props.report, () => { page.value = 1 })
 const functionStatus = { created: '新建', reused: '复用', failed: '失败' }
 const extensionStatus = { installed: '已安装', reused: '已复用', failed: '失败', rolled_back: '已回滚', unknown: '结果待核验' }
 async function copyDDL(ddl: string) {

@@ -35,6 +35,20 @@ func (m *Migrator) logOracleDamengSequenceBounds(original, adapted source.Sequen
 func (m *Migrator) sequenceFailure(original, adapted source.SequenceInfo, ddl string, err error) ObjectResult {
 	name := dialect.SequenceName(m.writer.Dialect(), adapted)
 	result := objectResultForError(name, ddl, err)
+	if adapted.OracleMySQL != nil {
+		result.Table, result.TargetTable, result.TargetName, result.TargetSchema = original.TableName, adapted.TableName, name, m.cfg.TargetSchema
+		result.Stage = "execute"
+		if m.oracleMySQLAuto != nil {
+			for _, item := range m.oracleMySQLAuto.Items {
+				if item.Trigger == adapted.OracleMySQL.TriggerName && item.Table == original.TableName && item.Start != "" {
+					adapted.StartValueText = item.Start
+					result.DDL = dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, adapted, ""))
+					break
+				}
+			}
+		}
+		return result
+	}
 	if !m.isOracleDameng() {
 		return result
 	}

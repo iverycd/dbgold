@@ -133,7 +133,7 @@ function triggerAdaptationPresentation(report: TriggerAdaptationReport) {
   if (report.unknown > 0) status.push(`结果未知${report.unknown}个`)
   return {
     totalLabel: String(report.total), failedLabel: String(report.failed),
-    statusLabel: report.total === 0 ? '无关联触发器' : complete ? '全部适配' : status.join('，') || '尚未适配',
+    statusLabel: report.total === 0 ? '无关联触发器' : complete ? (report.mode === 'mysql_auto_increment' ? '已转换为 AUTO_INCREMENT，起点已校准' : '全部适配') : status.join('，') || '尚未适配',
     statusColor: report.total === 0 ? 'gray' : complete ? 'green' : 'orange',
   }
 }
@@ -170,7 +170,7 @@ export function reportCategories(report: MigrationReport) {
       compatibilityKind: undefined as 'function' | 'procedure' | undefined,
     })),
     ...(adaptation ? [{
-      key: 'trigger_adaptation', label: '序列关联触发器',
+      key: 'trigger_adaptation', label: adaptation.mode === 'mysql_auto_increment' ? '自增列形式的触发器' : '序列关联触发器',
       category: { total: adaptation.total, success: adaptation.success, failed: adaptation.failed, items: [] as ObjectResult[] },
       compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
       compatibilityKind: undefined as 'function' | 'procedure' | undefined,
@@ -188,12 +188,13 @@ export function reportCategories(report: MigrationReport) {
       : key === 'triggers' && report.trigger_migration_enabled ? triggerMigrationPresentation(category) : categoryPresentation(category)
     const isCompatibility = !!compatibilityReport
     return {
+      autoIncrementItems: isTriggerAdaptation && adaptation?.mode === 'mysql_auto_increment' ? adaptation.items ?? [] : [],
       ...category, ...presentation, key, label, isTrigger, isTriggerAdaptation, isCompatibility,
       isInformational: isTrigger || isTriggerAdaptation, sourceInventoryOnly,
       totalLabel: sourceInventoryOnly && category.total < 0 ? '获取失败' : presentation.totalLabel,
       successLabel: isTrigger || isTriggerAdaptation && !adaptation?.recorded ? '—' : String(category.success),
       failedLabel: sourceInventoryOnly ? '—' : presentation.failedLabel,
-      statusLabel: sourceInventoryOnly ? '仅统计源端数量' : presentation.statusLabel,
+      statusLabel: sourceInventoryOnly ? (adaptation?.mode === 'mysql_auto_increment' ? '源端数量；自增转换见下方，普通触发器未迁移' : '仅统计源端数量') : presentation.statusLabel,
       compatibilityReport, compatibilityKind,
       created: compatibilityReport?.created ?? 0,
       reused: compatibilityReport?.reused ?? 0,
@@ -227,17 +228,29 @@ export function formatReportCategories(report: MigrationReport): string[] {
       lines.push(`${row.label.padEnd(6)} 总计 ${row.totalLabel}  成功 ${row.successLabel}  失败 ${row.failedLabel}  状态：${row.statusLabel}`)
     }
   }
+  if (report.trigger_adaptation?.mode === 'mysql_auto_increment' && report.trigger_adaptation.items?.length) {
+    lines.push('', '=== 自增列形式的触发器明细 ===')
+    for (const item of report.trigger_adaptation.items) {
+      lines.push(`  ${item.trigger}：${item.sequence_owner}.${item.sequence} → ${item.target_table}.${item.target_column} AUTO_INCREMENT`)
+      lines.push(`    源列：${item.table}.${item.column}；转换：${autoIncrementStatus(item.conversion_status)}；校准：${autoIncrementStatus(item.calibration_status)}；起点：${item.start ?? '未记录'}`)
+      if (item.shared_sequence) lines.push('    共享序列：转换后各表独立自增，新 ID 不再保证跨表唯一')
+      if (item.error) lines.push(`    原因：${item.error}`)
+    }
+  }
   for (const group of compatibilityReportGroups(report.compatibility_functions)) {
     const compatibility = group.report
     const routineLabel = group.kind === 'procedure' ? '存储过程' : '函数'
     lines.push('', `=== ${group.label}明细 ===`, `新建 ${compatibility.created}，复用 ${compatibility.reused}`)
     for (const item of compatibility.items) {
-      const status = ({ created: '新建', reused: '复用', failed: '失败' })[item.status] || item.status
+      const status = item.status === 'reused' && item.definition_warning === '已存在，跳过，未校验定义'
+        ? '已存在，跳过，未校验定义'
+        : ({ created: '新建', reused: '复用', failed: '失败' })[item.status] || item.status
       lines.push(`  ${item.schema}.${item.signature || item.name}：${status}`)
       if (item.generator) lines.push(`    底层函数：${item.generator}`)
       if (item.error) lines.push(`    失败原因：${item.error}`)
       if (item.ddl) appendReportDDL(lines, `    ${routineLabel} DDL：`, item.ddl)
-      else lines.push(`    ${item.definition_warning || `尚未生成${routineLabel} DDL`}`)
+      else if (!item.definition_warning) lines.push(`    尚未生成${routineLabel} DDL`)
+      if (item.definition_warning) lines.push(`    ${item.definition_warning}`)
     }
     for (const extension of compatibility.extensions ?? []) {
       lines.push(`  扩展 ${extension.schema}.${extension.name}：${({ installed: '已安装', reused: '已复用', failed: '失败', rolled_back: '已回滚', unknown: '结果待核验' })[extension.status]}`)
@@ -279,6 +292,10 @@ export function formatReportCategories(report: MigrationReport): string[] {
     }
   }
   return [...lines, '']
+}
+
+export function autoIncrementStatus(status: string): string {
+  return ({ converted: '已转换为 AUTO_INCREMENT', reused: '已验证现有自增列', succeeded: '已校准', failed: '失败', blocked: '已阻止', pending: '待执行', disabled: '源触发器已禁用，未转换', not_applicable: '不适用' } as Record<string, string>)[status] ?? '未记录'
 }
 
 // A missing validation block means no content check was recorded, never a pass.

@@ -152,6 +152,20 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
+	if r.DBType() == "oracle" && w.DBType() == "mysql" {
+		for _, col := range info.Columns {
+			if col.OracleMySQLAutoType == "" {
+				continue
+			}
+			checker, ok := w.(oracleMySQLAutoWriter)
+			if !ok {
+				return p, fmt.Errorf("目标 Writer 缺少自增校验能力")
+			}
+			if err = checker.ValidateOracleMySQLAutoIncrement(ctx, source.SequenceInfo{TableName: p.TargetTable, ColumnName: p.ColumnMapping[col.Name]}, col.OracleMySQLAutoType, true); err != nil {
+				return p, err
+			}
+		}
+	}
 	if r.DBType() == "oracle" && w.DBType() == "dameng" {
 		if checker, ok := r.(interface {
 			ValidateOracleDamengSource(context.Context, []*source.TableDDLInfo) error
@@ -303,7 +317,7 @@ func validateRecoveryColumns(sourceCols, targetCols []source.ColumnInfo, mapping
 		if dst.Generated != "" && !strings.EqualFold(dst.Generated, "NEVER") {
 			return fmt.Errorf("目标列 %s 为生成列，不能写入", n)
 		}
-		if c.IsNullable && !dst.IsNullable {
+		if c.IsNullable && !dst.IsNullable && c.OracleMySQLAutoType == "" {
 			return fmt.Errorf("列 %s → %s 收紧了可空性，请先核对数据及列定义", c.Name, n)
 		}
 	}

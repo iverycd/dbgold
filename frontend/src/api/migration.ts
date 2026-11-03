@@ -177,6 +177,8 @@ export interface CompatibilityFunctionsReport {
 }
 
 export interface TriggerAdaptationReport {
+	mode?: 'mysql_auto_increment'
+	items?: OracleMySQLAutoResult[]
   recorded: boolean
   total: number
   success: number
@@ -184,6 +186,21 @@ export interface TriggerAdaptationReport {
   blocked: number
   pending: number
   unknown: number
+}
+
+export interface OracleMySQLAutoResult {
+  table: string
+  column: string
+  trigger: string
+  sequence_owner: string
+  sequence: string
+  target_table: string
+  target_column: string
+  shared_sequence: boolean
+  conversion_status: string
+  calibration_status: string
+  start?: string
+  error?: string
 }
 
 export type DataValidationStatus = 'passed' | 'mismatch' | 'error' | 'unsupported' | 'cancelled' | 'incomplete'

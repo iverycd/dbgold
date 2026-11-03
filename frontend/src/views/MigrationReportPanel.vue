@@ -44,11 +44,11 @@
           <a-table
             :data="tableRows"
             row-key="key"
-            :pagination="false"
+            :pagination="{ pageSize: 10 }"
             :scroll="{ x: 600 }"
             size="small"
-            :row-class="record => (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? '' : 'report-row-no-details'"
-            :expandable="{ icon: (_, record) => (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? undefined : null }"
+            :row-class="record => record.autoIncrementItems?.length || (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? '' : 'report-row-no-details'"
+            :expandable="{ icon: (_, record) => record.autoIncrementItems?.length || (record.isCompatibility || record.failed > 0) && record.items?.length > 0 ? undefined : null }"
           >
             <template #columns>
               <a-table-column title="对象类型" data-index="label" :width="120" />
@@ -76,7 +76,8 @@
             </template>
 
             <template #expand-row="{ record }">
-              <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
+              <OracleMySQLAutoIncrementPanel v-if="record.autoIncrementItems?.length" :items="record.autoIncrementItems" />
+              <CompatibilityFunctionsPanel v-else-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
               <div v-else class="failure-list">
                 <div v-if="record.items.length > 5" class="failure-pagination">
                   <a-pagination
@@ -249,6 +250,7 @@
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
+import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'

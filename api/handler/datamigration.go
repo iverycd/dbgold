@@ -755,6 +755,9 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
 			return source.NewOracleForDameng(dsn, db, pool)
 		}
+		if len(targetTypes) > 0 && targetTypes[0] == "mysql" {
+			return source.NewOracleForMySQL(dsn, db, pool)
+		}
 		return source.NewOracle(dsn, db, pool)
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，
@@ -1090,6 +1093,13 @@ func GetDataMigrationReport(c *gin.Context) {
 		}
 		c.Data(http.StatusOK, "application/json", body)
 		return
+	}
+	if dbJob.SrcDBType == "oracle" && dbJob.DstDBType == "mysql" {
+		body, err = enrichOracleMySQLTriggerReport(body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "报告格式错误"})
+			return
+		}
 	}
 	c.Data(http.StatusOK, "application/json", body)
 }

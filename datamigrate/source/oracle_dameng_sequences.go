@@ -22,7 +22,7 @@ var oracleDMNullGuard = regexp.MustCompile(`(?is)^\s*:?(?:NEW)\s*\.\s*(` + oracl
 var oracleDMSelectInto = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+INTO\s*(.+?)\s+FROM\s+DUAL\s*;\s*$`)
 var oracleDMAssignment = regexp.MustCompile(`(?is)^(.+?)\s*:=\s*(.+?)\s*;\s*$`)
 var oracleDMDeclare = regexp.MustCompile(`(?is)^DECLARE\b\s*`)
-var oracleDMBody = regexp.MustCompile(`(?is)^\s*BEGIN\s+(.+)\s+END(?:\s+(` + oracleDMIdent + `))?\s*;?\s*$`)
+var oracleDMBody = regexp.MustCompile(`(?is)^\s*BEGIN\b\s*(.+)\bEND(?:\s+(` + oracleDMIdent + `))?\s*;?\s*$`)
 var oracleDMIf = regexp.MustCompile(`(?is)^IF\s+(.+?)\s+THEN\s+(.+)\s+END\s+IF\s*;\s*$`)
 var oracleDMInsertingAnd = regexp.MustCompile(`(?is)^INSERTING\s+AND\s+(.+)$`)
 

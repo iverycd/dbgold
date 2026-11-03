@@ -16,7 +16,7 @@ import (
 )
 
 // Opt-in: use a dedicated MySQL test database and a dedicated DM test schema.
-// Only the uniquely named fixture table is created/dropped in each database.
+// The fixture table and newly installed compatibility routines are cleaned up.
 func TestMySQLDamengZeroDateIntegration(t *testing.T) {
 	srcDSN := os.Getenv("MYSQL_DM_TEST_SOURCE_DSN")
 	dstDSN := os.Getenv("MYSQL_DM_TEST_TARGET_DSN")
@@ -79,7 +79,9 @@ func TestMySQLDamengZeroDateIntegration(t *testing.T) {
 				TargetDBType: "dameng", PageSize: 2, MaxParallel: 1,
 			})
 			report := m.Run(ctx)
-			require.False(t, report.HasFailures(), "%+v; logs=%v", report, drainLogs(job))
+			defer cleanupMySQLDMFixtureFunctions(t, dst, report)
+			t.Logf("migration logs: %v", drainLogs(job))
+			requireMySQLDMFixtureReport(t, report, mode != "data_only")
 			var count int
 			require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq).Scan(&count))
 			if mode == "schema_only" {

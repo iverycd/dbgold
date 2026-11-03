@@ -68,6 +68,8 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	mainMigrationFinished  bool
+	oracleMySQLAuto        *TriggerAdaptationSummary
 	tableState             migrationTableState
 	oracleMySQL            *oracleMySQLRunState
 	oracleMySQLIndexes     *oracleMySQLIndexRunState
@@ -102,6 +104,9 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if r, ok := reader.(*source.OracleReader); ok && writer.DBType() == "mysql" {
+		reader = source.WrapOracleForMySQL(r)
+	}
 	if reader.DBType() == "dameng" && writer.DBType() == "dameng" {
 		cfg.TargetDBType, cfg.LowerCaseNames, cfg.ChangeOwner, cfg.Distributed = "dameng", false, false, false
 		cfg.CharInLength, cfg.UseNvarchar2, cfg.StripViewSchemas = false, false, nil
@@ -220,6 +225,11 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.mainMigrationFinished = false
+	m.oracleMySQLAuto = nil
+	if r, ok := m.reader.(interface{ ResetOracleMySQLAutoIncrements() }); ok {
+		r.ResetOracleMySQLAutoIncrements()
+	}
 	m.tableState.mu.Lock()
 	m.tableState.failures = map[string]migrationTableFailure{}
 	m.tableState.objects = map[ObjectRef]error{}
@@ -264,10 +274,12 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	}
 	m.createMySQLDamengTriggers(ctx, &report)
 	m.finalizeDamengNativeEvents(ctx, &report)
+	m.finishMySQLDamengBusinessFunctions(ctx, &report)
 	m.recordOracleDamengTaskFailure(ctx, &report)
 	if m.cfg.CaptureRepair {
 		m.finishRepair(ctx, &report)
 	}
+	m.finishOracleMySQLAuto(&report)
 	return report
 }
 
@@ -397,6 +409,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			return report
 		}
 	}
+	m.initializeOracleMySQLAuto(ctx, tables)
 	m.preflightMigrationNames(tables)
 	if m.isOscar() {
 		if err := m.preflightOscarNames(ctx, tables, allTables); err != nil {
@@ -408,6 +421,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	tablesFailed := m.prepareDamengColumns(ctx, tables, &report)
+	m.preflightOracleMySQLAutoExisting(ctx, tables, &report, tablesFailed)
 	for _, table := range tables {
 		if tablesFailed[table] {
 			m.blockMigrationTable(table, "preflight", fmt.Errorf("源表预检失败"))
@@ -721,10 +735,26 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 
 	// Install business triggers after historical data and row-count validation.
+	if m.oracleMySQLAuto != nil && skipSchema {
+		for _, rc := range report.RowCounts {
+			if !rc.Match {
+				for _, table := range tables {
+					if m.objName(table) == rc.Table {
+						m.blockMigrationTable(table, "validation", fmt.Errorf("行数校验未通过，未校准自增起点"))
+					}
+				}
+			}
+		}
+		original := m.cfg.Objects
+		m.cfg.Objects = []string{"sequences"}
+		m.createPostDDL(ctx, &report, tables, allTables)
+		m.cfg.Objects = original
+	}
 	m.createMySQLPGTriggers(ctx, &report)
 	elapsed := time.Since(start).Round(time.Second)
 	m.logMigrationCompletion("迁移完成：成功 %d 张，失败 %d 张，耗时 %s",
 		report.Data.Success, report.Tables.Failed+report.Data.Failed, elapsed)
+	m.mainMigrationFinished = true
 	return report
 }
 

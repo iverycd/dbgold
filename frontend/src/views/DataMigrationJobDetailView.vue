@@ -117,9 +117,9 @@
               <div class="tab-toolbar">
                 <div><h2>分类迁移结果</h2><p>按对象类型核对迁移数量和失败情况。</p></div>
               </div>
-              <a-table :data="categoryRows" row-key="key" :pagination="false" size="small" :scroll="{ x: 760 }"
-                :row-class="record => record.isCompatibility && record.items.length ? '' : 'category-no-details'"
-                :expandable="{ icon: (_, record) => record.isCompatibility && record.items.length ? undefined : null }">
+              <a-table :data="categoryRows" row-key="key" :pagination="{ pageSize: 10 }" size="small" :scroll="{ x: 760 }"
+                :row-class="record => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? '' : 'category-no-details'"
+                :expandable="{ icon: (_, record) => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? undefined : null }">
                 <template #columns>
                   <a-table-column title="对象类型" data-index="label" :width="150" />
                   <a-table-column title="总数" data-index="totalLabel" :width="100" />
@@ -140,7 +140,8 @@
                   </a-table-column>
                 </template>
                 <template #expand-row="{ record }">
-                  <CompatibilityFunctionsPanel v-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
+                  <OracleMySQLAutoIncrementPanel v-if="record.autoIncrementItems?.length" :items="record.autoIncrementItems" />
+                  <CompatibilityFunctionsPanel v-else-if="record.compatibilityReport" :report="record.compatibilityReport" :kind="record.compatibilityKind" />
                 </template>
               </a-table>
             </div>
@@ -261,6 +262,7 @@ import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
+import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
 import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'

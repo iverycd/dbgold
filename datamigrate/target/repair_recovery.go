@@ -235,7 +235,7 @@ func PrepareRecovery(ctx context.Context, w Writer, table string, columns []sour
 		if a.Generated != "" {
 			return fmt.Errorf("映射列 %s.%s 是生成列，不能显式复制", table, c.Name)
 		}
-		if c.IsNullable && !a.IsNullable {
+		if c.IsNullable && !a.IsNullable && c.OracleMySQLAutoType == "" {
 			return fmt.Errorf("目标列 %s.%s 不允许源列中的 NULL", table, c.Name)
 		}
 	}

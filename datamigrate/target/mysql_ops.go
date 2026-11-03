@@ -25,6 +25,13 @@ func (w *MySQLWriter) CopyData(ctx context.Context, table string, cols []string,
 		}
 		defer restore()
 		tx, err = conn.BeginTx(ctx, nil)
+	} else if w.srcType == "oracle" {
+		conn, restore, e := w.oracleLoadSession(ctx)
+		if e != nil {
+			return e
+		}
+		defer restore()
+		tx, err = conn.BeginTx(ctx, nil)
 	} else {
 		tx, err = w.db.BeginTx(ctx, nil)
 	}
@@ -75,6 +82,13 @@ func (w *MySQLWriter) convertRow(row []interface{}, colTypes []string) []interfa
 // CreateSequence 修正自增列种子(MySQL 自增已在建表声明 AUTO_INCREMENT)。
 // 修正失败必须返回调用方并计入报告，不能忽略后续插入语义。
 func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	if seq.OracleMySQL != nil {
+		statements, start, err := w.PrepareOracleMySQLAutoIncrement(ctx, seq)
+		if err != nil {
+			return err
+		}
+		return w.ExecuteOracleMySQLAutoIncrement(ctx, seq, statements, start)
+	}
 	stmts := w.dia.SequenceStatements(w.schema, seq, owner)
 	return w.execStatements(ctx, stmts)
 }

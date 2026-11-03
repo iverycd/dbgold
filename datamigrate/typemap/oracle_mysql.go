@@ -31,6 +31,9 @@ const (
 // charInLength / useNvarchar2 对 MySQL 目标无意义(MySQL VARCHAR 长度即字符数、
 // 无 nvarchar2 类型),保留签名以符合 Mapper 接口。
 func OracleToMySQL(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
+	if col.OracleMySQLAutoType != "" {
+		return col.OracleMySQLAutoType
+	}
 	dt := strings.ToUpper(strings.TrimSpace(col.DataType))
 	base := dt
 	if idx := strings.Index(dt, "("); idx != -1 {

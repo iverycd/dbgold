@@ -86,9 +86,10 @@ func TestMySQLDamengTriggerIntegration(t *testing.T) {
 	job := &Job{LogCh: make(chan string, 4096)}
 	m := NewMigrator(reader, writer, job, Config{Mode: "include", Filter: strings.Join([]string{orders, audit, lookup, guids, hyphenGuids}, ","), Content: "both", TargetSchema: schema, TargetDBType: "dameng", PageSize: 10, MaxParallel: 1, MigrateTriggers: true, CaptureRepair: true})
 	report := m.Run(ctx)
+	defer cleanupMySQLDMFixtureFunctions(t, dst, report)
 	require.Equal(t, len(triggers)+2, report.Triggers.Total, "report=%+v", report)
 	require.Equal(t, len(triggers)+2, report.Triggers.Success, "failures=%+v logs=%v", report.Triggers.Items, drainLogs(job))
-	require.False(t, report.HasFailures(), "report=%+v", report)
+	requireMySQLDMFixtureReport(t, report, true)
 	var count int
 	require.NoError(t, dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+dq(audit)).Scan(&count))
 	require.Equal(t, 1, count, "historical load must not fire audit triggers")

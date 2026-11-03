@@ -72,6 +72,11 @@ func (d *MySQLDialect) PlanOracleMySQLTable(schema string, info *source.TableDDL
 			p.Columns[i].IdentityInfo = &identity
 		}
 		mapped := d.MapType(c, "oracle", TypeOpt{})
+		if c.OracleMySQLAutoType != "" {
+			mapped = c.OracleMySQLAutoType
+			c.Default = nil
+			p.Columns[i].IsNullable = false
+		}
 		// Replace the old single-column TEXT shortcut with the same guarded
 		// whole-table fit used below. TEXT alone can hold only 65535 bytes.
 		if oracleMySQLVarchar(c) && strings.EqualFold(mapped, "text") {

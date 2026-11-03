@@ -11,6 +11,8 @@ type IdentityInfo struct {
 }
 
 type ColumnInfo struct {
+	// Target-specific annotation; the original Oracle type/default remain intact.
+	OracleMySQLAutoType string `json:",omitempty"`
 	// PGMySQLLongText is a private migration-plan override. Readers leave it false;
 	// the original VARCHAR length remains authoritative for conversion and CHECK.
 	PGMySQLLongText   bool `json:"-"`
@@ -49,9 +51,10 @@ type TableDDLInfo struct {
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
 type SequenceInfo struct {
-	Native       *NativeSequenceInfo `json:"Native,omitempty"`
-	Unsupported  string              // Metadata that cannot be represented by the selected target.
-	FailureStage string              `json:"FailureStage,omitempty"` // Optional provenance for object-level failures.
+	OracleMySQL  *OracleMySQLAutoIncrement `json:",omitempty"`
+	Native       *NativeSequenceInfo       `json:"Native,omitempty"`
+	Unsupported  string                    // Metadata that cannot be represented by the selected target.
+	FailureStage string                    `json:"FailureStage,omitempty"` // Optional provenance for object-level failures.
 	IdentityInfo *IdentityInfo
 	TableName    string
 	ColumnName   string

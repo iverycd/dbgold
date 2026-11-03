@@ -227,6 +227,10 @@ func (r *OracleReader) pageColumnNames(ctx context.Context, table string) ([]str
 }
 
 func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
+	return r.readPage(ctx, table, pkCols, offset, limit, "*")
+}
+
+func (r *OracleReader) readPage(ctx context.Context, table string, pkCols []string, offset, limit int64, projection string) ([]string, []string, [][]interface{}, error) {
 	if offset < 0 || limit <= 0 || offset+limit < offset {
 		return nil, nil, nil, fmt.Errorf("无效分页范围")
 	}
@@ -238,7 +242,7 @@ func (r *OracleReader) ReadPage(ctx context.Context, table string, pkCols []stri
 		}
 		orderBy = strings.Join(pkList, ", ")
 	}
-	base := "SELECT * FROM " + quoteOracleIdentifier(r.owner) + "." + quoteOracleIdentifier(table) + " ORDER BY " + orderBy
+	base := "SELECT " + projection + " FROM " + quoteOracleIdentifier(r.owner) + "." + quoteOracleIdentifier(table) + " ORDER BY " + orderBy
 	query := fmt.Sprintf("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", base, offset, limit)
 	if r.version < 12 {
 		names, err := r.pageColumnNames(ctx, table)

@@ -51,13 +51,30 @@ type CategoryReport struct {
 // TriggerAdaptationSummary describes recorded automatic-numbering trigger
 // outcomes without adding the owning sequence failures to category totals.
 type TriggerAdaptationSummary struct {
-	Recorded bool `json:"recorded"`
-	Total    int  `json:"total"`
-	Success  int  `json:"success"`
-	Failed   int  `json:"failed"`
-	Blocked  int  `json:"blocked"`
-	Pending  int  `json:"pending"`
-	Unknown  int  `json:"unknown"`
+	Mode     string                  `json:"mode,omitempty"`
+	Items    []OracleMySQLAutoResult `json:"items,omitempty"`
+	Recorded bool                    `json:"recorded"`
+	Total    int                     `json:"total"`
+	Success  int                     `json:"success"`
+	Failed   int                     `json:"failed"`
+	Blocked  int                     `json:"blocked"`
+	Pending  int                     `json:"pending"`
+	Unknown  int                     `json:"unknown"`
+}
+
+type OracleMySQLAutoResult struct {
+	Table             string `json:"table"`
+	Column            string `json:"column"`
+	Trigger           string `json:"trigger"`
+	SequenceOwner     string `json:"sequence_owner"`
+	Sequence          string `json:"sequence"`
+	TargetTable       string `json:"target_table"`
+	TargetColumn      string `json:"target_column"`
+	SharedSequence    bool   `json:"shared_sequence"`
+	ConversionStatus  string `json:"conversion_status"`
+	CalibrationStatus string `json:"calibration_status"`
+	Start             string `json:"start,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 // A metadata failure is one failure event, not one discovered database object.

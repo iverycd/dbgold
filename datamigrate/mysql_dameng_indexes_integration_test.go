@@ -17,8 +17,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Opt-in, dedicated databases only. All DDL is confined to one unique fixture
-// table; the test never changes DM's duplicate-index configuration.
+// Opt-in, dedicated databases only. Fixture tables and newly installed routines
+// are cleaned up; the test never changes DM's duplicate-index configuration.
 func TestMySQLDamengDuplicateIndexesIntegration(t *testing.T) {
 	srcDSN := os.Getenv("MYSQL_DM_TEST_SOURCE_DSN")
 	dstDSN := os.Getenv("MYSQL_DM_TEST_TARGET_DSN")
@@ -83,8 +83,10 @@ func TestMySQLDamengDuplicateIndexesIntegration(t *testing.T) {
 			job := &Job{LogCh: make(chan string, 1024)}
 			migrationStarted := time.Now()
 			report := NewMigrator(reader, writer, job, config).Run(ctx)
+			defer cleanupMySQLDMFixtureFunctions(t, dst, report)
 			t.Logf("%s migration including index DDL/coverage: %s", mode, time.Since(migrationStarted))
-			require.False(t, report.HasFailures(), "%+v; logs=%v", report, drainLogs(job))
+			t.Logf("migration logs: %v", drainLogs(job))
+			requireMySQLDMFixtureReport(t, report, mode != "indexes_only")
 			require.Equal(t, 7, report.Indexes.Total)
 			require.Equal(t, 7, report.Indexes.Success)
 			require.Zero(t, report.Indexes.Failed)

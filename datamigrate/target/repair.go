@@ -180,6 +180,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if obj.Schema == "" || obj.Schema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
+	if mysql, ok := w.(*MySQLWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.OracleMySQL != nil {
+		return mysql.executeOracleMySQLAutoRepair(ctx, obj, out, onStep)
+	}
 	if obj.PartitionPlan != nil && len(obj.PartitionPlan.KeyColumns) == 0 {
 		// Legacy cross-product KEY plans lack the domain proof needed to make
 		// any repair executable. Reject before opening a DDL session.

@@ -387,11 +387,16 @@ test('fourteen compatibility functions render and export business signatures wit
   assert.ok(text.includes('EXISTING BUSINESS SCORE FUNCTION'))
   assert.doesNotMatch(text, /失败项详情|失败阶段：/)
 
-  const panel = createCompatibilityPanel()
-  const app = createSSRApp({ render: () => h(panel, { report: r.compatibility_functions }) })
-  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
-  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
-  const html = await renderToString(app)
+  let html = ''
+  for (const page of [1, 2]) {
+    const panel = createCompatibilityPanel([], page)
+    const app = createSSRApp({ render: () => h(panel, { report: r.compatibility_functions }) })
+    const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+    for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button', 'a-pagination']) app.component(name, passthrough)
+    const pageHTML = await renderToString(app)
+    assert.equal((pageHTML.match(/<article>/g) || []).length, page === 1 ? 10 : 4)
+    html += pageHTML
+  }
   for (const [, signature] of signatures) assert.ok(html.includes(`app.${signature}`), signature)
   assert.ok(html.includes('permission denied for schema app'))
   assert.ok(html.includes('EXISTING BUSINESS SCORE FUNCTION'))
@@ -423,6 +428,22 @@ test('compatibility failure and unreadable definitions remain explicit in export
   assert.equal(row.failed, 1)
   const text = formatReportCategories(r).join('\n')
   for (const expected of ['无法读取已有函数定义: denied', 'transaction rolled back', 'app.GET_UUID：失败', '已回滚']) assert.ok(text.includes(expected), expected)
+})
+
+test('Dameng existing functions explicitly skip without claiming verified definitions', async () => {
+  const r = report(empty())
+  r.compatibility_functions = { total: 1, success: 1, failed: 0, created: 0, reused: 1, items: [
+    { name: 'GETITEMTEXT', signature: 'GETITEMTEXT(p_question IN VARCHAR(50), p_codename IN VARCHAR(50))', schema: 'APP', status: 'reused', ddl: '', error: '', definition_warning: '已存在，跳过，未校验定义' },
+  ] }
+  const panel = createCompatibilityPanel()
+  const app = createSSRApp({ render: () => h(panel, { report: r.compatibility_functions }) })
+  const passthrough = { setup: (_, { slots }) => () => h('div', slots.default?.()) }
+  for (const name of ['a-space', 'a-tag', 'a-alert', 'a-button']) app.component(name, passthrough)
+  const html = await renderToString(app)
+  assert.match(html, /已存在，跳过，未校验定义/)
+  assert.doesNotMatch(html, /尚未生成函数 DDL|CREATE FUNCTION/)
+  const exported = formatReportCategories(r).join('\n')
+  assert.match(exported, /APP.GETITEMTEXT[^\n]*：已存在，跳过，未校验定义/)
 })
 
 test('old and non-PG reports do not acquire compatibility function rows', () => {
