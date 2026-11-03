@@ -93,13 +93,52 @@ func (m *Migrator) readOracleMySQLInventory(ctx context.Context) error {
 		s.inventoryRead = true
 		var pe, ie, fe error
 		s.primaryKeys, pe = m.reader.GetPrimaryKeys(ctx)
-		s.indexes, ie = m.reader.GetIndexes(ctx)
+		s.indexes, ie = m.readSourceIndexes(ctx)
 		s.foreignKeys, fe = m.reader.GetForeignKeys(ctx)
 		if err := errors.Join(pe, ie, fe); err != nil {
 			s.inventoryError = fmt.Errorf("读取 Oracle 主键、索引或外键依赖: %w", err)
 		}
 	}
 	return s.inventoryError
+}
+
+// Target-specific normalization must also happen before table planning, which
+// protects the real indexed columns from automatic type promotion.
+func (m *Migrator) readSourceIndexes(ctx context.Context) ([]source.IndexInfo, error) {
+	if m.reader.DBType() == "oracle" && m.writer.DBType() == "mysql" {
+		if reader, ok := m.reader.(interface {
+			GetIndexesForMySQL(context.Context) ([]source.IndexInfo, error)
+		}); ok {
+			return reader.GetIndexesForMySQL(ctx)
+		}
+	}
+	return m.reader.GetIndexes(ctx)
+}
+
+// Share a version probe between table and index planning without enabling the
+// table replacement workflow for object-only jobs.
+func (m *Migrator) oracleMySQLTargetVersion(ctx context.Context) (dialect.MySQLVersion, error) {
+	if s := m.oracleMySQL; s != nil && s.versionRead {
+		return s.version, s.versionError
+	}
+	var version dialect.MySQLVersion
+	var err error
+	if s := m.oracleMySQLIndexes; m.oracleMySQL == nil && s != nil && s.versionRead {
+		version, err = s.version, s.versionError
+	} else if writer, ok := m.writer.(interface {
+		OracleMySQLVersion(context.Context) (dialect.MySQLVersion, error)
+	}); ok {
+		version, err = writer.OracleMySQLVersion(ctx)
+	} else {
+		err = fmt.Errorf("目标 Writer 缺少 MySQL 版本探测能力")
+	}
+	if s := m.oracleMySQL; s != nil {
+		s.version, s.versionError, s.versionRead = version, err, true
+	}
+	if s := m.oracleMySQLIndexes; s != nil {
+		s.version, s.versionError, s.versionRead = version, err, true
+	}
+	return version, err
 }
 
 func (m *Migrator) sourcePrimaryKeys(ctx context.Context) ([]source.IndexInfo, error) {
@@ -110,11 +149,21 @@ func (m *Migrator) sourcePrimaryKeys(ctx context.Context) ([]source.IndexInfo, e
 	return m.reader.GetPrimaryKeys(ctx)
 }
 func (m *Migrator) sourceIndexes(ctx context.Context) ([]source.IndexInfo, error) {
-	if m.oracleMySQL != nil {
-		err := m.readOracleMySQLInventory(ctx)
-		return m.oracleMySQLSelectedIndexes(m.oracleMySQL.indexes), err
+	if m.reader.DBType() == "oracle" && m.writer.DBType() == "mysql" && m.oracleMySQLIndexes != nil && m.oracleMySQLIndexes.loaded {
+		return cloneOracleMySQLIndexes(m.oracleMySQLIndexes.indexes), m.oracleMySQLIndexes.err
 	}
-	return m.reader.GetIndexes(ctx)
+	var indexes []source.IndexInfo
+	var err error
+	if m.oracleMySQL != nil {
+		err = m.readOracleMySQLInventory(ctx)
+		indexes = m.oracleMySQLSelectedIndexes(m.oracleMySQL.indexes)
+	} else {
+		indexes, err = m.readSourceIndexes(ctx)
+	}
+	if m.reader.DBType() != "oracle" || m.writer.DBType() != "mysql" {
+		return indexes, err
+	}
+	return m.prepareOracleMySQLIndexes(ctx, indexes, err)
 }
 
 func (m *Migrator) oracleMySQLSelectedIndexes(indexes []source.IndexInfo) []source.IndexInfo {
@@ -224,18 +273,8 @@ func (m *Migrator) planOracleMySQLTable(ctx context.Context, table string, info 
 	opt := dialect.OracleMySQLOptions{ProtectedColumns: protected, BlockPromotion: opaque, Version: s.version}
 	p, err := dialect.NewMySQL().PlanOracleMySQLTable(m.cfg.TargetSchema, info, opt, m.objName)
 	if errors.Is(err, dialect.ErrOracleMySQLVersionRequired) {
-		if !s.versionRead {
-			s.versionRead = true
-			if target, ok := m.writer.(oracleMySQLTarget); ok {
-				s.version, s.versionError = target.OracleMySQLVersion(ctx)
-			} else {
-				s.versionError = fmt.Errorf("目标 Writer 缺少 MySQL 版本探测能力")
-			}
-		}
-		if s.versionError != nil {
-			err = s.versionError
-		} else {
-			opt.Version = s.version
+		opt.Version, err = m.oracleMySQLTargetVersion(ctx)
+		if err == nil {
 			p, err = dialect.NewMySQL().PlanOracleMySQLTable(m.cfg.TargetSchema, info, opt, m.objName)
 		}
 	}

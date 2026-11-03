@@ -70,6 +70,7 @@ func (c Config) objectMode() bool {
 type Migrator struct {
 	tableState             migrationTableState
 	oracleMySQL            *oracleMySQLRunState
+	oracleMySQLIndexes     *oracleMySQLIndexRunState
 	partitionState         *partitionRunState
 	validationTables       []frozenValidationTable
 	validationScopeFrozen  bool
@@ -228,6 +229,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	defer cancel(nil)
 	ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
 	m.oracleMySQL = nil
+	m.oracleMySQLIndexes = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	m.partitionState = nil
@@ -1153,6 +1155,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					blocked(&report.Indexes, idx.IndexName, idx.TableName, "依赖表 "+idx.TableName+" 迁移失败")
 					continue
 				}
+				m.recordOracleMySQLIndexWarning(report, idx)
 				idxCopy := idx
 				idxCopy.TableName = m.objName(idx.TableName)
 				idxCopy.IndexName = m.objName(idx.IndexName)

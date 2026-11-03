@@ -217,7 +217,7 @@ func TestOracleMySQLDefaultsUseSamePlanInDDLAndRepair(t *testing.T) {
 func TestOracleMySQLWidePlanPreservesSourceAndManifest(t *testing.T) {
 	for _, capture := range []bool{false, true} {
 		t.Run(fmt.Sprintf("capture=%v", capture), func(t *testing.T) {
-			m, r, w := oracleMySQLFixture(t, "Wide")
+			m, r, w := oracleMySQLIndexFixture(t, "Wide")
 			for i := 0; i < 10; i++ {
 				r.ddl["Wide"].Columns = append(r.ddl["Wide"].Columns, source.ColumnInfo{Name: fmt.Sprintf("C%d", i), DataType: "VARCHAR2", Length: 2000, IsNullable: true})
 			}

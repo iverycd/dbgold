@@ -857,7 +857,9 @@ func (m *Migrator) repairIndex(ctx context.Context, v source.IndexInfo) (err err
 	if v.Unsupported != "" {
 		return m.captureRepairCall(ctx, o, nil, func(context.Context) error { return fmt.Errorf("%s", v.Unsupported) })
 	}
-	return m.captureRepairCall(ctx, o, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateIndex(c, v) })
+	return m.captureRepairCall(ctx, o, m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v), func(c context.Context) error {
+		return m.describeOracleMySQLIndexError(v, m.writer.CreateIndex(c, v))
+	})
 }
 func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, owner string) error {
 	if v.Unsupported != "" {

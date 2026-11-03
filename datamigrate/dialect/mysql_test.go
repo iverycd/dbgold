@@ -86,6 +86,62 @@ func TestMySQLQuoteIdent(t *testing.T) {
 	}
 }
 
+func TestMySQLIndexPrefixLengths(t *testing.T) {
+	d := NewMySQL()
+	cases := []struct {
+		name     string
+		index    source.IndexInfo
+		wantTail string
+	}{
+		{
+			name:     "omitted preserves full columns",
+			index:    source.IndexInfo{Columns: []string{"moduleurl", "id"}},
+			wantTail: "ADD INDEX `ix` (`moduleurl`, `id`)",
+		},
+		{
+			name:     "positive prefixes are positional",
+			index:    source.IndexInfo{Columns: []string{"moduleurl", "id", "name"}, PrefixLengths: []int{500, 0, 100}},
+			wantTail: "ADD INDEX `ix` (`moduleurl`(500), `id`, `name`(100))",
+		},
+		{
+			name:     "short prefix list leaves remaining columns full",
+			index:    source.IndexInfo{Columns: []string{"moduleurl", "id"}, PrefixLengths: []int{768}},
+			wantTail: "ADD INDEX `ix` (`moduleurl`(768), `id`)",
+		},
+		{
+			name:     "nonpositive and excess prefixes are ignored",
+			index:    source.IndexInfo{Columns: []string{"moduleurl", "id"}, PrefixLengths: []int{0, -1, 100}},
+			wantTail: "ADD INDEX `ix` (`moduleurl`, `id`)",
+		},
+		{
+			name:     "unique never uses a prefix",
+			index:    source.IndexInfo{Columns: []string{"moduleurl"}, PrefixLengths: []int{768}, IsUnique: true},
+			wantTail: "ADD UNIQUE INDEX `ix` (`moduleurl`)",
+		},
+		{
+			name:     "primary never uses a prefix",
+			index:    source.IndexInfo{Columns: []string{"moduleurl"}, PrefixLengths: []int{768}, IsPrimary: true},
+			wantTail: "ADD PRIMARY KEY (`moduleurl`)",
+		},
+		{
+			name:     "column names remain literal identifiers",
+			index:    source.IndexInfo{Columns: []string{"moduleurl(100)", "col`name"}, PrefixLengths: []int{200, 50}},
+			wantTail: "ADD INDEX `ix` (`moduleurl(100)`(200), `col``name`(50))",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.index.TableName = "frame_module"
+			tc.index.IndexName = "ix"
+			got := JoinSQL(d.IndexStatements("app", tc.index))
+			want := "ALTER TABLE `app`.`frame_module` " + tc.wantTail
+			if got != want {
+				t.Fatalf("IndexStatements() = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
 func TestMySQLComment(t *testing.T) {
 	d := NewMySQL()
 	// 表注释:ALTER TABLE ... COMMENT

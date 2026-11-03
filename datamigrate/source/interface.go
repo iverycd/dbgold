@@ -91,12 +91,15 @@ type IndexInfo struct {
 	TableName   string
 	IndexName   string
 	Columns     []string
-	IsUnique    bool
-	IsPrimary   bool
-	Attnums     []int
-	Method      string
-	Definition  string
-	Unsupported string
+	// PrefixLengths is positional with Columns; omitted or zero means full length.
+	// Only ordinary, non-unique MySQL indexes may use a positive prefix length.
+	PrefixLengths []int `json:"prefix_lengths,omitempty"`
+	IsUnique      bool
+	IsPrimary     bool
+	Attnums       []int
+	Method        string
+	Definition    string
+	Unsupported   string
 }
 
 // FKInfo 表示一个外键约束
