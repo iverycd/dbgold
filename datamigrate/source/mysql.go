@@ -558,58 +558,82 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
-	if r.oracleTarget {
-		return r.oracleIndexes(ctx)
-	}
-	if r.damengTarget {
-		return r.damengIndexes(ctx)
-	}
-	rows, err := r.queryContext(ctx,
-		`SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
-		 FROM information_schema.STATISTICS
-		 WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
-		 ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, r.dbName)
+	rows, err := r.queryContext(ctx, `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION
+ FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
+ ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, r.dbName)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	type indexKey struct{ table, name string }
-	indexMap := map[indexKey]*IndexInfo{}
-	var order []indexKey
+	indexMap := map[indexKey]int{}
+	var indexes []IndexInfo
 	for rows.Next() {
-		var table, idxName string
-		var col sql.NullString
+		var table, name, method string
+		var column, collation sql.NullString
+		var prefix sql.NullInt64
 		var nonUnique int
-		if err := rows.Scan(&table, &idxName, &col, &nonUnique); err != nil {
+		if err := rows.Scan(&table, &name, &column, &nonUnique, &prefix, &method, &collation); err != nil {
 			return nil, err
 		}
-		key := indexKey{table: table, name: idxName}
-		if _, ok := indexMap[key]; !ok {
-			indexMap[key] = &IndexInfo{
-				TableName: table,
-				IndexName: idxName,
-				IsUnique:  nonUnique == 0,
-			}
-			order = append(order, key)
+		key := indexKey{table: table, name: name}
+		i, ok := indexMap[key]
+		if !ok {
+			i = len(indexes)
+			indexMap[key] = i
+			indexes = append(indexes, IndexInfo{TableName: table, IndexName: name, IsUnique: nonUnique == 0, Method: method})
 		}
-		idx := indexMap[key]
-		if !col.Valid {
-			// MySQL 函数/表达式索引的 COLUMN_NAME 为 NULL。整条索引不能
-			// 降级为仅包含普通列的索引，也不能阻断其他索引的元数据读取。
-			idx.Unsupported = "暂不支持 MySQL 函数/表达式索引的自动转换，请根据源端定义手工适配"
-			idx.Columns = nil
+		idx := &indexes[i]
+		var reason string
+		switch {
+		case !column.Valid:
+			reason = "函数/表达式索引"
+		case prefix.Valid && (prefix.Int64 <= 0 || !strings.EqualFold(method, "BTREE")):
+			reason = "前缀索引"
+		case r.damengTarget && strings.EqualFold(method, "FULLTEXT"):
+			// FULLTEXT keys have no B-tree ordering; COLLATION is normally NULL.
+		case !strings.EqualFold(method, "BTREE"):
+			reason = "空间或其他非 BTREE 索引"
+		case !strings.EqualFold(collation.String, "A") && !strings.EqualFold(collation.String, "D"):
+			reason = "排序方向未知的索引"
+		}
+		if reason != "" {
+			if idx.Unsupported == "" {
+				idx.Unsupported = "暂不支持 MySQL " + reason + "的等价转换，请根据源端定义手工适配"
+			}
+			idx.Columns, idx.Descending, idx.MySQLPrefixLengths = nil, nil, nil
 		} else if idx.Unsupported == "" {
-			idx.Columns = append(idx.Columns, col.String)
+			idx.Columns = append(idx.Columns, column.String)
+			idx.addMySQLPrefix(prefix)
+			if !strings.EqualFold(method, "FULLTEXT") {
+				idx.Descending = append(idx.Descending, strings.EqualFold(collation.String, "D"))
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	result := make([]IndexInfo, 0, len(order))
-	for _, k := range order {
-		result = append(result, *indexMap[k])
+	// Validate only after collecting all keys, so a composite FULLTEXT index
+	// cannot accidentally be migrated as a usable single-column definition.
+	for i := range indexes {
+		idx := &indexes[i]
+		if strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" && len(idx.Columns) > 1 {
+			idx.Unsupported = "暂不支持 MySQL 多列全文索引的自动转换，达梦 CONTEXT INDEX 仅支持单个文本列，请根据源端定义手工适配"
+			idx.Columns, idx.Descending, idx.MySQLPrefixLengths = nil, nil, nil
+		}
 	}
-	return result, nil
+	return indexes, nil
+}
+
+// Keep the array absent for ordinary indexes and positional for mixed keys.
+func (idx *IndexInfo) addMySQLPrefix(prefix sql.NullInt64) {
+	if idx.MySQLPrefixLengths == nil && !prefix.Valid {
+		return
+	}
+	if idx.MySQLPrefixLengths == nil {
+		idx.MySQLPrefixLengths = make([]int, len(idx.Columns)-1)
+	}
+	idx.MySQLPrefixLengths = append(idx.MySQLPrefixLengths, int(prefix.Int64))
 }
 
 // GetTableSourceDDL 按需读取源表完整定义，供无法自动转换的对象人工适配。

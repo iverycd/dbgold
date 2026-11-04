@@ -54,7 +54,8 @@ func TestOracleMySQLRejectsSpecialIndexMetadata(t *testing.T) {
 	require.NoError(t, e)
 	require.Len(t, indexes, 2)
 	require.Equal(t, "Mixed", indexes[0].TableName)
-	require.NotEmpty(t, indexes[0].Unsupported)
+	require.Empty(t, indexes[0].Unsupported)
+	require.Equal(t, []int{10}, indexes[0].MySQLPrefixLengths)
 	require.NotEmpty(t, indexes[1].Unsupported)
 	require.NoError(t, m.ExpectationsWereMet())
 }

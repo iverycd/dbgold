@@ -166,7 +166,19 @@ func (d *SQLServerDialect) Column(table, col string) (source.ColumnInfo, bool) {
 	}
 	return source.ColumnInfo{}, false
 }
+
+// SQLServerIndexPreflightError means no CREATE INDEX was issued. Repair can
+// keep the rejected SQL pending instead of treating its outcome as unknown.
+type SQLServerIndexPreflightError struct{ error }
+
 func (d *SQLServerDialect) ValidateIndex(i source.IndexInfo) error {
+	if err := d.validateIndex(i); err != nil {
+		return SQLServerIndexPreflightError{err}
+	}
+	return nil
+}
+
+func (d *SQLServerDialect) validateIndex(i source.IndexInfo) error {
 	if i.Unsupported != "" {
 		return fmt.Errorf("%s", i.Unsupported)
 	}
@@ -208,10 +220,9 @@ func (d *SQLServerDialect) ValidateIndex(i source.IndexInfo) error {
 	return nil
 }
 func (d *SQLServerDialect) IndexStatements(schema string, i source.IndexInfo) []Statement {
-	cols := []string{}
+	cols := orderedIndexColumns(d, i)
 	filters := []string{}
 	for _, n := range i.Columns {
-		cols = append(cols, d.QuoteIdent(n))
 		if c, ok := d.Column(i.TableName, n); ok && c.IsNullable {
 			filters = append(filters, d.QuoteIdent(n)+" IS NOT NULL")
 		}

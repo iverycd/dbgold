@@ -115,7 +115,7 @@ func (w *HighGoWriter) CreateSequence(ctx context.Context, seq source.SequenceIn
 }
 
 func (w *HighGoWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
+	return createPGIndex(ctx, w.db, w.dia, w.schema, idx)
 }
 
 func (w *HighGoWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {

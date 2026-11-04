@@ -153,38 +153,6 @@ func (r *MySQLReader) oracleSequences(ctx context.Context) ([]SequenceInfo, erro
 	return out, rows.Err()
 }
 
-func (r *MySQLReader) oracleIndexes(ctx context.Context) ([]IndexInfo, error) {
-	rows, err := r.queryContext(ctx, `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION
- FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY' ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, r.dbName)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []IndexInfo
-	indexes := map[string]int{}
-	for rows.Next() {
-		var table, name, method string
-		var col, coll sql.NullString
-		var prefix sql.NullInt64
-		var nonUnique int
-		if err = rows.Scan(&table, &name, &col, &nonUnique, &prefix, &method, &coll); err != nil {
-			return nil, err
-		}
-		key := table + "\x00" + name
-		i, ok := indexes[key]
-		if !ok {
-			i = len(out)
-			indexes[key] = i
-			out = append(out, IndexInfo{TableName: table, IndexName: name, IsUnique: nonUnique == 0, Method: method})
-		}
-		if !col.Valid || prefix.Valid || method != "BTREE" || coll.String == "D" {
-			out[i].Unsupported = "Oracle 暂不支持 MySQL 函数、前缀、全文、空间或降序索引的等价转换"
-		}
-		out[i].Columns = append(out[i].Columns, col.String)
-	}
-	return out, rows.Err()
-}
-
 func (r *MySQLReader) oracleForeignKeys(ctx context.Context) ([]FKInfo, error) {
 	rows, err := r.queryContext(ctx, `SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA,
  k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, r.DELETE_RULE, r.UPDATE_RULE

@@ -247,6 +247,10 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			if m.writer.DBType() == "dameng" {
 				_, _ = m.planDamengTable(ctx, t)
 			}
+			if d, ok := m.writer.Dialect().(*dialect.SQLServerDialect); ok {
+				// Nullable keys need the same filtered UNIQUE DDL in the initial manifest.
+				d.Tables[o.Table] = m.sqlServerTargetTable(info)
+			}
 			o.SourceColumns = slices.Clone(info.Columns)
 			if m.partitionState != nil {
 				if t := m.partitionState.tables[t]; t != nil {
@@ -786,6 +790,8 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		item.Status = "failed"
 		item.Error = err.Error()
 	}
+	var indexPreflight dialect.SQLServerIndexPreflightError
+	knownPreflight := errors.As(err, &indexPreflight) || target.IsOracleDamengSequencePreflight(err) || target.IsMySQLPGTriggerPreflight(err) || target.IsMySQLDamengTriggerPreflight(err)
 	for i := range item.Units {
 		u := &item.Units[i]
 		if u.Status == "running" {
@@ -794,7 +800,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		if err == nil && u.Status == "pending" {
 			u.Status = "succeeded"
 		}
-		if err != nil && u.Status == "pending" && len(observed) == 0 && !target.IsOracleDamengSequencePreflight(err) && !target.IsMySQLPGTriggerPreflight(err) && !target.IsMySQLDamengTriggerPreflight(err) {
+		if err != nil && u.Status == "pending" && len(observed) == 0 && !knownPreflight {
 			u.Status = "unknown"
 		}
 		u.Selected = u.Status != "succeeded" && !u.Destructive

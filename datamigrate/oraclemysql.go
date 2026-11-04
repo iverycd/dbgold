@@ -112,7 +112,11 @@ func (m *Migrator) readSourceIndexes(ctx context.Context) ([]source.IndexInfo, e
 			return reader.GetIndexesForMySQL(ctx)
 		}
 	}
-	return m.reader.GetIndexes(ctx)
+	indexes, err := m.reader.GetIndexes(ctx)
+	if err == nil && m.reader.DBType() == "mysql" && source.IsPGFamily(m.writer.DBType()) {
+		indexes = m.nameMySQLPGIndexes(indexes)
+	}
+	return indexes, err
 }
 
 // Share a version probe between table and index planning without enabling the

@@ -186,10 +186,11 @@ func (r *MySQLReader) PartitionIndexes(ctx context.Context, table string) ([]Ind
 		if ordinal != len(result[i].Columns)+1 || !column.Valid {
 			result[i].Unsupported = "分区索引包含表达式或不完整列顺序"
 		}
-		if prefix.Valid {
-			result[i].Unsupported = "分区索引包含前缀键，不能忽略其唯一性语义"
+		if prefix.Valid && (name == "PRIMARY" || !strings.EqualFold(method, "BTREE") || prefix.Int64 <= 0) {
+			result[i].Unsupported = "分区索引含不支持的前缀键"
 		}
 		result[i].Columns = append(result[i].Columns, column.String)
+		result[i].addMySQLPrefix(prefix)
 		result[i].Descending = append(result[i].Descending, direction.String == "D")
 	}
 	return result, rows.Err()

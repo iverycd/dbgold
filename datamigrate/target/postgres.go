@@ -157,7 +157,7 @@ func (w *PostgresWriter) CreateSequence(ctx context.Context, seq source.Sequence
 }
 
 func (w *PostgresWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
+	return createPGIndex(ctx, w.db, w.dia, w.schema, idx)
 }
 
 func (w *PostgresWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {

@@ -40,6 +40,16 @@ func (m *Migrator) sqlServerOptions() error {
 	}
 	return nil
 }
+func (m *Migrator) sqlServerTargetTable(info *source.TableDDLInfo) *source.TableDDLInfo {
+	target := *info
+	target.TableName = m.objName(info.TableName)
+	target.Columns = slices.Clone(info.Columns)
+	for i := range target.Columns {
+		target.Columns[i].Name = m.objName(target.Columns[i].Name)
+	}
+	return &target
+}
+
 func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	report := newMigrationReport()
 	failGlobal := func(e error) MigrationReport {
@@ -148,13 +158,10 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		}
 		if err == nil {
 			sourceInfo[t] = info
-			copy := *info
-			copy.TableName = m.objName(t)
-			copy.Columns = slices.Clone(info.Columns)
-			cols := []string{}
-			for i := range copy.Columns {
-				copy.Columns[i].Name = m.objName(copy.Columns[i].Name)
-				cols = append(cols, copy.Columns[i].Name)
+			targetTable := m.sqlServerTargetTable(info)
+			cols := make([]string, len(targetTable.Columns))
+			for i, c := range targetTable.Columns {
+				cols[i] = c.Name
 			}
 			err = inspector.CheckNames(ctx, cols)
 			if err != nil {
@@ -167,9 +174,9 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				}
 			}
 			if err == nil {
-				dia.Tables[copy.TableName] = &copy
+				dia.Tables[targetTable.TableName] = targetTable
 				if !rebuild {
-					err = inspector.ValidateExisting(ctx, &copy)
+					err = inspector.ValidateExisting(ctx, targetTable)
 				}
 			}
 		}
@@ -409,6 +416,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				if i.Unsupported != "" {
 					stage = "unsupported"
 				}
+				m.recordMySQLPrefixWarning(&report, i)
 				err = m.repairIndex(ctx, i)
 			}
 			if m.stopMigrationTask(ctx, err) {

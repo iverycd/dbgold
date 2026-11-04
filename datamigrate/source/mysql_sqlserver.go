@@ -23,13 +23,6 @@ func (r *MySQLSQLServerReader) GetViews(ctx context.Context) ([]ViewInfo, error)
 func (r *MySQLSQLServerReader) GetViewsForTarget(ctx context.Context, _ string) ([]ViewInfo, error) {
 	return r.GetViews(ctx)
 }
-func (r *MySQLSQLServerReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
-	out, err := r.oracleIndexes(ctx)
-	for i := range out {
-		out[i].Unsupported = strings.ReplaceAll(out[i].Unsupported, "Oracle", "SQL Server 2008 R2")
-	}
-	return out, err
-}
 func (r *MySQLSQLServerReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 	out, err := r.oracleForeignKeys(ctx)
 	for i := range out {

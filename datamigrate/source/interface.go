@@ -95,14 +95,35 @@ type IndexInfo struct {
 	IndexName   string
 	Columns     []string
 	// PrefixLengths is positional with Columns; omitted or zero means full length.
-	// Only ordinary, non-unique MySQL indexes may use a positive prefix length.
+	// Only ordinary, non-unique indexes may receive an automatically shortened key.
 	PrefixLengths []int `json:"prefix_lengths,omitempty"`
-	IsUnique      bool
-	IsPrimary     bool
-	Attnums       []int
-	Method        string
-	Definition    string
-	Unsupported   string
+	// MySQLPrefixLengths records source BTREE key parts (including UNIQUE).
+	// MySQL targets replay them; other dialects index the complete columns.
+	MySQLPrefixLengths []int `json:"mysql_prefix_lengths,omitempty"`
+	// TargetIndexName disambiguates table-scoped MySQL names in a PG schema.
+	TargetIndexName string `json:"target_index_name,omitempty"`
+	IsUnique        bool
+	IsPrimary       bool
+	Attnums         []int
+	Method          string
+	Definition      string
+	Unsupported     string
+}
+
+// MySQLTargetPrefix distinguishes replaying a source key from automatically
+// shortening a target key. Only the former is allowed on a UNIQUE index.
+func (idx IndexInfo) MySQLTargetPrefix(i int) int {
+	if idx.IsPrimary {
+		return 0
+	}
+	lengths := idx.MySQLPrefixLengths
+	if len(lengths) == 0 && !idx.IsUnique {
+		lengths = idx.PrefixLengths
+	}
+	if i < len(lengths) {
+		return max(lengths[i], 0)
+	}
+	return 0
 }
 
 // FKInfo 表示一个外键约束

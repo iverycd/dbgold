@@ -37,8 +37,8 @@ func (d *MySQLDialect) IndexStatements(schema string, idx source.IndexInfo) []St
 	quotedCols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
 		quotedCols[i] = d.QuoteIdent(c)
-		if !idx.IsPrimary && !idx.IsUnique && i < len(idx.PrefixLengths) && idx.PrefixLengths[i] > 0 {
-			quotedCols[i] += fmt.Sprintf("(%d)", idx.PrefixLengths[i])
+		if length := idx.MySQLTargetPrefix(i); length > 0 {
+			quotedCols[i] += fmt.Sprintf("(%d)", length)
 		}
 		if i < len(idx.Descending) && idx.Descending[i] {
 			quotedCols[i] += " DESC"

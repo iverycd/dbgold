@@ -125,7 +125,7 @@ func (w *GaussDBWriter) CreateSequence(ctx context.Context, seq source.SequenceI
 }
 
 func (w *GaussDBWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
-	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
+	return createPGIndex(ctx, w.db, w.dia, w.schema, idx)
 }
 
 func (w *GaussDBWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {

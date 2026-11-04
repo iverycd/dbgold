@@ -39,14 +39,14 @@ func (d *PostgresDialect) Caps() Capabilities {
 }
 
 func (d *PostgresDialect) QuoteIdent(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func (d *PostgresDialect) QualifyTable(schema, table string) string {
 	if schema == "" {
-		return fmt.Sprintf(`"%s"`, table)
+		return d.QuoteIdent(table)
 	}
-	return fmt.Sprintf(`"%s"."%s"`, schema, table)
+	return d.QuoteIdent(schema) + "." + d.QuoteIdent(table)
 }
 
 func (d *PostgresDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOpt) string {

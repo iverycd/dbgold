@@ -116,7 +116,7 @@ func quotedOscarColumns(d *OscarDialect, columns []string) string {
 }
 
 func (d *OscarDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
-	columns := quotedOscarColumns(d, idx.Columns)
+	columns := strings.Join(orderedIndexColumns(d, idx), ", ")
 	name := d.QuoteIdent(IndexName(d, idx))
 	if idx.IsPrimary {
 		return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)", d.QualifyTable(schema, idx.TableName), name, columns)}}

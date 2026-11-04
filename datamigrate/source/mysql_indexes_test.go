@@ -11,11 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const mysqlIndexesQuery = `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
-		 FROM information_schema.STATISTICS
-		 WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
-		 ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`
-
 func newIndexTestMySQLReader(t *testing.T, database string) (*MySQLReader, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -30,39 +25,39 @@ func newIndexTestMySQLReader(t *testing.T, database string) (*MySQLReader, sqlmo
 func TestMySQLGetIndexesPreservesColumnsNamesAndUniqueness(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "MixedSchema")
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("MixedSchema").
-		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE"}).
-			AddRow("MixedTable", "IX_Composite", "SecondColumn", 1).
-			AddRow("MixedTable", "IX_Composite", "FirstColumn", 1).
-			AddRow("MixedTable", "IX_Plain", "CamelCase", 1).
-			AddRow("MixedTable", "UX_Composite", "Code", 0).
-			AddRow("MixedTable", "UX_Composite", "TenantID", 0).
-			AddRow("OtherTable", "IX_Plain", "OtherColumn", 1)).RowsWillBeClosed()
+		WillReturnRows(mysqlIndexRows().
+			AddRow("MixedTable", "IX_Composite", "SecondColumn", 1, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_Composite", "FirstColumn", 1, 8, "BTREE", "D").
+			AddRow("MixedTable", "IX_Plain", "CamelCase", 1, nil, "BTREE", "A").
+			AddRow("MixedTable", "UX_Composite", "Code", 0, 8, "BTREE", "A").
+			AddRow("MixedTable", "UX_Composite", "TenantID", 0, 3, "BTREE", "A").
+			AddRow("OtherTable", "IX_Plain", "OtherColumn", 1, nil, "BTREE", "A")).RowsWillBeClosed()
 
 	indexes, err := r.GetIndexes(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []IndexInfo{
-		{TableName: "MixedTable", IndexName: "IX_Composite", Columns: []string{"SecondColumn", "FirstColumn"}},
-		{TableName: "MixedTable", IndexName: "IX_Plain", Columns: []string{"CamelCase"}},
-		{TableName: "MixedTable", IndexName: "UX_Composite", Columns: []string{"Code", "TenantID"}, IsUnique: true},
-		{TableName: "OtherTable", IndexName: "IX_Plain", Columns: []string{"OtherColumn"}},
+		{TableName: "MixedTable", IndexName: "IX_Composite", Columns: []string{"SecondColumn", "FirstColumn"}, Method: "BTREE", Descending: []bool{false, true}, MySQLPrefixLengths: []int{0, 8}},
+		{TableName: "MixedTable", IndexName: "IX_Plain", Columns: []string{"CamelCase"}, Method: "BTREE", Descending: []bool{false}},
+		{TableName: "MixedTable", IndexName: "UX_Composite", Columns: []string{"Code", "TenantID"}, Method: "BTREE", Descending: []bool{false, false}, IsUnique: true, MySQLPrefixLengths: []int{8, 3}},
+		{TableName: "OtherTable", IndexName: "IX_Plain", Columns: []string{"OtherColumn"}, Method: "BTREE", Descending: []bool{false}},
 	}, indexes)
 }
 
 func TestMySQLGetIndexesExpressionDoesNotBlockOtherIndexes(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
-		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE"}).
-			AddRow("MixedTable", "IX_Before", "BeforeColumn", 1).
-			AddRow("MixedTable", "IX_Expression", nil, 1).
-			AddRow("MixedTable", "IX_Mixed", "TenantID", 0).
-			AddRow("MixedTable", "IX_Mixed", nil, 0).
-			AddRow("MixedTable", "IX_Mixed", "DisplayName", 0).
-			AddRow("MixedTable", "IX_After", "AfterColumn", 1)).RowsWillBeClosed()
+		WillReturnRows(mysqlIndexRows().
+			AddRow("MixedTable", "IX_Before", "BeforeColumn", 1, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_Expression", nil, 1, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_Mixed", "TenantID", 0, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_Mixed", nil, 0, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_Mixed", "DisplayName", 0, nil, "BTREE", "A").
+			AddRow("MixedTable", "IX_After", "AfterColumn", 1, nil, "BTREE", "A")).RowsWillBeClosed()
 
 	indexes, err := r.GetIndexes(context.Background())
 	require.NoError(t, err)
 	require.Len(t, indexes, 4)
-	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "IX_Before", Columns: []string{"BeforeColumn"}}, indexes[0])
+	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "IX_Before", Columns: []string{"BeforeColumn"}, Method: "BTREE", Descending: []bool{false}}, indexes[0])
 	for _, idx := range indexes[1:3] {
 		require.Equal(t, "MixedTable", idx.TableName)
 		require.Contains(t, idx.Unsupported, "函数/表达式索引")
@@ -72,21 +67,21 @@ func TestMySQLGetIndexesExpressionDoesNotBlockOtherIndexes(t *testing.T) {
 	require.False(t, indexes[1].IsUnique)
 	require.Equal(t, "IX_Mixed", indexes[2].IndexName)
 	require.True(t, indexes[2].IsUnique)
-	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "IX_After", Columns: []string{"AfterColumn"}}, indexes[3])
+	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "IX_After", Columns: []string{"AfterColumn"}, Method: "BTREE", Descending: []bool{false}}, indexes[3])
 }
 
 func TestMySQLGetIndexesKeepsDottedNamesDistinct(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
-		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE"}).
-			AddRow("A", "B.C", "First", 1).
-			AddRow("A.B", "C", "Second", 0)).RowsWillBeClosed()
+		WillReturnRows(mysqlIndexRows().
+			AddRow("A", "B.C", "First", 1, nil, "BTREE", "A").
+			AddRow("A.B", "C", "Second", 0, nil, "BTREE", "A")).RowsWillBeClosed()
 
 	indexes, err := r.GetIndexes(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []IndexInfo{
-		{TableName: "A", IndexName: "B.C", Columns: []string{"First"}},
-		{TableName: "A.B", IndexName: "C", Columns: []string{"Second"}, IsUnique: true},
+		{TableName: "A", IndexName: "B.C", Columns: []string{"First"}, Method: "BTREE", Descending: []bool{false}},
+		{TableName: "A.B", IndexName: "C", Columns: []string{"Second"}, Method: "BTREE", Descending: []bool{false}, IsUnique: true},
 	}, indexes)
 }
 
@@ -94,9 +89,9 @@ func TestMySQLGetIndexesReturnsReadErrorsWithoutPartialIndexes(t *testing.T) {
 	readErr := errors.New("metadata stream interrupted")
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
-		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE"}).
-			AddRow("MixedTable", "IX_Composite", "FirstColumn", 1).
-			AddRow("MixedTable", "IX_Composite", "SecondColumn", 1).
+		WillReturnRows(mysqlIndexRows().
+			AddRow("MixedTable", "IX_Composite", "FirstColumn", 1, 8, "BTREE", "D").
+			AddRow("MixedTable", "IX_Composite", "SecondColumn", 1, nil, "BTREE", "A").
 			RowError(1, readErr)).RowsWillBeClosed()
 
 	indexes, err := r.GetIndexes(context.Background())
@@ -107,8 +102,8 @@ func TestMySQLGetIndexesReturnsReadErrorsWithoutPartialIndexes(t *testing.T) {
 func TestMySQLGetIndexesReturnsScanErrors(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
-		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE"}).
-			AddRow("MixedTable", "IX_Invalid", "ID", nil)).RowsWillBeClosed()
+		WillReturnRows(mysqlIndexRows().
+			AddRow("MixedTable", "IX_Invalid", "ID", nil, nil, "BTREE", "A")).RowsWillBeClosed()
 
 	indexes, err := r.GetIndexes(context.Background())
 	require.Error(t, err)
@@ -146,4 +141,20 @@ func TestMySQLGetTableSourceDDLReturnsMissingTable(t *testing.T) {
 	ddl, err := r.GetTableSourceDDL(context.Background(), "MissingTable")
 	require.ErrorIs(t, err, sql.ErrNoRows)
 	require.Empty(t, ddl)
+}
+
+func TestMySQLPartitionIndexesRetainSecondaryPrefixes(t *testing.T) {
+	r, m := newIndexTestMySQLReader(t, "Src")
+	m.ExpectQuery("SELECT INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX").WithArgs("Src", "Mixed").WillReturnRows(sqlmock.NewRows(
+		[]string{"name", "nonunique", "seq", "col", "prefix", "method", "direction"}).
+		AddRow("ByGuid", 0, 1, "PartitionID", nil, "BTREE", "A").
+		AddRow("ByGuid", 0, 2, "RowGuid", 8, "BTREE", "D").
+		AddRow("PRIMARY", 0, 1, "PartitionID", 4, "BTREE", "A").
+		AddRow("Expr", 1, 1, nil, nil, "BTREE", nil))
+	indexes, err := r.PartitionIndexes(context.Background(), "Mixed")
+	require.NoError(t, err)
+	require.Equal(t, IndexInfo{TableName: "Mixed", IndexName: "ByGuid", IsUnique: true, Method: "BTREE", Locality: "local",
+		Columns: []string{"PartitionID", "RowGuid"}, Descending: []bool{false, true}, MySQLPrefixLengths: []int{0, 8}}, indexes[0])
+	require.NotEmpty(t, indexes[1].Unsupported)
+	require.NotEmpty(t, indexes[2].Unsupported)
 }

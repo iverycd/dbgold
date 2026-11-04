@@ -20,3 +20,15 @@ func SequenceName(d Dialect, seq source.SequenceInfo) string {
 	}
 	return "seq_" + seq.TableName + "_" + seq.ColumnName
 }
+
+// Ordinary ordered index columns; primary-key constraints take bare columns.
+func orderedIndexColumns(d Dialect, idx source.IndexInfo) []string {
+	cols := make([]string, len(idx.Columns))
+	for i, column := range idx.Columns {
+		cols[i] = d.QuoteIdent(column)
+		if !idx.IsPrimary && i < len(idx.Descending) && idx.Descending[i] {
+			cols[i] += " DESC"
+		}
+	}
+	return cols
+}

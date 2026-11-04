@@ -212,7 +212,7 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("succeeded", "目标表存在且全部预期列可见；数据兼容性在补迁前单独检查")
 	}
 	if kind == "primary_key" || kind == "index" {
-		return inspectRepairIndex(ctx, w, a, obj)
+		return inspectRepairIndex(ctx, a, obj)
 	}
 	if kind == "foreign_key" {
 		return inspectRepairFK(ctx, w, a, obj)
@@ -261,7 +261,7 @@ func repairDefinitionEdited(obj repair.Object) bool {
 	return false
 }
 
-func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repair.Object) (repair.Verification, error) {
+func inspectRepairIndex(ctx context.Context, a repairTarget, obj repair.Object) (repair.Verification, error) {
 	if obj.Index == nil {
 		return verification("unknown", "缺少原索引列定义，不能核验")
 	}
@@ -277,14 +277,24 @@ func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repai
 	if obj.Table != "" {
 		table = obj.Table
 	}
+	schema := obj.Schema
+	wantColumns := idx.Columns
+	if a.family == "dameng" && len(idx.MySQLPrefixLengths) > 0 {
+		// DM quotes these target identifiers in uppercase, even in object-only runs.
+		schema, table = strings.ToUpper(schema), strings.ToUpper(table)
+		wantColumns = slices.Clone(idx.Columns)
+		for i := range wantColumns {
+			wantColumns[i] = strings.ToUpper(wantColumns[i])
+		}
+	}
 	var q string
 	var args []any
 	switch a.family {
 	case "postgres":
-		q = `SELECT a.attname,ix.indisunique,ix.indisprimary,ix.indisvalid,ix.indpred IS NOT NULL OR ix.indexprs IS NOT NULL,(ix.indoption[k.n-1] & 1)<>0 FROM pg_index ix JOIN pg_class t ON t.oid=ix.indrelid JOIN pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_class i ON i.oid=ix.indexrelid CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY k(attnum,n) LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum WHERE ns.nspname=$1 AND t.relname=$2 AND (($3 AND ix.indisprimary) OR (NOT $3 AND i.relname=$4)) ORDER BY k.n`
+		q = `SELECT a.attname,ix.indisunique,ix.indisprimary,ix.indisvalid,ix.indpred IS NOT NULL OR ix.indexprs IS NOT NULL OR am.amname<>'btree',(ix.indoption[k.n-1] & 1)<>0 FROM pg_index ix JOIN pg_class t ON t.oid=ix.indrelid JOIN pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_class i ON i.oid=ix.indexrelid JOIN pg_am am ON am.oid=i.relam CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY k(attnum,n) LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum WHERE ns.nspname=$1 AND t.relname=$2 AND (($3 AND ix.indisprimary) OR (NOT $3 AND i.relname=$4)) ORDER BY k.n`
 		args = []any{obj.Schema, table, idx.IsPrimary, name}
 	case "mysql":
-		q = `SELECT COLUMN_NAME,NON_UNIQUE=0,INDEX_NAME='PRIMARY',TRUE,SUB_PART IS NOT NULL,COLLATION='D' FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX`
+		q = `SELECT COLUMN_NAME,NON_UNIQUE=0,INDEX_NAME='PRIMARY',TRUE,INDEX_TYPE<>'BTREE',COALESCE(COLLATION='D',FALSE),COALESCE(SUB_PART,0) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=? ORDER BY SEQ_IN_INDEX`
 		if idx.IsPrimary {
 			name = "PRIMARY"
 		}
@@ -299,7 +309,7 @@ func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repai
 		}
 		primary := "0"
 		where := `i.INDEX_NAME=` + p3
-		args = []any{obj.Schema, table, name}
+		args = []any{schema, table, name}
 		if idx.IsPrimary {
 			primary = "1"
 			where = `EXISTS (SELECT 1 FROM ALL_CONSTRAINTS pc WHERE pc.OWNER=i.OWNER AND pc.TABLE_NAME=i.TABLE_NAME AND pc.INDEX_NAME=i.INDEX_NAME AND pc.CONSTRAINT_TYPE='P')`
@@ -319,11 +329,19 @@ func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repai
 	for rows.Next() {
 		var c sql.NullString
 		var unique, primary, valid, special, descending bool
-		if e = rows.Scan(&c, &unique, &primary, &valid, &special, &descending); e != nil {
+		fields := []any{&c, &unique, &primary, &valid, &special, &descending}
+		var prefix int
+		if a.family == "mysql" {
+			fields = append(fields, &prefix)
+		}
+		if e = rows.Scan(fields...); e != nil {
 			return repair.Verification{}, e
 		}
 		if !valid || special || !c.Valid {
 			return verification("unknown", "索引含表达式、过滤条件、前缀列或无效状态，需要人工核对")
+		}
+		if a.family == "mysql" && prefix != idx.MySQLTargetPrefix(len(cols)) {
+			return verification("failed", "索引列前缀长度与原计划不符")
 		}
 		if unique != (idx.IsUnique || idx.IsPrimary) || primary != idx.IsPrimary {
 			return verification("failed", "索引唯一性或主键属性与原计划不符")
@@ -337,7 +355,7 @@ func inspectRepairIndex(ctx context.Context, w Writer, a repairTarget, obj repai
 	if len(cols) == 0 {
 		return verification("failed", "目标索引不存在")
 	}
-	if !slices.Equal(cols, idx.Columns) {
+	if !slices.Equal(cols, wantColumns) {
 		return verification("failed", "索引键列或顺序与原计划不符")
 	}
 	for i, d := range desc {

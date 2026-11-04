@@ -314,6 +314,11 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			if m.migrationTargetTableError(index.TableName) != nil {
 				continue
 			}
+			// A converted secondary prefix key is attempted after data copy.
+			// Its full target type or key width can fail independently of the table.
+			if !index.IsPrimary && len(index.MySQLPrefixLengths) > 0 && index.Unsupported == "" {
+				continue
+			}
 			if index.Unsupported != "" {
 				rejectTarget(index.TableName, fmt.Errorf("表 %s 索引 %s: %s", index.TableName, index.IndexName, index.Unsupported))
 				continue
@@ -648,6 +653,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				m.recordBlockedObject(&report.Indexes, d.IndexName(i), sourceTables[i.TableName], "依赖表 "+i.TableName+" 迁移失败")
 				continue
 			}
+			m.recordMySQLPrefixWarning(&report, i)
 			recordIndex(&report.Indexes, i)
 		}
 		for _, f := range p.fks {

@@ -33,24 +33,30 @@ func (d *PostgresDialect) SequenceStatements(schema string, seq source.SequenceI
 	return append(stmts, Statement{SQL: ownedBySQL})
 }
 
-// IndexStatements 复刻 PostgresWriter.CreateIndex(postgres.go:132-150)。
+func (d *PostgresDialect) IndexName(idx source.IndexInfo) string {
+	if idx.TargetIndexName != "" {
+		return idx.TargetIndexName
+	}
+	return idx.IndexName
+}
+
 func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
-	quotedCols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
-	}
-	cols := strings.Join(quotedCols, ", ")
-	var ddl string
+	cols := strings.Join(orderedIndexColumns(d, idx), ", ")
+	table := d.qualified(schema, idx.TableName)
 	if idx.IsPrimary {
-		ddl = fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", d.qualified(schema, idx.TableName), cols)
-	} else if idx.IsUnique {
-		ddl = fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, d.qualified(schema, idx.TableName), cols)
-	} else {
-		ddl = fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "%s" ON %s (%s);`,
-			idx.IndexName, d.qualified(schema, idx.TableName), cols)
+		return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", table, cols)}}
 	}
-	return []Statement{{SQL: ddl}}
+	unique := ""
+	if idx.IsUnique {
+		unique = "UNIQUE "
+	}
+	ifAbsent := "IF NOT EXISTS "
+	if len(idx.MySQLPrefixLengths) > 0 || idx.TargetIndexName != "" {
+		// Let the writer verify duplicate definitions before reporting success.
+		ifAbsent = ""
+	}
+	return []Statement{{SQL: fmt.Sprintf("CREATE %sINDEX %s%s ON %s (%s);",
+		unique, ifAbsent, d.QuoteIdent(d.IndexName(idx)), table, cols)}}
 }
 
 // ForeignKeyStatements 复刻 PostgresWriter.CreateForeignKey(postgres.go:152-170)。

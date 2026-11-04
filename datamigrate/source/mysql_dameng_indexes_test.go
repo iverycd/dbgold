@@ -10,19 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const mysqlDamengIndexesQuery = `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION
+const mysqlIndexesQuery = `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION
  FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
  ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`
 
-func mysqlDamengIndexRows() *sqlmock.Rows {
+func mysqlIndexRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE", "SUB_PART", "INDEX_TYPE", "COLLATION"})
 }
 
 func TestMySQLDamengGetIndexesPreservesCompleteKeys(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "MixedSchema")
 	r.damengTarget = true
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesQuery)).WithArgs("MixedSchema").
-		WillReturnRows(mysqlDamengIndexRows().
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("MixedSchema").
+		WillReturnRows(mysqlIndexRows().
 			AddRow("MixedTable", "ByName", "TenantID", 1, nil, "BTREE", "A").
 			AddRow("MixedTable", "ByName", "DisplayName", 1, nil, "BTREE", "D").
 			AddRow("MixedTable", "ByRow", "Row_ID", 1, nil, "BTREE", "A").
@@ -46,8 +46,8 @@ func TestMySQLDamengGetIndexesPreservesCompleteKeys(t *testing.T) {
 func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	r.damengTarget = true
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesQuery)).WithArgs("Src").
-		WillReturnRows(mysqlDamengIndexRows().
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
+		WillReturnRows(mysqlIndexRows().
 			AddRow("MixedTable", "Before", "TenantID", 1, nil, "BTREE", "A").
 			AddRow("MixedTable", "Expression", "TenantID", 0, nil, "BTREE", "A").
 			AddRow("MixedTable", "Expression", nil, 0, nil, "BTREE", nil).
@@ -67,7 +67,8 @@ func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 	require.Len(t, indexes, 8)
 	require.Empty(t, indexes[0].Unsupported)
 	require.Equal(t, []string{"TenantID"}, indexes[0].Columns)
-	for _, idx := range indexes[1:7] {
+	for _, i := range []int{1, 3, 4, 5, 6} {
+		idx := indexes[i]
 		require.Equal(t, "MixedTable", idx.TableName)
 		require.NotEmpty(t, idx.Unsupported, idx.IndexName)
 		require.Contains(t, idx.Unsupported, "手工适配")
@@ -77,7 +78,9 @@ func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 	require.True(t, indexes[1].IsUnique)
 	require.Contains(t, indexes[1].Unsupported, "函数/表达式")
 	require.True(t, indexes[2].IsUnique)
-	require.Contains(t, indexes[2].Unsupported, "前缀")
+	require.Empty(t, indexes[2].Unsupported)
+	require.Equal(t, []int{0, 10}, indexes[2].MySQLPrefixLengths)
+	require.Equal(t, []string{"TenantID", "DisplayName"}, indexes[2].Columns)
 	require.Equal(t, "FULLTEXT", indexes[3].Method)
 	require.Contains(t, indexes[3].Unsupported, "多列全文索引")
 	require.Equal(t, "SPATIAL", indexes[4].Method)
@@ -90,8 +93,8 @@ func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 func TestMySQLDamengGetIndexesFulltextPreservesRawNames(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "MixedSchema")
 	r.damengTarget = true
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesQuery)).WithArgs("MixedSchema").
-		WillReturnRows(mysqlDamengIndexRows().
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("MixedSchema").
+		WillReturnRows(mysqlIndexRows().
 			AddRow("MixedTable", "FulltextBody", "BodyText", 1, nil, "FULLTEXT", nil).
 			AddRow("MixedTable", "FulltextTitle", "TitleText", 1, nil, "fulltext", "A").
 			AddRow("OtherTable", "FulltextBody", "OtherBody", 1, nil, "FullText", "D")).RowsWillBeClosed()
@@ -108,8 +111,8 @@ func TestMySQLDamengGetIndexesFulltextPreservesRawNames(t *testing.T) {
 func TestMySQLDamengFulltextDoesNotBypassInvalidKeyChecks(t *testing.T) {
 	r, mock := newIndexTestMySQLReader(t, "Src")
 	r.damengTarget = true
-	mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesQuery)).WithArgs("Src").
-		WillReturnRows(mysqlDamengIndexRows().
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
+		WillReturnRows(mysqlIndexRows().
 			AddRow("MixedTable", "Expression", nil, 1, nil, "FULLTEXT", nil).
 			AddRow("MixedTable", "Prefix", "Body", 1, 10, "FULLTEXT", nil)).RowsWillBeClosed()
 
@@ -130,17 +133,17 @@ func TestMySQLDamengGetIndexesNeverReturnsPartialMetadata(t *testing.T) {
 			r, mock := newIndexTestMySQLReader(t, "Src")
 			r.damengTarget = true
 			failure := errors.New("index metadata interrupted")
-			query := mock.ExpectQuery(regexp.QuoteMeta(mysqlDamengIndexesQuery)).WithArgs("Src")
+			query := mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src")
 			switch scenario {
 			case "query":
 				query.WillReturnError(failure)
 			case "stream":
-				query.WillReturnRows(mysqlDamengIndexRows().
+				query.WillReturnRows(mysqlIndexRows().
 					AddRow("MixedTable", "Composite", "First", 1, nil, "BTREE", "A").
 					AddRow("MixedTable", "Composite", "Second", 1, nil, "BTREE", "D").
 					RowError(1, failure)).RowsWillBeClosed()
 			case "scan":
-				query.WillReturnRows(mysqlDamengIndexRows().
+				query.WillReturnRows(mysqlIndexRows().
 					AddRow("MixedTable", "Before", "First", 1, nil, "BTREE", "A").
 					AddRow("MixedTable", "Invalid", "Second", nil, nil, "BTREE", "D")).RowsWillBeClosed()
 			}

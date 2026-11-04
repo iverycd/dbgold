@@ -1186,6 +1186,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					continue
 				}
 				m.recordOracleMySQLIndexWarning(report, idx)
+				m.recordMySQLPrefixWarning(report, idx)
 				idxCopy := idx
 				idxCopy.TableName = m.objName(idx.TableName)
 				idxCopy.IndexName = m.objName(idx.IndexName)

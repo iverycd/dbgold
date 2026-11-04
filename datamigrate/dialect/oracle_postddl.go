@@ -27,10 +27,7 @@ func (d *OracleDialect) SequenceMarker(schema string, s source.SequenceInfo) str
 	return "DBGOLD_MYSQL_ORACLE:" + d.QualifyTable(schema, s.TableName) + "." + d.QuoteIdent(s.ColumnName)
 }
 func (d *OracleDialect) IndexStatements(schema string, i source.IndexInfo) []Statement {
-	cols := make([]string, len(i.Columns))
-	for n, c := range i.Columns {
-		cols[n] = d.QuoteIdent(c)
-	}
+	cols := orderedIndexColumns(d, i)
 	name := d.QuoteIdent(d.IndexName(i))
 	if i.IsPrimary {
 		return []Statement{{SQL: "ALTER TABLE " + d.QualifyTable(schema, i.TableName) + " ADD CONSTRAINT " + name + " PRIMARY KEY (" + strings.Join(cols, ", ") + ")"}}
