@@ -27,7 +27,7 @@ import (
 // TestMySQLScanComparison uses dedicated instances, generates one immutable
 // source fixture, and creates a new target namespace and Go process per trial.
 func TestMySQLScanComparison(t *testing.T) {
-	runScanComparison(t, "gaussdb", "DBGOLD_MYSQL_SCAN_GAUSS_DSN", [][]string{
+	runScanComparison(t, "gaussdb", "DBGOLD_MYSQL_SCAN_GAUSS_DSN", seedConfiguredMySQLScanFixtures, nil, [][]string{
 		{"offset", "stream", "range"}, {"stream", "range", "offset"}, {"range", "offset", "stream"},
 	})
 }
@@ -36,12 +36,56 @@ func TestMySQLScanComparison(t *testing.T) {
 // In these four orders each treatment occupies each position once and every
 // ordered pair of different treatments occurs once at adjacent positions.
 func TestMySQLDamengScanComparison(t *testing.T) {
-	runScanComparison(t, "dameng", "DBGOLD_MYSQL_SCAN_DM_DSN", [][]string{
-		{"A", "B", "D", "C"}, {"B", "C", "A", "D"}, {"C", "D", "B", "A"}, {"D", "A", "C", "B"},
-	})
+	orders := [][]string{{"A", "B", "D", "C"}, {"B", "C", "A", "D"}, {"C", "D", "B", "A"}, {"D", "A", "C", "B"}}
+	if os.Getenv("DBGOLD_MYSQL_SCAN_SMOKE") == "1" {
+		orders = orders[:1]
+	}
+	runScanComparison(t, "dameng", "DBGOLD_MYSQL_SCAN_DM_DSN", seedConfiguredMySQLScanFixtures, nil, orders)
 }
 
-func runScanComparison(t *testing.T, product, targetEnv string, orders [][]string) {
+// C and D both use native DM batch writes. This fixed-size experiment does
+// not inherit multi-table fixture sizing or the abbreviated smoke schedule.
+func TestMySQLDamengKeylessScanComparison(t *testing.T) {
+	runScanComparison(t, "dameng", "DBGOLD_MYSQL_SCAN_DM_DSN", seedMySQLKeylessFixture, verifyKeylessTrial,
+		[][]string{{"C", "D"}, {"D", "C"}, {"C", "D"}, {"D", "C"}})
+}
+
+func verifyKeylessTrial(t *testing.T, trial scanTrialResult) {
+	t.Helper()
+	require.Len(t, trial.Tables, 1)
+	table := trial.Tables["scan_keyless"]
+	require.NotNil(t, table)
+	require.EqualValues(t, 1_000_000, table.RowsWritten)
+	require.EqualValues(t, 1_000_000, table.VerifiedTargetRows)
+	require.Equal(t, "batch", trial.WriteStrategy)
+	require.Positive(t, trial.BatchExecs)
+	switch trial.Strategy {
+	case "offset":
+		require.Equal(t, 50, table.OffsetPages)
+		require.Len(t, table.OffsetThirdsMS, 3)
+		require.Empty(t, table.Streams)
+	case "stream":
+		require.Zero(t, table.OffsetPages)
+		require.Len(t, table.Streams, 1)
+		require.Equal(t, 1_000_000, table.Streams[0].Rows)
+	default:
+		t.Fatalf("unexpected read strategy %q", trial.Strategy)
+	}
+}
+
+func seedConfiguredMySQLScanFixtures(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows := 1_000_000
+	if raw := os.Getenv("DBGOLD_MYSQL_SCAN_ROWS"); raw != "" {
+		var err error
+		rows, err = strconv.Atoi(raw)
+		require.NoError(t, err)
+		require.Positive(t, rows)
+	}
+	return seedMySQLScanFixtures(t, db, rows)
+}
+
+func runScanComparison(t *testing.T, product, targetEnv string, seed func(*testing.T, *sql.DB) []string, verify func(*testing.T, scanTrialResult), orders [][]string) {
 	myDSN, dstDSN := os.Getenv("DBGOLD_MYSQL_SCAN_SOURCE_DSN"), os.Getenv(targetEnv)
 	if myDSN == "" || dstDSN == "" {
 		t.Skipf("set DBGOLD_MYSQL_SCAN_SOURCE_DSN and %s to dedicated test instances", targetEnv)
@@ -49,16 +93,6 @@ func runScanComparison(t *testing.T, product, targetEnv string, orders [][]strin
 	if ns := os.Getenv("DBGOLD_SCAN_CHILD_SOURCE"); ns != "" {
 		runMySQLScanTrial(t, myDSN, dstDSN, ns, product)
 		return
-	}
-	if product == "dameng" && os.Getenv("DBGOLD_MYSQL_SCAN_SMOKE") == "1" {
-		orders = orders[:1]
-	}
-	rows := 1_000_000
-	if raw := os.Getenv("DBGOLD_MYSQL_SCAN_ROWS"); raw != "" {
-		var err error
-		rows, err = strconv.Atoi(raw)
-		require.NoError(t, err)
-		require.Positive(t, rows)
 	}
 	admin, err := sql.Open("mysql", myDSN)
 	require.NoError(t, err)
@@ -76,7 +110,7 @@ func runScanComparison(t *testing.T, product, targetEnv string, orders [][]strin
 	fixture, err := sql.Open("mysql", cfg.FormatDSN())
 	require.NoError(t, err)
 	defer fixture.Close()
-	tables := seedMySQLScanFixtures(t, fixture, rows)
+	tables := seed(t, fixture)
 	exe, err := os.Executable()
 	require.NoError(t, err)
 	var trials []scanTrialResult
@@ -99,6 +133,9 @@ func runScanComparison(t *testing.T, product, targetEnv string, orders [][]strin
 				rss /= 1024 // Darwin returns bytes, Linux returns KiB.
 			}
 			trial.PeakRSSMiB = rss / 1024
+			if verify != nil {
+				verify(t, trial)
+			}
 			trials = append(trials, trial)
 			b, err := json.Marshal(trial)
 			require.NoError(t, err)
@@ -217,16 +254,18 @@ func runMySQLScanTrial(t *testing.T, myDSN, dstDSN, ns, product string) {
 		require.NotNil(t, report.CompatibilityFunctions)
 		require.Equal(t, 9, report.CompatibilityFunctions.Success)
 		result.BatchExecs, result.ScalarRows = batchStats()
-		if writeStrategy == "batch" && result.Tables["scan_dense"].RowsWritten > 1 {
-			require.Positive(t, result.BatchExecs)
-		}
 	}
 	require.Equal(t, validation.StatusPassed, report.DataValidation.Status, "%+v", report.DataValidation)
 	require.Len(t, report.DataValidation.Tables, tableCount)
 	for _, row := range report.RowCounts {
 		require.True(t, row.Match, "%+v", row)
 		require.Contains(t, tables, row.Table)
-		require.Equal(t, row.Src, tables[row.Table].RowsWritten)
+		table := tables[row.Table]
+		require.Equal(t, row.Src, table.RowsWritten)
+		table.VerifiedTargetRows = row.Dst
+		if writeStrategy == "batch" && row.Table == "scan_dense" && row.Src > 1 {
+			require.Positive(t, result.BatchExecs)
+		}
 	}
 	if product == "dameng" && writeStrategy == "row" {
 		var written int64

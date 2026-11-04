@@ -193,7 +193,7 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
-	if err := validateCopyStrategies(req.MySQLReadStrategy, req.DamengWriteStrategy, srcConn.DBType, dstConn.DBType, req.MigrateContent); err != nil {
+	if err := req.resolveCopyStrategies(srcConn.DBType, dstConn.DBType, req.MigrateContent); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

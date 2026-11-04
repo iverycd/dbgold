@@ -58,7 +58,7 @@ func PreflightDataMigration(c *gin.Context) {
 	if len(req.MigrateObjects) > 0 || len(req.ViewNames) > 0 {
 		content = "schema_only"
 	}
-	if err := validateCopyStrategies(req.MySQLReadStrategy, req.DamengWriteStrategy, src.DBType, dst.DBType, content); err != nil {
+	if err := req.resolveCopyStrategies(src.DBType, dst.DBType, content); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

@@ -15,7 +15,8 @@ import (
 // which overlap each other and may exceed the wall time.
 type scanTrialTable struct {
 	QueueMS, WallMS, FinishMS, ReadMS, WriteMS float64
-	RowsWritten                                int64
+	RowsWritten, VerifiedTargetRows            int64
+	OffsetPages                                int               `json:",omitempty"`
 	OffsetThirdsMS                             []float64         `json:",omitempty"`
 	Streams                                    []scanTrialStream `json:",omitempty"`
 	pages                                      []scanPageTime
@@ -82,6 +83,7 @@ func (m *scanTrialMetrics) tableBoundary(table string, start bool) {
 		// of concurrent completion order. For short tables, show one mean.
 		sort.Slice(row.pages, func(i, j int) bool { return row.pages[i].offset < row.pages[j].offset })
 		n := len(row.pages)
+		row.OffsetPages = n
 		groups := 1
 		if n >= 3 {
 			groups = 3

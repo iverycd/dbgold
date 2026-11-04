@@ -46,17 +46,30 @@ func resolveTriggerMigration(src, dst, content string, requested *bool) bool {
 	return src == "mysql" && dst == "dameng" && content != "data_only"
 }
 
-// The request struct validates the enum values. Object preflight passes schema_only.
-func validateCopyStrategies(read, write, src, dst, content string) error {
-	if write != "" {
+// Only newly submitted ordinary data loads receive this default. Saved empty
+// strategies still describe scalar writes, including records predating the option.
+func resolveDamengWriteStrategy(requested, src, dst, content string) string {
+	if src != "mysql" || dst != "dameng" || (content != "" && content != "both" && content != "data_only") {
+		return ""
+	}
+	if requested == "" {
+		return "batch"
+	}
+	return requested
+}
+
+// JSON binding checks the enum. Preflight and start share the same resolution;
+// a mixed Excel batch instead ignores its common option on ineligible rows.
+func (req *startDataMigrationRequest) resolveCopyStrategies(src, dst, content string) error {
+	write := resolveDamengWriteStrategy(req.DamengWriteStrategy, src, dst, content)
+	if write == "" && req.DamengWriteStrategy != "" {
 		if src != "mysql" || dst != "dameng" {
 			return fmt.Errorf("达梦普通表写入方式仅支持 MySQL → 达梦迁移")
 		}
-		if content != "" && content != "both" && content != "data_only" {
-			return fmt.Errorf("达梦普通表写入方式仅适用于包含表数据的迁移")
-		}
+		return fmt.Errorf("达梦普通表写入方式仅适用于包含表数据的迁移")
 	}
-	if read != "stream" {
+	req.DamengWriteStrategy = write
+	if req.MySQLReadStrategy != "stream" {
 		return nil
 	}
 	if src != "mysql" || dst != "gaussdb" {

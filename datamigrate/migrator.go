@@ -60,7 +60,8 @@ type Config struct {
 	// TableNames 精确表名列表(源库原始大小写)。仅对象迁移模式下作为迁移表集合,
 	// 与 ListTables 结果取交集;为空则回退到 Mode+Filter 过滤。
 	TableNames []string
-	// DamengWriteStrategy selects row (default) or batch writes on ordinary MySQL loads.
+	// New MySQL → Dameng data jobs persist their resolved strategy; an empty
+	// value in an older config retains its original row-by-row behavior.
 	DamengWriteStrategy string `json:"DamengWriteStrategy,omitempty"`
 }
 

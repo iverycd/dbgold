@@ -621,6 +621,7 @@ export interface BatchOptions {
   overwrite_existing?: boolean
   validate_data?: boolean
   migrate_triggers?: boolean
+  dameng_write_strategy?: 'batch' | 'row'
   excluded_objects_by_row?: Record<number, MigrationObjectRef[]>
   migrate_content: 'both' | 'schema_only' | 'data_only'
   page_size: number
@@ -645,6 +646,7 @@ export const startBatch = (file: File, excludeRows: number[], opts: BatchOptions
   fd.append('overwrite_existing', String(!!opts.overwrite_existing))
   fd.append('validate_data', String(!!opts.validate_data))
   if (opts.migrate_triggers !== undefined) fd.append('migrate_triggers', String(opts.migrate_triggers))
+  if (opts.dameng_write_strategy) fd.append('dameng_write_strategy', opts.dameng_write_strategy)
   fd.append('page_size', String(opts.page_size))
   fd.append('max_parallel', String(opts.max_parallel))
   fd.append('intra_table_parallel', String(opts.intra_table_parallel))

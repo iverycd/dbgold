@@ -150,7 +150,7 @@ test('MySQL single scan is opt-in for ordinary GaussDB data copies and submitted
   }
 })
 
-test('DM batch inserts are opt-in on data requests and reset when scope changes', async () => {
+test('MySQL to DM data requests default to batch, send explicit row, and reset on scope changes', async () => {
   for (const policy of ['row', 'batch']) {
     const scope = Vue.effectScope()
     try {
@@ -158,8 +158,8 @@ test('DM batch inserts are opt-in on data requests and reset when scope changes'
       assert.equal(p.canSelectDamengWriteStrategy.value, false)
       p.connections.value[1].db_type = 'dameng'
       assert.equal(p.canSelectDamengWriteStrategy.value, true)
-      assert.equal(p.dataMigrate.damengWriteStrategy, 'row')
-      assert.equal('dameng_write_strategy' in p.dataMigrationRequest(), false)
+      assert.equal(p.dataMigrate.damengWriteStrategy, 'batch')
+      assert.equal(p.dataMigrationRequest().dameng_write_strategy, 'batch')
       p.dataMigrate.damengWriteStrategy = policy
       p.dataMigrate.content = 'data_only'
       p.requestDataMigration()
@@ -167,12 +167,19 @@ test('DM batch inserts are opt-in on data requests and reset when scope changes'
       assert.equal(starts.length, 1)
       assert.equal(checks.length, 1)
       for (const req of [checks[0], starts[0]]) {
-        assert.equal(req.dameng_write_strategy, policy === 'batch' ? 'batch' : undefined)
+        assert.equal(req.dameng_write_strategy, policy)
       }
       p.dataMigrate.content = 'schema_only'
-      assert.equal(p.dataMigrate.damengWriteStrategy, 'row')
+      assert.equal(p.dataMigrate.damengWriteStrategy, 'batch')
       assert.equal(p.canSelectDamengWriteStrategy.value, false)
       assert.equal('dameng_write_strategy' in p.dataMigrationRequest(), false)
+      p.dataMigrate.content = 'both'
+      assert.equal(p.dataMigrationRequest().dameng_write_strategy, 'batch')
+      p.dataMigrate.damengWriteStrategy = 'row'
+      p.connections.value[1].db_type = 'gaussdb'
+      assert.equal('dameng_write_strategy' in p.dataMigrationRequest(), false)
+      p.connections.value[1].db_type = 'dameng'
+      assert.equal(p.dataMigrationRequest().dameng_write_strategy, 'batch')
     } finally { scope.stop() }
   }
 })
@@ -216,6 +223,9 @@ test('task detail renders saved MySQL stream settings and legacy OFFSET configur
   assert.match(await html({ dst_db_type: 'dameng' }), /逐行写入/)
   assert.doesNotMatch(await html({ dst_db_type: 'dameng', src_db_type: 'dameng' }), /达梦普通表写入方式/)
   assert.doesNotMatch(await html({ dst_db_type: 'dameng', batch_id: 'batch' }), /达梦普通表写入方式/)
+  assert.doesNotMatch(await html({ dst_db_type: 'dameng', batch_id: 'batch', dameng_write_strategy: '' }), /达梦普通表写入方式/)
+  assert.match(await html({ dst_db_type: 'dameng', batch_id: 'batch', dameng_write_strategy: 'batch' }), /达梦普通表写入方式[\s\S]*批量写入/)
+  assert.match(await html({ dst_db_type: 'dameng', batch_id: 'batch', dameng_write_strategy: 'row' }), /达梦普通表写入方式[\s\S]*逐行写入/)
   assert.match(await html({ mysql_read_strategy: 'stream' }), /单次扫描（静态源库）/)
   for (const fields of [{}, { mysql_read_strategy: '' }, { mysql_read_strategy: 'offset' }]) {
     assert.match(await html(fields), /分页读取（OFFSET）/)

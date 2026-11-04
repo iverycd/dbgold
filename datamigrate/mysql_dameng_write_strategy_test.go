@@ -39,7 +39,7 @@ func TestMySQLDamengWriteStrategyOrdinaryTable(t *testing.T) {
 		{"serial offset batch", "offset", "batch", "dameng", "", 1, true, 3},
 		{"parallel offset batch", "offset", "batch", "dameng", "", 2, true, 3},
 		{"stream batch", "stream", "batch", "dameng", "", 2, true, 3},
-		{"default row", "offset", "", "dameng", "", 2, true, 0},
+		{"legacy empty strategy uses row", "offset", "", "dameng", "", 2, true, 0},
 		{"explicit row", "stream", "row", "dameng", "", 2, true, 0},
 		{"cdc", "stream", "batch", "dameng", "cdc", 1, true, 0},
 		{"another target", "stream", "batch", "gaussdb", "", 2, true, 0},

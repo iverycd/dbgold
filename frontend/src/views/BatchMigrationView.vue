@@ -132,6 +132,15 @@
                       <a-input v-model="options.strip_view_schemas" placeholder="如 dbo,public" allow-clear />
                     </a-form-item>
                   </a-col>
+                  <a-col v-if="canSelectDamengWriteStrategy" :span="24">
+                    <a-form-item label="MySQL → 达梦普通表写入方式">
+                      <a-radio-group v-model="options.dameng_write_strategy">
+                        <a-radio value="batch">批量写入（默认）</a-radio>
+                        <a-radio value="row">逐行写入</a-radio>
+                      </a-radio-group>
+                      <template #extra>仅用于本批受支持的 MySQL → 达梦任务。每页在一个事务内提交，超长字段等不适合批量绑定的值逐行写入。</template>
+                    </a-form-item>
+                  </a-col>
                 </a-row>
                 <a-space wrap>
                   <a-checkbox v-if="nativeDamengRows.length" v-model="options.overwrite_existing">达梦同库：覆盖目标同名对象（删除重建，默认关闭）</a-checkbox>
@@ -324,6 +333,13 @@ const exclusionKinds = [
   { value: 'view', label: '视图' }, { value: 'routine', label: '函数/过程' }, { value: 'trigger', label: '触发器' }, { value: 'sequence', label: '独立序列' },
 ]
 const nativeDamengRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.supported && row.src_db_type === 'dameng' && row.dst_db_type === 'dameng'))
+const canSelectDamengWriteStrategy = computed(() =>
+  options.migrate_content !== 'schema_only' &&
+  !!validateResult.value?.rows.some(row => row.supported && row.src_db_type === 'mysql' && row.dst_db_type === 'dameng'),
+)
+watch(canSelectDamengWriteStrategy, enabled => {
+  options.dameng_write_strategy = enabled ? 'batch' : undefined
+}, { flush: 'sync' })
 watch(nativeDamengRows, rows => { if (rows.length) options.migrate_content = 'both' })
 const pgMySQLRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.dst_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(row.src_db_type)))
 const batchObjectDraft = reactive({ row: undefined as number | undefined, kind: 'table', table: '', name: '' })
@@ -383,11 +399,12 @@ async function handleDownloadTemplate() {
 }
 
 async function handleValidate() {
-  if (!selectedFile.value) return
+  const file = selectedFile.value
+  if (!file) return
   validating.value = true
   try {
-    const { data } = await validateBatch(selectedFile.value)
-    validateResult.value = data
+    const { data } = await validateBatch(file)
+    if (selectedFile.value === file) validateResult.value = data
   } catch (e: any) {
     Message.error(e?.response?.data?.error ?? '校验失败')
   } finally {
