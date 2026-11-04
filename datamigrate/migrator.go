@@ -60,6 +60,8 @@ type Config struct {
 	// TableNames 精确表名列表(源库原始大小写)。仅对象迁移模式下作为迁移表集合,
 	// 与 ListTables 结果取交集;为空则回退到 Mode+Filter 过滤。
 	TableNames []string
+	// DamengWriteStrategy selects row (default) or batch writes on ordinary MySQL loads.
+	DamengWriteStrategy string `json:"DamengWriteStrategy,omitempty"`
 }
 
 // objectMode 判断是否为"仅对象迁移"模式(只补主键/索引/序列/外键,不建表不迁数据)
@@ -801,10 +803,8 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 
 // migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）
 func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
-	if s := m.partitionState; s != nil {
-		if t := s.tables[table]; t != nil && t.Plan != nil {
-			return m.migratePartitionData(ctx, table)
-		}
+	if m.hasPartitionPlan(table) {
+		return m.migratePartitionData(ctx, table)
 	}
 	if m.reader.DBType() == "mysql" && m.cfg.MigrationPurpose != "cdc" && m.cfg.MySQLReadStrategy != "" && m.cfg.MySQLReadStrategy != "offset" {
 		return m.migrateMySQLScan(ctx, table)
@@ -819,6 +819,28 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 		return m.migrateTableDataSerial(ctx, table, pks)
 	}
 	return m.migrateTableDataParallel(ctx, table, pks)
+}
+
+func (m *Migrator) hasPartitionPlan(table string) bool {
+	return m.partitionState != nil && m.partitionState.tables[table] != nil && m.partitionState.tables[table].Plan != nil
+}
+
+// Partition copies have their own writer call in migratePartitionData.
+func (m *Migrator) copyTableBatch(ctx context.Context, table string, cols, types []string, rows [][]interface{}) error {
+	strategy := m.cfg.DamengWriteStrategy
+	if strategy == "" || strategy == "row" || m.cfg.MigrationPurpose == "cdc" || !m.isMySQLDameng() {
+		return m.writer.CopyData(ctx, table, cols, types, rows)
+	}
+	if strategy != "batch" {
+		return fmt.Errorf("未知达梦写入策略 %q", strategy)
+	}
+	writer, ok := m.writer.(interface {
+		CopyMySQLBatchData(context.Context, string, []string, []string, [][]interface{}) error
+	})
+	if !ok {
+		return fmt.Errorf("目标 Writer 不支持 MySQL 到达梦的批量写入")
+	}
+	return writer.CopyMySQLBatchData(ctx, table, cols, types, rows)
 }
 
 // migrateTableDataSerial 串行分页迁移单张表
@@ -854,7 +876,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 		for i, c := range cols {
 			dstCols[i] = m.targetColumn(table, c)
 		}
-		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
+		if err := m.copyTableBatch(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.stopOracleDamengTask(ctx, err)
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)
@@ -909,7 +931,7 @@ func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, p
 	hasError := false
 
 	writePage := func(pageNum int, rows [][]interface{}) {
-		if err := m.writer.CopyData(ctx, dstTable, dstCols, colTypes, rows); err != nil {
+		if err := m.copyTableBatch(ctx, dstTable, dstCols, colTypes, rows); err != nil {
 			m.stopOracleDamengTask(ctx, err)
 			message := fmt.Sprintf("表 %s 第 %d 页写入失败: %s", table, pageNum, formatDataWriteError(err))
 			m.log.Errorf("%s", message)

@@ -81,7 +81,7 @@ func (m *Migrator) migrateMySQLScan(taskCtx context.Context, table string) (bool
 			mapped[i] = m.targetColumn(table, column)
 		}
 		write := func() {
-			if err := m.writer.CopyData(ctx, dstTable, mapped, types, rows); err != nil {
+			if err := m.copyTableBatch(ctx, dstTable, mapped, types, rows); err != nil {
 				fail(err, fmt.Sprintf("表 %s 第 %d 批写入失败: %s", table, batch, formatDataWriteError(err)))
 			} else {
 				m.log.Dataf("迁移 %s: 第 %d 批 (%d 行) ... OK", table, batch, len(rows))

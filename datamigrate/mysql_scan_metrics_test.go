@@ -46,6 +46,11 @@ func scanMS(d time.Duration) float64 { return float64(d) / float64(time.Millisec
 type scanTrialResult struct {
 	Round                  int
 	Strategy               string
+	Target                 string
+	Group                  string `json:",omitempty"`
+	WriteStrategy          string `json:",omitempty"`
+	BatchExecs             int64
+	ScalarRows             int64
 	JobHasFailures         bool
 	ContentValidation      string
 	Tables                 map[string]*scanTrialTable
@@ -167,15 +172,38 @@ type scanTrialTarget struct {
 	metrics *scanTrialMetrics
 }
 
+func (m *scanTrialMetrics) recordWrite(table string, start time.Time, rows int, err error) {
+	ms := scanMS(time.Since(start))
+	m.record(table, func(t *scanTrialTable) {
+		t.WriteMS += ms
+		if err == nil {
+			t.RowsWritten += int64(rows)
+		}
+	})
+}
+
 func (w *scanTrialTarget) CopyData(ctx context.Context, table string, cols, types []string, rows [][]any) error {
 	start := time.Now()
 	err := w.GaussDBWriter.CopyData(ctx, table, cols, types, rows)
-	ms := scanMS(time.Since(start))
-	w.metrics.record(table, func(t *scanTrialTable) {
-		t.WriteMS += ms
-		if err == nil {
-			t.RowsWritten += int64(len(rows))
-		}
-	})
+	w.metrics.recordWrite(table, start, len(rows), err)
+	return err
+}
+
+type scanTrialDMTarget struct {
+	*target.DaMengWriter
+	metrics *scanTrialMetrics
+}
+
+func (w *scanTrialDMTarget) CopyData(ctx context.Context, table string, cols, types []string, rows [][]any) error {
+	start := time.Now()
+	err := w.DaMengWriter.CopyData(ctx, table, cols, types, rows)
+	w.metrics.recordWrite(table, start, len(rows), err)
+	return err
+}
+
+func (w *scanTrialDMTarget) CopyMySQLBatchData(ctx context.Context, table string, cols, types []string, rows [][]any) error {
+	start := time.Now()
+	err := w.DaMengWriter.CopyMySQLBatchData(ctx, table, cols, types, rows)
+	w.metrics.recordWrite(table, start, len(rows), err)
 	return err
 }

@@ -83,6 +83,10 @@ func MySQLDamengDate(v interface{}, dt string) (interface{}, error) {
 
 func MySQLDamengPlaceholder(dt string) string {
 	switch strings.ToUpper(dt) {
+	case "DECIMAL", "NUMERIC":
+		// DM's numeric bind parses decimal strings through big.Float. Bind the
+		// original text and let the target NUMBER column convert it exactly.
+		return "CAST(? AS VARCHAR(128))"
 	case "DATE":
 		return "TO_DATE(?, 'YYYY-MM-DD')"
 	case "DATETIME", "TIMESTAMP":

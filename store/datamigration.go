@@ -38,6 +38,7 @@ type PageResult[T any] struct {
 }
 
 type DataMigrationJob struct {
+	DamengWriteStrategy      string     `gorm:"column:dameng_write_strategy;not null;default:''" json:"dameng_write_strategy,omitempty"`
 	MySQLReadStrategy        string     `gorm:"column:mysql_read_strategy;not null;default:''" json:"mysql_read_strategy,omitempty"`
 	ValidateData             bool       `gorm:"not null;default:false" json:"validate_data"`
 	MigrateTriggers          bool       `json:"migrate_triggers"`

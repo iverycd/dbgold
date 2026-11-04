@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/valueconv"
@@ -23,6 +24,9 @@ type DaMengWriter struct {
 
 	identMu    sync.Mutex      // 保护 identCache
 	identCache map[string]bool // table → 是否含自增(IDENTITY)列
+
+	mysqlDMBulkExecs  atomic.Int64
+	mysqlDMScalarRows atomic.Int64
 
 	mysqlDMIndexesMu sync.Mutex
 	mysqlDMIndexes   mysqlDamengIndexCache

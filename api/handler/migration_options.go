@@ -46,9 +46,17 @@ func resolveTriggerMigration(src, dst, content string, requested *bool) bool {
 	return src == "mysql" && dst == "dameng" && content != "data_only"
 }
 
-// Streaming has only been verified on ordinary MySQL to GaussDB data loads.
-func validateMySQLReadStrategy(strategy, src, dst, content string) error {
-	if strategy != "stream" {
+// The request struct validates the enum values. Object preflight passes schema_only.
+func validateCopyStrategies(read, write, src, dst, content string) error {
+	if write != "" {
+		if src != "mysql" || dst != "dameng" {
+			return fmt.Errorf("达梦普通表写入方式仅支持 MySQL → 达梦迁移")
+		}
+		if content != "" && content != "both" && content != "data_only" {
+			return fmt.Errorf("达梦普通表写入方式仅适用于包含表数据的迁移")
+		}
+	}
+	if read != "stream" {
 		return nil
 	}
 	if src != "mysql" || dst != "gaussdb" {

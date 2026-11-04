@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/validation"
@@ -13,7 +14,7 @@ import (
 // adopt a new source selection or column set after migration has finished.
 type frozenValidationTable struct {
 	name               string
-	target             string // optional native materialized-view storage mapping
+	target             string // physical destination name when different from objName(name)
 	metadata           validation.Table
 	err                error
 	rebasedRowIDs      map[string]bool // only direct MV outputs with a proven completed native baseline
@@ -54,6 +55,11 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 	scanner, supported := validationSource(m.reader)
 	for _, table := range tables {
 		frozen := frozenValidationTable{name: table}
+		// DaMengDialect quotes the uppercase physical name. The validation
+		// scanner uses exact catalog names for both metadata and row reads.
+		if m.isMySQLDameng() && m.cfg.MigrationPurpose != "cdc" && !m.hasPartitionPlan(table) {
+			frozen.target = strings.ToUpper(m.objName(table))
+		}
 		if err := m.migrationTableError(table); err != nil {
 			frozen.err = err
 		} else if ctx.Err() != nil {

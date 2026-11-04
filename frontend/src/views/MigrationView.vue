@@ -201,6 +201,13 @@
                 <!-- 左列：迁移参数与选项 -->
                 <a-col :xs="24" :lg="12">
                   <div class="adv-section-title">迁移性能</div>
+                  <a-form-item v-if="canSelectDamengWriteStrategy" label="达梦普通表写入方式">
+                    <a-radio-group v-model="dataMigrate.damengWriteStrategy">
+                      <a-radio value="row">逐行写入</a-radio>
+                      <a-radio value="batch">批量写入</a-radio>
+                    </a-radio-group>
+                    <template #extra>每页仍作为一个事务提交。超长字段等不适合批量绑定的值在同一事务内逐行写入。</template>
+                  </a-form-item>
                   <a-form-item v-if="canSelectMySQLReadStrategy" label="MySQL 普通表读取方式">
                     <a-radio-group v-model="dataMigrate.mysqlReadStrategy">
                       <a-radio value="offset">分页读取（OFFSET）</a-radio>
@@ -1029,6 +1036,7 @@ const dataMigrate = reactive({
   maxParallel: 10,
   intraTableParallel: 8,
   mysqlReadStrategy: 'offset' as 'offset' | 'stream',
+  damengWriteStrategy: 'row' as 'row' | 'batch',
   lowerCaseNames: true,
   charInLength: false,
   useNvarchar2: false,
@@ -1144,6 +1152,10 @@ const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )
 const canSelectMySQLReadStrategy = computed(() => selectedSrc.value?.db_type === 'mysql' && selectedDst.value?.db_type === 'gaussdb' && dataMigrate.content !== 'schema_only')
+const canSelectDamengWriteStrategy = computed(() => selectedSrc.value?.db_type === 'mysql' && selectedDst.value?.db_type === 'dameng' && dataMigrate.content !== 'schema_only')
+watch([canSelectDamengWriteStrategy, () => dataMigrate.srcConnId, () => dataMigrate.srcDatabase, () => dataMigrate.dstConnId], () => {
+  dataMigrate.damengWriteStrategy = 'row'
+}, { flush: 'sync' })
 const useMySQLStream = computed(() => canSelectMySQLReadStrategy.value && dataMigrate.mysqlReadStrategy === 'stream')
 watch([canSelectMySQLReadStrategy, () => dataMigrate.srcConnId, () => dataMigrate.srcDatabase, () => dataMigrate.dstConnId], () => {
   dataMigrate.mysqlReadStrategy = 'offset'
@@ -2005,6 +2017,7 @@ return {
       max_parallel: dataMigrate.maxParallel,
       intra_table_parallel: dataMigrate.intraTableParallel,
       ...(useMySQLStream.value ? { mysql_read_strategy: 'stream' as const } : {}),
+      ...(canSelectDamengWriteStrategy.value && dataMigrate.damengWriteStrategy === 'batch' ? { dameng_write_strategy: 'batch' as const } : {}),
       lower_case_names: !isDamengNative.value && dataMigrate.lowerCaseNames,
       char_in_length: !isDamengNative.value && dataMigrate.charInLength,
       use_nvarchar2: !isDamengNative.value && dataMigrate.useNvarchar2,

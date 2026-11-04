@@ -127,7 +127,9 @@ func validateDataValidationMode(content string, enabled bool) error {
 }
 
 type startDataMigrationRequest struct {
-	MySQLReadStrategy  string                  `json:"mysql_read_strategy" binding:"omitempty,oneof=offset stream"`
+	DamengWriteStrategy string `json:"dameng_write_strategy" binding:"omitempty,oneof=row batch"`
+	MySQLReadStrategy   string `json:"mysql_read_strategy" binding:"omitempty,oneof=offset stream"`
+
 	OverwriteExisting  bool                    `json:"overwrite_existing"`
 	ValidateData       bool                    `json:"validate_data"`
 	MigrateTriggers    *bool                   `json:"migrate_triggers"`
@@ -191,7 +193,7 @@ func StartDataMigration(c *gin.Context) {
 		return
 	}
 
-	if err := validateMySQLReadStrategy(req.MySQLReadStrategy, srcConn.DBType, dstConn.DBType, req.MigrateContent); err != nil {
+	if err := validateCopyStrategies(req.MySQLReadStrategy, req.DamengWriteStrategy, srcConn.DBType, dstConn.DBType, req.MigrateContent); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -233,7 +235,9 @@ func StartDataMigration(c *gin.Context) {
 		srcConnDatabase = req.SrcDatabase
 	}
 	dbJob := &store.DataMigrationJob{
-		MySQLReadStrategy:  req.MySQLReadStrategy,
+		DamengWriteStrategy: req.DamengWriteStrategy,
+		MySQLReadStrategy:   req.MySQLReadStrategy,
+
 		ValidateData:       req.ValidateData,
 		MigrateTriggers:    migrateTriggers,
 		ExcludedObjects:    encodeExcludedObjects(req.ExcludedObjects),
@@ -272,7 +276,9 @@ func StartDataMigration(c *gin.Context) {
 	}
 
 	p := migrationParams{
-		MySQLReadStrategy:  req.MySQLReadStrategy,
+		DamengWriteStrategy: req.DamengWriteStrategy,
+		MySQLReadStrategy:   req.MySQLReadStrategy,
+
 		OverwriteExisting:  req.OverwriteExisting,
 		ValidateData:       req.ValidateData,
 		MigrateTriggers:    migrateTriggers,
@@ -312,7 +318,9 @@ func StartDataMigration(c *gin.Context) {
 
 // migrationParams 承载一次数据迁移所需的全部参数，由单任务请求或批量行构造。
 type migrationParams struct {
-	MySQLReadStrategy string
+	DamengWriteStrategy string
+	MySQLReadStrategy   string
+
 	OverwriteExisting bool
 	ValidateData      bool
 	MigrateTriggers   bool
@@ -410,7 +418,9 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		}
 	}
 	cfg := datamigrate.Config{
-		MySQLReadStrategy:    p.MySQLReadStrategy,
+		DamengWriteStrategy: p.DamengWriteStrategy,
+		MySQLReadStrategy:   p.MySQLReadStrategy,
+
 		OverwriteExisting:    p.OverwriteExisting,
 		ValidateData:         p.ValidateData,
 		MigrateTriggers:      p.MigrateTriggers,

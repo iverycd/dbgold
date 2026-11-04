@@ -23,6 +23,7 @@ export interface StartDataMigrationRequest {
   max_parallel?: number
   intra_table_parallel?: number
   mysql_read_strategy?: 'offset' | 'stream'
+  dameng_write_strategy?: 'row' | 'batch'
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean
@@ -67,6 +68,7 @@ export interface DataMigrationJob {
   max_parallel: number
   intra_table_parallel?: number
   mysql_read_strategy?: '' | 'offset' | 'stream'
+  dameng_write_strategy?: '' | 'row' | 'batch'
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean

@@ -21,7 +21,7 @@ function page({ start, preflight, objectStart } = {}) {
     export { connections, dataMigrate, canStartMigration, requestDataMigration, confirmDataMigration,
       dataMigrationConfirmVisible, dataMigrationStarting, dataMigrationContentLabel,
       dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration, isDamengNative,
-      canSelectMySQLReadStrategy, dataMigrationRequest };`, {
+      canSelectMySQLReadStrategy, canSelectDamengWriteStrategy, dataMigrationRequest };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
   const context = {
@@ -150,6 +150,33 @@ test('MySQL single scan is opt-in for ordinary GaussDB data copies and submitted
   }
 })
 
+test('DM batch inserts are opt-in on data requests and reset when scope changes', async () => {
+  for (const policy of ['row', 'batch']) {
+    const scope = Vue.effectScope()
+    try {
+      const { p, starts, checks } = scope.run(() => page())
+      assert.equal(p.canSelectDamengWriteStrategy.value, false)
+      p.connections.value[1].db_type = 'dameng'
+      assert.equal(p.canSelectDamengWriteStrategy.value, true)
+      assert.equal(p.dataMigrate.damengWriteStrategy, 'row')
+      assert.equal('dameng_write_strategy' in p.dataMigrationRequest(), false)
+      p.dataMigrate.damengWriteStrategy = policy
+      p.dataMigrate.content = 'data_only'
+      p.requestDataMigration()
+      await p.confirmDataMigration()
+      assert.equal(starts.length, 1)
+      assert.equal(checks.length, 1)
+      for (const req of [checks[0], starts[0]]) {
+        assert.equal(req.dameng_write_strategy, policy === 'batch' ? 'batch' : undefined)
+      }
+      p.dataMigrate.content = 'schema_only'
+      assert.equal(p.dataMigrate.damengWriteStrategy, 'row')
+      assert.equal(p.canSelectDamengWriteStrategy.value, false)
+      assert.equal('dameng_write_strategy' in p.dataMigrationRequest(), false)
+    } finally { scope.stop() }
+  }
+})
+
 test('changing to schema only, another connection or another source database clears the single-scan selection', () => {
   const scope = Vue.effectScope()
   try {
@@ -185,6 +212,10 @@ test('task detail renders saved MySQL stream settings and legacy OFFSET configur
   async function html(fields) {
     return renderToString(Vue.createSSRApp({ render: () => render({ job: { ...job, ...fields }, yesNo: () => '否' }, []) }))
   }
+  assert.match(await html({ dst_db_type: 'dameng', dameng_write_strategy: 'batch' }), /批量写入/)
+  assert.match(await html({ dst_db_type: 'dameng' }), /逐行写入/)
+  assert.doesNotMatch(await html({ dst_db_type: 'dameng', src_db_type: 'dameng' }), /达梦普通表写入方式/)
+  assert.doesNotMatch(await html({ dst_db_type: 'dameng', batch_id: 'batch' }), /达梦普通表写入方式/)
   assert.match(await html({ mysql_read_strategy: 'stream' }), /单次扫描（静态源库）/)
   for (const fields of [{}, { mysql_read_strategy: '' }, { mysql_read_strategy: 'offset' }]) {
     assert.match(await html(fields), /分页读取（OFFSET）/)

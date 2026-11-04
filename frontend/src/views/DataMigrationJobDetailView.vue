@@ -230,6 +230,7 @@
               <section class="config-section">
                 <div class="section-heading compact"><div><span class="eyebrow">PERFORMANCE</span><h2>执行参数</h2></div></div>
                 <dl class="info-grid">
+                  <div v-if="job.src_db_type === 'mysql' && job.dst_db_type === 'dameng' && !job.batch_id && !job.migrate_objects"><dt>达梦普通表写入方式</dt><dd>{{ job.dameng_write_strategy === 'batch' ? '批量写入' : '逐行写入' }}</dd></div>
                   <div v-if="job.src_db_type === 'mysql' && job.dst_db_type === 'gaussdb' && !job.batch_id && !job.migrate_objects"><dt>MySQL 普通表读取方式</dt><dd>{{ job.mysql_read_strategy === 'stream' ? '单次扫描（静态源库）' : '分页读取（OFFSET）' }}</dd></div>
                   <div><dt>{{ job.mysql_read_strategy === 'stream' ? '每批行数' : '分页大小' }}</dt><dd>{{ job.page_size || '—' }}</dd></div>
                   <div><dt>最大并行</dt><dd>{{ job.max_parallel || '—' }}</dd></div>

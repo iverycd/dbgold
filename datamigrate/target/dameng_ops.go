@@ -3,8 +3,8 @@ package target
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
-	"dbgold/datamigrate/valueconv"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,11 +12,16 @@ import (
 
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/typemap"
+	"dbgold/datamigrate/valueconv"
 )
 
-// CopyData 用参数化批量 INSERT 写入(达梦占位符为 ?)。
+// CopyData 在单个页面事务中逐行执行参数化 INSERT。
 // 含自增列的表写入前后开关 IDENTITY_INSERT,以便导入源库原始 id。
-func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) (retErr error) {
+func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string, colTypes []string, rows [][]interface{}) error {
+	return w.copyData(ctx, table, cols, colTypes, rows, false)
+}
+
+func (w *DaMengWriter) copyData(ctx context.Context, table string, cols, colTypes []string, rows [][]any, mysqlBatch bool) (retErr error) {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -100,38 +105,50 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 	}
 	insertSQL := fmt.Sprintf(`%s %s (%s) VALUES (%s)`, insert,
 		w.qualifiedTable(table), strings.Join(quotedCols, ", "), strings.Join(placeholders, ", "))
+	if mysqlBatch {
+		err = w.writeMySQLBatches(ctx, tx, insertSQL, table, cols, colTypes, rows)
+	} else {
+		err = w.writeScalarRows(ctx, tx, insertSQL, table, cols, colTypes, rows, oracleRows)
+	}
+	if err != nil {
+		return err
+	}
+
+	if hasIdentity {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET IDENTITY_INSERT %s OFF`, w.qualifiedTable(table))); err != nil {
+			return err
+		}
+		identityEnabled = false
+	}
+	return tx.Commit()
+}
+
+func (w *DaMengWriter) writeScalarRows(ctx context.Context, tx *sql.Tx, insertSQL, table string, cols, colTypes []string, rows, oracleRows [][]any) error {
 	stmt, err := tx.PrepareContext(ctx, insertSQL)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
+	var mysqlScalarRows int64
+	if w.srcType == "mysql" {
+		defer func() { w.mysqlDMScalarRows.Add(mysqlScalarRows) }()
+	}
 	for rowIndex, row := range rows {
 		if len(row) != len(cols) {
 			return fmt.Errorf("表 %s 行列数不匹配", table)
 		}
-		var conv []interface{}
-		if w.srcType == "oracle" {
+		var conv []any
+		switch w.srcType {
+		case "mysql":
+			conv, err = w.mysqlInsertRow(table, cols, colTypes, row)
+			if err != nil {
+				return err
+			}
+			mysqlScalarRows++
+		case "oracle":
 			conv = oracleRows[rowIndex]
-		} else {
-			conv = w.convertRow(row, colTypes)
-		}
-		if w.srcType == "mysql" {
-			if len(colTypes) != len(cols) {
-				return fmt.Errorf("表 %s 缺少源列类型", table)
-			}
-			for i, v := range row {
-				converted, e := valueconv.MySQLDamengDate(v, colTypes[i])
-				if e != nil {
-					return fmt.Errorf("%s.%s: %w", table, cols[i], e)
-				}
-				switch strings.ToUpper(colTypes[i]) {
-				case "DATE", "DATETIME", "TIMESTAMP":
-					conv[i] = converted
-				}
-			}
-		}
-		if w.srcType == "sqlserver" {
+		case "sqlserver":
 			if len(colTypes) != len(cols) {
 				return fmt.Errorf("表 %s 缺少源列类型", table)
 			}
@@ -143,19 +160,14 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 					return fmt.Errorf("%s.%s: %w", table, cols[i], e)
 				}
 			}
+		default:
+			conv = w.convertRow(row, colTypes)
 		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
 	}
-
-	if hasIdentity {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET IDENTITY_INSERT %s OFF`, w.qualifiedTable(table))); err != nil {
-			return err
-		}
-		identityEnabled = false
-	}
-	return tx.Commit()
+	return nil
 }
 
 // convertRow 对一行的每个值按列类型经 ValueConverter 落地为达梦形态。
