@@ -16,6 +16,7 @@ ARG BUILD_TIME=unknown
 ARG GOPROXY=https://proxy.golang.org,direct
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY third_party/dm/go.mod third_party/dm/go.sum ./third_party/dm/
 RUN --mount=type=cache,target=/go/pkg/mod \
     for attempt in 1 2 3; do \
       echo "Downloading Go modules (attempt ${attempt}/3, timeout 180s, GOPROXY=${GOPROXY})"; \

@@ -13,7 +13,7 @@ http://服务器IP:18089/api/health/ready
 
 ## 单目录离线包（普通账号）
 
-Linux x86_64 选 `portable-linux-amd64.tar.gz`，Linux aarch64 选 `portable-linux-arm64.tar.gz`，Windows x64 选 `portable-windows-amd64.zip`。将压缩包解压到自己可写、其他账号不能读取的目录。三个包的顶层目录都叫 `dbgold/`，程序、前端、Java 17 和神通驱动已随包提供。
+Linux x86_64 选 `portable-linux-amd64.tar.gz`，Linux aarch64 选 `portable-linux-arm64.tar.gz`，Windows x64 选 `portable-windows-amd64.zip`。将压缩包解压到自己可写、其他账号不能读取的目录。三个包的顶层目录都叫 `dbgold/`，包含程序、前端和神通 JDBC 驱动。普通账号可直接启动。只有连接神通数据库时才需要在目标机配置 Java。
 
 | 平台 | 启动 | 浏览器访问 |
 |---|---|---|
@@ -27,7 +27,6 @@ dbgold/
   dbgold 或 dbgold.exe     主程序
   start.sh 或 start.cmd    前台启动入口
   web/                    前端静态资源
-  runtime/                本平台的 Java 运行时
   lib/                    桥接 JAR、神通 JDBC 驱动与许可
   config/                 端口、密钥、管理员初始化配置
   data/                   dbgold.db，保存账号、连接和迁移历史
@@ -38,6 +37,12 @@ dbgold/
 ```
 
 路径以主程序所在目录为准。**搬移时先停机，再移动整个 `dbgold/` 目录。** 同一目录只能启动一个实例。静态站点只提供 `web/` 中的资源。
+
+### 在目标机配置神通所需的 Java
+
+原生包使用目标机的 Java 8 或更高版本，推荐 Java 17。首次使用神通时，dbgold 优先使用 `OSCAR_JAVA_BIN` 指定的可执行文件，其次使用 `JAVA_HOME` 下的 `bin/java`（Windows 为 `bin/java.exe`），最后在启动账号的 `PATH` 中查找。显式指定的路径无效时，神通连接会提示修正该路径。dbgold 的启动、登录、升级和其他数据库功能均无需 Java。
+
+可在单目录包的 `config/dbgold.env` 中按目标机的实际安装位置填写一行。例如 Linux 使用 `OSCAR_JAVA_BIN=/opt/jdk-17/bin/java`，Windows 使用 `OSCAR_JAVA_BIN="C:/Program Files/Java/jdk-17/bin/java.exe"`。修改配置或系统环境变量后，重新启动 dbgold，再执行神通连接测试。
 
 ### 单目录包升级
 
@@ -56,15 +61,17 @@ dbgold/
 
 升级器校验新包，在旧目录的 `backups/` 下建立冷备份，然后替换程序和资源，启动目标程序验活。成功后从原目录启动。若验活失败，升级器从同一份备份恢复旧程序及数据；若升级进程被意外中断，从新包重新执行原命令，先恢复快照。旧备份和临时文件不递归进入快照。
 
+从旧版升级时，原有 `runtime/` 目录保留在原位。要继续使用其中的 Java，请将 `OSCAR_JAVA_BIN` 显式指向该目录里的可执行文件。
+
 ### 构建与目标机验收
 
 ```sh
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh --portable v1.2.3
 ```
 
-构建机使用 Go 1.25.5、Node/npm、JDK 和归档工具，可下载依赖及各平台已锁定 SHA-256 的 Temurin 运行时。输出在 `release/portable/v1.2.3/`，包含三个压缩包、`SHA256SUMS` 和版本清单。每个压缩包另含文件级 `manifest.sha256`。发布前须确认神通 JDBC 再分发许可，并提供 `third_party/oscar/LICENSE` 与指定校验值的驱动。
+构建机使用 Go 1.25.5、Node/npm、JDK 和归档工具。JDK 用于编译和验证随包发布的桥接 JAR。输出在 `release/portable/v1.2.3/`，包含三个压缩包、`SHA256SUMS` 和版本清单。每个压缩包另含文件级 `manifest.sha256`。发布前须确认神通 JDBC 再分发许可，并提供 `third_party/oscar/LICENSE` 与指定校验值的驱动。
 
-可在目标系统用普通账号运行 `python3 deploy/tests/smoke_portable.py <刚解压的dbgold目录>`。脚本使用临时副本，验证内置 Java 加载神通驱动、启动登录、附件路径、整目录搬移、端口冲突触发的回退，以及升级后的历史记录，需本机端口 18089 可用。现场验收时，用包内 Java 连接实际神通测试库，迁移一张含主键及中文文本的小表，核对目标行数和字段值，并记录操作系统版本与 CPU 架构。
+可在目标系统用普通账号运行 `python3 deploy/tests/smoke_portable.py <刚解压的dbgold目录>`。脚本在临时副本中验证启动登录、附件路径、整目录搬移、端口冲突回退及升级后的历史记录，需本机端口 18089 可用。配置好系统 Java 后，加 `--check-oscar-java` 可验证 dbgold 能启动外部 Java 并加载神通驱动。现场验收时，连接实际神通测试库并迁移一张含主键及中文文本的小表，核对目标行数和字段值。
 
 ## 本地开发
 
@@ -129,7 +136,7 @@ GO_BIN=/path/to/go ./deploy.sh -h 192.168.1.10 -u root -p 'secret' -j /usr/lib/j
 
 ## 生成离线发布包
 
-开发机需要 Go 1.25.5、Node/npm、Docker Buildx、zip、tar。版本化发布默认要求 Git 工作区干净：
+开发机需要 Go 1.25.5、Node/npm、JDK、Docker Buildx、zip、tar。版本化发布默认要求 Git 工作区干净：
 
 ```bash
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh v1.2.3
@@ -155,7 +162,7 @@ GOPROXY=https://goproxy.cn,direct GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./releas
 
 ## Linux 安装
 
-目标服务器只需要已启动且可访问的 Docker Engine。选择与 `uname -m` 对应的发布包，解压并进入生成的目录后执行：
+目标服务器只需要已启动且可访问的 Docker Engine。Docker 镜像包含神通所需的 Java，宿主机无需单独配置。选择与 `uname -m` 对应的发布包，解压并进入生成的目录后执行：
 
 ```bash
 tar -xzf dbgold-v1.2.3-linux-amd64.tar.gz
@@ -229,6 +236,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 程序安装到 `C:\Program Files\dbgold`，数据保存到 `C:\ProgramData\dbgold`，并以低权限账户注册为自动启动的 Windows 服务。安装程序添加仅允许 Domain/Private 本地子网访问该程序的防火墙规则。
+
+Windows 服务包也使用目标机 Java。使用神通时，建议在 `C:\ProgramData\dbgold\config\dbgold.env` 中填写 `OSCAR_JAVA_BIN="C:/Program Files/Java/jdk-17/bin/java.exe"`，替换为实际绝对路径，确保服务账户 `LocalService` 有读取和执行权限，再重启服务。通过环境变量配置时，使用该服务进程可见的系统变量。
 
 修改端口：
 

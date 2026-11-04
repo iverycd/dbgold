@@ -29,6 +29,8 @@ type upgradeState struct {
 	Backup         string
 	Token          string
 	SnapshotSHA256 string
+	// Markers from releases that installed a JRE have no KeepRuntime field.
+	KeepRuntime bool `json:",omitempty"`
 }
 
 func portableProgramFiles() []string {
@@ -36,7 +38,7 @@ func portableProgramFiles() []string {
 	if runtime.GOOS == "windows" {
 		binary, launcher = "dbgold.exe", "start.cmd"
 	}
-	return []string{binary, launcher, "web", "runtime", "lib", "VERSION", "release-manifest.json", "manifest.sha256"}
+	return []string{binary, launcher, "web", "lib", "VERSION", "release-manifest.json", "manifest.sha256"}
 }
 
 func runPortableUpgradeCommand(args []string) error {
@@ -230,6 +232,15 @@ func takePortableSnapshot(root string) (string, error) {
 		switch strings.ToLower(name) {
 		case "backups", "tmp", ".dbgold.lock", upgradeMarker:
 			continue
+		case "runtime":
+			bundled, err := snapshotBundledRuntime(root, name)
+			if err != nil {
+				os.RemoveAll(dest)
+				return "", err
+			}
+			if !bundled {
+				continue
+			}
 		}
 		if err := copyUpgradeTree(filepath.Join(root, name), filepath.Join(dest, name)); err != nil {
 			os.RemoveAll(dest)
@@ -239,13 +250,42 @@ func takePortableSnapshot(root string) (string, error) {
 	return dest, nil
 }
 
+// Previous releases listed the bundled, link-free JRE in their file manifest.
+// Leave independently installed runtimes (including links to a system JDK)
+// in place without walking into or copying them.
+func snapshotBundledRuntime(root, name string) (bool, error) {
+	manifest, err := os.ReadFile(filepath.Join(root, "manifest.sha256"))
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(manifest), "\n") {
+		_, path, ok := strings.Cut(line, "  ")
+		if !ok || !strings.HasPrefix(path, "runtime/") {
+			continue
+		}
+		regularTree := true
+		err := filepath.WalkDir(filepath.Join(root, name), func(_ string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() && !entry.Type().IsRegular() {
+				regularTree = false
+				return fs.SkipAll
+			}
+			return nil
+		})
+		return regularTree, err
+	}
+	return false, nil
+}
+
 func sealPortableSnapshot(snapshot string) (upgradeState, error) {
 	for _, name := range append(portableProgramFiles(), "config/dbgold.env", "web/index.html") {
 		info, err := os.Lstat(filepath.Join(snapshot, name))
 		if err != nil {
 			return upgradeState{}, err
 		}
-		wantDir := name == "web" || name == "runtime" || name == "lib"
+		wantDir := name == "web" || name == "lib"
 		if wantDir != info.IsDir() || !wantDir && !info.Mode().IsRegular() {
 			return upgradeState{}, fmt.Errorf("invalid portable backup entry: %s", name)
 		}
@@ -254,7 +294,7 @@ func sealPortableSnapshot(snapshot string) (upgradeState, error) {
 	if err != nil {
 		return upgradeState{}, err
 	}
-	return upgradeState{Backup: filepath.Base(snapshot), Token: rand.Text(), SnapshotSHA256: checksum}, nil
+	return upgradeState{Backup: filepath.Base(snapshot), Token: rand.Text(), SnapshotSHA256: checksum, KeepRuntime: true}, nil
 }
 
 // Record the complete cold tree, including empty directories and file lengths.
@@ -384,7 +424,12 @@ func restorePortable(root string, state upgradeState) error {
 	if checksum != state.SnapshotSHA256 {
 		return fmt.Errorf("cold backup is incomplete or has changed: %s", snapshot)
 	}
-	for _, name := range append(portableProgramFiles(), "config", "data", "uploads", "logs") {
+	restore := append(portableProgramFiles(), "config", "data", "uploads", "logs")
+	if !state.KeepRuntime {
+		// An interrupted old updater may have already replaced or removed the JRE.
+		restore = append(restore, "runtime")
+	}
+	for _, name := range restore {
 		src, dst := filepath.Join(snapshot, name), filepath.Join(root, name)
 		_, err := os.Lstat(src)
 		if err != nil && !os.IsNotExist(err) {
@@ -399,7 +444,42 @@ func restorePortable(root string, state upgradeState) error {
 			}
 		}
 	}
+	if state.KeepRuntime {
+		if err := recoverMissingRuntime(root, snapshot); err != nil {
+			return err
+		}
+	}
 	return os.Remove(filepath.Join(root, upgradeMarker))
+}
+
+// A current updater leaves an existing local runtime untouched. If the whole
+// legacy JRE disappeared, restore the cold copy without leaving a partial JRE
+// that a later recovery might mistake for the operator's installation.
+func recoverMissingRuntime(root, snapshot string) error {
+	dest := filepath.Join(root, "runtime")
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		return err
+	}
+	src := filepath.Join(snapshot, "runtime")
+	if _, err := os.Stat(src); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	stage, err := os.MkdirTemp(filepath.Join(root, "backups"), ".restore-runtime-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	staged := filepath.Join(stage, "runtime")
+	if err := copyUpgradeTree(src, staged); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(staged, dest)
 }
 
 func probeInstalledPortable(root string, state upgradeState) error {

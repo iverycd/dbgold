@@ -30,7 +30,7 @@ type Config struct {
 	QueryTimeoutSeconds     int    // 查询中心单语句超时，默认 30 秒
 	QueryMaxRows            int    // 查询中心最大返回行数，默认 1000
 	QueryAuditRetentionDays int    // 查询中心审计保留天数，默认 90 天
-	OscarJavaBin            string // Oscar JDBC Java 可执行文件；空值时自动查找内置 runtime 或 PATH
+	OscarJavaBin            string // Oscar JDBC Java 可执行文件；空值时查找 JAVA_HOME 和 PATH
 	OscarJDBCJar            string // Oscar JDBC 驱动路径；空值时使用内置 lib/oscarJDBC8.jar
 	OscarBridgeJar          string // 内部 JDBC bridge jar；主要供开发/测试覆盖
 	OscarLoginTimeoutMS     int

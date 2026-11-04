@@ -2,16 +2,6 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORTABLE=0
-if [[ "${1:-}" == "--portable" ]]; then
-  PORTABLE=1
-  shift
-fi
-if [[ $# != 1 ]]; then
-  printf 'Usage: %s [--portable] <version>\n' "$0" >&2
-  exit 2
-fi
-VERSION="${1:-}"
 BUILDER_NAME="${BUILDX_BUILDER:-dbgold-release}"
 GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 KEEP_WORK_DIR="${KEEP_WORK_DIR:-0}"
@@ -51,9 +41,6 @@ cleanup() {
   fi
 }
 
-trap 'on_error "$LINENO" "$BASH_COMMAND" "$?"' ERR
-trap cleanup EXIT
-
 run_stage() {
   local stage_name="$1"
   shift
@@ -87,7 +74,7 @@ preflight() {
   fi
 
   local command_name
-  for command_name in npm node zip unzip tar shasum git find sort awk sed file curl javac jar java; do
+  for command_name in npm node zip unzip tar shasum git find sort awk sed file javac jar java; do
     require_command "$command_name"
   done
 
@@ -107,7 +94,6 @@ preflight() {
   if (( PORTABLE )); then
     FINAL_OUTPUT_DIR="$ROOT_DIR/release/portable/$VERSION"
     require_command cmp
-    require_command realpath
   fi
   if [[ -e "$FINAL_OUTPUT_DIR" ]]; then
     printf 'Release output already exists: %s\n' "$FINAL_OUTPUT_DIR" >&2
@@ -238,8 +224,7 @@ package_windows() {
   cp -R "$ROOT_DIR/frontend/dist/." "$package_dir/web/"
   cp "$ROOT_DIR/deploy/windows/dbgold.env.example" "$ROOT_DIR/deploy/windows/"*.ps1 "$package_dir/"
   cp "$ROOT_DIR/README.md" "$package_dir/README.md"
-  mkdir -p "$package_dir/runtime" "$package_dir/lib"
-  cp -R "$WORK_DIR/runtime-windows-amd64/." "$package_dir/runtime/"
+  mkdir -p "$package_dir/lib"
   cp "$ROOT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.jar" "$package_dir/lib/"
   cp "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" "$package_dir/lib/"
   cp "$ROOT_DIR/third_party/oscar/README.md" "$package_dir/lib/OSCAR-JDBC-NOTICE.md"
@@ -270,7 +255,7 @@ write_release_metadata() {
 }
 
 validate_artifacts() {
-  local arch package_name archive image_manifest config_path image_config file_output
+  local arch package_name archive image_manifest config_path image_config
   for arch in amd64 arm64; do
     package_name="dbgold-$VERSION-linux-$arch"
     archive="$OUTPUT_DIR/$package_name.tar.gz"
@@ -284,19 +269,26 @@ validate_artifacts() {
     [[ "$image_config" == *"\"architecture\":\"$arch\""* ]]
   done
 
-  package_name="dbgold-$VERSION-windows-amd64"
-  archive="$OUTPUT_DIR/$package_name.zip"
-  (cd "$WORK_DIR/$package_name" && shasum -a 256 -c manifest.sha256)
-  unzip -tq "$archive" >/dev/null
-  unzip -Z1 "$archive" | awk -v expected="$package_name/dbgold.exe" '$0 == expected { found = 1 } END { exit !found }'
-  file_output="$(file "$WORK_DIR/$package_name/dbgold.exe")"
-  [[ "$file_output" == *"PE32+"* && "$file_output" == *"x86-64"* ]]
-  [[ -f "$WORK_DIR/$package_name/runtime/bin/java.exe" ]]
-  [[ -f "$WORK_DIR/$package_name/lib/dbgold-oscar-bridge.jar" ]]
-  [[ "$(shasum -a 256 "$WORK_DIR/$package_name/lib/oscarJDBC8.jar" | awk '{print $1}')" == "$OSCAR_JDBC_SHA256" ]]
-
+  validate_windows_archive
   (cd "$OUTPUT_DIR" && shasum -a 256 -c SHA256SUMS)
   [[ -s "$OUTPUT_DIR/release-manifest.json" ]]
+}
+
+validate_windows_archive() {
+  local name="dbgold-$VERSION-windows-amd64" unpacked="$WORK_DIR/checked-windows-service"
+  local pkg="$unpacked/$name" path
+  mkdir -p "$unpacked"
+  unzip -q "$OUTPUT_DIR/$name.zip" -d "$unpacked"
+  [[ "$(ls -A "$unpacked")" == "$name" && -d "$pkg" ]]
+  check_no_bundled_java "$pkg" || return 1
+  for path in dbgold.exe web/index.html {install,upgrade,backup,restore,set-port,uninstall}.ps1 dbgold.env.example \
+      lib/{dbgold-oscar-bridge.jar,oscarJDBC8.jar,OSCAR-JDBC-NOTICE.md,OSCAR-JDBC-LICENSE} VERSION release-manifest.json manifest.sha256; do
+    [[ -s "$pkg/$path" ]] || { printf 'Missing %s in %s\n' "$path" "$name" >&2; return 1; }
+  done
+  check_binary_target windows-amd64 "$pkg/dbgold.exe"
+  [[ "$(shasum -a 256 "$pkg/lib/oscarJDBC8.jar" | awk '{print $1}')" == "$OSCAR_JDBC_SHA256" ]]
+  (cd "$pkg" && shasum -a 256 -c manifest.sha256 >/dev/null)
+  rm -rf -- "$unpacked"
 }
 
 publish_artifacts() {
@@ -304,6 +296,17 @@ publish_artifacts() {
   mv "$OUTPUT_DIR" "$FINAL_OUTPUT_DIR"
 }
 
+# Archive tests source the builders and validators without starting a full release.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return; fi
+PORTABLE=0
+if [[ "${1:-}" == "--portable" ]]; then PORTABLE=1; shift; fi
+if [[ $# != 1 ]]; then
+  printf 'Usage: %s [--portable] <version>\n' "$0" >&2
+  exit 2
+fi
+VERSION="$1"
+trap 'on_error "$LINENO" "$BASH_COMMAND" "$?"' ERR
+trap cleanup EXIT
 run_stage "Preflight checks" preflight
 run_stage "Prepare temporary workspace" prepare_workspace
 run_stage "Frontend install, security audit, and build" build_frontend
@@ -314,7 +317,6 @@ if (( PORTABLE )); then
     run_stage "Portable $target package" build_portable_package "${target%-*}" "${target#*-}"
   done
 else
-  run_stage "Pinned Windows Java runtime" prepare_runtime windows amd64
   run_stage "Windows amd64 build" build_windows
   run_stage "Linux amd64 image and package" build_linux_package amd64
   run_stage "Linux arm64 image and package" build_linux_package arm64

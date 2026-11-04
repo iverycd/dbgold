@@ -133,7 +133,7 @@ func preparePortableRuntime(root string) error {
 		}
 	}
 	tmp := filepath.Join(root, "tmp")
-	// os.TempDir, SQLite and the bundled JVM use different environment keys.
+	// os.TempDir, SQLite and the Oscar JVM use different environment keys.
 	for _, key := range []string{"TMPDIR", "TEMP", "TMP", "SQLITE_TMPDIR"} {
 		if err := os.Setenv(key, tmp); err != nil {
 			return err
@@ -165,7 +165,7 @@ func initPortableConfig(root string) error {
 	}
 	defer os.Remove(file.Name())
 	pass := hex.EncodeToString(password[:])
-	_, writeErr := fmt.Fprintf(file, "# dbgold portable\nLISTEN_HOST=%s\nPORT=18089\nJWT_SECRET=%x\nADMIN_USER=admin\nADMIN_PASS=%s\n", portableDefaultHost(), secret, pass)
+	_, writeErr := fmt.Fprintf(file, "# dbgold portable\nLISTEN_HOST=%s\nPORT=18089\nJWT_SECRET=%x\nADMIN_USER=admin\nADMIN_PASS=%s\n# 神通 JDBC 可指定 Java 8+ 可执行文件，留空时使用主机环境。\nOSCAR_JAVA_BIN=\n", portableDefaultHost(), secret, pass)
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -196,11 +196,6 @@ func loadPortableConfig(root string) (*config.Config, error) {
 	cfg.UploadDir = "uploads"
 	cfg.LogDir = filepath.Join(root, "logs")
 	cfg.OscarTempDir = filepath.Join(root, "tmp")
-	java := "java"
-	if runtime.GOOS == "windows" {
-		java = "java.exe"
-	}
-	cfg.OscarJavaBin = filepath.Join(root, "runtime", "bin", java)
 	cfg.OscarBridgeJar = filepath.Join(root, "lib", "dbgold-oscar-bridge.jar")
 	cfg.OscarJDBCJar = filepath.Join(root, "lib", "oscarJDBC8.jar")
 	if err := cfg.Validate(); err != nil {

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Test the three archive formats without downloading runtimes or redistributing vendor files.
+# Verify all four native archives without downloading runtimes or redistributing vendor files.
 set -Eeuo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
-source "$repo/deploy/portable/package.sh"
+source "$repo/release.sh"
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 ROOT_DIR="$scratch/fixture repo"
@@ -15,6 +15,8 @@ BUILD_TIME=2026-11-04T00:00:00Z
 LDFLAGS="-s -w"
 GO_BIN="${GO_BIN:-go}"
 mkdir -p "$ROOT_DIR"/{deploy/portable,frontend/dist,jdbcbridge/java/build,third_party/oscar} "$WORK_DIR" "$OUTPUT_DIR"
+cp -R "$repo/deploy/windows" "$ROOT_DIR/deploy/"
+printf 'Release test\n' > "$ROOT_DIR/README.md"
 printf 'module fixture\n\ngo 1.21\n' > "$ROOT_DIR/go.mod"
 printf 'package main\nfunc main() {}\n' > "$ROOT_DIR/main.go"
 printf 'start test\n' | tee "$ROOT_DIR/deploy/portable/start.sh" > "$ROOT_DIR/deploy/portable/start.cmd"
@@ -23,30 +25,26 @@ printf 'bridge fixture' > "$ROOT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.j
 for f in README.md LICENSE oscarJDBC8.jar; do printf 'test fixture' > "$ROOT_DIR/third_party/oscar/$f"; done
 OSCAR_JDBC_SHA256="$(shasum -a 256 "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" | awk '{print $1}')"
 
-# Never accept an unverified Java archive, even if the URL resolves successfully.
-(curl() { printf corrupt > "${6}"; }; prepare_runtime linux amd64) && {
-  echo "Corrupt runtime was accepted" >&2; exit 1
-}
-
-if [[ -n "${TEST_TEMURIN_CACHE:-}" ]]; then
-  # Exercise real vendor archive extraction and checksum validation using a local download.
-  curl() { cp "$TEST_TEMURIN_CACHE/${7##*/}" "$6"; }
-else
-  # Reuse the cross-compiled fixture executable as a stand-in for the Java launcher.
-  prepare_runtime() {
-    local target="$1-$2" suffix=""
-    if [[ "$1" == windows ]]; then suffix=.exe; fi
-    mkdir -p "$WORK_DIR/runtime-$target/bin"
-    cp "$WORK_DIR/portable-$target/dbgold/dbgold$suffix" "$WORK_DIR/runtime-$target/bin/java$suffix"
-  }
-fi
+curl() { echo 'Unexpected release download' >&2; return 1; }
 
 for target in linux-amd64 linux-arm64 windows-amd64; do
   build_portable_package "${target%-*}" "${target#*-}"
   validate_portable_archive "${target%-*}" "${target#*-}"
 done
-if check_binary_target linux-arm64 "$WORK_DIR/portable-linux-amd64/dbgold/runtime/bin/java"; then
-  echo "Wrong Java architecture was accepted" >&2; exit 1
+if check_binary_target linux-arm64 "$WORK_DIR/portable-linux-amd64/dbgold/dbgold"; then
+  echo "Wrong application architecture was accepted" >&2; exit 1
+fi
+build_windows
+package_windows
+validate_windows_archive
+
+# Reject an accidental return of the bundled JVM in the Windows service ZIP.
+name="dbgold-$VERSION-windows-amd64"
+mkdir -p "$WORK_DIR/$name/runtime/bin"
+printf 'unexpected runtime' > "$WORK_DIR/$name/runtime/bin/java.exe"
+(cd "$WORK_DIR" && zip -qr "$OUTPUT_DIR/$name.zip" "$name/runtime")
+if validate_windows_archive; then
+  echo "Windows archive containing a runtime was accepted" >&2; exit 1
 fi
 
 # Simulate a damaged download of the application.
@@ -58,4 +56,4 @@ export WORK_DIR OUTPUT_DIR VERSION OSCAR_JDBC_SHA256
 if bash -ec 'source "$1"; validate_portable_archive linux amd64' bash "$repo/deploy/portable/package.sh"; then
   echo "Corrupt archive was accepted" >&2; exit 1
 fi
-echo "Portable release package checks passed"
+echo "Portable and Windows service release package checks passed"

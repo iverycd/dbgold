@@ -61,11 +61,17 @@ type response struct {
 	err  error
 }
 
+type bridgeStartup struct {
+	done chan struct{}
+	err  error
+}
+
 // Manager owns the single lazy JVM bridge process used by all Oscar sessions.
 type Manager struct {
 	cfg Config
 
 	processMu  sync.Mutex
+	starting   *bridgeStartup
 	cmd        *exec.Cmd
 	stdin      io.WriteCloser
 	stdout     io.ReadCloser
@@ -131,26 +137,41 @@ func firstExisting(candidates ...string) string {
 	return ""
 }
 
+func resolveJava(configured string) (string, error) {
+	name := strings.TrimSpace(configured)
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv("OSCAR_JAVA_BIN"))
+	}
+	if name != "" {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			return "", fmt.Errorf("神通 JDBC 需要 Java 8 或更高版本，OSCAR_JAVA_BIN=%q 不可执行: %w", name, err)
+		}
+		return path, nil
+	}
+
+	name = "java"
+	if runtime.GOOS == "windows" {
+		name = "java.exe"
+	}
+	home := strings.TrimSpace(os.Getenv("JAVA_HOME"))
+	if home != "" {
+		if path, err := exec.LookPath(filepath.Join(home, "bin", name)); err == nil {
+			return path, nil
+		}
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("神通 JDBC 需要 Java 8 或更高版本，JAVA_HOME=%q 和 PATH 中均未找到 %s，请设置 OSCAR_JAVA_BIN: %w", home, name, err)
+	}
+	return path, nil
+}
+
 func (m *Manager) resolvePaths() (javaBin, bridgeJar, jdbcJar string, err error) {
 	exeDir := executableDir()
-	javaBin = strings.TrimSpace(m.cfg.JavaBin)
-	if javaBin != "" {
-		if p, lookErr := exec.LookPath(javaBin); lookErr == nil {
-			javaBin = p
-		} else if _, statErr := os.Stat(javaBin); statErr != nil {
-			return "", "", "", fmt.Errorf("Oscar JDBC runtime unavailable: OSCAR_JAVA_BIN %q: %w", javaBin, statErr)
-		}
-	} else {
-		name := "java"
-		bundled := filepath.Join(exeDir, "runtime", "bin", name)
-		if runtime.GOOS == "windows" {
-			bundled += ".exe"
-		}
-		if firstExisting(bundled) != "" {
-			javaBin = bundled
-		} else if p, lookErr := exec.LookPath("java"); lookErr == nil {
-			javaBin = p
-		}
+	javaBin, err = resolveJava(m.cfg.JavaBin)
+	if err != nil {
+		return "", "", "", err
 	}
 	bridgeJar = strings.TrimSpace(m.cfg.BridgeJar)
 	if bridgeJar != "" {
@@ -175,9 +196,6 @@ func (m *Manager) resolvePaths() (javaBin, bridgeJar, jdbcJar string, err error)
 		)
 	}
 	var missing []string
-	if javaBin == "" {
-		missing = append(missing, "Java executable (OSCAR_JAVA_BIN or bundled runtime/bin/java)")
-	}
 	if bridgeJar == "" {
 		missing = append(missing, "dbgold-oscar-bridge.jar")
 	}
@@ -190,12 +208,35 @@ func (m *Manager) resolvePaths() (javaBin, bridgeJar, jdbcJar string, err error)
 	return javaBin, bridgeJar, jdbcJar, nil
 }
 
-func (m *Manager) ensureStarted(ctx context.Context) error {
+func (m *Manager) ensureStarted(ctx context.Context) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.processMu.Lock()
+	if starting := m.starting; starting != nil {
+		m.processMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-starting.done:
+			return starting.err
+		}
+	}
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.processMu.Unlock()
 		return nil
 	}
+	// Concurrent callers share this handshake and its diagnostics. A later
+	// operation can retry if the customer has corrected their Java setup.
+	starting := &bridgeStartup{done: make(chan struct{})}
+	m.starting = starting
+	defer func() {
+		m.processMu.Lock()
+		starting.err = err
+		m.starting = nil
+		close(starting.done)
+		m.processMu.Unlock()
+	}()
 	javaBin, bridgeJar, jdbcJar, err := m.resolvePaths()
 	if err != nil {
 		m.processMu.Unlock()
@@ -204,7 +245,7 @@ func (m *Manager) ensureStarted(ctx context.Context) error {
 	classpath := bridgeJar + string(os.PathListSeparator) + jdbcJar
 	args := []string{fmt.Sprintf("-Xmx%dm", m.cfg.MaxHeapMB)}
 	if m.cfg.TempDir != "" {
-		args = append(args, "-Djava.io.tmpdir="+m.cfg.TempDir, "-XX:-UsePerfData")
+		args = append(args, "-Djava.io.tmpdir="+m.cfg.TempDir, "-XX:+IgnoreUnrecognizedVMOptions", "-XX:-UsePerfData")
 	}
 	args = append(args, "-cp", classpath, "com.dbgold.oscar.BridgeMain")
 	cmd := exec.Command(javaBin, args...)
@@ -225,16 +266,26 @@ func (m *Manager) ensureStarted(ctx context.Context) error {
 	}
 	if err := cmd.Start(); err != nil {
 		m.processMu.Unlock()
-		return fmt.Errorf("start Oscar JDBC bridge with %s: %w", javaBin, err)
+		return fmt.Errorf("无法启动神通 JDBC，请检查 %q 是否为本机可运行的 Java 8 或更高版本: %w", javaBin, err)
 	}
 	m.cmd, m.stdin, m.stdout = cmd, stdin, stdout
 	m.generation++
 	gen := m.generation
 	m.processMu.Unlock()
 
-	go m.readLoop(gen, stdout)
-	go m.stderrLoop(stderr)
+	stdoutDone := make(chan struct{})
 	go func() {
+		defer close(stdoutDone)
+		m.readLoop(gen, stdout)
+	}()
+	stderrDone := make(chan struct{})
+	reaped := make(chan struct{})
+	var diagnostic string
+	go func() {
+		defer close(reaped)
+		diagnostic = readBridgeStderr(stderr)
+		close(stderrDone)
+		<-stdoutDone // Wait closes the pipes, including any pending final response.
 		err := cmd.Wait()
 		m.processDied(gen, fmt.Errorf("Oscar JDBC bridge exited: %w", err))
 	}()
@@ -242,33 +293,61 @@ func (m *Manager) ensureStarted(ctx context.Context) error {
 	helloCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	body, err := m.requestStarted(helloCtx, opHello, nil)
+	var driverVersion string
+	if err == nil {
+		driverVersion, err = decodeDriverVersion(body)
+	}
 	if err != nil {
-		_ = m.stopProcess(gen)
-		return fmt.Errorf("Oscar JDBC bridge handshake failed: %w", err)
+		_ = cmd.Process.Kill()
+		m.processDied(gen, err)
+		// A Java launcher may have left children holding the pipes. Give stderr
+		// time to drain, then unblock both readers so Wait can reap the launcher.
+		select {
+		case <-stderrDone:
+		case <-time.After(time.Second):
+		}
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		<-reaped
+		return fmt.Errorf("神通 JDBC 握手失败，请确认 %q 是 Java 8 或更高版本且能加载神通驱动: %w%s", javaBin, err, diagnostic)
 	}
-	d := newDecoder(body)
-	driverClass, decodeErr := d.string()
-	if decodeErr != nil || driverClass != "com.oscar.Driver" {
-		_ = m.stopProcess(gen)
-		return fmt.Errorf("Oscar JDBC bridge handshake returned invalid driver metadata")
-	}
-	driverVersion, decodeErr := d.string()
-	if decodeErr != nil || strings.TrimSpace(driverVersion) == "" {
-		_ = m.stopProcess(gen)
-		return fmt.Errorf("Oscar JDBC bridge handshake did not return a driver version")
-	}
-	slog.Info("Oscar JDBC bridge started", "driver", driverClass, "version", driverVersion)
+	slog.Info("Oscar JDBC bridge started", "driver", "com.oscar.Driver", "version", driverVersion)
 	return nil
 }
 
-func (m *Manager) stderrLoop(r io.Reader) {
+func decodeDriverVersion(body []byte) (string, error) {
+	d := newDecoder(body)
+	driverClass, err := d.string()
+	if err != nil || driverClass != "com.oscar.Driver" {
+		return "", errors.New("Oscar JDBC bridge handshake returned invalid driver metadata")
+	}
+	driverVersion, err := d.string()
+	if err != nil || strings.TrimSpace(driverVersion) == "" {
+		return "", errors.New("Oscar JDBC bridge handshake did not return a driver version")
+	}
+	return driverVersion, nil
+}
+
+func readBridgeStderr(r io.Reader) string {
 	scanner := bufio.NewScanner(r)
+	var detail strings.Builder
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			slog.Warn("Oscar JDBC bridge", "message", line)
+		// JVM option notices may include environment secrets.
+		if line == "" || strings.Contains(line, "OPTIONS:") {
+			continue
+		}
+		slog.Warn("Oscar JDBC bridge", "message", line)
+		if detail.Len() < 2048 {
+			detail.WriteString("\n")
+			detail.WriteString(line[:min(len(line), 2048-detail.Len())])
 		}
 	}
+	if scanner.Err() != nil {
+		_, _ = io.Copy(io.Discard, r)
+	}
+	return detail.String()
 }
 
 func (m *Manager) readLoop(gen uint64, r io.Reader) {
@@ -338,8 +417,8 @@ func (m *Manager) processDied(gen uint64, cause error) {
 		return
 	}
 	m.cmd, m.stdin, m.stdout = nil, nil, nil
-	m.processMu.Unlock()
 	m.failPending(fmt.Errorf("Oscar JDBC bridge unavailable: %w", cause))
+	m.processMu.Unlock()
 }
 
 func (m *Manager) failPending(err error) {

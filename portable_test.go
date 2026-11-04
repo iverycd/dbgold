@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -79,6 +80,26 @@ func TestPortableMissingConfigWithExistingDatabase(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "data", "dbgold.db"), []byte("old"), 0o600))
 	require.ErrorContains(t, initPortableConfig(root), "从备份恢复配置")
 	require.NoFileExists(t, filepath.Join(root, "config", "dbgold.env"))
+}
+
+func TestPortableJavaSetting(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "config"), 0o700))
+	t.Setenv("OSCAR_JAVA_BIN", "different-host-java")
+	require.NoError(t, initPortableConfig(root))
+	cfg, err := loadPortableConfig(root)
+	require.NoError(t, err)
+	require.Empty(t, cfg.OscarJavaBin) // Manager resolves host Java lazily.
+
+	file := filepath.Join(root, "config", "dbgold.env")
+	data, err := os.ReadFile(file)
+	require.NoError(t, err)
+	value := filepath.ToSlash(filepath.Join(root, "主机 Java", "bin", "java"))
+	data = bytes.Replace(data, []byte("OSCAR_JAVA_BIN=\n"), []byte("OSCAR_JAVA_BIN='"+value+"'\n"), 1)
+	require.NoError(t, os.WriteFile(file, data, 0o600))
+	cfg, err = loadPortableConfig(root)
+	require.NoError(t, err) // Only an Oscar operation needs this executable to exist.
+	require.Equal(t, value, cfg.OscarJavaBin)
 }
 
 func TestPortableRootLock(t *testing.T) {

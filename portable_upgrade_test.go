@@ -23,7 +23,7 @@ func writeUpgradeFixtureFile(t *testing.T, root, name, content string) {
 func makeUpgradePackage(t *testing.T, root, version string) {
 	t.Helper()
 	program := portableProgramFiles()
-	for _, name := range []string{program[0], program[1], "web/index.html", "runtime/bin/java", "lib/oscar.jar", "VERSION"} {
+	for _, name := range []string{program[0], program[1], "web/index.html", "lib/oscar.jar", "VERSION"} {
 		writeUpgradeFixtureFile(t, root, name, version)
 	}
 	writeUpgradeFixtureFile(t, root, "release-manifest.json",
@@ -40,6 +40,17 @@ func makeUpgradePackage(t *testing.T, root, version string) {
 		return err
 	}))
 	writeUpgradeFixtureFile(t, root, "manifest.sha256", hashes.String())
+}
+
+func addLegacyRuntime(t *testing.T, root string) {
+	t.Helper()
+	const content = "bundled java"
+	writeUpgradeFixtureFile(t, root, "runtime/bin/java", content)
+	manifest := filepath.Join(root, "manifest.sha256")
+	original, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	manifestBytes := fmt.Appendf(original, "%x  runtime/bin/java\n", sha256.Sum256([]byte(content)))
+	require.NoError(t, os.WriteFile(manifest, manifestBytes, 0o600))
 }
 
 func setupUpgradeTest(t *testing.T) (string, string) {
@@ -84,6 +95,7 @@ func TestPortableUpgrade(t *testing.T) {
 				return nil
 			})
 			require.NotEmpty(t, backup)
+			require.NoDirExists(t, filepath.Join(target, "runtime"))
 			require.NoFileExists(t, filepath.Join(target, upgradeMarker))
 			requireUpgradeFile(t, target, "config/dbgold.env", "original")
 			requireUpgradeFile(t, target, "uploads/nested/test.db", "original")
@@ -103,6 +115,84 @@ func TestPortableUpgrade(t *testing.T) {
 	}
 }
 
+func TestPortableUpgradeKeepsLegacyOrLocalRuntime(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		for _, fail := range []bool{true, false} {
+			t.Run(fmt.Sprintf("legacy=%v/fail=%v", legacy, fail), func(t *testing.T) {
+				source, target := setupUpgradeTest(t)
+				if legacy {
+					addLegacyRuntime(t, target)
+				}
+				writeUpgradeFixtureFile(t, target, "runtime/local settings", "custom")
+				info, err := os.Stat(filepath.Join(target, "runtime/local settings"))
+				require.NoError(t, err)
+				err = upgradePortable(source, target, func(root string, state upgradeState) error {
+					requireUpgradeFile(t, root, "runtime/local settings", "custom")
+					snapshot := filepath.Join(root, "backups", state.Backup)
+					if legacy {
+						requireUpgradeFile(t, snapshot, "runtime/bin/java", "bundled java")
+					} else {
+						require.NoDirExists(t, filepath.Join(snapshot, "runtime"))
+					}
+					if fail {
+						return os.ErrInvalid
+					}
+					return nil
+				})
+				if fail {
+					require.ErrorContains(t, err, "previous program and data restored")
+				} else {
+					require.NoError(t, err)
+				}
+				after, err := os.Stat(filepath.Join(target, "runtime/local settings"))
+				require.NoError(t, err)
+				require.True(t, os.SameFile(info, after), "upgrade must leave locally installed Java in place")
+			})
+		}
+	}
+}
+
+func TestPortableUpgradeRecoversLegacyRuntimeFromOldMarker(t *testing.T) {
+	source, target := setupUpgradeTest(t)
+	addLegacyRuntime(t, target)
+	snapshot, err := takePortableSnapshot(target)
+	require.NoError(t, err)
+	state, err := sealPortableSnapshot(snapshot)
+	require.NoError(t, err)
+	// Before external Java, the updater replaced runtime/. Its marker has no KeepRuntime.
+	state.KeepRuntime = false
+	require.NoError(t, writeUpgradeState(target, state))
+	writeUpgradeFixtureFile(t, target, "runtime/bin/java", "partially upgraded")
+	require.ErrorContains(t, upgradePortable(source, target, nil), "restored interrupted upgrade")
+	requireUpgradeFile(t, target, "runtime/bin/java", "bundled java")
+}
+
+func TestPortableUpgradeRestoresMissingBundledRuntime(t *testing.T) {
+	source, target := setupUpgradeTest(t)
+	addLegacyRuntime(t, target)
+	err := upgradePortable(source, target, func(root string, _ upgradeState) error {
+		require.NoError(t, os.RemoveAll(filepath.Join(root, "runtime")))
+		return os.ErrInvalid
+	})
+	require.ErrorContains(t, err, "previous program and data restored")
+	requireUpgradeFile(t, target, "runtime/bin/java", "bundled java")
+}
+
+func TestPortableUpgradeLeavesLinkedRuntimeAlone(t *testing.T) {
+	source, target := setupUpgradeTest(t)
+	addLegacyRuntime(t, target)
+	require.NoError(t, os.RemoveAll(filepath.Join(target, "runtime")))
+	javaHome := t.TempDir()
+	writeUpgradeFixtureFile(t, javaHome, "bin/java", "user runtime")
+	if err := os.Symlink(javaHome, filepath.Join(target, "runtime")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	require.NoError(t, upgradePortable(source, target, func(_ string, _ upgradeState) error { return nil }))
+	link, err := os.Readlink(filepath.Join(target, "runtime"))
+	require.NoError(t, err)
+	require.Equal(t, javaHome, link)
+	requireUpgradeFile(t, javaHome, "bin/java", "user runtime")
+}
 func TestPortableUpgradeRejectsBusyOrBrokenPackage(t *testing.T) {
 	source, target := setupUpgradeTest(t)
 	release, err := lockPortableRoot(target)

@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $ConfirmNoRunningTasks) { throw 'Confirm that no migration task is running with -ConfirmNoRunningTasks.' }
 $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-foreach ($required in @('dbgold.exe', 'VERSION', 'web\index.html', 'runtime\bin\java.exe', 'lib\dbgold-oscar-bridge.jar', 'lib\oscarJDBC8.jar')) {
+foreach ($required in @('dbgold.exe', 'VERSION', 'web\index.html', 'lib\dbgold-oscar-bridge.jar', 'lib\oscarJDBC8.jar')) {
     if (-not (Test-Path (Join-Path $SourceDir $required))) { throw "Release file is missing: $required" }
 }
 if (-not (Test-Path (Join-Path $SourceDir 'manifest.sha256'))) { throw 'Release checksum manifest is missing.' }
@@ -21,33 +21,32 @@ foreach ($line in Get-Content (Join-Path $SourceDir 'manifest.sha256')) {
 }
 
 $ServiceName = 'dbgold'
+if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'dbgold.exe') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $InstallDir 'web') -PathType Container)) {
+    throw "Existing dbgold installation not found at $InstallDir"
+}
 Stop-Service $ServiceName
 $backupFile = $null
 $programBackup = $null
+$backupReady = $false
+# Both a legacy bundled JRE and a user-provided runtime/ stay in place.
+$programItems = @('dbgold.exe', 'VERSION', 'web', 'lib', 'backup.ps1', 'restore.ps1', 'upgrade.ps1', 'set-port.ps1', 'uninstall.ps1')
 
 try {
     $backupFile = & (Join-Path $SourceDir 'backup.ps1') -DataRoot $DataRoot -AlreadyStopped
     $programBackup = Join-Path (Join-Path $DataRoot 'backups') ("program-{0}" -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))
-    New-Item -ItemType Directory -Path $programBackup -Force | Out-Null
-    Copy-Item (Join-Path $InstallDir 'dbgold.exe') $programBackup
-    Copy-Item (Join-Path $InstallDir 'VERSION') $programBackup -ErrorAction SilentlyContinue
-    Copy-Item (Join-Path $InstallDir 'web') $programBackup -Recurse
-    foreach ($dirName in @('runtime', 'lib')) {
-        $existing = Join-Path $InstallDir $dirName
-        if (Test-Path $existing) { Copy-Item $existing $programBackup -Recurse }
+    New-Item -ItemType Directory -Path $programBackup | Out-Null
+    foreach ($item in $programItems) {
+        $existing = Join-Path $InstallDir $item
+        if (Test-Path -LiteralPath $existing) {
+            Copy-Item -LiteralPath $existing -Destination (Join-Path $programBackup $item) -Recurse
+        }
     }
-
-    Copy-Item (Join-Path $SourceDir 'dbgold.exe') (Join-Path $InstallDir 'dbgold.exe') -Force
-    Copy-Item (Join-Path $SourceDir 'VERSION') (Join-Path $InstallDir 'VERSION') -Force
-    Remove-Item (Join-Path $InstallDir 'web') -Recurse -Force
-    Copy-Item (Join-Path $SourceDir 'web') (Join-Path $InstallDir 'web') -Recurse
-    foreach ($dirName in @('runtime', 'lib')) {
-        $destination = Join-Path $InstallDir $dirName
-        if (Test-Path $destination) { Remove-Item $destination -Recurse -Force }
-        Copy-Item (Join-Path $SourceDir $dirName) $destination -Recurse
-    }
-    foreach ($script in @('backup.ps1', 'restore.ps1', 'upgrade.ps1', 'set-port.ps1', 'uninstall.ps1')) {
-        Copy-Item (Join-Path $SourceDir $script) (Join-Path $InstallDir $script) -Force
+    $backupReady = $true
+    foreach ($item in $programItems) {
+        $destination = Join-Path $InstallDir $item
+        if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
+        Copy-Item -LiteralPath (Join-Path $SourceDir $item) -Destination $destination -Recurse
     }
     Start-Service $ServiceName
     $configFile = Join-Path $DataRoot 'config\dbgold.env'
@@ -64,19 +63,13 @@ try {
     throw 'The upgraded service failed its readiness check.'
 } catch {
     Stop-Service $ServiceName -ErrorAction SilentlyContinue
-    if ($programBackup -and (Test-Path (Join-Path $programBackup 'dbgold.exe'))) {
-        Copy-Item (Join-Path $programBackup 'dbgold.exe') (Join-Path $InstallDir 'dbgold.exe') -Force
-        Copy-Item (Join-Path $programBackup 'VERSION') (Join-Path $InstallDir 'VERSION') -Force -ErrorAction SilentlyContinue
-        if (Test-Path (Join-Path $InstallDir 'web')) { Remove-Item (Join-Path $InstallDir 'web') -Recurse -Force }
-        Copy-Item (Join-Path $programBackup 'web') (Join-Path $InstallDir 'web') -Recurse
-        foreach ($dirName in @('runtime', 'lib')) {
-            $backupDir = Join-Path $programBackup $dirName
-            $destination = Join-Path $InstallDir $dirName
-            if (Test-Path $destination) { Remove-Item $destination -Recurse -Force }
-            if (Test-Path $backupDir) { Copy-Item $backupDir $destination -Recurse }
+    if ($backupReady) {
+        foreach ($item in $programItems) {
+            $saved = Join-Path $programBackup $item
+            $destination = Join-Path $InstallDir $item
+            if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
+            if (Test-Path -LiteralPath $saved) { Copy-Item -LiteralPath $saved -Destination $destination -Recurse }
         }
-    }
-    if ($backupFile -and (Test-Path $backupFile -PathType Container)) {
         & (Join-Path $SourceDir 'restore.ps1') -Backup $backupFile -DataRoot $DataRoot -ConfirmRestore
     } else {
         Start-Service $ServiceName -ErrorAction SilentlyContinue

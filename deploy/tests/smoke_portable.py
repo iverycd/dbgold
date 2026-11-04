@@ -20,9 +20,9 @@ URL = "http://127.0.0.1:18089"
 EXE = "dbgold.exe" if os.name == "nt" else "dbgold"
 
 
-def request(path, data=None, headers=None):
+def request(path, data=None, headers=None, timeout=5):
     req = urllib.request.Request(URL + path, data=data, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=5) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return response.read()
 
 
@@ -70,7 +70,27 @@ def login(root):
     return {"Authorization": "Bearer " + token}
 
 
-def smoke(package, work):
+def check_oscar_java(root, headers):
+    # Exercise dbgold's own Java discovery and HELLO handshake without a real database.
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        conn = dict(name="oscar-java-smoke", db_type="oscar", host="127.0.0.1",
+                    port=reserved.getsockname()[1], database="fixture", username="fixture", password="fixture")
+        saved = json.loads(request("/api/connections", json.dumps(conn).encode(),
+                                   {**headers, "Content-Type": "application/json"}))
+        try:
+            request(f"/api/connections/{saved['id']}/test", b"", headers, timeout=30)
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode()
+            assert err.code == 502, detail
+        else:
+            raise AssertionError("unexpected database at the reserved test port")
+    logs = (root / "logs").glob("*.log")
+    assert any("Oscar JDBC bridge started" in log.read_text(encoding="utf-8") for log in logs), detail
+    print("External Java loaded the Oscar JDBC driver.")
+
+
+def smoke(package, work, check_java=False):
     # Use disposable copies exclusively. An installed directory can contain real credentials.
     for name in ("data", "config", "uploads", "logs", "backups", "tmp"):
         if any((package / name).iterdir()):
@@ -81,13 +101,11 @@ def smoke(package, work):
     shutil.copytree(package, root, symlinks=True)
     cwd = work / "other-cwd"
     cwd.mkdir()
-    java = root / "runtime/bin" / ("java.exe" if os.name == "nt" else "java")
-    classpath = os.pathsep.join(str(root / "lib" / jar) for jar in ("dbgold-oscar-bridge.jar", "oscarJDBC8.jar"))
-    subprocess.run([str(java), "-Djava.io.tmpdir=" + str(root / "tmp"), "-XX:-UsePerfData",
-                    "-cp", classpath, "com.dbgold.oscar.BridgeMain"],
-                   stdin=subprocess.DEVNULL, cwd=cwd, check=True, timeout=60)
+    assert not (root / "runtime").exists(), "native packages must not bundle a Java runtime"
     with running(root, cwd):
         headers = login(root)
+        if check_java:
+            check_oscar_java(root, headers)
         original_config = (root / "config/dbgold.env").read_bytes()
         assert b"dbgold" in request("/").lower()
         duplicate = subprocess.run([str(root / EXE), "portable", "--no-browser"], cwd=cwd,
@@ -134,7 +152,9 @@ def smoke(package, work):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path, help="freshly extracted dbgold directory")
+    parser.add_argument("--check-oscar-java", action="store_true",
+                        help="also verify that dbgold can start the system Java and load the Oscar JDBC driver")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as work:
-        smoke(args.package.resolve(), Path(work))
+        smoke(args.package.resolve(), Path(work), args.check_oscar_java)
     print("Portable startup, upload, relocation and upgrade passed.")
