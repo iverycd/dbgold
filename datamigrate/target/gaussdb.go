@@ -55,6 +55,8 @@ func (w *GaussDBWriter) qualifiedTable(table string) string {
 func (w *GaussDBWriter) Close() error   { return w.db.Close() }
 func (w *GaussDBWriter) DBType() string { return "gaussdb" }
 
+func (w *GaussDBWriter) PoolStats() sql.DBStats { return w.db.Stats() }
+
 func (w *GaussDBWriter) CreateTable(ctx context.Context, stmts []dialect.Statement) error {
 	return w.execStatements(ctx, stmts)
 }

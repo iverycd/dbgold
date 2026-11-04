@@ -77,7 +77,7 @@
         <div class="metric-item">
           <span class="metric-label">并行配置</span>
           <strong>{{ job.max_parallel || 0 }} / {{ job.intra_table_parallel || 0 }}</strong>
-          <span class="metric-note">任务 / 表内并行 · 每页 {{ job.page_size || 0 }}</span>
+          <span class="metric-note">任务 / 表内并行 · {{ job.mysql_read_strategy === 'stream' ? '每批' : '每页' }} {{ job.page_size || 0 }}</span>
         </div>
       </section>
 
@@ -230,7 +230,8 @@
               <section class="config-section">
                 <div class="section-heading compact"><div><span class="eyebrow">PERFORMANCE</span><h2>执行参数</h2></div></div>
                 <dl class="info-grid">
-                  <div><dt>分页大小</dt><dd>{{ job.page_size || '—' }}</dd></div>
+                  <div v-if="job.src_db_type === 'mysql' && job.dst_db_type === 'gaussdb' && !job.batch_id && !job.migrate_objects"><dt>MySQL 普通表读取方式</dt><dd>{{ job.mysql_read_strategy === 'stream' ? '单次扫描（静态源库）' : '分页读取（OFFSET）' }}</dd></div>
+                  <div><dt>{{ job.mysql_read_strategy === 'stream' ? '每批行数' : '分页大小' }}</dt><dd>{{ job.page_size || '—' }}</dd></div>
                   <div><dt>最大并行</dt><dd>{{ job.max_parallel || '—' }}</dd></div>
                   <div><dt>表内并行</dt><dd>{{ job.intra_table_parallel || '—' }}</dd></div>
                   <div><dt>数据内容校验</dt><dd>{{ yesNo(job.validate_data) }}</dd></div>

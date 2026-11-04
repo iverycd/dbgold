@@ -54,6 +54,14 @@ func PreflightDataMigration(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "对象和视图模式不能同时选择"})
 		return
 	}
+	content := req.MigrateContent
+	if len(req.MigrateObjects) > 0 || len(req.ViewNames) > 0 {
+		content = "schema_only"
+	}
+	if err := validateMySQLReadStrategy(req.MySQLReadStrategy, src.DBType, dst.DBType, content); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if native {
 		if len(req.MigrateObjects) > 0 || len(req.TableNames) > 0 || len(req.ViewNames) > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "达梦同库迁移仅支持整个 Schema 的全部对象和数据"})
@@ -76,7 +84,7 @@ func PreflightDataMigration(c *gin.Context) {
 		return
 	}
 	defer writer.Close()
-	cfg := datamigrate.Config{MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, CharInLength: req.CharInLength, UseNvarchar2: req.UseNvarchar2, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, MaxParallel: req.MaxParallel, IntraTableParallel: req.IntraTableParallel, ValidateData: req.ValidateData, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
+	cfg := datamigrate.Config{MySQLReadStrategy: req.MySQLReadStrategy, MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, CharInLength: req.CharInLength, UseNvarchar2: req.UseNvarchar2, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, MaxParallel: req.MaxParallel, IntraTableParallel: req.IntraTableParallel, ValidateData: req.ValidateData, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
 	m := datamigrate.NewMigrator(reader, writer, &datamigrate.Job{LogCh: make(chan string, 16)}, cfg)
 	if native {
 		c.JSON(http.StatusOK, m.PreflightDamengNative(c.Request.Context()))

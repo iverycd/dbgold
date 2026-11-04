@@ -57,7 +57,9 @@ func (s *SQLScanner) catalogFor(ctx context.Context) (string, error) {
 	var last error
 	for _, candidate := range []string{"pg_catalog", "sys_catalog"} {
 		cat := QuoteValidationIdent("postgres", candidate)
-		query := `SELECT c.relname,a.attname FROM ` + cat + `.pg_attribute a JOIN ` + cat + `.pg_class c ON c.oid=a.attrelid JOIN ` + cat + `.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND a.attnum>0 AND NOT a.attisdropped AND c.relname IN ('pg_class','pg_namespace','pg_constraint','pg_attribute','pg_type')`
+		// Older PG-family kernels expose oid as a system column (attnum=-2).
+		// It is just as usable in the catalog joins as a positive-numbered oid.
+		query := `SELECT c.relname,a.attname FROM ` + cat + `.pg_attribute a JOIN ` + cat + `.pg_class c ON c.oid=a.attrelid JOIN ` + cat + `.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND (a.attnum>0 OR a.attname='oid') AND NOT a.attisdropped AND c.relname IN ('pg_class','pg_namespace','pg_constraint','pg_attribute','pg_type')`
 		rows, err := s.db.QueryContext(ctx, query, candidate)
 		if err != nil {
 			last = err

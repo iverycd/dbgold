@@ -167,8 +167,8 @@ BEGIN
  parts_b := {{CAT}}.string_to_array(p_setb,',');
  WHILE idx<len_a LOOP
   idx := idx+1;
-  prefix_value := {{CAT}}.array_to_string(parts_a[1:idx],',');
-  current_length := ({{CAT}}.octet_length({{CAT}}.convert_to(prefix_value,'UTF8'))-{{CAT}}.char_length(prefix_value)+1)/2;
+  prefix_value := {{CAT}}.array_to_string(parts_a[1:(idx)],',');
+  current_length := {{CAT}}.trunc(({{CAT}}.octet_length({{CAT}}.convert_to(prefix_value,'UTF8'))-{{CAT}}.char_length(prefix_value)+1)/2);
   IF idx=1 THEN
    current_value := prefix_value;
   ELSIF current_length>previous_length THEN

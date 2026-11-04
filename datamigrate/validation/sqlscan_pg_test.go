@@ -63,6 +63,21 @@ func TestPGValidationTargetCatalogProbeFallsBack(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPGValidationDetectsCatalogWithSystemOIDs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	// GaussDB 505 stores the oid of pg_class, pg_type and pg_namespace
+	// at attnum -2. A positive-only filter would fail their capability check.
+	probe := pgCatalogProbe("pg_catalog") + ".*" + regexp.QuoteMeta("(a.attnum>0 OR a.attname='oid')")
+	mock.ExpectQuery(probe).WithArgs("pg_catalog").WillReturnRows(pgCatalogFields())
+	expectPGValidationDescribe(mock, "pg_catalog", "{7,1}")
+	meta, err := NewSQLScanner(db, "postgres", "CaseSchema").DescribeValidationTable(context.Background(), "Rows")
+	require.NoError(t, err)
+	require.Equal(t, []string{"Last", "First"}, meta.PrimaryKey)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPGValidationWithoutUDTNameCanScan(t *testing.T) {
 	for _, catalog := range []string{"pg_catalog", "sys_catalog"} {
 		t.Run(catalog, func(t *testing.T) {

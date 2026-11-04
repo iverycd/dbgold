@@ -87,6 +87,8 @@ func (r *MySQLReader) Close() error {
 }
 func (r *MySQLReader) DBType() string { return "mysql" }
 
+func (r *MySQLReader) PoolStats() sql.DBStats { return r.db.Stats() }
+
 func (r *MySQLReader) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	if r.snapshotTx != nil {
 		return r.snapshotTx.QueryContext(ctx, query, args...)

@@ -172,3 +172,12 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 		})
 	}
 }
+
+func TestInterArrayDDLUsesPortableSliceAndIntegerDivision(t *testing.T) {
+	ddl := builtinFunctionDDL("business", "pg_catalog", "inter_arry")
+	// GaussDB parses :idx as a bind parameter, and / on integers produces
+	// a floating-point quotient. Preserve the original truncated prefix length.
+	require.Contains(t, ddl, "parts_a[1:(idx)]")
+	require.Contains(t, ddl, `current_length := "pg_catalog".trunc((`)
+	require.Contains(t, ddl, `"pg_catalog".char_length(prefix_value)+1)/2);`)
+}

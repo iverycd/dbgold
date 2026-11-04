@@ -45,3 +45,17 @@ func resolveTriggerMigration(src, dst, content string, requested *bool) bool {
 	}
 	return src == "mysql" && dst == "dameng" && content != "data_only"
 }
+
+// Streaming has only been verified on ordinary MySQL to GaussDB data loads.
+func validateMySQLReadStrategy(strategy, src, dst, content string) error {
+	if strategy != "stream" {
+		return nil
+	}
+	if src != "mysql" || dst != "gaussdb" {
+		return fmt.Errorf("流式读取仅支持 MySQL → GaussDB 迁移")
+	}
+	if content != "" && content != "both" && content != "data_only" {
+		return fmt.Errorf("流式读取仅适用于包含表数据的迁移")
+	}
+	return nil
+}

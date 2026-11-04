@@ -23,6 +23,19 @@ func streamPartitionQuery(ctx context.Context, db partitionQueryer, query string
 		return err
 	}
 	defer rows.Close()
+	// The partition reader historically retained typed nil byte slices as an
+	// empty binary value. A SQL NULL is a nil interface and stays distinct.
+	return streamSQLBatches(ctx, rows, batchSize, typesOverride, streamRowFormat{emptyNilBytes: true}, normalize, consume)
+}
+
+type streamRowFormat struct {
+	preserveTypeCase bool
+	emptyNilBytes    bool
+}
+
+// Each batch owns its values, including byte slices. Consumers can retain a
+// completed batch while the reader continues scanning the next one.
+func streamSQLBatches(ctx context.Context, rows *sql.Rows, batchSize int, typesOverride []string, format streamRowFormat, normalize func([]interface{}, []string), consume func([]string, []string, [][]interface{}) error) error {
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
@@ -33,7 +46,10 @@ func streamPartitionQuery(ctx context.Context, db partitionQueryer, query string
 	}
 	types := make([]string, len(descriptors))
 	for i, descriptor := range descriptors {
-		types[i] = strings.ToUpper(descriptor.DatabaseTypeName())
+		types[i] = descriptor.DatabaseTypeName()
+		if !format.preserveTypeCase {
+			types[i] = strings.ToUpper(types[i])
+		}
 	}
 	if typesOverride != nil {
 		if len(typesOverride) != len(types) {
@@ -42,21 +58,24 @@ func streamPartitionQuery(ctx context.Context, db partitionQueryer, query string
 		copy(types, typesOverride)
 	}
 	batch := make([][]interface{}, 0, batchSize)
+	pointers := make([]interface{}, len(columns))
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		values, pointers := make([]interface{}, len(columns)), make([]interface{}, len(columns))
+		values := make([]interface{}, len(columns))
 		for i := range values {
 			pointers[i] = &values[i]
 		}
 		if err := rows.Scan(pointers...); err != nil {
 			return err
 		}
-		// Retained batches must never alias a driver's reusable row buffer.
-		for i, value := range values {
-			if bytes, ok := value.([]byte); ok {
-				values[i] = append([]byte{}, bytes...)
+		// database/sql copies driver []byte values scanned into *interface{}.
+		if format.emptyNilBytes {
+			for i, v := range values {
+				if b, ok := v.([]byte); ok && b == nil {
+					values[i] = []byte{}
+				}
 			}
 		}
 		if normalize != nil {

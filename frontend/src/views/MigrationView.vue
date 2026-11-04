@@ -201,9 +201,16 @@
                 <!-- 左列：迁移参数与选项 -->
                 <a-col :xs="24" :lg="12">
                   <div class="adv-section-title">迁移性能</div>
+                  <a-form-item v-if="canSelectMySQLReadStrategy" label="MySQL 普通表读取方式">
+                    <a-radio-group v-model="dataMigrate.mysqlReadStrategy">
+                      <a-radio value="offset">分页读取（OFFSET）</a-radio>
+                      <a-radio value="stream">单次扫描（静态源库）</a-radio>
+                    </a-radio-group>
+                    <template #extra>单次扫描适用于已停写的源库或静态副本。复制数据时，每张普通表只扫描一次，分批写入目标库。请保持源数据不变，直到迁移和校验结束。</template>
+                  </a-form-item>
                   <a-row :gutter="16">
                     <a-col :span="8">
-                      <a-form-item label="每页行数">
+                      <a-form-item :label="useMySQLStream ? '每批行数' : '每页行数'">
                         <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 100%" />
                       </a-form-item>
                     </a-col>
@@ -213,7 +220,7 @@
                       </a-form-item>
                     </a-col>
                     <a-col :span="8">
-                      <a-form-item label="表内分页并发数">
+                      <a-form-item :label="useMySQLStream ? '表内写入并发数' : '表内分页并发数'">
                         <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 100%" />
                       </a-form-item>
                     </a-col>
@@ -1021,6 +1028,7 @@ const dataMigrate = reactive({
   pageSize: 20000,
   maxParallel: 10,
   intraTableParallel: 8,
+  mysqlReadStrategy: 'offset' as 'offset' | 'stream',
   lowerCaseNames: true,
   charInLength: false,
   useNvarchar2: false,
@@ -1135,6 +1143,11 @@ function targetDatabaseName(connection: Connection, targetSchema: string): strin
 const selectedDst = computed(() =>
   connections.value.find((c) => c.id === dataMigrate.dstConnId)
 )
+const canSelectMySQLReadStrategy = computed(() => selectedSrc.value?.db_type === 'mysql' && selectedDst.value?.db_type === 'gaussdb' && dataMigrate.content !== 'schema_only')
+const useMySQLStream = computed(() => canSelectMySQLReadStrategy.value && dataMigrate.mysqlReadStrategy === 'stream')
+watch([canSelectMySQLReadStrategy, () => dataMigrate.srcConnId, () => dataMigrate.srcDatabase, () => dataMigrate.dstConnId], () => {
+  dataMigrate.mysqlReadStrategy = 'offset'
+}, { flush: 'sync' })
 
 function sourceUsesSchema(connection?: Connection): boolean {
   return !!connection && connection.db_type !== 'mysql' && connection.db_type !== 'sqlserver'
@@ -1991,6 +2004,7 @@ return {
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
       intra_table_parallel: dataMigrate.intraTableParallel,
+      ...(useMySQLStream.value ? { mysql_read_strategy: 'stream' as const } : {}),
       lower_case_names: !isDamengNative.value && dataMigrate.lowerCaseNames,
       char_in_length: !isDamengNative.value && dataMigrate.charInLength,
       use_nvarchar2: !isDamengNative.value && dataMigrate.useNvarchar2,

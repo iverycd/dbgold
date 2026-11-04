@@ -20,7 +20,8 @@ function page({ start, preflight, objectStart } = {}) {
   const compiled = ts.transpileModule(`${descriptor.scriptSetup.content}
     export { connections, dataMigrate, canStartMigration, requestDataMigration, confirmDataMigration,
       dataMigrationConfirmVisible, dataMigrationStarting, dataMigrationContentLabel,
-      dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration, isDamengNative };`, {
+      dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration, isDamengNative,
+      canSelectMySQLReadStrategy, dataMigrationRequest };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
   const context = {
@@ -124,6 +125,73 @@ test('invalid configuration is rejected before showing confirmation', () => {
     assert.equal(starts.length, 0)
     assert.equal(checks.length, 0)
   } finally { scope.stop() }
+})
+
+test('MySQL single scan is opt-in for ordinary GaussDB data copies and submitted to preflight and start', async () => {
+  for (const strategy of ['offset', 'stream']) {
+    const scope = Vue.effectScope()
+    try {
+      const { p, starts, checks } = scope.run(() => page())
+      assert.equal(p.canSelectMySQLReadStrategy.value, false)
+      p.connections.value[1].db_type = 'gaussdb'
+      assert.equal(p.canSelectMySQLReadStrategy.value, true)
+      assert.equal(p.dataMigrate.mysqlReadStrategy, 'offset')
+      assert.equal('mysql_read_strategy' in p.dataMigrationRequest(), false)
+      p.dataMigrate.mysqlReadStrategy = strategy
+      p.dataMigrate.content = 'data_only'
+      p.requestDataMigration()
+      await p.confirmDataMigration()
+      assert.equal(checks.length, 1)
+      assert.equal(starts.length, 1)
+      for (const req of [checks[0], starts[0]]) {
+        assert.equal(req.mysql_read_strategy, strategy === 'stream' ? 'stream' : undefined)
+      }
+    } finally { scope.stop() }
+  }
+})
+
+test('changing to schema only, another connection or another source database clears the single-scan selection', () => {
+  const scope = Vue.effectScope()
+  try {
+    const { p } = scope.run(() => page())
+    p.connections.value[1].db_type = 'gaussdb'
+    for (const [obj, field, value] of [
+      [p.dataMigrate, 'content', 'schema_only'],
+      [p.connections.value[1], 'db_type', 'postgres'],
+      [p.connections.value[0], 'db_type', 'oracle'],
+      [p.dataMigrate, 'srcConnId', undefined],
+      [p.dataMigrate, 'dstConnId', undefined],
+    ]) {
+      const original = obj[field]
+      p.dataMigrate.mysqlReadStrategy = 'stream'
+      obj[field] = value
+      assert.equal(p.canSelectMySQLReadStrategy.value, false)
+      assert.equal(p.dataMigrate.mysqlReadStrategy, 'offset')
+      assert.equal('mysql_read_strategy' in p.dataMigrationRequest(), false)
+      obj[field] = original
+      assert.equal(p.canSelectMySQLReadStrategy.value, true)
+    }
+    p.dataMigrate.mysqlReadStrategy = 'stream'
+    p.dataMigrate.srcDatabase = 'another_source'
+    assert.equal('mysql_read_strategy' in p.dataMigrationRequest(), false)
+  } finally { scope.stop() }
+})
+
+test('task detail renders saved MySQL stream settings and legacy OFFSET configuration', async () => {
+  const detail = parse(readFileSync(new URL('../src/views/DataMigrationJobDetailView.vue', import.meta.url), 'utf8'))
+  const params = detail.descriptor.template.content.split('<h2>执行参数</h2>')[1].match(/<dl[\s\S]*?<\/dl>/)[0]
+  const render = new Function('Vue', compile(params, { mode: 'function' }).code)(Vue)
+  const job = { src_db_type: 'mysql', dst_db_type: 'gaussdb' }
+  async function html(fields) {
+    return renderToString(Vue.createSSRApp({ render: () => render({ job: { ...job, ...fields }, yesNo: () => '否' }, []) }))
+  }
+  assert.match(await html({ mysql_read_strategy: 'stream' }), /单次扫描（静态源库）/)
+  for (const fields of [{}, { mysql_read_strategy: '' }, { mysql_read_strategy: 'offset' }]) {
+    assert.match(await html(fields), /分页读取（OFFSET）/)
+  }
+  for (const fields of [{ dst_db_type: 'postgres' }, { batch_id: 'batch' }, { migrate_objects: 'indexes' }]) {
+    assert.doesNotMatch(await html(fields), /普通表读取方式/)
+  }
 })
 
 test('Dameng native confirmation explains default conflict blocking and optional overwrite', async () => {

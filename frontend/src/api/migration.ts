@@ -22,6 +22,7 @@ export interface StartDataMigrationRequest {
   page_size?: number
   max_parallel?: number
   intra_table_parallel?: number
+  mysql_read_strategy?: 'offset' | 'stream'
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean
@@ -65,6 +66,7 @@ export interface DataMigrationJob {
   page_size: number
   max_parallel: number
   intra_table_parallel?: number
+  mysql_read_strategy?: '' | 'offset' | 'stream'
   lower_case_names?: boolean
   char_in_length?: boolean
   use_nvarchar2?: boolean

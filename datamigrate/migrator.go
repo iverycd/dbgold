@@ -36,7 +36,8 @@ type Config struct {
 	ViewNames          []string
 	PageSize           int
 	MaxParallel        int
-	IntraTableParallel int // 单表内部分页并发数，<=1 表示串行
+	IntraTableParallel int    // 单表内部分页并发数，<=1 表示串行
+	MySQLReadStrategy  string `json:"MySQLReadStrategy,omitempty"` // ordinary full loads: offset (default), stream, range
 	Mode               string
 	Filter             string
 	Content            string // "both" | "schema_only" | "data_only"，默认 "both"
@@ -68,6 +69,9 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	// Optional timing observer for the ordinary full-copy comparison.
+	// An empty table marks the boundaries of the whole data phase.
+	observeDataCopy        func(table string, start bool)
 	mainMigrationFinished  bool
 	oracleMySQLAuto        *TriggerAdaptationSummary
 	tableState             migrationTableState
@@ -592,6 +596,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		m.log.Info("=== Phase 2: 跳过迁移数据（仅创建表结构模式）===")
 	} else {
 		m.log.Info("=== Phase 2: 迁移数据 ===")
+		if m.observeDataCopy != nil {
+			m.observeDataCopy("", true)
+		}
 		sem := make(chan struct{}, m.cfg.MaxParallel)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -619,6 +626,10 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			go func(tbl string) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				if m.observeDataCopy != nil {
+					m.observeDataCopy(tbl, true)
+					defer m.observeDataCopy(tbl, false)
+				}
 				ok, firstErr := m.migrateTableData(ctx, tbl)
 				mu.Lock()
 				if ok {
@@ -634,6 +645,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			}(table)
 		}
 		wg.Wait()
+		if m.observeDataCopy != nil {
+			m.observeDataCopy("", false)
+		}
 		for table := range dataFailed {
 			tablesFailed[table] = true
 			if m.dmBlocked != nil {
@@ -791,6 +805,9 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 		if t := s.tables[table]; t != nil && t.Plan != nil {
 			return m.migratePartitionData(ctx, table)
 		}
+	}
+	if m.reader.DBType() == "mysql" && m.cfg.MigrationPurpose != "cdc" && m.cfg.MySQLReadStrategy != "" && m.cfg.MySQLReadStrategy != "offset" {
+		return m.migrateMySQLScan(ctx, table)
 	}
 	pks, err := m.reader.GetPrimaryKey(ctx, table)
 	if err != nil {

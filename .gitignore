@@ -10,6 +10,7 @@ docs
 /docs/*
 !/docs/partition-migration.md
 !/docs/dameng-dameng.md
+!/docs/mysql-scan-benchmark.md
 .claude
 log
 uploads
