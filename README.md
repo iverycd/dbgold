@@ -2,7 +2,7 @@
 
 数据库迁移工具：后端 Go + Gin，前端 Vue 3 + Vite + Arco Design。
 
-生产发布采用统一 HTTP 入口，Go 服务同时提供前端页面、`/api/*` 和健康检查。部署默认监听所有 IPv4 网卡的 `18089` 端口：
+生产发布采用统一 HTTP 入口，Go 服务同时提供前端页面、`/api/*` 和健康检查。默认端口为 `18089`。服务器部署可从内网访问，Windows 单目录包默认只接受本机连接。
 
 ```text
 http://服务器IP:18089/
@@ -10,6 +10,61 @@ http://服务器IP:18089/api/health/ready
 ```
 
 正式用户流量应通过 HTTPS 网关进入；直接 HTTP 端口仅用于受控内网访问和检查。
+
+## 单目录离线包（普通账号）
+
+Linux x86_64 选 `portable-linux-amd64.tar.gz`，Linux aarch64 选 `portable-linux-arm64.tar.gz`，Windows x64 选 `portable-windows-amd64.zip`。将压缩包解压到自己可写、其他账号不能读取的目录。三个包的顶层目录都叫 `dbgold/`，程序、前端、Java 17 和神通驱动已随包提供。
+
+| 平台 | 启动 | 浏览器访问 |
+|---|---|---|
+| Linux | 在解压目录运行 `./start.sh`，保持终端或 SSH 会话打开 | 默认监听 `0.0.0.0:18089`，在办公电脑打开终端列出的可达内网地址 |
+| Windows | 双击 `start.cmd`，保持启动窗口打开 | 就绪后自动打开 `http://127.0.0.1:18089/` |
+
+首次启动生成 `config/dbgold.env`，终端显示管理员 `admin` 的初始密码。可在该文件中修改 `LISTEN_HOST` 和 `PORT`（1024–65535），然后重启。Windows 自用模式默认仅监听本机。Linux 从办公电脑直连时，服务器防火墙需允许相应内网来源访问该端口。关闭浏览器后任务继续运行；结束迁移任务后可在启动窗口按 Ctrl+C 停止。
+
+```text
+dbgold/
+  dbgold 或 dbgold.exe     主程序
+  start.sh 或 start.cmd    前台启动入口
+  web/                    前端静态资源
+  runtime/                本平台的 Java 运行时
+  lib/                    桥接 JAR、神通 JDBC 驱动与许可
+  config/                 端口、密钥、管理员初始化配置
+  data/                   dbgold.db，保存账号、连接和迁移历史
+  uploads/                工单附件
+  logs/                   日志
+  tmp/                    数据校验等临时文件
+  backups/                升级前的冷备份
+```
+
+路径以主程序所在目录为准。**搬移时先停机，再移动整个 `dbgold/` 目录。** 同一目录只能启动一个实例。静态站点只提供 `web/` 中的资源。
+
+### 单目录包升级
+
+1. 确认没有正在运行的迁移任务，关闭旧实例。准备足够空间容纳程序、配置、SQLite、上传文件及日志的冷备份。
+2. 将同平台新版解压到**独立的临时目录**。在新版目录中执行升级命令，`--target` 指向原安装目录。
+
+```sh
+# Linux
+./dbgold portable-upgrade --target "/data/迁移工具/dbgold" --confirm-no-running-tasks
+```
+
+```powershell
+# Windows PowerShell
+.\dbgold.exe portable-upgrade --target 'D:\迁移工具\dbgold' --confirm-no-running-tasks
+```
+
+升级器校验新包，在旧目录的 `backups/` 下建立冷备份，然后替换程序和资源，启动目标程序验活。成功后从原目录启动。若验活失败，升级器从同一份备份恢复旧程序及数据；若升级进程被意外中断，从新包重新执行原命令，先恢复快照。旧备份和临时文件不递归进入快照。
+
+### 构建与目标机验收
+
+```sh
+GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh --portable v1.2.3
+```
+
+构建机使用 Go 1.25.5、Node/npm、JDK 和归档工具，可下载依赖及各平台已锁定 SHA-256 的 Temurin 运行时。输出在 `release/portable/v1.2.3/`，包含三个压缩包、`SHA256SUMS` 和版本清单。每个压缩包另含文件级 `manifest.sha256`。发布前须确认神通 JDBC 再分发许可，并提供 `third_party/oscar/LICENSE` 与指定校验值的驱动。
+
+可在目标系统用普通账号运行 `python3 deploy/tests/smoke_portable.py <刚解压的dbgold目录>`。脚本使用临时副本，验证内置 Java 加载神通驱动、启动登录、附件路径、整目录搬移、端口冲突触发的回退，以及升级后的历史记录，需本机端口 18089 可用。现场验收时，用包内 Java 连接实际神通测试库，迁移一张含主键及中文文本的小表，核对目标行数和字段值，并记录操作系统版本与 CPU 架构。
 
 ## 本地开发
 

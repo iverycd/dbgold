@@ -89,3 +89,15 @@ func TestStaticSiteAndSPAFallback(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, missingAPI.Code)
 	assert.NotContains(t, missingAPI.Body.String(), "<html>")
 }
+
+func TestStaticSiteCannotFollowLinkToConfig(t *testing.T) {
+	r, web := setupRouterTest(t)
+	config := filepath.Join(t.TempDir(), "dbgold.env")
+	require.NoError(t, os.WriteFile(config, []byte("private configuration"), 0o600))
+	if err := os.Symlink(config, filepath.Join(web, "config-link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/config-link", nil))
+	require.Equal(t, "<html>dbgold</html>", response.Body.String())
+}

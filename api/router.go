@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -192,8 +193,26 @@ func readinessHandler(staticDir string) gin.HandlerFunc {
 	}
 }
 
+func serveWebFile(c *gin.Context, staticDir, name string) bool {
+	file, err := os.OpenInRoot(staticDir, filepath.FromSlash(name))
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if path.Base(name) == "index.html" {
+		c.Header("Cache-Control", "no-cache")
+	} else if strings.HasPrefix(name, "assets/") {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	}
+	http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), file)
+	return true
+}
+
 func configureStaticSite(r *gin.Engine, staticDir string) {
-	staticRoot, _ := filepath.Abs(staticDir)
 	r.NoRoute(func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 		if requestPath == "/api" || strings.HasPrefix(requestPath, "/api/") {
@@ -201,21 +220,12 @@ func configureStaticSite(r *gin.Engine, staticDir string) {
 			return
 		}
 
-		relPath := strings.TrimPrefix(filepath.Clean("/"+requestPath), string(filepath.Separator))
-		candidate := filepath.Join(staticRoot, relPath)
-		if rel, err := filepath.Rel(staticRoot, candidate); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				if filepath.Base(candidate) == "index.html" {
-					c.Header("Cache-Control", "no-cache")
-				} else if strings.HasPrefix(requestPath, "/assets/") {
-					c.Header("Cache-Control", "public, max-age=31536000, immutable")
-				}
-				c.File(candidate)
-				return
-			}
+		name := strings.TrimPrefix(path.Clean(requestPath), "/")
+		if name != "" && serveWebFile(c, staticDir, name) {
+			return
 		}
-
-		c.Header("Cache-Control", "no-cache")
-		c.File(filepath.Join(staticRoot, "index.html"))
+		if !serveWebFile(c, staticDir, "index.html") {
+			c.Status(http.StatusNotFound)
+		}
 	})
 }

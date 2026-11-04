@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PORTABLE=0
+if [[ "${1:-}" == "--portable" ]]; then
+  PORTABLE=1
+  shift
+fi
+if [[ $# != 1 ]]; then
+  printf 'Usage: %s [--portable] <version>\n' "$0" >&2
+  exit 2
+fi
 VERSION="${1:-}"
 BUILDER_NAME="${BUILDX_BUILDER:-dbgold-release}"
 GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
@@ -9,11 +18,11 @@ KEEP_WORK_DIR="${KEEP_WORK_DIR:-0}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 MIN_FREE_KB=$((4 * 1024 * 1024))
 OSCAR_JDBC_SHA256="50fe16b24ad5b8fb0fb73f9239db3fb1c86a69c887614ddb34528a4a65f30f24"
-TEMURIN_WINDOWS_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_windows_hotspot_17.0.19_10.zip"
-TEMURIN_WINDOWS_SHA256="79a598e1fbb4e16582d92c4ee22280a3c4d72fd52606e1e46b1223c0fe53b0da"
 CURRENT_STAGE="initialization"
 ERROR_REPORTED=0
 WORK_DIR=""
+
+source "$ROOT_DIR/deploy/portable/package.sh"
 
 log() {
   printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -65,7 +74,7 @@ require_command() {
 
 preflight() {
   if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-    printf 'Usage: %s <version>, for example %s v1.2.3\n' "$0" "$0" >&2
+    printf 'Usage: %s [--portable] <version>\n' "$0" >&2
     return 2
   fi
   if [[ "$KEEP_WORK_DIR" != "0" && "$KEEP_WORK_DIR" != "1" ]]; then
@@ -78,7 +87,7 @@ preflight() {
   fi
 
   local command_name
-  for command_name in docker npm node zip unzip tar shasum git find sort awk sed file curl javac jar java; do
+  for command_name in npm node zip unzip tar shasum git find sort awk sed file curl javac jar java; do
     require_command "$command_name"
   done
 
@@ -94,16 +103,12 @@ preflight() {
     return 1
   fi
 
-  docker info >/dev/null 2>&1 || {
-    printf 'Docker Engine is not running or is not accessible.\n' >&2
-    return 1
-  }
-  docker buildx version >/dev/null 2>&1 || {
-    printf 'Docker Buildx is required.\n' >&2
-    return 1
-  }
-
   FINAL_OUTPUT_DIR="$ROOT_DIR/release/$VERSION"
+  if (( PORTABLE )); then
+    FINAL_OUTPUT_DIR="$ROOT_DIR/release/portable/$VERSION"
+    require_command cmp
+    require_command realpath
+  fi
   if [[ -e "$FINAL_OUTPUT_DIR" ]]; then
     printf 'Release output already exists: %s\n' "$FINAL_OUTPUT_DIR" >&2
     return 1
@@ -120,12 +125,6 @@ preflight() {
     return 1
   fi
 
-  if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
-    log "Creating Buildx builder: $BUILDER_NAME"
-    docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
-  fi
-  docker buildx inspect --bootstrap "$BUILDER_NAME" >/dev/null
-
   local jdbc_hash
   if [[ ! -s "$ROOT_DIR/third_party/oscar/LICENSE" ]]; then
     printf 'Oscar JDBC vendor license is required at third_party/oscar/LICENSE before release.\n' >&2
@@ -137,9 +136,25 @@ preflight() {
     return 1
   }
 
+  if (( ! PORTABLE )); then
+    require_command docker
+    docker info >/dev/null 2>&1 || {
+      printf 'Docker Engine is not running or is not accessible.\n' >&2
+      return 1
+    }
+    docker buildx version >/dev/null 2>&1 || {
+      printf 'Docker Buildx is required.\n' >&2
+      return 1
+    }
+    if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
+      log "Creating Buildx builder: $BUILDER_NAME"
+      docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
+    fi
+    docker buildx inspect --bootstrap "$BUILDER_NAME" >/dev/null
+    log "Buildx builder: $BUILDER_NAME"
+  fi
   log "Go: $go_version"
   log "Node: $(node --version); npm: $(npm --version)"
-  log "Buildx builder: $BUILDER_NAME"
   log "GOPROXY: $GOPROXY"
 }
 
@@ -147,22 +162,6 @@ build_jdbc_bridge() {
   cd "$ROOT_DIR"
   sh jdbcbridge/java/build.sh
   java -cp "jdbcbridge/java/build/dbgold-oscar-bridge.jar:third_party/oscar/oscarJDBC8.jar" com.dbgold.oscar.BridgeMain </dev/null
-}
-
-prepare_windows_runtime() {
-  local archive="$WORK_DIR/temurin17-windows.zip"
-  local extracted="$WORK_DIR/temurin17-windows"
-  curl --fail --location --retry 3 --output "$archive" "$TEMURIN_WINDOWS_URL"
-  local actual
-  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
-  [[ "$actual" == "$TEMURIN_WINDOWS_SHA256" ]] || {
-    printf 'Temurin Windows JRE checksum mismatch: expected %s, got %s.\n' "$TEMURIN_WINDOWS_SHA256" "$actual" >&2
-    return 1
-  }
-  mkdir -p "$extracted"
-  unzip -q "$archive" -d "$extracted"
-  WINDOWS_RUNTIME_DIR="$(find "$extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-  [[ -f "$WINDOWS_RUNTIME_DIR/bin/java.exe" ]]
 }
 
 prepare_workspace() {
@@ -240,7 +239,7 @@ package_windows() {
   cp "$ROOT_DIR/deploy/windows/dbgold.env.example" "$ROOT_DIR/deploy/windows/"*.ps1 "$package_dir/"
   cp "$ROOT_DIR/README.md" "$package_dir/README.md"
   mkdir -p "$package_dir/runtime" "$package_dir/lib"
-  cp -R "$WINDOWS_RUNTIME_DIR/." "$package_dir/runtime/"
+  cp -R "$WORK_DIR/runtime-windows-amd64/." "$package_dir/runtime/"
   cp "$ROOT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.jar" "$package_dir/lib/"
   cp "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" "$package_dir/lib/"
   cp "$ROOT_DIR/third_party/oscar/README.md" "$package_dir/lib/OSCAR-JDBC-NOTICE.md"
@@ -262,8 +261,12 @@ write_release_metadata() {
     cd "$OUTPUT_DIR"
     shasum -a 256 dbgold-* > SHA256SUMS
   )
-  printf '{\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "artifacts": ["linux/amd64", "linux/arm64", "windows/amd64"]\n}\n' \
-    "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" > "$OUTPUT_DIR/release-manifest.json"
+  {
+    printf '{\n'
+    if (( PORTABLE )); then printf '  "edition": "portable",\n'; fi
+    printf '  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "artifacts": ["linux/amd64", "linux/arm64", "windows/amd64"]\n}\n' \
+      "$VERSION" "$GIT_COMMIT" "$BUILD_TIME"
+  } > "$OUTPUT_DIR/release-manifest.json"
 }
 
 validate_artifacts() {
@@ -297,7 +300,7 @@ validate_artifacts() {
 }
 
 publish_artifacts() {
-  mkdir -p "$ROOT_DIR/release"
+  mkdir -p "$(dirname "$FINAL_OUTPUT_DIR")"
   mv "$OUTPUT_DIR" "$FINAL_OUTPUT_DIR"
 }
 
@@ -306,13 +309,23 @@ run_stage "Prepare temporary workspace" prepare_workspace
 run_stage "Frontend install, security audit, and build" build_frontend
 run_stage "Go vet and tests" validate_go
 run_stage "Oscar JDBC helper build and handshake" build_jdbc_bridge
-run_stage "Pinned Windows Java runtime" prepare_windows_runtime
-run_stage "Windows amd64 build" build_windows
-run_stage "Linux amd64 image and package" build_linux_package amd64
-run_stage "Linux arm64 image and package" build_linux_package arm64
-run_stage "Windows amd64 package" package_windows
+if (( PORTABLE )); then
+  for target in linux-amd64 linux-arm64 windows-amd64; do
+    run_stage "Portable $target package" build_portable_package "${target%-*}" "${target#*-}"
+  done
+else
+  run_stage "Pinned Windows Java runtime" prepare_runtime windows amd64
+  run_stage "Windows amd64 build" build_windows
+  run_stage "Linux amd64 image and package" build_linux_package amd64
+  run_stage "Linux arm64 image and package" build_linux_package arm64
+  run_stage "Windows amd64 package" package_windows
+fi
 run_stage "Release metadata" write_release_metadata
-run_stage "Artifact integrity checks" validate_artifacts
+if (( PORTABLE )); then
+  run_stage "Portable archives integrity checks" validate_portable_artifacts
+else
+  run_stage "Artifact integrity checks" validate_artifacts
+fi
 run_stage "Publish artifacts" publish_artifacts
 
 CURRENT_STAGE="complete"

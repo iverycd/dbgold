@@ -15,7 +15,7 @@ func TestPGTextWeightsAndRoundTrip(t *testing.T) {
 	for _, lossy := range []bool{false, true} {
 		db, mock, _ := sqlmock.New()
 		table := source.PGTable{Info: source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "K", DataType: "varchar", Length: 20}}}}
-		rules := map[string]target.MySQLTextRules{"K": {"latin1", "latin1_swedish_ci", 1, true}}
+		rules := map[string]target.MySQLTextRules{"K": {Charset: "latin1", Collation: "latin1_swedish_ci", MaxBytes: 1, PadSpace: true}}
 		back := "é"
 		if lossy {
 			back = "?"
@@ -82,8 +82,8 @@ func TestPGCharacterCapacityUsesActualCharset(t *testing.T) {
 }
 
 func TestPGForeignKeyCharacterRulesMustMatch(t *testing.T) {
-	a := target.MySQLTextRules{"utf8mb4", "utf8mb4_bin", 4, true}
-	b := target.MySQLTextRules{"utf8mb4", "utf8mb4_general_ci", 4, true}
+	a := target.MySQLTextRules{Charset: "utf8mb4", Collation: "utf8mb4_bin", MaxBytes: 4, PadSpace: true}
+	b := target.MySQLTextRules{Charset: "utf8mb4", Collation: "utf8mb4_general_ci", MaxBytes: 4, PadSpace: true}
 	p := &PGMySQLPreflight{textRules: map[string]map[string]target.MySQLTextRules{"child": {"k": a}, "parent": {"k": b}}, validationFKs: []source.FKInfo{{TableName: "child", ConstraintName: "fk", Columns: []string{"k"}, RefTable: "parent", RefColumns: []string{"k"}}}}
 	(&Migrator{}).checkPGMySQLTextStructure(p)
 	p.finish()

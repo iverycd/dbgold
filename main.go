@@ -40,13 +40,19 @@ func runCLI(args []string) error {
 	switch command {
 	case "serve":
 		return runServeCommand(args)
+	case "portable":
+		return runPortableCommand(args)
+	case "portable-upgrade":
+		return runPortableUpgradeCommand(args)
+	case "portable-upgrade-check":
+		return runPortableUpgradeCheck(args)
 	case "healthcheck":
 		return runHealthcheckCommand(args)
 	case "help":
 		printUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (expected serve or healthcheck)", command)
+		return fmt.Errorf("unknown command %q (see dbgold help)", command)
 	}
 }
 
@@ -108,7 +114,19 @@ func runHealthcheckCommand(args []string) error {
 		url = "http://127.0.0.1:" + cfg.Port + "/api/health/ready"
 	}
 	client := &http.Client{Timeout: *timeout}
-	resp, err := client.Get(url)
+	if err := checkReadiness(context.Background(), client, url); err != nil {
+		return err
+	}
+	fmt.Println("dbgold is ready")
+	return nil
+}
+
+func checkReadiness(ctx context.Context, client *http.Client, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("healthcheck request failed: %w", err)
 	}
@@ -116,17 +134,24 @@ func runHealthcheckCommand(args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("healthcheck returned %s", resp.Status)
 	}
-	fmt.Println("dbgold is ready")
 	return nil
 }
 
 func printUsage() {
 	fmt.Println(`Usage:
   dbgold serve [--config FILE] [--listen-host IPv4] [--port PORT]
+  dbgold portable [--no-browser]
+  dbgold portable-upgrade --help
   dbgold healthcheck [--config FILE] [--url URL] [--timeout 5s]`)
 }
 
 func runServer(ctx context.Context, cfg *config.Config) error {
+	return runServerWithReady(ctx, cfg, nil)
+}
+
+// The portable launcher and upgrade check announce success only after this
+// instance has bound its own socket and passed the normal HTTP readiness check.
+func runServerWithReady(ctx context.Context, cfg *config.Config, onReady func()) error {
 	address := net.JoinHostPort(cfg.ListenHost, cfg.Port)
 	listener, err := net.Listen("tcp4", address)
 	if err != nil {
@@ -152,6 +177,7 @@ func runServer(ctx context.Context, cfg *config.Config) error {
 		LoginTimeoutMS:  cfg.OscarLoginTimeoutMS,
 		SocketTimeoutMS: cfg.OscarSocketTimeoutMS,
 		MaxHeapMB:       cfg.OscarBridgeXmxMB,
+		TempDir:         cfg.OscarTempDir,
 	})
 	defer jdbcbridge.Default().Close()
 
@@ -210,6 +236,19 @@ func runServer(ctx context.Context, cfg *config.Config) error {
 		slog.Info("starting server", "address", address)
 		serveErr <- server.Serve(listener)
 	}()
+	if onReady != nil {
+		url := localServerURL(cfg) + "api/health/ready"
+		client := &http.Client{Timeout: defaultHealthcheckTimeout, Transport: &http.Transport{DisableKeepAlives: true}}
+		if err := checkReadiness(ctx, client, url); err != nil {
+			_ = server.Close()
+			<-serveErr
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("readiness check %s: %w", url, err)
+		}
+		onReady()
+	}
 
 	select {
 	case err := <-serveErr:

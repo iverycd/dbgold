@@ -36,6 +36,7 @@ type Config struct {
 	OscarLoginTimeoutMS     int
 	OscarSocketTimeoutMS    int
 	OscarBridgeXmxMB        int
+	OscarTempDir            string // Portable mode keeps JVM temporary files under the release directory.
 }
 
 func Load() *Config {
@@ -47,6 +48,16 @@ func Load() *Config {
 // Real environment variables take precedence over values from the env file.
 // An empty path means ".env" is optional; an explicit path must exist.
 func LoadFromFile(path string) (*Config, error) {
+	return loadFile(path, true, "0.0.0.0")
+}
+
+// LoadStandaloneFile reads only the named configuration so another installation's
+// environment cannot override a portable instance's settings or credentials.
+func LoadStandaloneFile(path, defaultHost string) (*Config, error) {
+	return loadFile(path, false, defaultHost)
+}
+
+func loadFile(path string, allowEnv bool, defaultHost string) (*Config, error) {
 	values := map[string]string{}
 	if path == "" {
 		if parsed, err := godotenv.Read(); err == nil {
@@ -61,8 +72,10 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 
 	lookup := func(key, fallback string) string {
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			return value
+		if allowEnv {
+			if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+				return value
+			}
 		}
 		if value := strings.TrimSpace(values[key]); value != "" {
 			return value
@@ -94,7 +107,7 @@ func LoadFromFile(path string) (*Config, error) {
 
 	return &Config{
 		AppEnv:                  lookup("APP_ENV", "development"),
-		ListenHost:              lookup("LISTEN_HOST", "0.0.0.0"),
+		ListenHost:              lookup("LISTEN_HOST", defaultHost),
 		Port:                    lookup("PORT", "18089"),
 		StaticDir:               lookup("STATIC_DIR", "frontend/dist"),
 		TrustedProxies:          trustedProxies,

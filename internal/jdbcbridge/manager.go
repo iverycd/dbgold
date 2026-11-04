@@ -26,6 +26,7 @@ type Config struct {
 	LoginTimeoutMS  int
 	SocketTimeoutMS int
 	MaxHeapMB       int
+	TempDir         string
 }
 
 type SessionOptions struct {
@@ -201,7 +202,12 @@ func (m *Manager) ensureStarted(ctx context.Context) error {
 		return err
 	}
 	classpath := bridgeJar + string(os.PathListSeparator) + jdbcJar
-	cmd := exec.Command(javaBin, fmt.Sprintf("-Xmx%dm", m.cfg.MaxHeapMB), "-cp", classpath, "com.dbgold.oscar.BridgeMain")
+	args := []string{fmt.Sprintf("-Xmx%dm", m.cfg.MaxHeapMB)}
+	if m.cfg.TempDir != "" {
+		args = append(args, "-Djava.io.tmpdir="+m.cfg.TempDir, "-XX:-UsePerfData")
+	}
+	args = append(args, "-cp", classpath, "com.dbgold.oscar.BridgeMain")
+	cmd := exec.Command(javaBin, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		m.processMu.Unlock()
