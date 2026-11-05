@@ -78,7 +78,7 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			if cfg.LowerCaseNames {
 				targetName = strings.ToLower(targetName)
 			}
-			if targetName == CheckpointTableName {
+			if cfg.TargetDBType != "dameng" && targetName == CheckpointTableName {
 				r.Errors = append(r.Errors, "源表名与 CDC 保留表冲突: "+t.Name)
 			}
 			if !incrementalOnly && !strings.EqualFold(t.Engine, "InnoDB") {
@@ -125,6 +125,11 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 	}
+	if cfg.TargetDBType == "dameng" && !incrementalOnly {
+		// Reject ambiguous name folding before DDL; other per-table failures
+		// belong in the bootstrap report so healthy tables can continue.
+		r.Errors = append(r.Errors, validateDamengNameCollisions(cfg, tables)...)
+	}
 	dst, dstErr := openTargetDB(cfg)
 	targetMetadata := targetSchemaMetadata{}
 	targetMetadataReady := false
@@ -135,10 +140,12 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 		if dstErr = dst.PingContext(ctx); dstErr != nil {
 			r.Errors = append(r.Errors, "连接目标库失败: "+dstErr.Error())
 		} else {
-			var schemaExists bool
-			if dstErr = dst.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, cfg.TargetSchema).Scan(&schemaExists); dstErr != nil || !schemaExists {
+			schemaExists, schemaErr := targetSchemaExists(ctx, dst, cfg)
+			if schemaErr != nil {
+				r.Errors = append(r.Errors, "检查目标 Schema 失败: "+schemaErr.Error())
+			} else if !schemaExists {
 				r.Errors = append(r.Errors, "目标 Schema 不存在: "+cfg.TargetSchema)
-			} else if targetMetadata, dstErr = loadTargetSchemaMetadata(ctx, dst, cfg.TargetSchema); dstErr != nil {
+			} else if targetMetadata, dstErr = loadConfiguredTargetSchemaMetadata(ctx, dst, cfg); dstErr != nil {
 				r.Errors = append(r.Errors, "读取目标 Schema 元数据失败: "+dstErr.Error())
 			} else {
 				targetMetadataReady = true
@@ -165,6 +172,9 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 			tables = effective
 			r.Tables = effective
+			if cfg.TargetDBType == "dameng" {
+				r.Errors = append(r.Errors, validateDamengNames(cfg, effective)...)
+			}
 			for _, t := range effective {
 				name := targetTableName(cfg, t.Name)
 				target := targetMetadata.Tables[name]
@@ -173,10 +183,7 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 				}
 				sourceCols := map[string]bool{}
 				for _, sourceCol := range t.Columns {
-					expected := sourceCol
-					if cfg.LowerCaseNames {
-						expected = strings.ToLower(expected)
-					}
+					expected := targetObjectName(cfg, sourceCol)
 					sourceCols[expected] = true
 					if !target.ColumnNames[expected] {
 						r.Errors = append(r.Errors, fmt.Sprintf("目标表缺少列: %s.%s", name, expected))
@@ -190,10 +197,7 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 				if len(t.PrimaryKey) > 0 {
 					expectedPK := make([]string, 0, len(t.PrimaryKey))
 					for _, index := range t.PrimaryKey {
-						column := t.Columns[index]
-						if cfg.LowerCaseNames {
-							column = strings.ToLower(column)
-						}
+						column := targetObjectName(cfg, t.Columns[index])
 						expectedPK = append(expectedPK, column)
 					}
 					matched := false

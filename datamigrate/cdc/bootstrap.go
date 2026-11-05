@@ -205,7 +205,7 @@ func ValidateTargetTableCompatibility(ctx context.Context, cfg Config, tables []
 	if err = db.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	metadata, err := loadTargetSchemaMetadata(ctx, db, cfg.TargetSchema)
+	metadata, err := loadConfiguredTargetSchemaMetadata(ctx, db, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -223,10 +223,7 @@ func validateTargetTableCompatibilityFromMetadata(cfg Config, tables []TableInfo
 		}
 		sourceColumns := map[string]bool{}
 		for _, sourceColumn := range table.Columns {
-			expected := sourceColumn
-			if cfg.LowerCaseNames {
-				expected = strings.ToLower(expected)
-			}
+			expected := targetObjectName(cfg, sourceColumn)
 			sourceColumns[expected] = true
 			if !target.ColumnNames[expected] {
 				failures[table.Name] = "目标表缺少列: " + expected
@@ -247,10 +244,7 @@ func validateTargetTableCompatibilityFromMetadata(cfg Config, tables []TableInfo
 		}
 		expectedPK := make([]string, 0, len(table.PrimaryKey))
 		for _, index := range table.PrimaryKey {
-			column := table.Columns[index]
-			if cfg.LowerCaseNames {
-				column = strings.ToLower(column)
-			}
+			column := targetObjectName(cfg, table.Columns[index])
 			expectedPK = append(expectedPK, column)
 		}
 		matched := false

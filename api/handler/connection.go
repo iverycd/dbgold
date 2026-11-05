@@ -66,10 +66,16 @@ func buildDSN(c *store.Connection) string {
 	case "oracle":
 		return goora.BuildUrl(c.Host, c.Port, c.Database, c.Username, c.Password, nil)
 	case "sqlserver":
+		portOption := fmt.Sprintf(";port=%d", c.Port)
+		if _, instance, ok := strings.Cut(c.Host, `\`); ok && instance != "" {
+			// An explicit port overrides the instance in go-mssqldb. Omit it
+			// so SQL Server Browser resolves the named instance instead.
+			portOption = ""
+		}
 		// ODBC braced values preserve semicolons, braces and whitespace without
 		// letting a database name or password add connection-string options.
-		return fmt.Sprintf("odbc:server=%s;port=%d;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
-			odbcDSNValue(c.Host), c.Port, odbcDSNValue(c.Database), odbcDSNValue(c.Username), odbcDSNValue(c.Password))
+		return fmt.Sprintf("odbc:server=%s%s;database=%s;user id=%s;password=%s;trustservercertificate=true;encrypt=DISABLE",
+			odbcDSNValue(c.Host), portOption, odbcDSNValue(c.Database), odbcDSNValue(c.Username), odbcDSNValue(c.Password))
 	case "dameng":
 		return fmt.Sprintf("dm://%s:%s@%s:%d",
 			c.Username, c.Password, c.Host, c.Port)

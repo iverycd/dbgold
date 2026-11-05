@@ -32,7 +32,7 @@ func LoadExactTables(ctx context.Context, db *sql.DB, database string, exact []s
 }
 
 func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, exact []string) ([]TableInfo, error) {
-	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, t.ENGINE
+	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, t.ENGINE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME
 		FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
 		ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE='BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`, database)
@@ -42,9 +42,10 @@ func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, 
 	tableMap := map[string]*TableInfo{}
 	var order []string
 	for rows.Next() {
-		var table, col, typ, extra string
-		var engine sql.NullString
-		if err := rows.Scan(&table, &col, &typ, &extra, &engine); err != nil {
+		var table, col, typ, extra, definition string
+		var engine, charset sql.NullString
+		if err := rows.Scan(&table, &col, &typ, &extra, &engine, &definition, &charset); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		if tableMap[table] == nil {
@@ -54,6 +55,8 @@ func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, 
 		t := tableMap[table]
 		t.Columns = append(t.Columns, col)
 		t.ColumnTypes = append(t.ColumnTypes, strings.ToUpper(typ))
+		t.ColumnDefinitions = append(t.ColumnDefinitions, definition)
+		t.ColumnCharsets = append(t.ColumnCharsets, charset.String)
 		if strings.Contains(strings.ToLower(extra), "auto_increment") {
 			t.AutoIncrement = append(t.AutoIncrement, len(t.Columns)-1)
 		}
@@ -238,7 +241,7 @@ func ResolveLocatorStrategies(ctx context.Context, cfg Config, tables []TableInf
 	if err = db.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	metadata, err := loadTargetSchemaMetadata(ctx, db, cfg.TargetSchema)
+	metadata, err := loadConfiguredTargetSchemaMetadata(ctx, db, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +249,10 @@ func ResolveLocatorStrategies(ctx context.Context, cfg Config, tables []TableInf
 }
 
 func selectUniqueLocator(table *TableInfo, targetUniqueSets [][]string, lower bool) bool {
+	return selectConfiguredUniqueLocator(table, targetUniqueSets, Config{LowerCaseNames: lower})
+}
+
+func selectConfiguredUniqueLocator(table *TableInfo, targetUniqueSets [][]string, cfg Config) bool {
 	candidates := append([]UniqueIndexInfo(nil), table.UniqueIndexes...)
 	sort.Slice(candidates, func(i, j int) bool {
 		if len(candidates[i].Columns) != len(candidates[j].Columns) {
@@ -256,10 +263,7 @@ func selectUniqueLocator(table *TableInfo, targetUniqueSets [][]string, lower bo
 	for _, candidate := range candidates {
 		expected := make([]string, len(candidate.Columns))
 		for columnIndex, column := range candidate.Columns {
-			expected[columnIndex] = column
-			if lower {
-				expected[columnIndex] = strings.ToLower(column)
-			}
+			expected[columnIndex] = targetObjectName(cfg, column)
 		}
 		for _, actual := range targetUniqueSets {
 			if sameColumnSet(expected, actual) {

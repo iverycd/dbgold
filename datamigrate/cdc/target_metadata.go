@@ -38,6 +38,7 @@ type targetColumnMetadata struct {
 	Nullable     string
 	DefaultValue sql.NullString
 	Identity     string
+	DataType     string
 }
 
 type targetTableMetadata struct {
@@ -178,10 +179,34 @@ func parseIndexKeyOrder(indkey string) ([]int, error) {
 }
 
 func targetTableName(cfg Config, sourceName string) string {
+	return targetObjectName(cfg, sourceName)
+}
+
+func targetObjectName(cfg Config, sourceName string) string {
+	// Match Migrator.objName before the target dialect quotes the identifier.
+	// For a legacy DM request with lower_case_names=true, Unicode lower/upper
+	// composition is not always the same as uppercase alone (for example K).
 	if cfg.LowerCaseNames {
-		return strings.ToLower(sourceName)
+		sourceName = strings.ToLower(sourceName)
+	}
+	if cfg.TargetDBType == "dameng" {
+		return strings.ToUpper(sourceName)
 	}
 	return sourceName
+}
+
+func targetSchemaName(cfg Config) string {
+	if cfg.TargetDBType == "dameng" {
+		return strings.ToUpper(cfg.TargetSchema)
+	}
+	return cfg.TargetSchema
+}
+
+func loadConfiguredTargetSchemaMetadata(ctx context.Context, db *sql.DB, cfg Config) (targetSchemaMetadata, error) {
+	if cfg.TargetDBType == "dameng" {
+		return loadDamengTargetSchemaMetadata(ctx, db, targetSchemaName(cfg))
+	}
+	return loadTargetSchemaMetadata(ctx, db, cfg.TargetSchema)
 }
 
 func resolveLocatorStrategiesFromMetadata(cfg Config, tables []TableInfo, metadata targetSchemaMetadata) []TableInfo {
@@ -198,7 +223,7 @@ func resolveLocatorStrategiesFromMetadata(cfg Config, tables []TableInfo, metada
 		if target := metadata.Tables[targetTableName(cfg, table.Name)]; target != nil {
 			uniqueSets = target.UniqueSets
 		}
-		selectUniqueLocator(table, uniqueSets, cfg.LowerCaseNames)
+		selectConfiguredUniqueLocator(table, uniqueSets, cfg)
 		if table.LocatorStrategy == "" {
 			table.LocatorStrategy = LocatorFullRow
 			table.LocatorColumns = append([]string(nil), table.Columns...)

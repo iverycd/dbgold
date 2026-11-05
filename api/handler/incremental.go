@@ -52,17 +52,25 @@ var incrementalTargetTypes = map[string]bool{
 	"gbase":    true,
 	"kingbase": true,
 	"seabox":   true,
+	"dameng":   true,
 }
 
 func isSupportedIncrementalTarget(dbType string) bool {
 	return incrementalTargetTypes[dbType]
 }
 
+func incrementalTargetSchema(dbType, schema string) string {
+	if dbType == "dameng" {
+		return strings.ToUpper(schema)
+	}
+	return schema
+}
+
 func incrementalConfig(req incrementalRequest, jobID string, src, dst *store.Connection) cdc.Config {
 	srcCopy := *src
 	srcCopy.Database = req.SrcDatabase
 	return cdc.Config{JobID: jobID, SourceDSN: buildDSN(&srcCopy), SourceHost: src.Host, SourcePort: uint16(src.Port), SourceUser: src.Username,
-		SourcePassword: src.Password, SourceDatabase: req.SrcDatabase, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: req.TargetSchema,
+		SourcePassword: src.Password, SourceDatabase: req.SrcDatabase, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: incrementalTargetSchema(dst.DBType, req.TargetSchema),
 		Mode: req.MigrateMode, Filter: req.TableFilter, RequestedExclusions: req.ExcludedTables, LowerCaseNames: req.LowerCaseNames, ServerID: req.ServerID,
 		Start: cdc.Position{File: req.StartFile, Pos: req.StartPosition, GTID: req.StartGTID}, KeylessChangePolicy: "full_row_match"}
 }
@@ -75,7 +83,7 @@ func validateIncrementalConnections(c *gin.Context, req incrementalRequest) (*st
 	}
 	dst, e := store.GetConnectionOwned(req.DstConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
 	if e != nil || !isSupportedIncrementalTarget(dst.DBType) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL、GaussDB、HighGo、Vastbase、GBase（PG兼容）、Kingbase 或 SeaBox 连接"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "增量迁移目标库必须是可访问的 PostgreSQL、GaussDB、HighGo、Vastbase、GBase（PG兼容）、Kingbase、SeaBox 或达梦连接"})
 		return nil, nil, false
 	}
 	if req.StartMode == "incremental_only" {
@@ -113,6 +121,7 @@ func StartIncremental(c *gin.Context) {
 	if !ok {
 		return
 	}
+	req.TargetSchema = incrementalTargetSchema(dst.DBType, req.TargetSchema)
 	jobID := uuid.NewString()
 	if req.ServerID == 0 {
 		h := fnv.New32a()
@@ -199,6 +208,9 @@ func StartIncremental(c *gin.Context) {
 func createIncrementalAfterPreflight(j *store.IncrementalMigrationJob, src, dst *store.Connection, launch func()) error {
 	incrementalStartMu.Lock()
 	defer incrementalStartMu.Unlock()
+	// The DM writer addresses the uppercase physical schema. Persist that same
+	// spelling before checking occupancy so case variants cannot bypass the lock.
+	j.TargetSchema = incrementalTargetSchema(dst.DBType, j.TargetSchema)
 	if err := store.CheckConnectionSnapshots(src, dst); err != nil {
 		return err
 	}
@@ -355,7 +367,11 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	srcCopy := *src
 	srcCopy.Database = j.SrcDatabase
 	preparationStartedAt := time.Now()
-	r, e := source.NewMySQL(buildDSN(&srcCopy), j.SrcDatabase, source.ConnPoolConfig{MaxOpenConns: 4, MaxIdleConns: 2})
+	newReader := source.NewMySQL
+	if dst.DBType == "dameng" {
+		newReader = source.NewMySQLForDameng
+	}
+	r, e := newReader(buildDSN(&srcCopy), j.SrcDatabase, source.ConnPoolConfig{MaxOpenConns: 4, MaxIdleConns: 2})
 	if e != nil {
 		return e
 	}

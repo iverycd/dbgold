@@ -39,11 +39,8 @@ func ValidateCounts(ctx context.Context, cfg Config) ([]CountValidation, bool, e
 			results = append(results, item)
 			continue
 		}
-		targetName := t.Name
-		if cfg.LowerCaseNames {
-			targetName = strings.ToLower(targetName)
-		}
-		target := quoteIdent(cfg.TargetSchema) + "." + quoteIdent(targetName)
+		targetName := targetObjectName(cfg, t.Name)
+		target := quoteIdent(targetSchemaName(cfg)) + "." + quoteIdent(targetName)
 		if err = dst.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", target)).Scan(&item.Target); err != nil {
 			item.Error = "目标库计数失败: " + err.Error()
 			allMatch = false

@@ -282,7 +282,7 @@ export interface AutoRepair {
 export const getDataMigrationReport = (jobID: string) =>
   api.get<MigrationReport>(`/migration/data-migrate/${jobID}/report`)
 
-// ===== MySQL → PostgreSQL Binlog CDC =====
+// ===== MySQL Binlog CDC =====
 
 export interface IncrementalRequest {
   src_conn_id: number

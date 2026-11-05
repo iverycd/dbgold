@@ -119,7 +119,11 @@
         </a-form-item>
       </a-col>
       <a-col :span="12"><a-form-item label="表过滤"><a-input v-model="form.table_filter" :disabled="form.migrate_mode === 'all'" placeholder="逗号分隔，支持 *" /></a-form-item></a-col>
-      <a-col :span="4"><a-form-item label="名称"><a-checkbox v-model="form.lower_case_names">转小写</a-checkbox></a-form-item></a-col>
+      <a-col :span="4"><a-form-item label="名称">
+        <a-tag v-if="isDamengTarget">固定转大写</a-tag>
+        <a-checkbox v-else v-model="form.lower_case_names">转小写</a-checkbox>
+        <template v-if="isDamengTarget" #extra>达梦 Schema、表名和列名统一使用大写，与全量迁移一致。</template>
+      </a-form-item></a-col>
     </a-row>
 
     </section>
@@ -228,12 +232,13 @@ const envHistory = computed(() => {
 const mysqlConnections = computed(() => connections.value.filter(c =>
   c.db_type === 'mysql' && (!srcEnvFilter.value || c.env === srcEnvFilter.value)
 ))
-const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'kingbase', 'seabox'])
+const incrementalTargetTypes = new Set(['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'kingbase', 'seabox', 'dameng'])
 const targetConnections = computed(() => connections.value.filter(c =>
   incrementalTargetTypes.has(c.db_type) && (!dstEnvFilter.value || c.env === dstEnvFilter.value)
 ))
 const selectedSrc = computed(() => connections.value.find(c => c.id === form.src_conn_id))
 const selectedDst = computed(() => connections.value.find(c => c.id === form.dst_conn_id))
+const isDamengTarget = computed(() => selectedDst.value?.db_type === 'dameng')
 const databaseBlocked = computed(() => databaseEditors.isBlocked(form.src_conn_id) || databaseEditors.isBlocked(form.dst_conn_id))
 const ready = computed(() => !databaseBlocked.value && !!(form.src_conn_id && form.dst_conn_id && form.src_database && form.target_schema))
 const retentionText = computed(() => {
@@ -328,6 +333,7 @@ function buildRequest(): IncrementalRequest | null {
     ...form,
     src_conn_id: form.src_conn_id,
     dst_conn_id: form.dst_conn_id,
+    lower_case_names: isDamengTarget.value ? false : form.lower_case_names,
   }
 }
 async function preflight() {

@@ -49,7 +49,11 @@
           </template>
         </a-table-column>
         <a-table-column title="主机" data-index="host" />
-        <a-table-column title="端口" data-index="port" :width="80" />
+        <a-table-column title="端口" data-index="port" :width="80">
+          <template #cell="{ record }">
+            {{ isSQLServerInstance(record) ? '自动' : record.port }}
+          </template>
+        </a-table-column>
         <a-table-column title="数据库" data-index="database" />
         <a-table-column v-if="isAdmin" title="所属用户" data-index="owner_username" :width="120">
           <template #cell="{ record }">
@@ -102,11 +106,13 @@
           <a-col :span="16">
             <a-form-item label="主机" field="host" :rules="[{ required: true }]">
               <a-input v-model="form.host" placeholder="localhost" />
+              <template v-if="form.db_type === 'sqlserver'" #extra>支持主机地址或 主机\实例名</template>
             </a-form-item>
           </a-col>
           <a-col :span="8">
             <a-form-item label="端口" field="port" :rules="[{ required: true }]">
-              <a-input-number v-model="form.port" :min="1" :max="65535" style="width: 100%" />
+              <a-input-number v-model="form.port" :disabled="isInstanceConnection" :min="1" :max="65535" style="width: 100%" />
+              <template v-if="isInstanceConnection" #extra>按实例名连接，自动获取端口</template>
             </a-form-item>
           </a-col>
         </a-row>
@@ -168,6 +174,18 @@ const defaultForm = () => ({
 })
 
 const form = reactive(defaultForm())
+function isSQLServerInstance(connection: { db_type: string; host: string }): boolean {
+  const separator = connection.host?.indexOf('\\') ?? -1
+  return connection.db_type === 'sqlserver' && separator >= 0 && separator < connection.host.length - 1
+}
+const isInstanceConnection = computed(() => isSQLServerInstance(form))
+watch(isInstanceConnection, (isInstance) => {
+  // Keep a valid stored port for the existing API, even if it was cleared
+  // before entering an instance name. The backend ignores it in this mode.
+  if (isInstance && (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535)) {
+    form.port = 1433
+  }
+})
 const envFilter = ref<string | undefined>(undefined)
 const searchKeyword = ref('')
 type PageSize = 20 | 50 | 100

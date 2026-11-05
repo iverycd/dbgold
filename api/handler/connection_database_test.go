@@ -421,6 +421,40 @@ func TestCatalogQueryUsesRealDatabasesAndPreservesNames(t *testing.T) {
 	}
 }
 
+func TestSQLServerDSNInstanceRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		host     string
+		port     int
+		instance string
+		wantPort uint64
+	}{
+		{"instance with default port", `192.168.219.243\sql2012`, 1433, "sql2012", 0},
+		{"instance with custom port", `192.168.219.243\sql2012`, 51433, "sql2012", 0},
+		{"hostname instance preserves case", `db.example.com\Sql2012`, 1433, "Sql2012", 0},
+		{"plain host default port", "192.168.219.243", 1433, "", 1433},
+		{"plain host custom port", "db.example.com", 51433, "", 51433},
+		{"empty instance retains port", `db.example.com\`, 51433, "", 51433},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &store.Connection{DBType: "sqlserver", Host: tc.host, Port: tc.port,
+				Database: `MiXeD DB};port=1234;{`, Username: `reader};port=1234;{`, Password: `p;@ss}' word`}
+			before := *conn
+			dsn := buildDSN(conn)
+			parsed, err := msdsn.Parse(dsn)
+			require.NoError(t, err)
+			host, _, _ := strings.Cut(tc.host, `\`)
+			require.Equal(t, host, parsed.Host)
+			require.Equal(t, tc.instance, parsed.Instance)
+			require.Equal(t, tc.wantPort, parsed.Port)
+			require.Equal(t, conn.Database, parsed.Database)
+			require.Equal(t, conn.Username, parsed.User)
+			require.Equal(t, conn.Password, parsed.Password)
+			require.Equal(t, before, *conn, "building a DSN must not change saved connection fields")
+		})
+	}
+}
+
 func TestDatabaseDSNPreservesNamesWithoutAddingOptions(t *testing.T) {
 	require.Equal(t, "'业务　库'", pgDSNValue("业务　库"), "lib/pq treats Unicode spaces as option separators")
 	name := `MiXeD DB/'\;?sslmode=require&password=changed}`

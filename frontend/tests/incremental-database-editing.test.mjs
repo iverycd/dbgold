@@ -9,7 +9,7 @@ import { parse } from '@vue/compiler-sfc'
 const { descriptor } = parse(readFileSync(new URL('../src/views/IncrementalMigrationPanel.vue', import.meta.url), 'utf8'))
 const source = ts.transpileModule(`${descriptor.scriptSetup.content}
   export { form, schemas, ready, checking, starting, preflightResult, missingTableModalVisible,
-    selectedMissingTables, preflight, start, retryAfterRepair, excludeMissingAndRetry };`, {
+    selectedMissingTables, targetConnections, isDamengTarget, preflight, start, retryAfterRepair, excludeMissingAndRetry };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
@@ -73,6 +73,33 @@ async function withPanel(run, overrides) {
   const scope = Vue.effectScope()
   try { await run(scope.run(() => panel(overrides))) } finally { scope.stop() }
 }
+
+test('Dameng is selectable and sends fixed uppercase naming without changing other targets', async () => {
+  await withPanel(async ({ p, props, checks, starts }) => {
+    props.connections.push({ id: 4, db_type: 'dameng', database: 'DMTEST', host: 'dm-target' })
+    props.connections.push({ id: 5, db_type: 'oracle', database: 'ORA', host: 'unsupported-target' })
+    assert.ok(p.targetConnections.value.some(connection => connection.id === 4))
+    assert.ok(!p.targetConnections.value.some(connection => connection.id === 5))
+    p.form.dst_conn_id = 4
+    await flushPromises()
+    assert.equal(p.isDamengTarget.value, true)
+    assert.deepEqual(Array.from(p.schemas.value), ['DMTEST'])
+    p.form.target_schema = 'DMTEST'
+    p.form.lower_case_names = true
+    await p.preflight()
+    await p.start()
+    assert.equal(checks.at(-1).dst_conn_id, 4)
+    assert.equal(checks.at(-1).target_schema, 'DMTEST')
+    assert.equal(checks.at(-1).lower_case_names, false)
+    assert.equal(starts.at(-1).lower_case_names, false)
+    p.form.dst_conn_id = 2
+    await flushPromises()
+    p.form.target_schema = 'public'
+    assert.equal(p.isDamengTarget.value, false)
+    await p.preflight()
+    assert.equal(checks.at(-1).lower_case_names, true)
+  }, { schemas: async id => ({ data: id === 4 ? ['DMTEST'] : ['public'] }) })
+})
 
 test('incremental database saves synchronize source names and invalidate schemas, exclusions and preflight', async () => {
   await withPanel(async ({ p, props, checks }) => {

@@ -41,10 +41,6 @@ func NewPostgresApplier(ctx context.Context, dsn, schema, jobID string, lower bo
 	return newPostgresApplier(ctx, Config{TargetDSN: dsn, TargetSchema: schema, JobID: jobID, LowerCaseNames: lower})
 }
 
-func newTargetApplier(ctx context.Context, cfg Config) (*PostgresApplier, error) {
-	return newPostgresApplier(ctx, cfg)
-}
-
 func newPostgresApplier(ctx context.Context, cfg Config) (*PostgresApplier, error) {
 	db, err := openTargetDB(cfg)
 	if err != nil {

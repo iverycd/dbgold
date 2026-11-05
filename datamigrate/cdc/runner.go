@@ -46,7 +46,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer applier.Close()
-	if err = checkTargetBusinessTriggers(ctx, applier.db, r.cfg, tables); err != nil {
+	if err = applier.CheckBusinessTriggers(ctx, tables); err != nil {
 		return err
 	}
 	record, recordExists, err := applier.LoadBootstrapRecord(ctx)
@@ -94,8 +94,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	cfg := replication.BinlogSyncerConfig{ServerID: r.cfg.ServerID, Flavor: "mysql", Host: r.cfg.SourceHost, Port: r.cfg.SourcePort,
-		User: r.cfg.SourceUser, Password: r.cfg.SourcePassword, ParseTime: true, HeartbeatPeriod: 10 * time.Second, ReadTimeout: 60 * time.Second,
+		User: r.cfg.SourceUser, Password: r.cfg.SourcePassword, ParseTime: r.cfg.TargetDBType != "dameng", HeartbeatPeriod: 10 * time.Second, ReadTimeout: 60 * time.Second,
 		MaxReconnectAttempts: 0, Logger: slog.Default()}
+	if r.cfg.TargetDBType == "dameng" {
+		// TIMESTAMP is stored as UTC in binlog. The source SQL session, not
+		// this process's local zone, decides its wall-clock target value.
+		cfg.TimestampStringLocation = time.UTC
+		cfg.UseFloatWithTrailingZero = true
+		cfg.RowsEventDecodeFunc = func(event *replication.RowsEvent, data []byte) error {
+			_, err := event.DecodeHeader(data)
+			if err != nil {
+				return err
+			}
+			if string(event.Table.Schema) != r.cfg.SourceDatabase || byName[string(event.Table.Table)] == nil {
+				event.Rows = nil
+				event.SkippedColumns = nil
+				return nil
+			}
+			return decodeDamengRowsEvent(event, data)
+		}
+	}
 	syncer := replication.NewBinlogSyncer(cfg)
 	defer syncer.Close()
 	var streamer *replication.BinlogStreamer
@@ -190,7 +208,17 @@ func (r *Runner) Run(ctx context.Context) error {
 			// not be applied twice.
 			changes = nil
 		} else {
-			stats, e := applier.Apply(eventCtx, changes, pos)
+			var stats Stats
+			var e error
+			if r.cfg.TargetDBType == "dameng" {
+				changes, e = normalizeDamengTimestamps(eventCtx, src, changes)
+				if e == nil {
+					changes, e = normalizeDamengJSON(eventCtx, src, changes)
+				}
+			}
+			if e == nil {
+				stats, e = applier.Apply(eventCtx, changes, pos)
+			}
 			if e != nil {
 				var conflict *RowConflictError
 				if errors.As(e, &conflict) && r.hooks.RowConflict != nil {

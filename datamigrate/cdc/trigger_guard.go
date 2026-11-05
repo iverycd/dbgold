@@ -17,6 +17,9 @@ type triggerMetadataReader interface {
 }
 
 func checkTargetBusinessTriggers(ctx context.Context, db triggerMetadataReader, cfg Config, tables []TableInfo) error {
+	if cfg.TargetDBType == "dameng" {
+		return checkDamengBusinessTriggers(ctx, db, cfg, tables)
+	}
 	selected := map[string]bool{}
 	for _, t := range tables {
 		selected[targetTableName(cfg, t.Name)] = true
@@ -36,6 +39,10 @@ func checkTargetBusinessTriggers(ctx context.Context, db triggerMetadataReader, 
 		}
 	}
 	return rows.Err()
+}
+
+func (a *PostgresApplier) CheckBusinessTriggers(ctx context.Context, tables []TableInfo) error {
+	return checkTargetBusinessTriggers(ctx, a.db, Config{TargetSchema: a.schema, LowerCaseNames: a.lower}, tables)
 }
 
 // Hold each table's ordinary write lock while checking its triggers and

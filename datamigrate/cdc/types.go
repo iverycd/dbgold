@@ -11,17 +11,19 @@ type Position struct {
 }
 
 type TableInfo struct {
-	Name            string            `json:"name"`
-	Engine          string            `json:"engine"`
-	Columns         []string          `json:"columns"`
-	ColumnTypes     []string          `json:"column_types"`
-	PrimaryKey      []int             `json:"primary_key_indexes"`
-	AutoIncrement   []int             `json:"auto_increment_indexes"`
-	LocatorStrategy string            `json:"locator_strategy"`
-	LocatorIndex    string            `json:"locator_index,omitempty"`
-	LocatorColumns  []string          `json:"locator_columns"`
-	LocatorWarning  string            `json:"locator_warning,omitempty"`
-	UniqueIndexes   []UniqueIndexInfo `json:"-"`
+	Name              string            `json:"name"`
+	Engine            string            `json:"engine"`
+	Columns           []string          `json:"columns"`
+	ColumnTypes       []string          `json:"column_types"`
+	ColumnDefinitions []string          `json:"-"`
+	ColumnCharsets    []string          `json:"-"`
+	PrimaryKey        []int             `json:"primary_key_indexes"`
+	AutoIncrement     []int             `json:"auto_increment_indexes"`
+	LocatorStrategy   string            `json:"locator_strategy"`
+	LocatorIndex      string            `json:"locator_index,omitempty"`
+	LocatorColumns    []string          `json:"locator_columns"`
+	LocatorWarning    string            `json:"locator_warning,omitempty"`
+	UniqueIndexes     []UniqueIndexInfo `json:"-"`
 }
 
 const LocatorStrategyVersion = 1

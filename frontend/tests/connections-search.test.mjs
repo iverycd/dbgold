@@ -10,7 +10,7 @@ const { descriptor } = parse(readFileSync(new URL('../src/views/ConnectionsView.
 const { outputText } = ts.transpileModule(`${descriptor.scriptSetup.content}
   export { connections, searchKeyword, envFilter, envHistory, filteredConnections,
     page, pagination, handlePageChange, handlePageSizeChange, loadConnections,
-    openCreate, openEdit, form, handleSubmit, handleDelete };`, {
+    openCreate, openEdit, form, handleSubmit, handleDelete, isSQLServerInstance, isInstanceConnection };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 })
 
@@ -61,6 +61,52 @@ function setup(t, initialRows = []) {
 }
 
 function ids(view) { return Array.from(view.filteredConnections.value, row => row.id) }
+
+test('SQL Server instance mode follows the host and preserves the saved port', async t => {
+  const { view } = setup(t)
+  view.openCreate()
+  view.form.db_type = 'sqlserver'
+  await Vue.nextTick()
+  assert.equal(view.form.port, 1433)
+  view.form.host = '192.168.219.243\\sql2012'
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, true)
+  await view.handleSubmit(closed => assert.equal(closed, true))
+  const saved = view.connections.value[0]
+  assert.equal(saved.host, '192.168.219.243\\sql2012')
+  assert.equal(saved.port, 1433)
+  assert.equal(view.isSQLServerInstance(saved), true)
+
+  view.openEdit(connection(42, { db_type: 'sqlserver', host: 'db\\Sql2012', port: 51433 }))
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, true)
+  assert.equal(view.form.port, 51433)
+  view.form.host = 'db'
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, false)
+  assert.equal(view.form.port, 51433)
+  view.form.host = 'db\\'
+  assert.equal(view.isInstanceConnection.value, false)
+  view.form.host = 'db\\Sql2012'
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, true)
+  assert.equal(view.form.port, 51433)
+  view.form.db_type = 'mysql'
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, false)
+  assert.equal(view.isSQLServerInstance(connection(1, { host: 'db\\Sql2012' })), false)
+})
+
+test('entering instance mode after clearing the port supplies a valid API port', async t => {
+  const { view } = setup(t)
+  view.openEdit(connection(42, { db_type: 'sqlserver', host: 'db', port: 51433 }))
+  await Vue.nextTick()
+  view.form.port = undefined
+  view.form.host = 'db\\sql2012'
+  await Vue.nextTick()
+  assert.equal(view.isInstanceConnection.value, true)
+  assert.equal(view.form.port, 1433)
+})
 
 test('search matches only name, host or database, ignoring case and surrounding whitespace', async t => {
   const { view, calls } = setup(t, [

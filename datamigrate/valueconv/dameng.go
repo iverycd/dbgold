@@ -1,6 +1,11 @@
 package valueconv
 
-import "encoding/hex"
+import (
+	"encoding/hex"
+	"math"
+	"math/big"
+	"strconv"
+)
 
 // DaMengValueConverter 把 Reader 输出的中立值落地为达梦(dm 驱动)能接受的形态。
 //
@@ -16,11 +21,11 @@ func (c *DaMengValueConverter) Convert(val interface{}, srcType, dbTypeName stri
 		return nil
 	}
 	if srcType == "mysql" {
+		if dbTypeName == "BIT" {
+			return mysqlDamengBit(val)
+		}
 		if b, ok := val.([]byte); ok {
 			switch dbTypeName {
-			case "BIT":
-				// 目标为 NUMBER(1):把位串字节转十进制整数
-				return bytesToInt(b)
 			case "GEOMETRY":
 				// 几何类型映射为文本(CLOB),用十六进制串表示
 				if len(b) >= 4 {
@@ -43,7 +48,32 @@ func (c *DaMengValueConverter) Convert(val interface{}, srcType, dbTypeName stri
 	return val
 }
 
-// bytesToInt 把大端字节序列转为整数(用于 MySQL BIT → 达梦 NUMBER)。
+// MySQL BIT is unsigned. The full reader returns big-endian bytes, while
+// the binlog decoder returns int64 with the same bits. Keep both paths exact;
+// the DM driver cannot bind uint64 above MaxInt64 without wrapping it.
+func mysqlDamengBit(value interface{}) interface{} {
+	var unsigned uint64
+	switch v := value.(type) {
+	case []byte:
+		n := new(big.Int).SetBytes(v)
+		if n.IsInt64() {
+			return n.Int64()
+		}
+		return n.String()
+	case int64:
+		unsigned = uint64(v)
+	case uint64:
+		unsigned = v
+	default:
+		return value
+	}
+	if unsigned > math.MaxInt64 {
+		return strconv.FormatUint(unsigned, 10)
+	}
+	return int64(unsigned)
+}
+
+// bytesToInt retains the existing signed BIT conversion used by Oscar.
 func bytesToInt(b []byte) int64 {
 	var n int64
 	for _, x := range b {

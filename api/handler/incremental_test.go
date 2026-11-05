@@ -67,7 +67,7 @@ func TestConfigFromIncrementalUsesConfirmedIncrementalOnlyScope(t *testing.T) {
 }
 
 func TestIncrementalTargetTypesAndConfig(t *testing.T) {
-	supported := []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "kingbase", "seabox"}
+	supported := []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "kingbase", "seabox", "dameng"}
 	for _, dbType := range supported {
 		t.Run(dbType, func(t *testing.T) {
 			require.True(t, isSupportedIncrementalTarget(dbType))
@@ -78,7 +78,35 @@ func TestIncrementalTargetTypesAndConfig(t *testing.T) {
 		})
 	}
 	require.False(t, isSupportedIncrementalTarget("mysql"))
-	require.False(t, isSupportedIncrementalTarget("dameng"))
+	require.False(t, isSupportedIncrementalTarget("oracle"))
+}
+
+func TestIncrementalDamengSchemaMatchesTargetAndOccupancy(t *testing.T) {
+	store.Init(&config.Config{SQLitePath: ":memory:"})
+	src := &store.Connection{OwnerID: 1, Name: "source", DBType: "mysql", Host: "127.0.0.1", Port: 3306, Username: "root", Database: "SourceCase"}
+	dst := &store.Connection{OwnerID: 1, Name: "target", DBType: "dameng", Host: "127.0.0.1", Port: 5236, Username: "SYSDBA", Password: "test-password"}
+	require.NoError(t, store.CreateConnection(src))
+	require.NoError(t, store.CreateConnection(dst))
+	cfg := incrementalConfig(incrementalRequest{SrcDatabase: "SourceCase", TargetSchema: "TargetCase"}, "dm-config", src, dst)
+	require.Equal(t, "dameng", cfg.TargetDBType)
+	require.Equal(t, "TARGETCASE", cfg.TargetSchema)
+	require.Equal(t, "SourceCase", cfg.SourceDatabase)
+	require.Equal(t, buildDSN(dst), cfg.TargetDSN)
+	pg := *dst
+	pg.DBType = "postgres"
+	require.Equal(t, "TargetCase", incrementalConfig(incrementalRequest{TargetSchema: "TargetCase"}, "pg-config", src, &pg).TargetSchema)
+
+	job := &store.IncrementalMigrationJob{OwnerID: 1, JobID: "dm-first", SrcConnID: src.ID, DstConnID: dst.ID, DstDBType: "dameng", TargetSchema: "TargetCase", Status: "initializing"}
+	launched := 0
+	require.NoError(t, createIncrementalAfterPreflight(job, src, dst, func() { launched++ }))
+	stored, err := store.GetIncrementalJob(job.JobID)
+	require.NoError(t, err)
+	require.Equal(t, "TARGETCASE", stored.TargetSchema)
+	duplicate := &store.IncrementalMigrationJob{OwnerID: 1, JobID: "dm-duplicate", SrcConnID: src.ID, DstConnID: dst.ID, DstDBType: "dameng", TargetSchema: "targetcase", Status: "initializing"}
+	require.ErrorIs(t, createIncrementalAfterPreflight(duplicate, src, dst, func() { launched++ }), errIncrementalTargetInUse)
+	require.Equal(t, 1, launched)
+	_, err = store.GetIncrementalJob(duplicate.JobID)
+	require.Error(t, err)
 }
 
 func TestGetIncrementalReturnsConnectionSnapshotsAndEnforcesOwnership(t *testing.T) {

@@ -5,6 +5,7 @@ import "testing"
 func TestTargetDriverName(t *testing.T) {
 	tests := map[string]string{
 		"":         "postgres",
+		"dameng":   "dm",
 		"postgres": "postgres",
 		"highgo":   "highgo",
 		"vastbase": "postgres",
