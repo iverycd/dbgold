@@ -283,6 +283,7 @@ for (const [kind, stateKey, launchKey, resetKey, tabKey, panelKey] of [
       assert.equal(p.pgTaskSummaries.value[kind].preflight, null)
       p.onPGReportLoaded(kind, 'second-job', {})
       assert.equal(p.pgTaskSummaries.value[kind].preflight, null, 'legacy report without preflight retains page attribution')
+      Object.assign(state, { running: false, finished: true })
       p[resetKey]()
       assert.equal(p.pgTaskSummaries.value[kind], null)
       assert.equal(state.currentJobId, '')
@@ -345,6 +346,7 @@ for (const [kind, stateKey, launchKey, resetKey] of [
       await p[launchKey]()
       assert.equal(checks, 2)
       // Reset again without exclusions: a matching request key must not reuse success.
+      Object.assign(state, { running: false, finished: true })
       p[resetKey]()
       await p[launchKey]()
       assert.equal(checks, 3)

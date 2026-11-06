@@ -50,6 +50,7 @@
                   </a-select>
                   <a-select
                     v-model="dataMigrate.srcConnId"
+                    :disabled="migrationContextLocked('data')"
                     placeholder="选择源库连接"
                     style="width: 100%"
                     allow-search
@@ -66,10 +67,11 @@
                   <span v-if="selectedSrc.database && !supportsDatabaseEditing(selectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ selectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedSrc.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="selectedSrc" />
+                <DatabaseNameEditor :connection="selectedSrc" :disabled="migrationContextLocked('data')" />
                 <a-select
                   v-if="sourceUsesSchema(selectedSrc)"
                   v-model="dataMigrate.srcDatabase"
+                  :disabled="migrationContextLocked('data')"
                   placeholder="选择要迁移的 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
@@ -99,6 +101,7 @@
                   </a-select>
                   <a-select
                     v-model="dataMigrate.dstConnId"
+                    :disabled="migrationContextLocked('data')"
                     placeholder="选择目标库连接"
                     style="width: 100%"
                     allow-search
@@ -115,11 +118,12 @@
                   <span v-if="!supportsDatabaseEditing(selectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ selectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(selectedDst, dataMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ selectedDst.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="selectedDst" />
+                <DatabaseNameEditor :connection="selectedDst" :disabled="migrationContextLocked('data')" />
                 <div v-if="dataMigrate.dstConnId && selectedDst?.db_type !== 'mysql'" class="migration-schema-field">
                   <div class="migration-schema-control">
                     <a-select
                       v-model="dataMigrate.dstSchema"
+                      :disabled="migrationContextLocked('data')"
                       :placeholder="selectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                       :allow-clear="selectedDst?.db_type === 'oracle'"
                       class="migration-schema-select"
@@ -437,6 +441,7 @@
                   </a-select>
                   <a-select
                     v-model="viewMigrate.srcConnId"
+                    :disabled="migrationContextLocked('views')"
                     placeholder="选择源库连接"
                     style="width: 100%"
                     allow-search
@@ -453,10 +458,11 @@
                   <span v-if="vmSelectedSrc.database && !supportsDatabaseEditing(vmSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ vmSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedSrc.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="vmSelectedSrc" />
+                <DatabaseNameEditor :connection="vmSelectedSrc" :disabled="migrationContextLocked('views')" />
                 <a-select
                   v-if="sourceUsesSchema(vmSelectedSrc)"
                   v-model="viewMigrate.srcDatabase"
+                  :disabled="migrationContextLocked('views')"
                   placeholder="选择 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
@@ -487,6 +493,7 @@
                   </a-select>
                   <a-select
                     v-model="viewMigrate.dstConnId"
+                    :disabled="migrationContextLocked('views')"
                     placeholder="选择目标库连接"
                     style="width: 100%"
                     allow-search
@@ -503,11 +510,12 @@
                   <span v-if="!supportsDatabaseEditing(vmSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ vmSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(vmSelectedDst, viewMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ vmSelectedDst.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="vmSelectedDst" />
+                <DatabaseNameEditor :connection="vmSelectedDst" :disabled="migrationContextLocked('views')" />
                 <div v-if="viewMigrate.dstConnId && vmSelectedDst?.db_type !== 'mysql'" class="migration-schema-field">
                   <div class="migration-schema-control">
                     <a-select
                       v-model="viewMigrate.dstSchema"
+                      :disabled="migrationContextLocked('views')"
                       :placeholder="vmSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                       :allow-clear="vmSelectedDst?.db_type === 'oracle'"
                       class="migration-schema-select"
@@ -683,6 +691,7 @@
                   </a-select>
                   <a-select
                     v-model="objMigrate.srcConnId"
+                    :disabled="migrationContextLocked('objects')"
                     placeholder="选择源库连接"
                     style="width: 100%"
                     allow-search
@@ -699,10 +708,11 @@
                   <span v-if="omSelectedSrc.database && !supportsDatabaseEditing(omSelectedSrc.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedSrc.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ omSelectedSrc.database }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedSrc.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="omSelectedSrc" />
+                <DatabaseNameEditor :connection="omSelectedSrc" :disabled="migrationContextLocked('objects')" />
                 <a-select
                   v-if="sourceUsesSchema(omSelectedSrc)"
                   v-model="objMigrate.srcDatabase"
+                  :disabled="migrationContextLocked('objects')"
                   placeholder="选择 Schema"
                   style="width: 100%; margin-top: 10px"
                   allow-search
@@ -733,6 +743,7 @@
                   </a-select>
                   <a-select
                     v-model="objMigrate.dstConnId"
+                    :disabled="migrationContextLocked('objects')"
                     placeholder="选择目标库连接"
                     style="width: 100%"
                     allow-search
@@ -749,11 +760,12 @@
                   <span v-if="!supportsDatabaseEditing(omSelectedDst.db_type)" class="conn-meta-item"><span class="conn-meta-label">{{ omSelectedDst.db_type === 'oracle' ? 'Service Name' : '数据库' }}</span>{{ targetDatabaseName(omSelectedDst, objMigrate.dstSchema) }}</span>
                   <span class="conn-meta-item"><span class="conn-meta-label">账号</span>{{ omSelectedDst.username }}</span>
                 </div>
-                <DatabaseNameEditor :connection="omSelectedDst" />
+                <DatabaseNameEditor :connection="omSelectedDst" :disabled="migrationContextLocked('objects')" />
                 <div v-if="objMigrate.dstConnId && omSelectedDst?.db_type !== 'mysql'" class="migration-schema-field">
                   <div class="migration-schema-control">
                     <a-select
                       v-model="objMigrate.dstSchema"
+                      :disabled="migrationContextLocked('objects')"
                       :placeholder="omSelectedDst?.db_type === 'oracle' ? '留空使用当前登录用户' : '请选择目标 Schema'"
                       :allow-clear="omSelectedDst?.db_type === 'oracle'"
                       class="migration-schema-select"
@@ -1320,27 +1332,32 @@ async function startDataMigration() {
 }
 
 function connectSSE(jobID: string) {
-  currentEventSource = createDataMigrateEventSource(jobID)
-  currentEventSource.addEventListener('message', (e) => {
+  currentEventSource?.close()
+  const eventSource = createDataMigrateEventSource(jobID)
+  currentEventSource = eventSource
+  const current = () => currentEventSource === eventSource && dataMigrate.currentJobId === jobID
+  eventSource.addEventListener('message', (e) => {
+    if (!current()) return
     if (e.data === '[STREAM_END]') {
       dataMigrate.running = false
       dataMigrate.finished = true
-      currentEventSource?.close()
+      eventSource.close()
       currentEventSource = null
       return
     }
     dataMigrate.logs.push(e.data)
     nextTick(() => {
-      if (logContainer.value) {
+      if (dataMigrate.currentJobId === jobID && logContainer.value) {
         logContainer.value.scrollTop = logContainer.value.scrollHeight
       }
     })
   })
-  currentEventSource.onerror = () => {
+  eventSource.onerror = () => {
+    if (!current()) return
     dataMigrate.logs.push('[ERROR] 日志流连接中断，请查看历史任务获取详情')
     dataMigrate.running = false
     dataMigrate.finished = true
-    currentEventSource?.close()
+    eventSource.close()
     currentEventSource = null
   }
 }
@@ -1355,12 +1372,8 @@ async function cancelDataMigration() {
 }
 
 function resetDataMigration() {
-  dataMigrate.running = false
-  dataMigrate.finished = false
-  dataMigrationChecking.value = false
-  dataMigrate.logs = []
-  dataMigrate.currentJobId = ''
-  dataExecutionRoute.value = null
+  if (dataMigrate.running || dataMigrationStarting.value) return
+  clearMigrationResults('data')
   clearPGCheck('data', true)
   clearPartitionCheck()
   nativeCheckAbort?.abort()
@@ -1766,27 +1779,32 @@ async function startObjectMigration() {
 }
 
 function omConnectSSE(jobID: string) {
-  objEventSource = createDataMigrateEventSource(jobID)
-  objEventSource.addEventListener('message', (e) => {
+  objEventSource?.close()
+  const eventSource = createDataMigrateEventSource(jobID)
+  objEventSource = eventSource
+  const current = () => objEventSource === eventSource && objMigrate.currentJobId === jobID
+  eventSource.addEventListener('message', (e) => {
+    if (!current()) return
     if (e.data === '[STREAM_END]') {
       objMigrate.running = false
       objMigrate.finished = true
-      objEventSource?.close()
+      eventSource.close()
       objEventSource = null
       return
     }
     objMigrate.logs.push(e.data)
     nextTick(() => {
-      if (objLogContainer.value) {
+      if (objMigrate.currentJobId === jobID && objLogContainer.value) {
         objLogContainer.value.scrollTop = objLogContainer.value.scrollHeight
       }
     })
   })
-  objEventSource.onerror = () => {
+  eventSource.onerror = () => {
+    if (!current()) return
     objMigrate.logs.push('[ERROR] 日志流连接中断，请查看历史任务获取详情')
     objMigrate.running = false
     objMigrate.finished = true
-    objEventSource?.close()
+    eventSource.close()
     objEventSource = null
   }
 }
@@ -1801,10 +1819,8 @@ async function cancelObjectMigration() {
 }
 
 function resetObjectMigration() {
-  objMigrate.running = false
-  objMigrate.finished = false
-  objMigrate.logs = []
-  objMigrate.currentJobId = ''
+  if (objMigrate.running) return
+  clearMigrationResults('objects')
   clearPGCheck('objects', true)
 }
 
@@ -1813,15 +1829,44 @@ function copyObjLogs() {
 }
 
 const databaseEditors = createConnectionDatabaseEditors(connections, onConnectionDatabaseSaved, (id) =>
-  [dataMigrate, viewMigrate, objMigrate].some(state => state.running && (state.srcConnId === id || state.dstConnId === id)) ||
-  (exportingRoutines.value && dataMigrate.srcConnId === id) ||
-  (dataMigrationStarting.value && (dataMigrate.srcConnId === id || dataMigrate.dstConnId === id))
+  (['data', 'views', 'objects'] as PGCheckKind[]).some(kind => {
+    const state = migrationState(kind)
+    return migrationContextLocked(kind) && (state.srcConnId === id || state.dstConnId === id)
+  }) || (exportingRoutines.value && dataMigrate.srcConnId === id)
 )
 provide(CONNECTION_DATABASE_EDITORS_KEY, databaseEditors)
 onUnmounted(() => databaseEditors.dispose())
 
 function migrationState(kind: PGCheckKind) {
   return kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
+}
+function migrationContextLocked(kind: PGCheckKind): boolean {
+  return migrationState(kind).running || pgBusy[kind] || (kind === 'data' && (
+    dataMigrationStarting.value || dataMigrationChecking.value || nativeCheckBusy.value || partitionCheckBusy.value
+  ))
+}
+function clearMigrationResults(kind: PGCheckKind) {
+  if (kind === 'views') {
+    viewMigrate.results = []
+    viewMigrate.compatibilityFunctions = undefined
+    return
+  }
+  const state = kind === 'data' ? dataMigrate : objMigrate
+  if (kind === 'data') {
+    currentEventSource?.close()
+    currentEventSource = null
+    dataMigrationChecking.value = false
+    dataExecutionRoute.value = null
+    dataMigrateResultTab.value = 'logs'
+  } else {
+    objEventSource?.close()
+    objEventSource = null
+    objMigrateResultTab.value = 'logs'
+  }
+  state.logs = []
+  state.currentJobId = ''
+  state.finished = false
+  pgSubmissions[kind] = null
 }
 function databaseSelectionBlocked(kind: PGCheckKind): boolean {
   const state = migrationState(kind)
@@ -2170,6 +2215,12 @@ function restorePGObject(kind: PGCheckKind, object: MigrationObjectRef) {
   pgExclusions[kind] = pgExclusions[kind].filter(o => objectKey(o) !== objectKey(object)); pgChecks[kind] = null
 }
 for (const kind of ['data', 'views', 'objects'] as PGCheckKind[]) {
+  watch(() => databaseContextKey(kind), () => {
+    // Running workflows keep their result state; their context controls are locked.
+    if (!migrationState(kind).running && !(kind === 'data' && dataMigrationStarting.value)) {
+      clearMigrationResults(kind)
+    }
+  }, { flush: 'sync' })
   watch([() => databaseContextKey(kind), () => databaseSelectionBlocked(kind)], () => {
     clearPGCheck(kind, true)
     if (kind === 'data') dataMigrationConfirmVisible.value = false
