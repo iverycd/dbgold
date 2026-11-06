@@ -294,6 +294,10 @@ type batchOptions struct {
 	StripViewSchemas   string
 }
 
+func (o batchOptions) triggersFor(src, dst string) bool {
+	return supportsTriggerMigration(src, dst) && resolveTriggerMigration(src, dst, o.MigrateContent, o.MigrateTriggers)
+}
+
 func (o batchOptions) changeOwnerFor(targetType string) bool {
 	if targetType == "sqlserver" {
 		return false
@@ -469,11 +473,12 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		ctx, cancel := context.WithCancel(context.Background())
 		job := datamigrate.Registry.Register(jobID, cancel)
 
+		migrateTriggers := rowOpts.triggersFor(r.SrcDBType, r.DstDBType)
 		dbJob := &store.DataMigrationJob{
 			DamengWriteStrategy: rowOpts.DamengWriteStrategy,
 
 			ValidateData:       rowOpts.ValidateData,
-			MigrateTriggers:    resolveTriggerMigration(r.SrcDBType, r.DstDBType, rowOpts.MigrateContent, rowOpts.MigrateTriggers) && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			MigrateTriggers:    migrateTriggers,
 			ExcludedObjects:    encodeExcludedObjects(rowOpts.ExcludedObjects[r.RowNum]),
 			OwnerID:            ownerID,
 			JobID:              jobID,
@@ -516,7 +521,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 
 			OverwriteExisting:  rowOpts.OverwriteExisting,
 			ValidateData:       rowOpts.ValidateData,
-			MigrateTriggers:    resolveTriggerMigration(r.SrcDBType, r.DstDBType, rowOpts.MigrateContent, rowOpts.MigrateTriggers) && supportsTriggerMigration(r.SrcDBType, r.DstDBType),
+			MigrateTriggers:    migrateTriggers,
 			ExcludedObjects:    rowOpts.ExcludedObjects[r.RowNum],
 			SrcDatabase:        sourceSchema,
 			MigrateMode:        "all",

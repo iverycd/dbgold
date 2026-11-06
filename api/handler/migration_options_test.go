@@ -61,22 +61,24 @@ func TestBatchOwnerDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestMySQLDamengNewRequestTriggerDefaults(t *testing.T) {
+func TestMySQLNewRequestTriggerDefaults(t *testing.T) {
 	for _, content := range []string{"", "both", "schema_only", "data_only"} {
 		for _, option := range []string{"", `,"migrate_triggers":false`, `,"migrate_triggers":true`} {
 			var req startDataMigrationRequest
 			require.NoError(t, json.Unmarshal([]byte(`{"migrate_content":"`+content+`"`+option+`}`), &req))
-			resolved := resolveTriggerMigration("mysql", "dameng", req.MigrateContent, req.MigrateTriggers)
-			want := option == `,"migrate_triggers":true` || option == "" && content != "data_only"
-			require.Equal(t, want, resolved, content+option)
-			if content == "data_only" && option == `,"migrate_triggers":true` {
-				require.ErrorContains(t, validateTriggerMigration("mysql", "dameng", content, resolved), "仅迁移数据")
-			} else {
-				require.NoError(t, validateTriggerMigration("mysql", "dameng", content, resolved))
+			for _, dst := range []string{"dameng", "postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
+				resolved := resolveTriggerMigration("mysql", dst, req.MigrateContent, req.MigrateTriggers)
+				want := option == `,"migrate_triggers":true` || option == "" && content != "data_only"
+				require.Equal(t, want, resolved, dst+content+option)
+				if content == "data_only" && option == `,"migrate_triggers":true` {
+					require.ErrorContains(t, validateTriggerMigration("mysql", dst, content, resolved), "仅迁移数据")
+				} else {
+					require.NoError(t, validateTriggerMigration("mysql", dst, content, resolved))
+				}
 			}
 		}
 	}
-	for _, pair := range [][2]string{{"mysql", "postgres"}, {"mysql", "oracle"}, {"oracle", "dameng"}} {
+	for _, pair := range [][2]string{{"mysql", "oracle"}, {"mysql", "sqlserver"}, {"mysql", "oscar"}, {"mysql", "mysql"}, {"oracle", "dameng"}} {
 		require.False(t, resolveTriggerMigration(pair[0], pair[1], "both", nil))
 	}
 }
@@ -89,9 +91,13 @@ func TestBatchTriggerDefaultsResolvePerPair(t *testing.T) {
 		opts := parseBatchOptions(c)
 		require.Equal(t, form == "", opts.MigrateTriggers == nil)
 		for _, content := range []string{"both", "schema_only", "data_only"} {
-			wantDM := form == "migrate_triggers=true" || form == "" && content != "data_only"
-			require.Equal(t, wantDM, resolveTriggerMigration("mysql", "dameng", content, opts.MigrateTriggers))
-			require.Equal(t, form == "migrate_triggers=true", resolveTriggerMigration("mysql", "postgres", content, opts.MigrateTriggers))
+			opts.MigrateContent = content
+			want := form == "migrate_triggers=true" || form == "" && content != "data_only"
+			for _, dst := range []string{"dameng", "postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
+				require.Equal(t, want, opts.triggersFor("mysql", dst), dst+content+form)
+			}
+			require.False(t, opts.triggersFor("mysql", "oracle"))
+			require.False(t, opts.triggersFor("oracle", "postgres"))
 		}
 	}
 }

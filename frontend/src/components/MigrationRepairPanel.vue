@@ -58,6 +58,7 @@
       <template #empty>
         <div class="repair-empty">
           <a-empty :description="emptyDescription" />
+          <slot name="empty-action" />
           <a-button v-if="filter !== 'all' || keyword.trim()" type="text" size="small" @click="showAllObjects">查看全部对象</a-button>
         </div>
       </template>
@@ -122,7 +123,10 @@
       </template>
     </a-table>
     <a-spin v-else-if="loading" />
-    <a-empty v-else-if="!error" :description="emptyDescription" />
+    <div v-else-if="!error" class="repair-empty">
+      <a-empty :description="emptyDescription" />
+      <slot name="empty-action" />
+    </div>
 
     <a-modal v-model:visible="errorDetailsVisible" :mask-closable="false" width="min(800px, calc(100vw - 48px))" title="原始错误详情" :body-style="{ maxHeight: '60vh', overflow: 'auto' }" @close="closeErrorDetails">
       <template v-if="errorDetailRecord">

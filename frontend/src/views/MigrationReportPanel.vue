@@ -18,7 +18,13 @@
       <MigrationTimingSummary :job="timingJob" :loading="timingLoading" :unavailable="timingUnavailable" />
       <div class="report-stats">
         <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
-        <div><span>原始失败项</span><strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong></div>
+        <div>
+          <span>原始失败项</span>
+          <div class="report-failure-stat">
+            <strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong>
+            <a-button v-if="failedCount > 0" type="text" size="mini" @click="showOriginalFailures">查看失败原因</a-button>
+          </div>
+        </div>
         <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
         <div><span>数据内容校验</span><strong :class="{ 'report-danger': dataValidationNeedsAttention(report.dataValidation) }">{{ dataValidationLabel(report.dataValidation) }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
@@ -219,7 +225,11 @@
             对象修复
             <a-badge v-if="repairSummary.state === 'ready' && repairSummary.attention > 0" :count="repairSummary.attention" style="margin-left: 6px" />
           </template>
-          <MigrationRepairPanel ref="repairPanel" :jobID="jobID" @summary-change="updateRepairSummary" />
+          <MigrationRepairPanel ref="repairPanel" :jobID="jobID" @summary-change="updateRepairSummary">
+            <template v-if="failedCount > 0" #empty-action>
+              <a-button type="text" size="small" @click="showOriginalFailures">查看原始失败原因</a-button>
+            </template>
+          </MigrationRepairPanel>
         </a-tab-pane>
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
           <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
@@ -233,6 +243,24 @@
           </a-table>
         </a-tab-pane>
       </a-tabs>
+      <a-modal v-if="originalFailuresVisible" v-model:visible="originalFailuresVisible" title="原始失败原因" :mask-closable="false"
+        width="min(800px, calc(100vw - 48px))" :body-style="{ maxHeight: '65vh', overflowY: 'auto' }">
+        <article v-for="detail in visibleOriginalFailures" :key="detail.key" class="failure-item">
+          <a-alert v-if="'missing' in detail" type="warning">{{ detail.category }}：另有 {{ detail.missing }} 项未保存错误明细，请查看任务执行日志。</a-alert>
+          <template v-else>
+            <div class="failure-name">{{ detail.category }} · {{ detail.name }}</div>
+            <div v-if="detail.item.table" class="failure-context">所属表：{{ detail.item.table }}</div>
+            <div class="failure-context">失败阶段：{{ detail.stageLabel }}</div>
+            <div class="failure-error">{{ detail.item.error?.trim() ? detail.item.error : '报告未保存该对象的错误原文，请查看任务执行日志。' }}</div>
+            <details v-for="[label, ddl] in recordedFailureDDL(detail.item)" :key="label" class="source-table-details">
+              <summary>{{ label }}</summary>
+              <pre class="ddl-code">{{ ddl }}</pre>
+            </details>
+          </template>
+        </article>
+        <a-pagination v-if="originalFailures.length > 10" v-model:current="originalFailurePage" :total="originalFailures.length" :page-size="10" />
+        <template #footer><a-button @click="originalFailuresVisible = false">关闭</a-button></template>
+      </a-modal>
       <DamengNativePreflightPanel v-if="report.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
       <PartitionPreflightPanel v-if="report.partition_migration" :result="report.partition_migration" readonly />
       <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
@@ -254,7 +282,7 @@ import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrement
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
+import { reportCategories, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -266,6 +294,7 @@ import {
   getDataMigrationJob,
   type DataMigrationJob,
   type MigrationReport,
+  type ObjectResult,
   type TableRowCount,
 } from '@/api/migration'
 import { copyText } from '@/utils/clipboard'
@@ -336,6 +365,19 @@ const sortedRowCounts = computed<TableRowCount[]>(() => [
   ...allRowCounts.value.filter(row => row.match),
 ])
 const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isInformational ? 0 : row.failed), 0))
+const originalFailuresVisible = ref(false)
+const originalFailurePage = ref(1)
+const originalFailures = computed(() => originalFailureDetails(tableRows.value))
+const visibleOriginalFailures = computed(() => originalFailures.value.slice((originalFailurePage.value - 1) * 10, originalFailurePage.value * 10))
+
+function showOriginalFailures() {
+  originalFailurePage.value = 1
+  originalFailuresVisible.value = true
+}
+function recordedFailureDDL(item: ObjectResult) {
+  return [['目标 DDL', item.ddl], ['源端 DDL', item.source_ddl], ['建议 DDL', item.suggested_ddl]].filter(([, ddl]) => ddl?.trim())
+}
+
 let reportRequest = 0
 let timingPromise: Promise<void> | null = null
 
@@ -363,6 +405,7 @@ async function loadReport() {
   timingUnavailable.value = false
   timingPromise = loadTiming(jobID, request)
   activeTab.value = 'overview'
+  originalFailuresVisible.value = false
   repairSummary.value = { jobID, state: 'loading', repaired: 0, attention: 0 }
   preflightActiveKeys.value = []
   failurePagination.value = {}
@@ -530,7 +573,8 @@ onUnmounted(() => { reportRequest++ })
 .report-heading span { color: var(--color-text-3); font-size: 12px; overflow-wrap: anywhere; }
 .report-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
 .report-stats > div { padding: 16px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-2); }
-.report-stats span { display: block; color: var(--color-text-3); font-size: 12px; margin-bottom: 8px; }
+.report-stats > div > span { display: block; color: var(--color-text-3); font-size: 12px; margin-bottom: 8px; }
+.report-failure-stat { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .report-stats strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .report-danger { color: #dc2626; }
 .row-count-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; color: var(--color-text-2); font-size: 13px; }

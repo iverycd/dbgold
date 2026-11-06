@@ -146,7 +146,7 @@
                   <a-checkbox v-if="nativeDamengRows.length" v-model="options.overwrite_existing">达梦同库：覆盖目标同名对象（删除重建，默认关闭）</a-checkbox>
                   <a-checkbox v-model="options.validate_data" :disabled="options.migrate_content === 'schema_only'">迁移后校验数据内容</a-checkbox>
                   <a-select v-model="batchTriggerMode" :disabled="options.migrate_content === 'data_only'" style="width:290px" aria-label="触发器迁移策略">
-                    <a-option value="default">MySQL 触发器：按组合默认（达梦开启）</a-option>
+                    <a-option value="default">MySQL 触发器：支持的目标默认开启</a-option>
                     <a-option value="on">MySQL 触发器：支持的目标全部开启</a-option>
                     <a-option value="off">MySQL 触发器：全部关闭</a-option>
                   </a-select>
@@ -162,7 +162,7 @@
             </a-collapse-item>
           </a-collapse>
 
-          <a-alert v-if="options.migrate_content !== 'data_only' && batchTriggerMode !== 'off'" type="info">MySQL → 达梦行默认迁移触发器，在数据导入和校验后创建，目标触发器所有者需有相关表的直接权限；转换或创建失败会记录原因并继续迁移其他对象。PG 内核目标仅在选择“全部开启”时迁移触发器，以 SECURITY INVOKER 执行，需核对业务用户权限和会话时区。</a-alert>
+          <a-alert v-if="options.migrate_content !== 'data_only' && batchTriggerMode !== 'off'" type="info">MySQL 迁移到达梦或 PG 内核目标时，默认迁移所选表的触发器。有数据导入和校验时，触发器在这些步骤完成后创建。转换或创建失败会记录原因，其他对象继续迁移。达梦触发器所有者需有相关表的直接权限。PG 内核目标以 SECURITY INVOKER 执行触发器函数，请核对业务用户权限和会话时区。</a-alert>
           <a-alert v-if="nativeDamengRows.length" type="info">达梦同库行执行整个 Schema 的全部对象与数据迁移，自动保留原生定义与大小写。共享转换选项对这些行不生效；每行执行前重新预检，阻止项会记录到任务报告。源库需停写，目标 Schema 需提前创建。</a-alert>
           <a-card v-if="pgMySQLRows.length" title="PG → MySQL 对象排除（按 Excel 行生效）" size="small">
             <a-alert type="info">上面的校验只检查迁移组合。每行启动时都会执行完整兼容预检，阻止项会保存在任务报告中。可根据报告明确排除独立对象或整表后重新提交；排除后仍会重新检查依赖。源 schema 可使用 Excel 可选列 source_schema 指定，未填时为 public。</a-alert>

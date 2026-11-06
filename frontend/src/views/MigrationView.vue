@@ -1174,9 +1174,9 @@ const dataSupportsTriggers = computed(() => supportedPairs.value.some(pair => pa
 watch(() => dataMigrate.content, content => { if (content === 'schema_only') dataMigrate.validateData = false })
 watch([() => selectedSrc.value?.db_type, () => selectedDst.value?.db_type, dataSupportsTriggers, () => dataMigrate.content], ([src, dst, supported, content], [oldSrc, oldDst, oldSupported, oldContent]) => {
   if (!supported || content === 'data_only') { dataMigrate.migrateTriggers = false; return }
-  const mysqlDameng = src === 'mysql' && dst === 'dameng'
-  if (mysqlDameng && (src !== oldSrc || dst !== oldDst || !oldSupported || oldContent === 'data_only')) dataMigrate.migrateTriggers = true
-  else if (!mysqlDameng && oldSrc === 'mysql' && oldDst === 'dameng') dataMigrate.migrateTriggers = false
+  if (src === 'mysql' && (src !== oldSrc || dst !== oldDst || !oldSupported || oldContent === 'data_only')) {
+    dataMigrate.migrateTriggers = true
+  }
 })
 function triggerMigrationHint(targetType?: string): string {
   return targetType === 'dameng'

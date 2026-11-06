@@ -13,22 +13,22 @@ import Arco from '@arco-design/web-vue'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
-const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems };`, {
+const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems, originalFailuresVisible, originalFailurePage, originalFailures, visibleOriginalFailures, showOriginalFailures, recordedFailureDDL };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const renderCode = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
 
-function harness() {
+function harness(props = { jobID: 'job-manual-ddl' }, api = {}) {
   const copied = [], downloads = [], clicks = [], tabStates = [], repairInstances = []
   const context = {
     exports: {}, Blob, Vue,
-    defineProps: () => ({ jobID: 'job-manual-ddl' }),
+    defineProps: () => props,
     defineEmits: () => () => {}, defineExpose() {},
     URL: { createObjectURL(blob) { downloads.push(blob); return 'blob:report' }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {} }) },
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
-      if (id === '@/api/migration') return {}
+      if (id === '@/api/migration') return api
       if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/clipboard') return { copyText: async value => copied.push(value) }
@@ -51,12 +51,13 @@ function harness() {
     },
   })
   app.component('a-tab-pane', Arco.TabPane)
+  app.component('a-modal', { setup: (_, { slots }) => () => Vue.h('section', { role: 'dialog' }, slots.default?.()) })
   app.component('a-pagination', Arco.Pagination)
   app.component('CompatibilityFunctionsPanel', createCompatibilityPanel(copied))
   app.component('a-space', passthrough)
-  app.component('MigrationRepairPanel', { props: ['jobID'], setup: props => {
+  app.component('MigrationRepairPanel', { props: ['jobID'], setup: (props, { slots }) => {
     repairInstances.push(props.jobID)
-    return () => Vue.h('div', '修复操作面板')
+    return () => Vue.h('div', ['修复操作面板', slots['empty-action']?.()])
   } })
   app.component('a-button', {
     setup: (_, { slots, attrs }) => () => {
@@ -96,6 +97,57 @@ function paginatedReport(count) {
   result.tables = { total: count, success: 0, failed: count, items }
   return result
 }
+
+test('both failure links open original report errors when repair attention is zero', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const r = report({ name: 'Orders', stage: 'metadata', ddl: 'CREATE TABLE Orders', error: 'first line\nsecond line' })
+    r.data = report({ name: 'Payments', ddl: '', error: '   ' }).tables
+    h.p.report.value = r
+    h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'ready', repaired: 0, attention: 0 })
+    const overview = await renderToString(h.app)
+    assert.match(overview, /原始失败 2 项，[^]*当前无待处理对象/)
+    for (const label of ['查看失败原因', '查看原始失败原因']) {
+      h.clicks.find(button => button.label === label).handler()
+      const html = (await renderToString(h.app)).match(/<section role="dialog"[^]*?<\/section>/)[0]
+      assert.match(html, /表 · Orders/)
+      assert.match(html, /元数据读取失败/)
+      assert.match(html, /first line\nsecond line/)
+      assert.match(html, /<details[^]*CREATE TABLE Orders/)
+      assert.match(html, /数据写入 · Payments[^]*未保存该对象的错误原文/)
+      h.p.originalFailuresVisible.value = false
+    }
+    h.p.report.value.tables.failed = 2
+    h.p.showOriginalFailures()
+    assert.match(await renderToString(h.app), /表：另有 1 项未保存错误明细，请查看任务执行日志/)
+  } finally { scope.stop() }
+})
+
+test('original failures page ten at a time and switch to the newly loaded job', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const props = Vue.reactive({ jobID: 'first' })
+    const next = report({ name: 'NewJobTable', ddl: '', error: 'new job error' })
+    const h = scope.run(() => harness(props, {
+      getDataMigrationReport: async id => { assert.equal(id, 'second'); return { data: next } },
+      getDataMigrationJob: async id => ({ data: { job_id: id } }),
+    }))
+    h.p.report.value = paginatedReport(11)
+    h.p.showOriginalFailures()
+    assert.equal(h.p.visibleOriginalFailures.value.length, 10)
+    h.p.originalFailurePage.value = 2
+    assert.equal(h.p.visibleOriginalFailures.value[0].name, 'Orders_10')
+    props.jobID = 'second'
+    await Vue.nextTick()
+    assert.equal(h.p.originalFailuresVisible.value, false)
+    await new Promise(resolve => setImmediate(resolve))
+    h.p.showOriginalFailures()
+    assert.equal(h.p.originalFailurePage.value, 1)
+    assert.equal(h.p.visibleOriginalFailures.value.length, 1)
+    assert.equal(h.p.visibleOriginalFailures.value[0].item.error, 'new job error')
+  } finally { scope.stop() }
+})
 
 function memoryRenderer() {
   const element = tag => ({ tag, children: [], style: {}, offsetWidth: 0, offsetHeight: 0, offsetTop: 0, offsetLeft: 0 })

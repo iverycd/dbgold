@@ -43,7 +43,7 @@ func resolveTriggerMigration(src, dst, content string, requested *bool) bool {
 	if requested != nil {
 		return *requested
 	}
-	return src == "mysql" && dst == "dameng" && content != "data_only"
+	return src == "mysql" && supportsTriggerMigration(src, dst) && content != "data_only"
 }
 
 // Only newly submitted ordinary data loads receive this default. Saved empty

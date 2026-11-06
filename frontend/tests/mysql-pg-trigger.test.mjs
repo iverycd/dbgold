@@ -31,19 +31,28 @@ test('trigger capability controls options and resets data-only or unsupported se
     Object.assign(page.dataMigrate, { srcConnId: 1, dstConnId: 2 })
     Object.assign(page.objMigrate, { srcConnId: 1, dstConnId: 2 })
     await Vue.nextTick()
-    assert.equal(page.dataMigrate.migrateTriggers, false)
+    assert.equal(page.dataMigrate.migrateTriggers, true)
     assert.equal(page.dataSupportsTriggers.value, true)
     assert.ok(page.objectTypeOptions.value.some(option => option.value === 'triggers'))
-    page.dataMigrate.migrateTriggers = true
     assert.equal(page.dataMigrationRequest().migrate_triggers, true)
+    page.dataMigrate.migrateTriggers = false
+    for (const content of ['schema_only', 'both']) {
+      page.dataMigrate.content = content
+      await Vue.nextTick()
+      assert.equal(page.dataMigrationRequest().migrate_triggers, false)
+    }
     page.dataMigrate.content = 'data_only'
     await Vue.nextTick()
-    assert.equal(page.dataMigrate.migrateTriggers, false)
+    assert.equal(page.dataMigrationRequest().migrate_triggers, false)
+    page.dataMigrate.content = 'schema_only'
+    await Vue.nextTick()
+    assert.equal(page.dataMigrationRequest().migrate_triggers, true)
     page.objMigrate.objects = ['indexes', 'triggers']
     page.objMigrate.dstConnId = 3
     page.dataMigrate.dstConnId = 3
     await Vue.nextTick()
     assert.equal(page.dataSupportsTriggers.value, false)
+    assert.equal(page.dataMigrationRequest().migrate_triggers, false)
     assert.deepEqual([...page.objMigrate.objects], ['indexes'])
     assert.ok(!page.objectTypeOptions.value.some(option => option.value === 'triggers'))
   } finally { scope.stop() }
@@ -52,8 +61,9 @@ test('trigger capability controls options and resets data-only or unsupported se
 test('batch multipart preserves explicit choices and omits the pair-default choice', async () => {
   const requests = []
   const api = execute(readFileSync(new URL('../src/api/migration.ts', import.meta.url), 'utf8'), () => ({ default: { post: async (url, data) => { requests.push(data); return {} } } }))
-  for (const enabled of [undefined, false, true]) {
-    await api.startBatch(new Blob(['excel']), [], { migrate_content: 'both', migrate_triggers: enabled })
+  for (const [content, enabled] of [['both', undefined], ['both', false], ['schema_only', true], ['data_only', false]]) {
+    await api.startBatch(new Blob(['excel']), [], { migrate_content: content, migrate_triggers: enabled })
+    assert.equal(requests.at(-1).get('migrate_content'), content)
     assert.equal(requests.at(-1).get('migrate_triggers'), enabled === undefined ? null : String(enabled))
   }
 })
@@ -131,9 +141,10 @@ test('MySQL Dameng defaults on without resetting a manual uncheck within the pai
     page.dataMigrate.content = 'schema_only'
     await Vue.nextTick()
     assert.equal(page.dataMigrate.migrateTriggers, true)
+    page.dataMigrate.migrateTriggers = false
     page.dataMigrate.dstConnId = 2
     await Vue.nextTick()
-    assert.equal(page.dataMigrate.migrateTriggers, false, 'DM default must not opt PG in')
+    assert.equal(page.dataMigrationRequest().migrate_triggers, true)
   } finally { scope.stop() }
 })
 

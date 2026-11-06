@@ -213,6 +213,29 @@ export function reportCategories(report: MigrationReport) {
   })
 }
 
+type OriginalFailureEntry = { key: string; category: string } & (
+  { name: string; item: ObjectResult; stageLabel: string } | { missing: number }
+)
+
+export function originalFailureDetails(categories: ReturnType<typeof reportCategories>) {
+  const entries: OriginalFailureEntry[] = []
+  for (const row of categories) {
+    if (row.isInformational || row.failed <= 0) continue
+    const items = row.compatibilityReport
+      ? row.compatibilityReport.items.filter(item => item.status === 'failed').map(item => ({
+        item, name: [item.schema, item.signature || item.name].filter(Boolean).join('.'), stageLabel: '兼容对象初始化',
+      }))
+      : row.items.map(item => ({ item, name: item.name || item.target_name || item.source_name, stageLabel: item.stageLabel }))
+    for (const [index, detail] of items.entries()) {
+      entries.push({ ...detail, name: detail.name || '对象名未记录', key: `${row.key}:${index}`, category: row.label })
+    }
+    if (row.failed > items.length) {
+      entries.push({ key: `${row.key}:missing`, category: row.label, missing: row.failed - items.length })
+    }
+  }
+  return entries
+}
+
 function appendReportDDL(lines: string[], label: string, ddl: string) {
   lines.push(label)
   for (const line of ddl.split('\n')) lines.push(`      ${line}`)

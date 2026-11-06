@@ -40,13 +40,7 @@ func TestMySQLPGTriggerCapabilityAndValidation(t *testing.T) {
 	require.Equal(t, 9, enabled)
 }
 
-func TestMySQLPGTriggerRequestsAndBatchDefaultOff(t *testing.T) {
-	for _, raw := range []string{"", "migrate_triggers=false", "migrate_triggers=true"} {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = httptest.NewRequest("POST", "/", strings.NewReader(raw))
-		c.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		require.Equal(t, raw == "migrate_triggers=true", resolveTriggerMigration("mysql", "postgres", "both", parseBatchOptions(c).MigrateTriggers))
-	}
+func TestMySQLPGTriggerObjectRequest(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(`{"src_conn_id":1,"dst_conn_id":2,"migrate_objects":["triggers"],"table_names":["Orders"]}`))
 	c.Request.Header.Set("Content-Type", "application/json")

@@ -52,6 +52,24 @@ function report(indexes) {
   return result
 }
 
+test('original failure details include only failed compatibility routines and counted categories', () => {
+  const r = report({ total: 4, success: 2, failed: 2, items: null })
+  r.compatibility_functions = { total: 4, success: 2, created: 1, reused: 1, failed: 2, items: [
+    { name: 'helper', status: 'created' }, { name: 'existing', status: 'reused' },
+    { schema: 'public', name: 'convert', signature: 'convert(text)', status: 'failed', error: 'function error' },
+    { schema: 'public', name: 'sync', kind: 'procedure', status: 'failed', error: 'procedure error' },
+  ] }
+  r.trigger_adaptation = { recorded: true, total: 5, success: 0, failed: 5, blocked: 0, pending: 0, unknown: 0 }
+  const entries = migrationReportUtils.originalFailureDetails(reportCategories(r))
+  assert.equal(entries.length, 3)
+  assert.equal(entries[0].category, '索引')
+  assert.equal(entries[0].missing, 2)
+  assert.equal(entries[1].category, '兼容函数')
+  assert.equal(entries[1].name, 'public.convert(text)')
+  assert.equal(entries[2].category, '兼容存储过程')
+  assert.equal(entries[2].item.error, 'procedure error')
+})
+
 for (const [label, category] of [
   ['new metadata failure', { total: 0, total_unknown: true, success: 0, failed: 1, items: [failure({ name: '元数据读取', stage: 'metadata' })] }],
   ['legacy metadata failure', { total: 1, success: 0, failed: 1, items: [failure({ name: '元数据读取' })] }],
