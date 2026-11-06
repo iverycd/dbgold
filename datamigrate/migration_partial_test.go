@@ -26,6 +26,24 @@ func (r *partialMigrationReader) GetTableDDLInfo(ctx context.Context, table stri
 	return r.oscarFixtureReader.GetTableDDLInfo(ctx, table)
 }
 
+func (r *partialMigrationReader) GetViewRelationColumns(ctx context.Context, schema, relation string) (*source.TableDDLInfo, error) {
+	if schema != "" && !strings.EqualFold(schema, "dbo") {
+		return nil, fmt.Errorf("fixture relation %s.%s does not exist", schema, relation)
+	}
+	for name := range r.ddl {
+		if strings.EqualFold(name, relation) {
+			// Keep the same metadata failure injection as ordinary table reads.
+			return r.GetTableDDLInfo(ctx, name)
+		}
+	}
+	for _, view := range r.views {
+		if strings.EqualFold(view.ViewName, relation) {
+			return &source.TableDDLInfo{TableName: view.ViewName, Columns: []source.ColumnInfo{{Name: "Id", DataType: "int"}}}, nil
+		}
+	}
+	return nil, fmt.Errorf("fixture relation %s.%s does not exist", schema, relation)
+}
+
 type partialMigrationDialect struct {
 	dialect.Dialect
 	fail bool

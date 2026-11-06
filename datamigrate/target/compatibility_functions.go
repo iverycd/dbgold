@@ -360,35 +360,58 @@ func findUUIDGenerator(ctx context.Context, tx *sql.Tx, schema, catalog, product
 				return "", "", err
 			}
 		}
-		var candidates []uuidGenerator
-		err := compatibilityProbe(ctx, tx, func() error {
-			var e error
-			candidates, e = listUUIDGenerators(ctx, tx, catalog, schema, name)
-			return e
-		})
-		if err != nil {
-			attempts = append(attempts, name+": "+err.Error())
-			continue
+		generator, typ, failures := probeUUIDGenerator(ctx, tx, schema, catalog, name)
+		if generator != "" {
+			return generator, typ, nil
 		}
-		if len(candidates) == 0 {
-			attempts = append(attempts, name+": 不存在或无执行/模式访问权限")
+		attempts = append(attempts, failures...)
+	}
+	if product == "kingbase" {
+		// An existing generator may belong to another extension or be installed
+		// independently. Try every candidate before changing database extensions.
+		if err := prepareUUIDExtension(ctx, tx, catalog, schema, report); err != nil {
+			return "", "", err
 		}
-		for _, candidate := range candidates {
-			full := qualifiedFunction(candidate.schema, name)
-			var sample sql.NullString
-			err = compatibilityProbe(ctx, tx, func() error {
-				return tx.QueryRowContext(ctx, "SELECT "+uuidNormalizer(candidate.typ, "v")+" FROM (SELECT "+full+"() AS v OFFSET 0) uuid_sample").Scan(&sample)
-			})
-			if err == nil && sample.Valid && uuidHex.MatchString(sample.String) {
-				return full, candidate.typ, nil
-			}
-			if err == nil {
-				err = fmt.Errorf("返回值不是 32 位十六进制 UUID")
-			}
-			attempts = append(attempts, full+": "+err.Error())
+		generator, typ, failures := probeUUIDGenerator(ctx, tx, schema, catalog, "uuid_generate_v4")
+		if generator != "" {
+			return generator, typ, nil
+		}
+		for _, failure := range failures {
+			attempts = append(attempts, "启用 uuid-ossp 后 "+failure)
 		}
 	}
 	return "", "", fmt.Errorf("get_uuid 兼容函数初始化失败 [%s]: 无可用 UUID 函数；%s", schema, strings.Join(attempts, "；"))
+}
+
+func probeUUIDGenerator(ctx context.Context, tx *sql.Tx, schema, catalog, name string) (string, string, []string) {
+	var candidates []uuidGenerator
+	err := compatibilityProbe(ctx, tx, func() error {
+		var e error
+		candidates, e = listUUIDGenerators(ctx, tx, catalog, schema, name)
+		return e
+	})
+	if err != nil {
+		return "", "", []string{name + ": " + err.Error()}
+	}
+	if len(candidates) == 0 {
+		return "", "", []string{name + ": 不存在或无执行/模式访问权限"}
+	}
+	var failures []string
+	for _, candidate := range candidates {
+		full := qualifiedFunction(candidate.schema, name)
+		var sample sql.NullString
+		err = compatibilityProbe(ctx, tx, func() error {
+			return tx.QueryRowContext(ctx, "SELECT "+uuidNormalizer(candidate.typ, "v")+" FROM (SELECT "+full+"() AS v OFFSET 0) uuid_sample").Scan(&sample)
+		})
+		if err == nil && sample.Valid && uuidHex.MatchString(sample.String) {
+			return full, candidate.typ, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("返回值不是 32 位十六进制 UUID")
+		}
+		failures = append(failures, full+": "+err.Error())
+	}
+	return "", "", failures
 }
 
 func prepareUUIDExtension(ctx context.Context, tx *sql.Tx, catalog, schema string, report *CompatibilityFunctionsReport) error {
@@ -418,7 +441,7 @@ func prepareUUIDExtension(ctx context.Context, tx *sql.Tx, catalog, schema strin
 	if err != nil {
 		extension.Error = err.Error()
 		report.Extensions = append(report.Extensions, extension)
-		return fmt.Errorf("HighGo get_uuid 初始化失败，执行 %s: %w", extension.SQL, err)
+		return fmt.Errorf("get_uuid 初始化失败，执行 %s: %w", extension.SQL, err)
 	}
 	extension.Status = "installed"
 	// A concurrent installer may have chosen another schema. Always resolve it.

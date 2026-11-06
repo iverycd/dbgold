@@ -1070,6 +1070,38 @@ test('rendered manual repair shows its entry and editor while keeping source def
   } finally { scope.stop() }
 })
 
+test('SQL Server view suggestions stay read-only until explicitly adopted and do not execute on adoption', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const source = "CREATE VIEW [dbo].[CatalogView] AS SELECT name FROM syscolumns WHERE id=object_id('SourceView')"
+    const suggested = "CREATE OR REPLACE VIEW app.catalogview AS SELECT column_name AS name FROM information_schema.columns WHERE table_schema='app' AND table_name='sourceview'"
+    const failed = record({ kind: 'view', name: 'catalogview', target_name: 'catalogview', schema: 'app', ddl: '', units: [], source_ddl: source, suggested_ddl: suggested, original_error: '系统目录列名参与业务关联，需人工适配', requires_review: true })
+    const calls = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      saveRepairDraft: async () => { calls.push('save'); throw new Error('must not save on adoption') },
+      executeRepair: async () => { calls.push('execute'); throw new Error('must not execute on adoption') },
+    }))
+    await tick(); p.job.value.dst_db_type = 'kingbase'; p.records.value = [failed]
+    p.openEditor(failed)
+    assert.equal(p.draftUnits.value.length, 0, 'opening the editor does not adopt the candidate')
+    const html = await renderPanel(p)
+    for (const label of ['源端定义（只读', '采用建议 DDL', '系统目录列名参与业务关联，需人工适配']) assert.ok(html.includes(label), label)
+    const text = html.replaceAll('&#39;', "'")
+    assert.ok(text.includes(source))
+    assert.ok(text.includes(suggested))
+    p.useSuggested()
+    assert.equal(p.draftUnits.value.length, 1)
+    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(suggested, 'kingbase'))
+    assert.equal(p.draftUnits.value[0].original_sql, '')
+    assert.deepEqual(calls, [], 'adoption changes only the local draft')
+    assert.equal(failed.object.source_ddl, source)
+    assert.equal(failed.object.suggested_ddl, suggested)
+    assert.equal(failed.object.ddl, '')
+    assert.equal(failed.object.units.length, 0)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
 test('unsupported index saves and executes manual target SQL in one action', async () => {
   const scope = Vue.effectScope()
   try {

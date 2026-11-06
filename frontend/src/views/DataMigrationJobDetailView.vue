@@ -178,6 +178,8 @@
                     <div><strong>完整错误</strong><pre>{{ record.error || '—' }}</pre><a-button size="mini" type="text" @click="copy(record.error, '错误详情')"><icon-copy /> 复制错误</a-button></div>
                     <div v-if="record.ddl"><strong>失败 DDL</strong><pre>{{ record.ddl }}</pre><a-button size="mini" type="text" @click="copy(record.ddl, '失败 DDL')"><icon-copy /> 复制 DDL</a-button></div>
                     <div v-if="record.source_ddl"><strong>源端定义（只读，仅供适配参考）</strong><pre>{{ record.source_ddl }}</pre><a-button size="mini" type="text" @click="copy(record.source_ddl, '源端定义')"><icon-copy /> 复制源端定义</a-button></div>
+                    <a-alert v-if="record.suggestion" type="warning">{{ record.suggestion }}</a-alert>
+                    <div v-if="record.suggested_ddl"><strong>建议 DDL（需核对后手工采用）</strong><pre>{{ record.suggested_ddl }}</pre><a-button size="mini" type="text" @click="copy(record.suggested_ddl, '建议 DDL')"><icon-copy /> 复制建议 DDL</a-button></div>
                   </div>
                 </template>
               </a-table>

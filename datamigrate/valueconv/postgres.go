@@ -74,8 +74,10 @@ func convertSQLServer(val interface{}, dt string) interface{} {
 		if t, ok := val.(time.Time); ok {
 			return t.Format(timeLayout)
 		}
-	case "MONEY", "SMALLMONEY":
+	case "DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY":
 		if b, ok := val.([]byte); ok {
+			// SQL Server returns exact decimal text as []byte. pq COPY treats
+			// []byte as bytea, so preserve every digit by binding the text directly.
 			return string(b)
 		}
 	case "XML":

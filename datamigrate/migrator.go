@@ -1510,7 +1510,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 
 // prepareView shares the final view definition between execution and Oscar's
 // initial repair inventory, even if migration stops before reaching the view.
-func (m *Migrator) prepareView(v source.ViewInfo) (source.ViewInfo, error) {
+func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.ViewInfo, error) {
+	if m.isSQLServerPG() {
+		return m.prepareSQLServerPGView(ctx, v)
+	}
 	vCopy := v
 	vCopy.ViewName = m.objName(v.ViewName)
 	vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
@@ -1552,8 +1555,11 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
 		return ddl, m.repairView(ctx, v)
 	}
-	vCopy, err := m.prepareView(v)
+	vCopy, err := m.prepareView(ctx, v)
 	if err != nil {
+		if m.isSQLServerPG() {
+			return "", err
+		}
 		return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
 	}
 	// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
@@ -1561,7 +1567,7 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	if m.cfg.TargetSchema != "" {
 		viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
 	}
-	if m.isOscar() {
+	if m.isOscar() || m.isSQLServerPG() {
 		viewDDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
 	}
 	if err := m.repairView(ctx, vCopy); err != nil {
@@ -1691,6 +1697,7 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 		res := ObjectResult{Name: m.objName(v.ViewName), DDL: ddl}
 		if cerr != nil {
 			res.Error = cerr.Error()
+			m.attachSQLServerViewIssue(&res, v, cerr)
 		}
 		results = append(results, res)
 	}

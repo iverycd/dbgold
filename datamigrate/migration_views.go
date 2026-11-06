@@ -302,7 +302,9 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 				if err != nil {
 					m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, err)
 					category.Failed++
-					category.Items = append(category.Items, ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "execute", DDL: ddl, Error: err.Error()})
+					result := ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "execute", DDL: ddl, Error: err.Error()}
+					m.attachSQLServerViewIssue(&result, view, err)
+					category.Items = append(category.Items, result)
 					if m.stopMigrationTask(ctx, err) {
 						return
 					}

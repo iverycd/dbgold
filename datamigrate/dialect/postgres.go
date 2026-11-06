@@ -70,8 +70,20 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
 			def := coldefault.Strip(srcType, *col.Default)
+			literal := false
+			if srcType == "sqlserver" {
+				var err error
+				def, literal, err = sqlServerPGDefault(*col.Default)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+				}
+			}
 			// MySQL 位串字面量 b'0' / b'1' → PostgreSQL B'0' / B'1'
-			if reBitLiteral.MatchString(def) {
+			if literal {
+				// SQL Server stores the SQL literal itself, including its quotes.
+				// Classify it before keywords/functions so 'NULL' stays text.
+				colDef += " DEFAULT " + def
+			} else if reBitLiteral.MatchString(def) {
 				colDef += fmt.Sprintf(" DEFAULT B'%s'", def[2:len(def)-1])
 			} else if isFunctionDefault(def) {
 				colDef += fmt.Sprintf(" DEFAULT %s", d.functionDefault(def))

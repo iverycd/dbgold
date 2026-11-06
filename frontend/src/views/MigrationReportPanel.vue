@@ -143,7 +143,7 @@
                     </details>
                     <template v-else>
                       <div class="ddl-header">
-                        <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">复制源端表定义</a-button>
+                        <a-button size="mini" type="text" @click="copyDDL(item.source_ddl)">{{ item.sourceDDLCopyLabel }}</a-button>
                         <span>{{ item.sourceDDLLabel }}</span>
                       </div>
                       <pre class="ddl-code">{{ item.source_ddl }}</pre>

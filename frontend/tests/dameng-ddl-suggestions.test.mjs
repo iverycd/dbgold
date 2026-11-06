@@ -432,6 +432,29 @@ test('old reports omit the suggestion section and remain exportable', async () =
   } finally { scope.stop() }
 })
 
+test('unsupported SQL Server view keeps its source and manual candidate distinct in the report', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const source = "CREATE VIEW [dbo].[CatalogView] AS SELECT name FROM syscolumns WHERE id=object_id('SourceView')"
+    const suggested = "CREATE VIEW app.catalogview AS SELECT column_name AS name FROM information_schema.columns WHERE table_schema='app' AND table_name='sourceview'"
+    const diagnostic = '系统目录返回的原始列名作为业务值使用，无法保证大小写关联等价，需人工适配'
+    h.p.report.value = report({ name: 'catalogview', ddl: '', stage: 'unsupported', error: diagnostic, source_ddl: source, suggested_ddl: suggested }, 'views')
+    const html = await renderToString(h.app)
+    for (const label of ['源端视图定义（仅供参考，需适配目标库）', '不支持自动转换', diagnostic, '建议 DDL（手动创建）']) assert.ok(html.includes(label), label)
+    const sourceCopy = h.clicks.find(c => c.label === '复制源端视图定义')
+    const suggestionCopy = h.clicks.find(c => c.label === '复制建议 DDL')
+    assert.ok(sourceCopy)
+    assert.ok(suggestionCopy)
+    await sourceCopy.handler(); await suggestionCopy.handler()
+    assert.deepEqual(h.copied, [source, suggested])
+    assert.equal(h.p.report.value.views.items[0].ddl, '', 'candidate is not executable target DDL')
+    await h.p.exportReport()
+    const text = await h.downloads[0].text()
+    for (const value of [source, suggested, diagnostic, '源端视图定义（仅供参考，需适配目标库）']) assert.ok(text.includes(value), value)
+  } finally { scope.stop() }
+})
+
 test('data failures display and export multiline column diagnostics without an empty DDL section', async () => {
   const scope = Vue.effectScope()
   try {

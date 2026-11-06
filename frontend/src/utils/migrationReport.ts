@@ -10,8 +10,6 @@ export function preflightStatusLabel(result?: { can_start?: boolean; partition_p
   return !result ? '待预检' : !preflightCanStart(result) ? '预检未通过' : result.ready ? '预检通过' : '部分可执行'
 }
 
-const sourceDDLLabel = '源端表定义（仅供参考，需适配目标库）'
-
 // Isolate the original MySQL KEY clause for this failed index. Split only at
 // table-body commas, preserving nested expressions and quoted text verbatim.
 export function sourceIndexDefinition(ddl: string, name: string): string {
@@ -72,7 +70,8 @@ export function describeFailure(item: ObjectResult, category?: string) {
     : stage === 'task' ? '任务已终止，后续对象未执行；此前已成功提交的对象和分页予以保留。'
     : stage === 'unsupported' ? '该对象暂不支持自动转换，未生成目标 DDL。'
     : stage === 'execute' ? 'DDL 执行失败，但报告未记录目标 DDL。' : '未记录 DDL。'
-  return { stageLabel, emptyDDLMessage, sourceDDLLabel: category === 'triggers' ? '源端触发器定义（仅供参考，需适配目标库）' : sourceDDLLabel, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
+  const sourceKind = category === 'triggers' ? '触发器' : category === 'views' ? '视图' : '表'
+  return { stageLabel, emptyDDLMessage, sourceDDLLabel: `源端${sourceKind}定义（仅供参考，需适配目标库）`, sourceDDLCopyLabel: `复制源端${sourceKind}定义`, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
 }
 
 export function categoryPresentation(category: CategoryReport) {

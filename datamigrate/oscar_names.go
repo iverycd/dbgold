@@ -16,7 +16,7 @@ func (m *Migrator) isOscar() bool {
 }
 
 func (m *Migrator) readViews(ctx context.Context) ([]source.ViewInfo, error) {
-	if m.isOscar() || m.isOracleDameng() {
+	if m.isOscar() || m.isOracleDameng() || m.isSQLServerPG() {
 		if reader, ok := m.reader.(interface {
 			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
 		}); ok {

@@ -510,11 +510,18 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			}
 			name := m.objName(src)
 			o := repair.Object{Kind: "view", Name: name, SourceName: src, TargetName: name}
-			if m.isOscar() {
+			if m.isOscar() || m.isSQLServerPG() {
 				var err error
-				v, err = m.prepareView(v)
+				if m.isSQLServerPG() {
+					o.SourceDDL = v.Definition
+				}
+				v, err = m.prepareView(ctx, v)
 				if err != nil {
 					o.Error = err.Error()
+					var issue *sqlServerPGViewError
+					if errors.As(err, &issue) && issue.suggested != "" {
+						o.SuggestedDDL = m.sqlServerViewCandidate(name, issue.suggested)
+					}
 					add(o, nil)
 					continue
 				}

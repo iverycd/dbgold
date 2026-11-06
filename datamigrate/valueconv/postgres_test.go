@@ -5,6 +5,7 @@ import (
 	"time"
 
 	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPostgresConvert_MySQL 验证 MySQL 中立值 → PG 形态,
@@ -57,6 +58,42 @@ func TestPostgresConvert_SQLServer(t *testing.T) {
 	// BIT 在 SqlServer 已由 Reader 转 int64,Converter 不动
 	if got := c.Convert(int64(1), "sqlserver", "BIT"); got != int64(1) {
 		t.Errorf("sqlserver BIT passthrough: got %v", got)
+	}
+}
+
+func TestPostgresConvert_SQLServerExactNumbers(t *testing.T) {
+	c := NewPostgres()
+	for _, dt := range []string{"DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY"} {
+		t.Run(dt, func(t *testing.T) {
+			for _, raw := range []string{"0", "-12.3400", "0.0001"} {
+				// A []byte must become text before pq COPY sees it; otherwise pq
+				// encodes even a decimal zero as bytea (\\x30).
+				require.Equal(t, raw, c.Convert([]byte(raw), "sqlserver", dt))
+				require.Equal(t, raw, c.Convert(raw, "sqlserver", dt))
+			}
+			require.Nil(t, c.Convert(nil, "sqlserver", dt))
+		})
+	}
+	for _, dt := range []string{"DECIMAL", "NUMERIC"} {
+		for _, raw := range []string{
+			"12345678901234567890.123456789012345678",
+			"-12345678901234567890123456789012345678",
+		} {
+			// The 38 significant digits must survive without float conversion.
+			require.Equal(t, raw, c.Convert([]byte(raw), "sqlserver", dt))
+		}
+	}
+}
+
+func TestPostgresConvert_SQLServerBinaryStaysBinary(t *testing.T) {
+	c := NewPostgres()
+	for _, dt := range []string{"VARBINARY", "BINARY", "IMAGE", "TIMESTAMP", "ROWVERSION"} {
+		t.Run(dt, func(t *testing.T) {
+			for _, raw := range [][]byte{{0, 255, 0}, []byte("0"), {}} {
+				require.Equal(t, raw, c.Convert(raw, "sqlserver", dt))
+			}
+			require.Nil(t, c.Convert(nil, "sqlserver", dt))
+		})
 	}
 }
 
