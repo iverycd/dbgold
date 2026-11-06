@@ -10,12 +10,17 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.StringReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.CodingErrorAction;
 import java.nio.CharBuffer;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -32,8 +37,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -47,7 +54,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * framed protocol messages; diagnostics go to standard error.
  */
 public final class BridgeMain {
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
     private static final int RESPONSE = 0x80;
     private static final int MAX_FRAME = 64 * 1024 * 1024;
 
@@ -68,6 +75,9 @@ public final class BridgeMain {
     private static final int CURSOR_OPEN = 15;
     private static final int CURSOR_FETCH = 16;
     private static final int CURSOR_CLOSE = 17;
+    private static final int LOB_BEGIN = 18;
+    private static final int LOB_CHUNK = 19;
+    private static final int LOB_END = 20;
 
     private static final int NULL = 0;
     private static final int BOOL = 1;
@@ -80,6 +90,10 @@ public final class BridgeMain {
     private static final int DATE = 8;
     private static final int TIME = 9;
     private static final int TIMESTAMP = 10;
+    private static final int LOB_REF = 11;
+    private static final int LOB_TEXT = 1;
+    private static final int LOB_BINARY = 2;
+    private static final int MAX_LOB_CHUNK = 1024 * 1024;
 
     private final DataInputStream input = new DataInputStream(new BufferedInputStream(System.in));
     private final DataOutputStream output = new DataOutputStream(new BufferedOutputStream(System.out));
@@ -87,6 +101,7 @@ public final class BridgeMain {
     private final ExecutorService workers = Executors.newCachedThreadPool();
     private final Map<Long, Future<?>> requests = new ConcurrentHashMap<Long, Future<?>>();
     private final Map<Long, Statement> activeStatements = new ConcurrentHashMap<Long, Statement>();
+    private final Map<Long, Batch> activeBatches = new ConcurrentHashMap<Long, Batch>();
     private final Map<Long, Session> sessions = new ConcurrentHashMap<Long, Session>();
     private final Map<Long, Batch> batches = new ConcurrentHashMap<Long, Batch>();
     private final Map<Long, Cursor> cursors = new ConcurrentHashMap<Long, Cursor>();
@@ -124,7 +139,7 @@ public final class BridgeMain {
             final int op = body.readUnsignedByte();
             final long requestId = body.readLong();
             if (version != VERSION) {
-                writeError(requestId, "", 0, "protocol version mismatch");
+                writeError(requestId, "", 0, "Oscar bridge protocol version mismatch; update dbgold and bridge JAR together");
                 continue;
             }
             if (op == CANCEL) {
@@ -190,6 +205,15 @@ public final class BridgeMain {
                     return;
                 case BATCH_ABORT:
                     abortBatch(requestId, body.readLong());
+                    return;
+                case LOB_BEGIN:
+                    beginLOB(requestId, body.readLong(), body);
+                    return;
+                case LOB_CHUNK:
+                    appendLOB(requestId, body.readLong(), body);
+                    return;
+                case LOB_END:
+                    finishLOB(requestId, body.readLong(), body.readLong());
                     return;
                 case DESCRIBE_TABLE:
                     describeTable(requestId, body.readLong(), readString(body), readString(body));
@@ -461,18 +485,30 @@ public final class BridgeMain {
     private void beginBatch(final long requestId, long sessionId, String sql) throws Exception {
         Session s = session(sessionId);
         PooledConnection holder = s.pool.acquire();
+        PreparedStatement statement = null;
+        Batch opened = null;
         try {
             holder.connection.setAutoCommit(false);
-            PreparedStatement statement = holder.connection.prepareStatement(sql);
+            statement = holder.connection.prepareStatement(sql);
             long id = nextBatch.getAndIncrement();
-            batches.put(id, new Batch(id, s, holder, statement));
+            Batch batch = new Batch(id, s, holder, statement, requestId);
+            opened = batch;
+            batches.put(id, batch);
+            if (!running || s.closed || sessions.get(sessionId) != s || requestCancelled(requestId)) {
+                batch.closing = true;
+                throw new SQLException("Oscar JDBC batch opening cancelled", "57014");
+            }
             final long batchId = id;
             writeSuccess(requestId, new BodyWriter() {
                 @Override public void write(DataOutputStream out) throws IOException { out.writeLong(batchId); }
             });
         } catch (Throwable error) {
-            rollbackQuietly(holder.connection);
-            s.pool.discard(holder);
+            if (opened != null) discardBatch(opened);
+            else {
+                rollbackQuietly(holder.connection);
+                closeQuietly(statement);
+                s.pool.discard(holder);
+            }
             throw error;
         }
     }
@@ -483,27 +519,143 @@ public final class BridgeMain {
         return result;
     }
 
-    private void addBatch(long requestId, long batchId, DataInputStream body) throws Exception {
+    private boolean requestCancelled(long requestId) {
+        Future<?> request = requests.get(requestId);
+        return Thread.currentThread().isInterrupted() || (request != null && request.isCancelled());
+    }
+
+    private Batch requestBatch(long requestId, long batchId) throws SQLException {
         Batch batch = batch(batchId);
-        synchronized (batch) {
-            activeStatements.put(requestId, batch.statement);
-            try {
-                int rowCount = body.readInt();
-                for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                    int columns = body.readInt();
-                    if (batch.parameterTypes == null) batch.loadParameterTypes(columns);
-                    for (int column = 1; column <= columns; column++) {
-                        bind(batch, body, column);
-                    }
-                    batch.statement.addBatch();
-                }
-                batch.statement.executeBatch();
-                batch.statement.clearBatch();
-            } finally {
-                activeStatements.remove(requestId);
-            }
+        activeBatches.put(requestId, batch);
+        if (requestCancelled(requestId)) batch.closing = true;
+        return batch;
+    }
+
+    private void ensureBatchOpen(Batch batch, long requestId) throws SQLException {
+        if (batch.closing || batch.session.closed || requestCancelled(requestId)) {
+            batch.closing = true;
+            throw new SQLException("Oscar JDBC batch cancelled or closed", "57014");
         }
-        writeSuccess(requestId, null);
+        if (batch.failed) throw new SQLException("Oscar JDBC batch has failed; abort it before retrying", "25000");
+    }
+
+    private static Path spoolDirectory() throws IOException {
+        String configured = System.getProperty("dbgold.oscar.spoolDir", "");
+        if (configured.isEmpty()) throw new IOException("Oscar bridge LOB spool directory is not configured");
+        Path directory = Paths.get(configured);
+        if (!Files.isDirectory(directory)) throw new IOException("Oscar bridge LOB spool directory is unavailable");
+        return directory;
+    }
+
+    private void beginLOB(long requestId, long batchId, DataInputStream body) throws Exception {
+        Batch batch = requestBatch(requestId, batchId);
+        try {
+            synchronized (batch) {
+                try {
+                    ensureBatchOpen(batch, requestId);
+                    long id = body.readLong();
+                    int kind = body.readUnsignedByte();
+                    long total = body.readLong();
+                    if (id <= 0 || !batch.usedLOBIds.add(id)) throw new IOException("invalid or duplicate Oscar LOB id");
+                    if (kind != LOB_TEXT && kind != LOB_BINARY) throw new IOException("unsupported Oscar LOB kind " + kind);
+                    if (total < 0) throw new IOException("invalid Oscar LOB length " + total);
+                    Path path = Files.createTempFile(spoolDirectory(), "lob-", ".tmp");
+                    try {
+                        batch.lobs.put(id, new LOB(id, kind, total, path));
+                    } catch (Throwable error) {
+                        Files.deleteIfExists(path);
+                        throw error;
+                    }
+                    ensureBatchOpen(batch, requestId);
+                } catch (Throwable error) { batch.failed = true; throw error; }
+            }
+            writeSuccess(requestId, null);
+        } finally { activeBatches.remove(requestId); }
+    }
+
+    private void appendLOB(long requestId, long batchId, DataInputStream body) throws Exception {
+        Batch batch = requestBatch(requestId, batchId);
+        try {
+            synchronized (batch) {
+                try {
+                    ensureBatchOpen(batch, requestId);
+                    LOB lob = batch.lobs.get(body.readLong());
+                    long offset = body.readLong();
+                    int length = body.readInt();
+                    if (lob == null || lob.sealed || lob.consumed) throw new IOException("Oscar LOB is not open for upload");
+                    if (length < 0 || length > MAX_LOB_CHUNK) throw new IOException("Oscar LOB chunk exceeds 1 MiB");
+                    if (offset != lob.received || length > lob.total - lob.received) throw new IOException("Oscar LOB offset or length mismatch");
+                    byte[] chunk = new byte[length];
+                    body.readFully(chunk);
+                    lob.upload.write(chunk);
+                    lob.received += length;
+                    ensureBatchOpen(batch, requestId);
+                } catch (Throwable error) { batch.failed = true; throw error; }
+            }
+            writeSuccess(requestId, null);
+        } finally { activeBatches.remove(requestId); }
+    }
+
+    private void finishLOB(long requestId, long batchId, long lobId) throws Exception {
+        Batch batch = requestBatch(requestId, batchId);
+        try {
+            synchronized (batch) {
+                try {
+                    ensureBatchOpen(batch, requestId);
+                    LOB lob = batch.lobs.get(lobId);
+                    if (lob == null || lob.sealed || lob.consumed || lob.received != lob.total) throw new IOException("Oscar LOB upload is incomplete or closed");
+                    lob.upload.close();
+                    lob.upload = null;
+                    if (lob.kind == LOB_TEXT) {
+                        // JDBC's length is UTF-16 characters, not UTF-8 bytes. Decode
+                        // incrementally so a large value never becomes one Java String.
+                        try (Reader reader = lob.openReader()) {
+                            char[] buffer = new char[8192];
+                            int count;
+                            while ((count = reader.read(buffer)) >= 0) {
+                                lob.characters += count;
+                                ensureBatchOpen(batch, requestId);
+                            }
+                        }
+                    }
+                    lob.sealed = true;
+                    ensureBatchOpen(batch, requestId);
+                } catch (Throwable error) { batch.failed = true; throw error; }
+            }
+            writeSuccess(requestId, null);
+        } finally { activeBatches.remove(requestId); }
+    }
+
+    private void addBatch(long requestId, long batchId, DataInputStream body) throws Exception {
+        Batch batch = requestBatch(requestId, batchId);
+        try {
+            synchronized (batch) {
+                activeStatements.put(requestId, batch.statement);
+                try {
+                    ensureBatchOpen(batch, requestId);
+                    int rowCount = body.readInt();
+                    if (rowCount < 0 || rowCount > 1000) throw new IOException("invalid Oscar batch row count " + rowCount);
+                    for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                        ensureBatchOpen(batch, requestId);
+                        int columns = body.readInt();
+                        if (columns < 0) throw new IOException("invalid Oscar batch column count");
+                        if (batch.parameterTypes == null) batch.loadParameterTypes(columns);
+                        for (int column = 1; column <= columns; column++) {
+                            bind(batch, body, column);
+                        }
+                        batch.statement.addBatch();
+                    }
+                    batch.statement.executeBatch();
+                    ensureBatchOpen(batch, requestId);
+                    batch.statement.clearBatch();
+                } catch (Throwable error) { batch.failed = true; throw error; }
+                finally {
+                    activeStatements.remove(requestId);
+                    batch.releaseConsumedLOBs();
+                }
+            }
+            writeSuccess(requestId, null);
+        } finally { activeBatches.remove(requestId); }
     }
 
     private void bind(Batch batch, DataInputStream body, int index) throws Exception {
@@ -550,55 +702,85 @@ public final class BridgeMain {
             case TIMESTAMP:
                 batch.statement.setTimestamp(index, Timestamp.valueOf(readString(body)));
                 return;
+            case LOB_REF: {
+                LOB lob = batch.lobs.get(body.readLong());
+                if (lob == null || !lob.sealed || lob.consumed) throw new IOException("Oscar LOB reference is missing, unsealed or already consumed");
+                lob.consumed = true;
+                if (lob.kind == LOB_TEXT) {
+                    Reader reader = lob.openReader();
+                    batch.lobStreams.add(reader);
+                    batch.statement.setCharacterStream(index, reader, lob.characters);
+                } else {
+                    InputStream stream = Files.newInputStream(lob.path);
+                    batch.lobStreams.add(stream);
+                    batch.statement.setBinaryStream(index, stream, lob.total);
+                }
+                return;
+            }
             default:
                 throw new IOException("unsupported value kind " + kind);
         }
     }
 
     private void commitBatch(long requestId, long batchId) throws Exception {
-        Batch batch = batch(batchId);
-        synchronized (batch) {
-            batches.remove(batchId);
-            try {
-                batch.holder.connection.commit();
-                batch.holder.connection.setAutoCommit(true);
-                closeQuietly(batch.statement);
-                batch.session.pool.release(batch.holder);
-            } catch (Throwable error) {
-                rollbackQuietly(batch.holder.connection);
-                closeQuietly(batch.statement);
-                batch.session.pool.discard(batch.holder);
-                throw error;
+        Batch batch = requestBatch(requestId, batchId);
+        try {
+            synchronized (batch) {
+                try {
+                    ensureBatchOpen(batch, requestId);
+                    if (!batch.lobs.isEmpty()) throw new SQLException("Oscar batch contains unconsumed or incomplete LOBs", "25000");
+                    batch.closing = true;
+                    batches.remove(batchId);
+                    batch.holder.connection.commit();
+                    batch.holder.connection.setAutoCommit(true);
+                    closeQuietly(batch.statement);
+                    batch.session.pool.release(batch.holder);
+                    batch.disposed = true;
+                } catch (Throwable error) {
+                    batch.closing = true;
+                    batches.remove(batchId, batch);
+                    rollbackQuietly(batch.holder.connection);
+                    closeQuietly(batch.statement);
+                    batch.session.pool.discard(batch.holder);
+                    batch.disposed = true;
+                    throw error;
+                } finally { batch.releaseAllLOBs(); }
             }
+            writeSuccess(requestId, null);
+        } finally { activeBatches.remove(requestId); }
+    }
+
+    private void discardBatch(Batch batch) {
+        batch.closing = true;
+        batches.remove(batch.id, batch);
+        // A JDBC execution can hold the batch monitor while ignoring thread
+        // interruption. Signal its statement before waiting for that monitor.
+        if (!batch.disposed) try { batch.statement.cancel(); } catch (Throwable ignored) { }
+        synchronized (batch) {
+            if (batch.disposed) return;
+            batch.disposed = true;
+            rollbackQuietly(batch.holder.connection);
+            closeQuietly(batch.statement);
+            batch.releaseAllLOBs();
+            batch.session.pool.discard(batch.holder);
         }
-        writeSuccess(requestId, null);
     }
 
     private void abortBatch(long requestId, long batchId) throws Exception {
         Batch batch = batches.remove(batchId);
-        if (batch != null) {
-            synchronized (batch) {
-                try { batch.statement.cancel(); } catch (Throwable ignored) { }
-                rollbackQuietly(batch.holder.connection);
-                closeQuietly(batch.statement);
-                batch.session.pool.discard(batch.holder);
-            }
-        }
+        if (batch != null) discardBatch(batch);
         writeSuccess(requestId, null);
     }
 
     private void closeSession(long requestId, long sessionId) throws Exception {
         Session session = sessions.remove(sessionId);
         if (session != null) {
+            session.closed = true;
             for (Cursor c : new ArrayList<Cursor>(cursors.values())) if(c.session==session) closeCursor(c.id);
             for (Map.Entry<Long, Batch> entry : new ArrayList<Map.Entry<Long, Batch>>(batches.entrySet())) {
                 if (entry.getValue().session == session) {
-                    Batch batch = batches.remove(entry.getKey());
-                    if (batch != null) {
-                        rollbackQuietly(batch.holder.connection);
-                        closeQuietly(batch.statement);
-                        session.pool.discard(batch.holder);
-                    }
+                    Batch batch = batches.get(entry.getKey());
+                    if (batch != null) discardBatch(batch);
                 }
             }
             session.pool.close();
@@ -611,6 +793,16 @@ public final class BridgeMain {
         // Statement.cancel while its fetch holds the cursor monitor.
         Future<?> future = requests.get(target);
         if (future != null) future.cancel(true);
+        final List<Batch> toAbort = new ArrayList<Batch>();
+        Batch activeBatch = activeBatches.get(target);
+        for (Batch batch : new ArrayList<Batch>(batches.values())) {
+            if (batch == activeBatch || batch.openingRequest == target) {
+                // Set this before scheduling cleanup: queued uploads must never
+                // recreate files after an abort has acquired the batch monitor.
+                batch.closing = true;
+                toAbort.add(batch);
+            }
+        }
         final Statement statement = activeStatements.get(target);
         Cursor active = activeCursors.get(target);
         final List<Cursor> toClose = new ArrayList<Cursor>();
@@ -619,9 +811,10 @@ public final class BridgeMain {
         }
         // Never wait on driver calls or cursor monitors on the protocol input
         // thread: other sessions and close requests must remain serviceable.
-        if (statement != null || !toClose.isEmpty()) workers.execute(new Runnable() {
+        if (statement != null || !toClose.isEmpty() || !toAbort.isEmpty()) workers.execute(new Runnable() {
             @Override public void run() {
                 if (statement != null) try { statement.cancel(); } catch (Throwable ignored) { }
+                for (Batch batch : toAbort) discardBatch(batch);
                 for (Cursor c : toClose) {
                     try { c.statement.cancel(); } catch (Throwable ignored) { }
                     closeCursor(c.id);
@@ -631,18 +824,18 @@ public final class BridgeMain {
     }
 
     private void closeEverything() {
+        running = false;
+        for (Session session : sessions.values()) session.closed = true;
         for(Cursor c:new ArrayList<Cursor>(cursors.values())) closeCursor(c.id);
         for (Future<?> request : requests.values()) request.cancel(true);
         for (Statement statement : activeStatements.values()) closeQuietly(statement);
-        for (Batch batch : batches.values()) {
-            rollbackQuietly(batch.holder.connection);
-            closeQuietly(batch.statement);
-            batch.session.pool.discard(batch.holder);
-        }
+        for (Batch batch : batches.values()) discardBatch(batch);
         batches.clear();
         for (Session session : sessions.values()) session.pool.close();
         sessions.clear();
         workers.shutdownNow();
+        String spool = System.getProperty("dbgold.oscar.spoolDir", "");
+        if (!spool.isEmpty()) try { Files.deleteIfExists(Paths.get(spool)); } catch (IOException ignored) { }
     }
 
     private interface BodyWriter { void write(DataOutputStream out) throws IOException; }
@@ -754,6 +947,7 @@ public final class BridgeMain {
 
     private static final class Session {
         final ConnectionPool pool;
+        volatile boolean closed;
         Session(String url, String username, String password, String schema, int maxOpen,
                 int maxIdle, long lifetimeMs, int loginTimeoutMs, int socketTimeoutMs) {
             this.pool = new ConnectionPool(url, username, password, schema, maxOpen, maxIdle,
@@ -776,13 +970,36 @@ public final class BridgeMain {
         final Session session;
         final PooledConnection holder;
         final PreparedStatement statement;
+        final long openingRequest;
+        final Map<Long, LOB> lobs = new ConcurrentHashMap<Long, LOB>();
+        final Set<Long> usedLOBIds = new HashSet<Long>();
+        final List<AutoCloseable> lobStreams = new ArrayList<AutoCloseable>();
+        volatile boolean closing;
+        boolean failed;
+        volatile boolean disposed;
         int[] parameterTypes;
 
-        Batch(long id, Session session, PooledConnection holder, PreparedStatement statement) {
+        Batch(long id, Session session, PooledConnection holder, PreparedStatement statement, long openingRequest) {
             this.id = id;
             this.session = session;
             this.holder = holder;
             this.statement = statement;
+            this.openingRequest = openingRequest;
+        }
+
+        void releaseConsumedLOBs() {
+            for (AutoCloseable stream : lobStreams) closeQuietly(stream);
+            lobStreams.clear();
+            for (LOB lob : new ArrayList<LOB>(lobs.values())) {
+                if (lob.consumed) { lob.close(); lobs.remove(lob.id); }
+            }
+        }
+
+        void releaseAllLOBs() {
+            for (AutoCloseable stream : lobStreams) closeQuietly(stream);
+            lobStreams.clear();
+            for (LOB lob : lobs.values()) lob.close();
+            lobs.clear();
         }
 
         void loadParameterTypes(int columns) {
@@ -793,6 +1010,30 @@ public final class BridgeMain {
             } catch (Throwable ignored) {
                 parameterTypes = new int[columns];
             }
+        }
+    }
+
+    private static final class LOB {
+        final long id, total;
+        final int kind;
+        final Path path;
+        OutputStream upload;
+        long received, characters;
+        boolean sealed, consumed;
+
+        LOB(long id, int kind, long total, Path path) throws IOException {
+            this.id = id; this.kind = kind; this.total = total; this.path = path;
+            this.upload = Files.newOutputStream(path);
+        }
+
+        Reader openReader() throws IOException {
+            return new InputStreamReader(Files.newInputStream(path), StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT));
+        }
+
+        void close() {
+            closeQuietly(upload); upload = null;
+            try { Files.deleteIfExists(path); } catch (IOException ignored) { }
         }
     }
 

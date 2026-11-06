@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	protocolVersion byte = 1
+	protocolVersion byte = 2
 	responseMarker  byte = 0x80
 	maxFrameSize         = 64 << 20
 )
@@ -33,6 +33,9 @@ const (
 	opCursorOpen
 	opCursorFetch
 	opCursorClose
+	opLOBBegin
+	opLOBChunk
+	opLOBEnd
 )
 
 const (
@@ -47,6 +50,7 @@ const (
 	valueDate
 	valueTime
 	valueTimestamp
+	valueLOBRef
 )
 
 // Decimal keeps an exact decimal value while it crosses the Go/JDBC bridge.
@@ -56,6 +60,10 @@ type Decimal string
 type Date string
 type Time string
 type Timestamp string
+
+// lobRef names a sealed, single-use LOB owned by the current JDBC batch.
+// File paths never cross the bridge protocol.
+type lobRef uint64
 
 type encoder struct{ bytes.Buffer }
 
@@ -189,6 +197,9 @@ func encodeValue(e *encoder, value any) error {
 	case time.Time:
 		e.byte(valueTimestamp)
 		e.string(v.Format("2006-01-02 15:04:05.999999999"))
+	case lobRef:
+		e.byte(valueLOBRef)
+		e.uint64(uint64(v))
 	default:
 		return fmt.Errorf("unsupported JDBC bridge value type %T", value)
 	}

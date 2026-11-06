@@ -81,6 +81,7 @@ type Manager struct {
 	pendingMu sync.Mutex
 	pending   map[uint64]chan response
 	nextID    atomic.Uint64
+	nextLOBID atomic.Uint64
 }
 
 func NewManager(cfg Config) *Manager {
@@ -242,8 +243,24 @@ func (m *Manager) ensureStarted(ctx context.Context) (err error) {
 		m.processMu.Unlock()
 		return err
 	}
+	spoolDir, err := os.MkdirTemp(m.cfg.TempDir, "dbgold-oscar-spool-")
+	if err != nil {
+		m.processMu.Unlock()
+		return fmt.Errorf("create Oscar bridge LOB spool directory: %w", err)
+	}
+	started := false
+	defer func() {
+		if !started {
+			_ = os.RemoveAll(spoolDir)
+		}
+	}()
+	absoluteSpoolDir, err := filepath.Abs(spoolDir)
+	if err != nil {
+		m.processMu.Unlock()
+		return fmt.Errorf("resolve Oscar bridge LOB spool directory: %w", err)
+	}
 	classpath := bridgeJar + string(os.PathListSeparator) + jdbcJar
-	args := []string{fmt.Sprintf("-Xmx%dm", m.cfg.MaxHeapMB)}
+	args := []string{fmt.Sprintf("-Xmx%dm", m.cfg.MaxHeapMB), "-Ddbgold.oscar.spoolDir=" + absoluteSpoolDir}
 	if m.cfg.TempDir != "" {
 		args = append(args, "-Djava.io.tmpdir="+m.cfg.TempDir, "-XX:+IgnoreUnrecognizedVMOptions", "-XX:-UsePerfData")
 	}
@@ -268,6 +285,7 @@ func (m *Manager) ensureStarted(ctx context.Context) (err error) {
 		m.processMu.Unlock()
 		return fmt.Errorf("无法启动神通 JDBC，请检查 %q 是否为本机可运行的 Java 8 或更高版本: %w", javaBin, err)
 	}
+	started = true
 	m.cmd, m.stdin, m.stdout = cmd, stdin, stdout
 	m.generation++
 	gen := m.generation
@@ -287,6 +305,11 @@ func (m *Manager) ensureStarted(ctx context.Context) (err error) {
 		close(stderrDone)
 		<-stdoutDone // Wait closes the pipes, including any pending final response.
 		err := cmd.Wait()
+		// Only the JVM owns live LOB files. Once it has been reaped, even an
+		// abnormal exit can safely remove every file from this generation.
+		if cleanupErr := os.RemoveAll(spoolDir); cleanupErr != nil {
+			slog.Warn("Oscar JDBC bridge LOB cleanup failed", "error", cleanupErr)
+		}
 		m.processDied(gen, fmt.Errorf("Oscar JDBC bridge exited: %w", err))
 	}()
 
@@ -369,7 +392,7 @@ func (m *Manager) readLoop(gen uint64, r io.Reader) {
 		d := newDecoder(payload)
 		version, err := d.byte()
 		if err != nil || version != protocolVersion {
-			m.processDied(gen, fmt.Errorf("Oscar bridge protocol version mismatch"))
+			m.processDied(gen, fmt.Errorf("Oscar bridge protocol version mismatch (Go v%d, JAR v%d); 请同时更新 dbgold 程序与 dbgold-oscar-bridge.jar", protocolVersion, version))
 			return
 		}
 		marker, _ := d.byte()
@@ -476,6 +499,9 @@ func (m *Manager) requestExisting(ctx context.Context, op byte, body []byte) ([]
 }
 
 func (m *Manager) requestStarted(ctx context.Context, op byte, body []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	id := m.nextID.Add(1)
 	ch := make(chan response, 1)
 	m.pendingMu.Lock()
@@ -607,7 +633,7 @@ func (m *Manager) BeginBatch(ctx context.Context, session uint64, sql string) (u
 	return newDecoder(body).uint64()
 }
 
-func (m *Manager) AddBatch(ctx context.Context, batch uint64, rows [][]any) error {
+func (m *Manager) addBatchRows(ctx context.Context, batch uint64, rows [][]any) error {
 	encodedRows, err := encodeRows(rows)
 	if err != nil {
 		return err

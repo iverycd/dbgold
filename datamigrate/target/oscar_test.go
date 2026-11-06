@@ -15,6 +15,11 @@ type fakeOscarBridge struct {
 	calls      []string
 	rows       int
 	failAdd    bool
+	failAddAt  int
+	addCalls   int
+	failCommit bool
+	onAdd      func(int)
+	abortErr   error
 	lastSQL    string
 	lastSchema string
 }
@@ -42,18 +47,72 @@ func (f *fakeOscarBridge) BeginBatch(_ context.Context, _ uint64, sql string) (u
 func (f *fakeOscarBridge) AddBatch(_ context.Context, _ uint64, rows [][]any) error {
 	f.calls = append(f.calls, "add")
 	f.rows += len(rows)
-	if f.failAdd {
+	f.addCalls++
+	if f.onAdd != nil {
+		f.onAdd(f.addCalls)
+	}
+	if f.failAdd || f.addCalls == f.failAddAt {
 		return errors.New("batch failed")
 	}
 	return nil
 }
 func (f *fakeOscarBridge) CommitBatch(context.Context, uint64) error {
 	f.calls = append(f.calls, "commit")
+	if f.failCommit {
+		return errors.New("commit failed")
+	}
 	return nil
 }
-func (f *fakeOscarBridge) AbortBatch(context.Context, uint64) error {
+func (f *fakeOscarBridge) AbortBatch(ctx context.Context, _ uint64) error {
 	f.calls = append(f.calls, "abort")
+	f.abortErr = ctx.Err()
 	return nil
+}
+
+func TestOscarWriterLaterChunkFailureAbortsWholePage(t *testing.T) {
+	fake := &fakeOscarBridge{failAddAt: 2}
+	w := newFakeOscarWriter(fake)
+	rows := make([][]interface{}, 1001)
+	for i := range rows {
+		rows[i] = []interface{}{int64(i)}
+	}
+	if err := w.CopyData(context.Background(), "t", []string{"id"}, []string{"BIGINT"}, rows); err == nil {
+		t.Fatal("expected second chunk failure")
+	}
+	if got := strings.Join(fake.calls, ","); got != "begin,add,add,abort" {
+		t.Fatalf("page must abort without an intermediate commit: %s", got)
+	}
+}
+
+func TestOscarWriterCancellationAbortsWithFreshContext(t *testing.T) {
+	for _, count := range []int{1, 1002} {
+		ctx, cancel := context.WithCancel(context.Background())
+		fake := &fakeOscarBridge{onAdd: func(_ int) { cancel() }}
+		w := newFakeOscarWriter(fake)
+		rows := make([][]interface{}, count)
+		for i := range rows {
+			rows[i] = []interface{}{int64(i)}
+		}
+		err := w.CopyData(ctx, "t", []string{"id"}, []string{"BIGINT"}, rows)
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("%d rows: expected cancellation, got %v", count, err)
+		}
+		if got := strings.Join(fake.calls, ","); got != "begin,add,abort" {
+			t.Fatalf("%d rows: canceled page must abort: %s", count, got)
+		}
+		if fake.abortErr != nil {
+			t.Fatalf("rollback inherited canceled context: %v", fake.abortErr)
+		}
+	}
+}
+
+func TestOscarWriterCommitFailureAborts(t *testing.T) {
+	fake := &fakeOscarBridge{failCommit: true}
+	err := newFakeOscarWriter(fake).CopyData(context.Background(), "t", []string{"id"}, []string{"BIGINT"}, [][]interface{}{{int64(1)}})
+	if err == nil || strings.Join(fake.calls, ",") != "begin,add,commit,abort" {
+		t.Fatalf("failed commit must abort: err=%v calls=%v", err, fake.calls)
+	}
 }
 func (f *fakeOscarBridge) CloseSession(context.Context, uint64) error { return nil }
 

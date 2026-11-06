@@ -3,6 +3,7 @@ package valueconv
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -25,7 +26,13 @@ func (c *OscarValueConverter) Convert(value interface{}, srcType, dbTypeName str
 		if b, ok := value.([]byte); ok {
 			switch dt {
 			case "BIT":
-				return bytesToInt(b)
+				// BIT(64) is unsigned. Avoid wrapping values with the high bit
+				// set before they reach the DECIMAL(20,0) target column.
+				bits := new(big.Int).SetBytes(b)
+				if bits.IsInt64() {
+					return bits.Int64()
+				}
+				return jdbcbridge.Decimal(bits.String())
 			case "GEOMETRY":
 				if len(b) >= 4 {
 					b = b[4:]

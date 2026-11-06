@@ -1,9 +1,11 @@
 package jdbcbridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -146,6 +148,101 @@ func TestOscarStartupIncludesJavaError(t *testing.T) {
 	require.ErrorContains(t, err, "Java 8")
 	require.ErrorContains(t, err, "UnsupportedClassVersionError")
 	require.NotContains(t, err.Error(), "secret-value")
+	spools, globErr := filepath.Glob(filepath.Join(root, "dbgold-oscar-spool-*"))
+	require.NoError(t, globErr)
+	require.Empty(t, spools, "failed JVM startup must clean its generation's LOB files")
+}
+
+func TestOscarLaunchFailureCleansSpoolDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses an executable with an invalid Unix format")
+	}
+	root := t.TempDir()
+	java := filepath.Join(root, "java")
+	jar := filepath.Join(root, "fixture.jar")
+	require.NoError(t, os.WriteFile(java, []byte("invalid executable format"), 0o700))
+	require.NoError(t, os.WriteFile(jar, nil, 0o600))
+	m := NewManager(Config{JavaBin: java, BridgeJar: jar, JDBCJar: jar, TempDir: root})
+	_, err := m.OpenSession(context.Background(), SessionOptions{})
+	require.Error(t, err)
+	spools, err := filepath.Glob(filepath.Join(root, "dbgold-oscar-spool-*"))
+	require.NoError(t, err)
+	require.Empty(t, spools)
+}
+
+func TestOscarJVMSpoolRemovedAfterReap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix shell fixture")
+	}
+	root := t.TempDir()
+	java := filepath.Join(root, "java")
+	jar := filepath.Join(root, "fixture.jar")
+	const script = `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -Ddbgold.oscar.spoolDir=*)
+      spool=${arg#-Ddbgold.oscar.spoolDir=}
+      printf '%s' "$spool" > "$OSCAR_SPOOL_TEST_ROOT/spool-path"
+      printf 'unfinished lob' > "$spool/unfinished.lob"
+      ;;
+  esac
+done
+while [ ! -f "$OSCAR_SPOOL_TEST_ROOT/release" ]; do sleep 0.01; done
+exit 1
+`
+	require.NoError(t, os.WriteFile(java, []byte(script), 0o700))
+	require.NoError(t, os.WriteFile(jar, nil, 0o600))
+	t.Setenv("OSCAR_SPOOL_TEST_ROOT", root)
+	m := NewManager(Config{JavaBin: java, BridgeJar: jar, JDBCJar: jar, TempDir: root})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.OpenSession(ctx, SessionOptions{})
+		result <- err
+	}()
+	// Always release the fixture even if a test assertion fails.
+	t.Cleanup(func() { _ = os.WriteFile(filepath.Join(root, "release"), nil, 0o600) })
+	var spool string
+	require.Eventually(t, func() bool {
+		path, err := os.ReadFile(filepath.Join(root, "spool-path"))
+		if err != nil || len(path) == 0 {
+			return false
+		}
+		spool = string(path)
+		_, err = os.Stat(filepath.Join(spool, "unfinished.lob"))
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+	require.DirExists(t, spool, "live JVM files must remain available")
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(spool)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "release"), nil, 0o600))
+	require.Error(t, <-result)
+	require.NoDirExists(t, spool, "JVM exit must remove unconsumed LOB files")
+}
+
+func TestOscarProtocolMismatchExplainsJarUpgrade(t *testing.T) {
+	m := NewManager(Config{})
+	m.generation = 1
+	m.cmd = &exec.Cmd{Process: &os.Process{Pid: 1}}
+	ch := make(chan response, 1)
+	m.pending[1] = ch
+	e := &encoder{}
+	e.byte(1) // Previous bridge JAR protocol.
+	e.byte(responseMarker)
+	e.uint64(1)
+	e.byte(0)
+	frame := &encoder{}
+	frame.uint32(uint32(e.Len()))
+	_, _ = frame.Write(e.Bytes())
+	m.readLoop(1, bytes.NewReader(frame.Bytes()))
+	err := (<-ch).err
+	require.ErrorContains(t, err, "Go v2, JAR v1")
+	require.ErrorContains(t, err, "dbgold-oscar-bridge.jar")
+	require.ErrorContains(t, err, "同时更新")
 }
 
 func TestConcurrentOscarStartupWait(t *testing.T) {

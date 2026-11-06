@@ -2,6 +2,7 @@ package typemap
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"dbgold/datamigrate/source"
@@ -50,6 +51,12 @@ func MySQLToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 		}
 		return sized("CHAR", col.Length, 1)
 	case "varchar", "enum":
+		// Preserve the source capacity rather than generating an Oscar VARCHAR
+		// declaration above its 8000-character limit. Apply this before the
+		// optional NVARCHAR2 selection so large source columns stay LOBs.
+		if col.Length > 8000 {
+			return "CLOB"
+		}
 		if useNvarchar2 {
 			return sized("NVARCHAR2", col.Length, 255)
 		}
@@ -64,7 +71,19 @@ func MySQLToOscar(col source.ColumnInfo, _ bool, useNvarchar2 bool) string {
 		}
 		return "BLOB"
 	case "bit":
-		// MySQL BIT may contain up to 64 bits; BIGINT preserves BIT(n), not just BIT(1).
+		// MySQL BIT is unsigned, so BIT(64) needs one more bit than BIGINT.
+		bits := col.Precision
+		if match := mysqlNativeBitType.FindStringSubmatch(strings.TrimSpace(col.FormattedType)); match != nil {
+			if n, err := strconv.ParseInt(match[1], 10, 64); err == nil && n >= 1 && n <= 64 {
+				bits = n
+			}
+		}
+		if bits <= 0 {
+			bits = col.Length
+		}
+		if bits == 64 {
+			return "DECIMAL(20,0)"
+		}
 		return "BIGINT"
 	case "boolean", "bool":
 		return "BOOLEAN"

@@ -60,3 +60,111 @@ func TestOscarCapabilities(t *testing.T) {
 		t.Fatalf("unexpected capabilities: %+v", caps)
 	}
 }
+
+func TestOscarBitDefaultsMatchTargetType(t *testing.T) {
+	for _, tc := range []struct {
+		name, srcType, dataType, value, want string
+		precision                            int64
+	}{
+		{"zero", "mysql", "bit", "b'0'", "BIGINT DEFAULT 0", 1},
+		{"one", "mysql", "bit", "b'1'", "BIGINT DEFAULT 1", 1},
+		{"all bits", "mysql", "bit", "b'1010'", "BIGINT DEFAULT 10", 4},
+		{"uppercase", "mysql", "bit", "B'1011'", "BIGINT DEFAULT 11", 4},
+		{"signed maximum", "mysql", "bit", "b'" + strings.Repeat("1", 63) + "'", "BIGINT DEFAULT 9223372036854775807", 63},
+		{"high bit", "mysql", "bit", "b'1" + strings.Repeat("0", 63) + "'", "DECIMAL(20,0) DEFAULT 9223372036854775808", 64},
+		{"unsigned maximum", "mysql", "bit", "b'" + strings.Repeat("1", 64) + "'", "DECIMAL(20,0) DEFAULT 18446744073709551615", 64},
+		{"boolean zero", "mysql", "boolean", "b'0'", "BOOLEAN DEFAULT FALSE", 0},
+		{"boolean nonzero", "mysql", "boolean", "b'10'", "BOOLEAN DEFAULT TRUE", 0},
+		{"sqlserver boolean", "sqlserver", "bit", "((1))", "BOOLEAN DEFAULT TRUE", 0},
+		{"sqlserver false", "sqlserver", "bit", "((0))", "BOOLEAN DEFAULT FALSE", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{
+				Name: "Flag", DataType: tc.dataType, Precision: tc.precision, IsNullable: true, Default: &tc.value,
+			}}}
+			statements, err := NewOscar().CreateTableStatements("S", info, tc.srcType, TypeOpt{}, func(v string) string { return v })
+			require.NoError(t, err)
+			require.Contains(t, JoinSQL(statements), `"Flag" `+tc.want)
+		})
+	}
+}
+
+func TestOscarDefaultRenderingPreservesOtherDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		dataType, value, extra, want string
+	}{
+		{"int", "99", "", "INTEGER DEFAULT 99"},
+		{"varchar", "a'b", "", "VARCHAR(255) DEFAULT 'a''b'"},
+		{"datetime", "NOW()", "", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
+		{"int", "NULL", "", "INTEGER DEFAULT NULL"},
+		{"boolean", "TRUE", "", "BOOLEAN DEFAULT TRUE"},
+		{"bigint", "b'1'", "auto_increment", "BIGINT"},
+	} {
+		t.Run(tc.value+tc.extra, func(t *testing.T) {
+			info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "C", DataType: tc.dataType, IsNullable: true, Default: &tc.value, Extra: tc.extra}}}
+			statements, err := NewOscar().CreateTableStatements("", info, "mysql", TypeOpt{}, func(v string) string { return v })
+			require.NoError(t, err)
+			ddl := JoinSQL(statements)
+			require.Contains(t, ddl, `"C" `+tc.want)
+			if tc.extra == "auto_increment" {
+				require.NotContains(t, ddl, "DEFAULT")
+			}
+		})
+	}
+}
+
+func TestOscarRejectsOverflowingBitDefault(t *testing.T) {
+	value := "b'" + strings.Repeat("1", 65) + "'"
+	info := &source.TableDDLInfo{TableName: "SourceTable", Columns: []source.ColumnInfo{{Name: "SourceColumn", DataType: "bit", Precision: 64, Default: &value}}}
+	statements, err := NewOscar().CreateTableStatements("", info, "mysql", TypeOpt{}, func(v string) string { return v })
+	require.ErrorContains(t, err, "SourceTable.SourceColumn")
+	require.ErrorContains(t, err, "invalid MySQL BIT default")
+	require.Empty(t, statements)
+}
+
+func TestOscarMySQLCharacterDefaultsRemainLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name, dataType, value, want string
+		length                      int64
+	}{
+		{"true", "varchar", "true", "VARCHAR(255) DEFAULT 'true'", 0},
+		{"false", "varchar", "FALSE", "VARCHAR(255) DEFAULT 'FALSE'", 0},
+		{"null text", "enum", "NULL", "VARCHAR(255) DEFAULT 'NULL'", 0},
+		{"leading zeroes", "char", "001", "CHAR(3) DEFAULT '001'", 3},
+		{"bit-like text", "varchar", "b'10'", "VARCHAR(255) DEFAULT 'b''10'''", 0},
+		{"spaces", "text", "  ", "CLOB DEFAULT '  '", 0},
+		{"quoted text", "varchar", "'quoted'", "VARCHAR(255) DEFAULT '''quoted'''", 0},
+		{"parentheses", "varchar", "('value')", "VARCHAR(255) DEFAULT '(''value'')'", 0},
+		{"function text", "varchar", "uuid()", "VARCHAR(255) DEFAULT 'uuid()'", 0},
+		{"promoted varchar", "varchar", "NULL", "CLOB DEFAULT 'NULL'", 10000},
+		{"json boolean text", "json", "false", "CLOB DEFAULT 'false'", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "C", DataType: tc.dataType, Length: tc.length, IsNullable: true, Default: &tc.value}}}
+			statements, err := NewOscar().CreateTableStatements("", info, "mysql", TypeOpt{}, identity)
+			require.NoError(t, err)
+			require.Contains(t, JoinSQL(statements), `"C" `+tc.want)
+			require.Equal(t, tc.value, *info.Columns[0].Default)
+			require.Equal(t, tc.dataType, info.Columns[0].DataType)
+			require.Equal(t, tc.length, info.Columns[0].Length)
+		})
+	}
+}
+
+func TestOscarMySQLExpressionDefaultsKeepExpressionPath(t *testing.T) {
+	for _, tc := range []struct {
+		dataType, value, extra, want string
+	}{
+		{"varchar", "uuid()", "DEFAULT_GENERATED", "VARCHAR(255) DEFAULT uuid()"},
+		{"varchar", "('expression')", "default_generated", "VARCHAR(255) DEFAULT 'expression'"},
+		{"int", "(0)", "DEFAULT_GENERATED", "INTEGER DEFAULT 0"},
+		{"datetime", "CURRENT_TIMESTAMP", "DEFAULT_GENERATED", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "C", DataType: tc.dataType, IsNullable: true, Default: &tc.value, Extra: tc.extra}}}
+			statements, err := NewOscar().CreateTableStatements("", info, "mysql", TypeOpt{}, identity)
+			require.NoError(t, err)
+			require.Contains(t, JoinSQL(statements), `"C" `+tc.want)
+		})
+	}
+}

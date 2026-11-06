@@ -72,12 +72,3 @@ func mysqlDamengBit(value interface{}) interface{} {
 	}
 	return int64(unsigned)
 }
-
-// bytesToInt retains the existing signed BIT conversion used by Oscar.
-func bytesToInt(b []byte) int64 {
-	var n int64
-	for _, x := range b {
-		n = n<<8 | int64(x)
-	}
-	return n
-}

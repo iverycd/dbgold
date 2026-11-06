@@ -341,3 +341,45 @@ func TestOscarLocalMetadataFailureContinuesHealthyTablesAndViews(t *testing.T) {
 	require.NotContains(t, ddl, `CREATE TABLE "ORDERS"`)
 	require.NotContains(t, ddl, `"VORDERS"`)
 }
+
+type failingCreateOscarWriter struct {
+	*recordingOscarWriter
+	table string
+}
+
+func (w *failingCreateOscarWriter) CreateTable(_ context.Context, stmts []dialect.Statement) error {
+	if err := w.record(stmts); err != nil {
+		return err
+	}
+	if strings.Contains(dialect.JoinSQL(stmts), `CREATE TABLE "MixedSchema"."`+w.table+`"`) {
+		return fmt.Errorf("oscar JDBC SQLSTATE 40000: simulated table DDL failure")
+	}
+	return nil
+}
+
+func TestOscarCreateFailureContinuesLaterHealthyTables(t *testing.T) {
+	for _, failed := range []string{"ORDERS", "ITEMS"} {
+		t.Run(failed, func(t *testing.T) {
+			r := newOscarFixture()
+			r.tables = append(r.tables, "Audit")
+			r.ddl["Audit"] = &source.TableDDLInfo{TableName: "Audit", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}
+			r.rows["Audit"] = [][]interface{}{{int64(1)}}
+			w := &failingCreateOscarWriter{recordingOscarWriter: &recordingOscarWriter{}, table: failed}
+			m, _ := newTestMigrator(r, w)
+			m.cfg.TargetDBType, m.cfg.TargetSchema = "oscar", "MixedSchema"
+			report := m.Run(context.Background())
+			require.Equal(t, 1, report.Tables.Failed)
+			require.Equal(t, 2, report.Tables.Success)
+			require.Equal(t, 2, report.Data.Success)
+			require.Len(t, report.Tables.Items, 1)
+			require.Contains(t, report.Tables.Items[0].Error, "simulated table DDL failure")
+			require.Contains(t, report.Tables.Items[0].DDL, `CREATE TABLE "MixedSchema"."`+failed+`"`)
+			require.Contains(t, w.copied, "AUDIT")
+			require.NotContains(t, w.copied, failed)
+			require.NotContains(t, w.counted, failed)
+			ddl := strings.Join(w.sql, "\n")
+			require.NotContains(t, ddl, `CONSTRAINT "PK_`+failed+`"`)
+			require.NotContains(t, ddl, `CONSTRAINT "FK_ORDER"`)
+		})
+	}
+}

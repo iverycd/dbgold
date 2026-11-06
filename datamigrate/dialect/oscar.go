@@ -3,6 +3,7 @@ package dialect
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"dbgold/datamigrate/coldefault"
@@ -43,15 +44,33 @@ var oscarNumericLiteral = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$`)
 func (d *OscarDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
 	columns := make([]string, 0, len(info.Columns))
 	for _, col := range info.Columns {
-		definition := d.QuoteIdent(name(col.Name)) + " " + d.MapType(col, srcType, opt)
+		mappedType := d.MapType(col, srcType, opt)
+		definition := d.QuoteIdent(name(col.Name)) + " " + mappedType
 		if !col.IsNullable {
 			definition += " NOT NULL"
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
 			value := strings.TrimSpace(coldefault.Strip(srcType, *col.Default))
 			switch {
+			case srcType == "mysql" && oscarMySQLTextType(col.DataType) && !strings.Contains(strings.ToUpper(col.Extra), "DEFAULT_GENERATED"):
+				// COLUMN_DEFAULT holds ordinary MySQL character defaults as raw
+				// text. Keep keyword-like strings, quotes and spaces intact even
+				// when the target type was promoted from VARCHAR to CLOB.
+				definition += " DEFAULT '" + strings.ReplaceAll(*col.Default, "'", "''") + "'"
 			case reBitLiteral.MatchString(value):
-				if value[len(value)-2] == '1' {
+				bits, err := strconv.ParseUint(value[2:len(value)-1], 2, 64)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: invalid MySQL BIT default %q: %w", info.TableName, col.Name, value, err)
+				}
+				if mappedType != "BOOLEAN" {
+					definition += " DEFAULT " + strconv.FormatUint(bits, 10)
+				} else if bits != 0 {
+					definition += " DEFAULT TRUE"
+				} else {
+					definition += " DEFAULT FALSE"
+				}
+			case mappedType == "BOOLEAN" && (value == "0" || value == "1"):
+				if value == "1" {
 					definition += " DEFAULT TRUE"
 				} else {
 					definition += " DEFAULT FALSE"
@@ -69,6 +88,15 @@ func (d *OscarDialect) CreateTableStatements(schema string, info *source.TableDD
 		{SQL: "DROP TABLE IF EXISTS " + qualified + " CASCADE"},
 		{SQL: fmt.Sprintf("CREATE TABLE %s (\n%s\n)", qualified, strings.Join(columns, ",\n"))},
 	}, nil
+}
+
+func oscarMySQLTextType(dataType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "char", "varchar", "enum", "set", "tinytext", "text", "mediumtext", "longtext", "json", "xml":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *OscarDialect) functionDefault(value string) string {

@@ -12,10 +12,7 @@ import (
 	"dbgold/internal/jdbcbridge"
 )
 
-const (
-	oscarBatchRows  = 1000
-	oscarBatchBytes = 8 << 20
-)
+const oscarBatchRows = 1000
 
 type OscarWriter struct {
 	bridge    oscarBridge
@@ -108,8 +105,9 @@ func (w *OscarWriter) CopyData(ctx context.Context, table string, columns []stri
 		}
 	}()
 
+	// Bound conversion memory here. The bridge owns exact wire-size splitting
+	// and streams oversized fields while retaining this page's transaction.
 	chunk := make([][]any, 0, oscarBatchRows)
-	chunkBytes := 0
 	flush := func() error {
 		if len(chunk) == 0 {
 			return nil
@@ -118,29 +116,31 @@ func (w *OscarWriter) CopyData(ctx context.Context, table string, columns []stri
 			return err
 		}
 		chunk = chunk[:0]
-		chunkBytes = 0
 		return nil
 	}
 	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		converted := make([]any, len(row))
-		rowBytes := 0
 		for i, value := range row {
 			dbType := ""
 			if i < len(columnTypes) {
 				dbType = columnTypes[i]
 			}
 			converted[i] = w.valueConv.Convert(value, w.srcType, dbType)
-			rowBytes += estimateOscarValueSize(converted[i])
 		}
-		if len(chunk) > 0 && (len(chunk) >= oscarBatchRows || chunkBytes+rowBytes > oscarBatchBytes) {
+		if len(chunk) >= oscarBatchRows {
 			if err := flush(); err != nil {
 				return err
 			}
 		}
 		chunk = append(chunk, converted)
-		chunkBytes += rowBytes
 	}
 	if err := flush(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := w.bridge.CommitBatch(ctx, batch); err != nil {
@@ -148,27 +148,6 @@ func (w *OscarWriter) CopyData(ctx context.Context, table string, columns []stri
 	}
 	committed = true
 	return nil
-}
-
-func estimateOscarValueSize(value any) int {
-	switch v := value.(type) {
-	case nil:
-		return 1
-	case string:
-		return len(v) + 8
-	case []byte:
-		return len(v) + 8
-	case jdbcbridge.Decimal:
-		return len(v) + 8
-	case jdbcbridge.Date:
-		return len(v) + 8
-	case jdbcbridge.Time:
-		return len(v) + 8
-	case jdbcbridge.Timestamp:
-		return len(v) + 8
-	default:
-		return 16
-	}
 }
 
 func (w *OscarWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
