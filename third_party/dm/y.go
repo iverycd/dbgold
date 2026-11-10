@@ -7,6 +7,7 @@ package dm
 
 import (
 	"bytes"
+	"context"
 	"math/rand"
 	"sync"
 	"time"
@@ -48,7 +49,7 @@ func newEPGroup(name string, serverList []*ep) *epGroup {
 	return g
 }
 
-func (g *epGroup) connect(connector *DmConnector) (*DmConnection, error) {
+func (g *epGroup) connect(ctx context.Context, connector *DmConnector) (*DmConnection, error) {
 	var dbSelector = g.getEPSelector(connector)
 	var ex error = nil
 	// 如果配置了loginMode的主、备等优先策略，而未找到最高优先级的节点时持续循环switchtimes次，如果最终还是没有找到最高优先级则选择次优先级的
@@ -60,14 +61,24 @@ func (g *epGroup) connect(connector *DmConnector) (*DmConnection, error) {
 		cycleCount = connector.switchTimes + 1
 	}
 	for i := int32(0); i < cycleCount; i++ {
-		// 循环了一遍，如果没有符合要求的, 重新排序, 再尝试连接
-		conn, err := g.traverseServerList(connector, dbSelector, i == 0, i == cycleCount-1)
-		if err != nil {
-			ex = err
-			time.Sleep(time.Duration(connector.switchInterval) * time.Millisecond)
-			continue
+		if i > 0 {
+			timer := time.NewTimer(time.Duration(connector.switchInterval) * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
-		return conn, nil
+		// 循环了一遍，如果没有符合要求的, 重新排序, 再尝试连接
+		conn, err := g.traverseServerList(ctx, connector, dbSelector, i == 0, i == cycleCount-1)
+		if err == nil {
+			return conn, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		ex = err
 	}
 	return nil, ex
 }
@@ -97,12 +108,15 @@ func (g *epGroup) getEPSelector(connector *DmConnector) *epSelector {
 * DBError.ECJDBC_INVALID_SERVER_MODE 有站点的模式不匹配
 * DBError.ECJDBC_COMMUNITION_ERROR 所有站点都连不上
  */
-func (g *epGroup) traverseServerList(connector *DmConnector, epSelector *epSelector, first bool, last bool) (*DmConnection, error) {
+func (g *epGroup) traverseServerList(ctx context.Context, connector *DmConnector, epSelector *epSelector, first bool, last bool) (*DmConnection, error) {
 	epList := epSelector.sortDBList(first)
 	errorMsg := bytes.NewBufferString("")
 	var ex error = nil // 第一个错误
 	for _, server := range epList {
-		conn, err := server.connect(connector)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := server.connect(ctx, connector)
 		if err != nil {
 			if ex == nil {
 				ex = err

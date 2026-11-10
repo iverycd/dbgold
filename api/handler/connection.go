@@ -262,14 +262,16 @@ func ListConnectionDatabases(c *gin.Context) {
 		listOracleSchemas(c, conn)
 		return
 	}
+	if conn.DBType == "dameng" {
+		listDaMengSourceSchemas(c, conn)
+		return
+	}
 	var reader source.Reader
 	switch conn.DBType {
 	case "mysql":
 		reader, err = source.NewMySQL(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "sqlserver":
 		reader, err = source.NewSQLServer(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
-	case "dameng":
-		reader, err = source.NewDaMeng(buildDSN(conn), conn.Database, source.ConnPoolConfig{})
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库作为源库时，可迁移的「数据库」即库内的 schema 列表
 		reader, err = source.NewPostgresProduct(conn.DBType, pgCompatibleDriverName(conn.DBType), buildDSN(conn), "*", source.ConnPoolConfig{})

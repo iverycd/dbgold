@@ -927,7 +927,7 @@ func (c *DmConnector) Driver() driver.Driver {
 
 func (c *DmConnector) connect(ctx context.Context) (*DmConnection, error) {
 	if c.group != nil && len(c.group.epList) > 0 {
-		return c.group.connect(c)
+		return c.group.connect(ctx, c)
 	} else {
 		return c.connectSingle(ctx)
 	}
@@ -938,6 +938,9 @@ func (c *DmConnector) driver() *DmDriver {
 }
 
 func (c *DmConnector) connectSingle(ctx context.Context) (*DmConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var err error
 	var dc = &DmConnection{
 		closech:     make(chan struct{}),
@@ -951,35 +954,49 @@ func (c *DmConnector) connectSingle(ctx context.Context) (*DmConnection, error) 
 
 	dc.Access, err = dm_build_14(ctx, dc)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 
+	err = dc.handshake(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+	}
+	if err != nil {
+		dc.cleanup()
+		return nil, err
+	}
 	dc.startWatcher()
-	if err = dc.watchCancel(ctx); err != nil {
-		return nil, err
-	}
-	defer dc.finish()
-
-	if err = dc.Access.dm_build_59(); err != nil {
-
-		if !dc.closed.IsSet() {
-			close(dc.closech)
-			if dc.Access != nil {
-				dc.Access.Close()
-			}
-			dc.closed.Set(true)
-		}
-		return nil, err
-	}
-
-	if c.schema != "" {
-		_, err = dc.exec("set schema \""+util.StringUtil.ProcessDoubleQuoteOfName(c.schema)+"\"", nil)
-		if err != nil {
-
-			dc.cleanup()
-			return nil, err
-		}
-	}
-
 	return dc, nil
+}
+
+func (dc *DmConnection) handshake(ctx context.Context) error {
+	if ctx.Done() != nil {
+		// Interrupt I/O without tearing down driver state while login still uses it.
+		socket := dc.Access.dm_build_3
+		done, stopped := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(stopped)
+			select {
+			case <-ctx.Done():
+				_ = socket.Close()
+			case <-done:
+			}
+		}()
+		defer func() {
+			close(done)
+			<-stopped
+		}()
+	}
+
+	if err := dc.Access.dm_build_59(); err != nil {
+		return err
+	}
+	if schema := dc.dmConnector.schema; schema != "" {
+		_, err := dc.exec("set schema \""+util.StringUtil.ProcessDoubleQuoteOfName(schema)+"\"", nil)
+		return err
+	}
+	return nil
 }

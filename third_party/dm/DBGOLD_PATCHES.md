@@ -34,6 +34,9 @@ documents the driver. The root module pins this directory with a `replace`.
    mask bits on a copy of the descriptor. Place a nanosecond timestamp's zone
    after all nine timestamp bytes; the upstream path overwrites its last byte.
    Ordinary top-level parameter conversion remains unchanged.
+7. `a.go` / `m.go` / `n.go` / `x.go` / `y.go`: pass the connection context
+   through endpoint selection, retries and TCP dialing. Interrupt a canceled
+   login by closing its socket before cleaning up the driver state.
 
 `dbgold_codec_test.go` exercises the actual driver encoders and existing decoders
 without a database, including nested object/array values, negative 38-digit

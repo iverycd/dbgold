@@ -47,7 +47,7 @@ func dm_build_14(dm_build_15 context.Context, dm_build_16 *DmConnection) (*dm_bu
 	if dm_build_20 {
 		dm_build_17, dm_build_18 = dm_build_19(dm_build_15, dm_build_16.dmConnector.host+":"+strconv.Itoa(int(dm_build_16.dmConnector.port)))
 	} else {
-		dm_build_17, dm_build_18 = dm_build_22(dm_build_16.dmConnector.host+":"+strconv.Itoa(int(dm_build_16.dmConnector.port)), time.Duration(dm_build_16.dmConnector.socketTimeout)*time.Second)
+		dm_build_17, dm_build_18 = dm_build_22(dm_build_15, dm_build_16.dmConnector.host+":"+strconv.Itoa(int(dm_build_16.dmConnector.port)), time.Duration(dm_build_16.dmConnector.socketTimeout)*time.Second)
 	}
 	if dm_build_18 != nil {
 		return nil, dm_build_18
@@ -67,8 +67,9 @@ func dm_build_14(dm_build_15 context.Context, dm_build_16 *DmConnection) (*dm_bu
 	return &dm_build_21, nil
 }
 
-func dm_build_22(dm_build_23 string, dm_build_24 time.Duration) (net.Conn, error) {
-	dm_build_25, dm_build_26 := net.DialTimeout("tcp", dm_build_23, dm_build_24)
+func dm_build_22(ctx context.Context, dm_build_23 string, dm_build_24 time.Duration) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: dm_build_24}
+	dm_build_25, dm_build_26 := dialer.DialContext(ctx, "tcp", dm_build_23)
 	if dm_build_26 != nil {
 		return &net.TCPConn{}, ECGO_COMMUNITION_ERROR.addDetail("\tdial address: " + dm_build_23).throw()
 	}
