@@ -289,6 +289,11 @@ func (m *Migrator) planOracleMySQLTable(ctx context.Context, table string, info 
 // All ordinary/partition base DDL uses this entry point. The source cache is
 // never overwritten by the target plan's mapped types or normalized defaults.
 func (m *Migrator) baseCreateTableStatements(ctx context.Context, table string, info *source.TableDDLInfo, opt dialect.TypeOpt) ([]dialect.Statement, error) {
+	var err error
+	opt, err = m.mysqlPGSpatialTypeOptions(ctx, info, opt)
+	if err != nil {
+		return nil, err
+	}
 	if m.oracleMySQLSchemaMode() {
 		p, err := m.planOracleMySQLTable(ctx, table, info)
 		if err != nil {

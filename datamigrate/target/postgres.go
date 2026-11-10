@@ -44,9 +44,9 @@ type PostgresWriter struct {
 	db        *sql.DB
 	schema    string
 	dbType    string
-	srcType   string                   // 源库类型，用于 ValueConverter 落地中立值
-	valueConv valueconv.ValueConverter // 把 Reader 中立值落地为 PG 形态
-	dia       dialect.Dialect          // SQL 生成方言
+	srcType   string                          // 源库类型，用于 ValueConverter 落地中立值
+	valueConv valueconv.CheckedValueConverter // 把 Reader 中立值落地为 PG 形态
+	dia       dialect.Dialect                 // SQL 生成方言
 }
 
 // SetSourceType 由 Migrator 注入源库类型(reader.DBType())。
@@ -116,7 +116,10 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 	defer stmt.Close()
 
 	for _, row := range rows {
-		conv := w.convertRow(row, colTypes)
+		conv, err := w.convertRow(row, colTypes, cols...)
+		if err != nil {
+			return fmt.Errorf("表 %s 数据转换失败: %w", table, err)
+		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
@@ -128,9 +131,9 @@ func (w *PostgresWriter) CopyData(ctx context.Context, table string, cols []stri
 }
 
 // convertRow 对一行的每个值按列类型经 ValueConverter 落地。
-func (w *PostgresWriter) convertRow(row []interface{}, colTypes []string) []interface{} {
+func (w *PostgresWriter) convertRow(row []interface{}, colTypes []string, cols ...string) ([]interface{}, error) {
 	if w.valueConv == nil {
-		return row
+		return row, nil
 	}
 	out := make([]interface{}, len(row))
 	for i, v := range row {
@@ -138,9 +141,17 @@ func (w *PostgresWriter) convertRow(row []interface{}, colTypes []string) []inte
 		if i < len(colTypes) {
 			dt = colTypes[i]
 		}
-		out[i] = w.valueConv.Convert(v, w.srcType, dt)
+		var err error
+		out[i], err = w.valueConv.Convert(v, w.srcType, dt)
+		if err != nil {
+			label := fmt.Sprintf("第 %d 列", i+1)
+			if i < len(cols) {
+				label += " " + cols[i]
+			}
+			return nil, fmt.Errorf("%s (%s): %w", label, dt, err)
+		}
 	}
-	return out
+	return out, nil
 }
 
 func (w *PostgresWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {

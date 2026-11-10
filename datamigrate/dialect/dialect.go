@@ -20,6 +20,8 @@ type NameFunc func(string) string
 type TypeOpt struct {
 	CharInLength bool
 	UseNvarchar2 bool
+	// SpatialSchema is the verified schema of the target geometry type/functions.
+	SpatialSchema string
 }
 
 // Statement is one independently executable SQL statement. A Writer executes

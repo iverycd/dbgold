@@ -221,6 +221,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		}
 		m.repairs.appendObject(o)
 	}
+	var objectSpatialCaps *target.PGSpatialCapabilities
+	var objectSpatialErr error
+	objectSpatialRead := false
 	for i, t := range participating {
 		if cancelled() {
 			return
@@ -258,6 +261,37 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				}
 			}
 			o.Columns = slices.Clone(info.Columns)
+			spatialOpt := dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2}
+			if m.cfg.objectMode() && m.isMySQLPGSpatial() && hasMySQLSpatialColumns(info) {
+				if !objectSpatialRead {
+					objectSpatialRead = true
+					if checker, ok := m.writer.(mysqlPGSpatialWriter); ok {
+						objectSpatialCaps, objectSpatialErr = checker.InspectMySQLPGSpatial(ctx)
+					} else {
+						objectSpatialErr = fmt.Errorf("目标 %s 未实现空间能力检查", m.writer.DBType())
+					}
+				}
+				if objectSpatialErr != nil {
+					e = objectSpatialErr
+				} else if objectSpatialCaps != nil {
+					spatialOpt.SpatialSchema = objectSpatialCaps.Schema
+				}
+			}
+			if m.isMySQLPGSpatial() && hasMySQLSpatialColumns(info) && !m.cfg.objectMode() && len(m.cfg.ViewNames) == 0 {
+				var spatialErr error
+				if m.cfg.Content == "data_only" {
+					var caps *target.PGSpatialCapabilities
+					caps, spatialErr = m.prepareMySQLPGSpatial(ctx)
+					if spatialErr == nil {
+						spatialOpt.SpatialSchema = caps.Schema
+					}
+				} else {
+					spatialOpt, spatialErr = m.mysqlPGSpatialTypeOptions(ctx, info, spatialOpt)
+				}
+				if spatialErr != nil {
+					e = spatialErr
+				}
+			}
 			if m.oracleMySQLSchemaMode() {
 				plan, planErr := m.planOracleMySQLTable(ctx, t, info)
 				if planErr != nil {
@@ -271,7 +305,12 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				o.ColumnMapping[c.Name] = n
 				o.Columns[i].Name = n
 				if !m.oracleMySQLSchemaMode() {
-					o.Columns[i].DataType = m.writer.Dialect().MapType(c, m.reader.DBType(), dialect.TypeOpt{CharInLength: m.cfg.CharInLength, UseNvarchar2: m.cfg.UseNvarchar2})
+					o.Columns[i].DataType = m.writer.Dialect().MapType(c, m.reader.DBType(), spatialOpt)
+					if _, spatial := source.MySQLSpatialSubtype(c.DataType); spatial && m.isMySQLPGSpatial() {
+						o.Columns[i].FormattedType = o.Columns[i].DataType
+						o.Columns[i].DataType = "geometry"
+						o.Columns[i].TypeSchema = spatialOpt.SpatialSchema
+					}
 				}
 				if m.isOracleDameng() && strings.HasPrefix(o.Columns[i].DataType, "SYSGEO2.") {
 					o.Columns[i].TypeSchema = "SYSGEO2"
@@ -316,6 +355,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		if !selected[v.TableName] {
 			return
 		}
+		v = m.planMySQLPGSpatialIndex(ctx, v)
 		src, originalName := v.TableName, v.IndexName
 		v.TableName = m.objName(src)
 		v.IndexName = m.objName(v.IndexName)

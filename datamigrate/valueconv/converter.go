@@ -18,3 +18,10 @@ package valueconv
 type ValueConverter interface {
 	Convert(val interface{}, srcType, dbTypeName string) interface{}
 }
+
+// CheckedValueConverter reports values that cannot be represented faithfully
+// by the destination. Writers must propagate the error instead of substituting
+// NULL or passing the original bytes to a different destination type.
+type CheckedValueConverter interface {
+	Convert(val interface{}, srcType, dbTypeName string) (interface{}, error)
+}

@@ -19,7 +19,7 @@ type GaussDBWriter struct {
 	db        *sql.DB
 	schema    string
 	srcType   string
-	valueConv valueconv.ValueConverter
+	valueConv valueconv.CheckedValueConverter
 	dia       dialect.Dialect
 }
 
@@ -86,7 +86,10 @@ func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []strin
 	defer stmt.Close()
 
 	for _, row := range rows {
-		conv := w.convertRow(row, colTypes)
+		conv, err := w.convertRow(row, colTypes, cols...)
+		if err != nil {
+			return fmt.Errorf("表 %s 数据转换失败: %w", table, err)
+		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
@@ -98,9 +101,9 @@ func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []strin
 }
 
 // convertRow 对一行的每个值按列类型经 ValueConverter 落地。
-func (w *GaussDBWriter) convertRow(row []interface{}, colTypes []string) []interface{} {
+func (w *GaussDBWriter) convertRow(row []interface{}, colTypes []string, cols ...string) ([]interface{}, error) {
 	if w.valueConv == nil {
-		return row
+		return row, nil
 	}
 	out := make([]interface{}, len(row))
 	for i, v := range row {
@@ -108,9 +111,17 @@ func (w *GaussDBWriter) convertRow(row []interface{}, colTypes []string) []inter
 		if i < len(colTypes) {
 			dt = colTypes[i]
 		}
-		out[i] = w.valueConv.Convert(v, w.srcType, dt)
+		var err error
+		out[i], err = w.valueConv.Convert(v, w.srcType, dt)
+		if err != nil {
+			label := fmt.Sprintf("第 %d 列", i+1)
+			if i < len(cols) {
+				label += " " + cols[i]
+			}
+			return nil, fmt.Errorf("%s (%s): %w", label, dt, err)
+		}
 	}
-	return out
+	return out, nil
 }
 
 func (w *GaussDBWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {

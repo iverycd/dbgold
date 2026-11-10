@@ -51,7 +51,11 @@ func (d *PostgresDialect) QualifyTable(schema, table string) string {
 
 func (d *PostgresDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOpt) string {
 	if m, ok := typemap.Get(srcType, d.name); ok {
-		return m(col, opt.CharInLength, opt.UseNvarchar2)
+		mapped := m(col, opt.CharInLength, opt.UseNvarchar2)
+		if _, spatial := source.MySQLSpatialSubtype(col.DataType); srcType == "mysql" && spatial && opt.SpatialSchema != "" {
+			return d.QuoteIdent(opt.SpatialSchema) + "." + d.QuoteIdent("geometry") + strings.TrimPrefix(mapped, "geometry")
+		}
+		return mapped
 	}
 	// 兜底:理论上不会发生(注册表已覆盖所有受支持组合)
 	return col.DataType
@@ -63,8 +67,18 @@ var reBitLiteral = regexp.MustCompile(`(?i)^b'[01]+'$`)
 func (d *PostgresDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
 	var cols []string
 	for _, col := range info.Columns {
+		_, spatial := source.MySQLSpatialSubtype(col.DataType)
+		spatial = spatial && srcType == "mysql"
+		if spatial {
+			if err := ValidateMySQLSpatialColumn(col); err != nil {
+				return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+			}
+			if opt.SpatialSchema == "" {
+				return nil, fmt.Errorf("%s.%s: MySQL 空间类型 %s 尚未完成目标空间能力检测", info.TableName, col.Name, col.DataType)
+			}
+		}
 		pgType := d.MapType(col, srcType, opt)
-		colDef := fmt.Sprintf(`"%s" %s`, name(col.Name), pgType)
+		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(name(col.Name)), pgType)
 		if !col.IsNullable {
 			colDef += " NOT NULL"
 		}
@@ -91,6 +105,11 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 				colDef += fmt.Sprintf(" DEFAULT '%s'", strings.ReplaceAll(def, "'", "''"))
 			}
 		}
+		if spatial && col.SpatialSRID != nil && *col.SpatialSRID == 0 {
+			// PostGIS's typmod SRID zero means unrestricted; MySQL SRID 0 is
+			// an explicit restriction, so preserve it with a CHECK as well.
+			colDef += fmt.Sprintf(" CHECK (%s.%s(%s) = 0)", d.QuoteIdent(opt.SpatialSchema), d.QuoteIdent("st_srid"), d.QuoteIdent(name(col.Name)))
+		}
 		cols = append(cols, "  "+colDef)
 	}
 	tblName := name(info.TableName)
@@ -103,6 +122,31 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedName)
 	createSQL := fmt.Sprintf("CREATE TABLE %s (\n%s\n);", qualifiedName, strings.Join(cols, ",\n"))
 	return []Statement{{SQL: dropSQL}, {SQL: createSQL}}, nil
+}
+
+// ValidateMySQLSpatialColumn rejects expressions that cannot safely be replayed
+// as PostgreSQL SQL, before the migrator executes a destructive table DDL.
+func ValidateMySQLSpatialColumn(col source.ColumnInfo) error {
+	if _, ok := source.MySQLSpatialSubtype(col.DataType); !ok {
+		return nil
+	}
+	if col.SpatialSRID != nil && *col.SpatialSRID > 999999 {
+		return fmt.Errorf("空间列 SRID %d 超出目标支持范围 0..999999，不能原样保留", *col.SpatialSRID)
+	}
+	extra := strings.ToUpper(col.Extra)
+	if strings.TrimSpace(col.Generated) != "" || strings.Contains(extra, "VIRTUAL GENERATED") || strings.Contains(extra, "STORED GENERATED") {
+		return fmt.Errorf("空间生成列表达式不支持自动转换")
+	}
+	if col.Default != nil {
+		def := strings.TrimSpace(*col.Default)
+		for strings.HasPrefix(def, "(") && strings.HasSuffix(def, ")") {
+			def = strings.TrimSpace(def[1 : len(def)-1])
+		}
+		if !strings.EqualFold(def, "NULL") {
+			return fmt.Errorf("空间列默认表达式不支持自动转换: %s", *col.Default)
+		}
+	}
+	return nil
 }
 
 // isFunctionDefault 判断默认值是否为函数或关键字(不应加引号)。

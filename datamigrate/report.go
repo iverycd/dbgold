@@ -87,6 +87,7 @@ func recordMetadataFailure(category *CategoryReport, err error) {
 
 // MigrationReport 完整迁移报告
 type MigrationReport struct {
+	SpatialCapabilities     *target.PGSpatialCapabilities        `json:"spatial_capabilities,omitempty"`
 	TargetDependencies      []OracleMySQLDependencyResult        `json:"target_dependencies,omitempty"`
 	PartitionMigration      *PartitionPreflight                  `json:"partition_migration,omitempty"`
 	NativeSchema            *NativeSchemaReport                  `json:"native_schema,omitempty"`

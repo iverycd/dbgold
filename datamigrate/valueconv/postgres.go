@@ -2,9 +2,11 @@ package valueconv
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
+	"dbgold/datamigrate/source"
 	mssql "github.com/microsoft/go-mssqldb"
 )
 
@@ -24,38 +26,46 @@ type PostgresValueConverter struct{}
 
 func NewPostgres() *PostgresValueConverter { return &PostgresValueConverter{} }
 
-func (c *PostgresValueConverter) Convert(val interface{}, srcType, dbTypeName string) interface{} {
+func (c *PostgresValueConverter) Convert(val interface{}, srcType, dbTypeName string) (interface{}, error) {
 	if val == nil {
-		return nil
+		return nil, nil
 	}
 	switch srcType {
 	case "mysql":
 		return convertMySQL(val, dbTypeName)
 	case "sqlserver":
-		return convertSQLServer(val, dbTypeName)
+		return convertSQLServer(val, dbTypeName), nil
 	case "oracle":
-		return convertOracle(val, dbTypeName)
+		return convertOracle(val, dbTypeName), nil
 	case "dameng":
-		return convertDaMeng(val, dbTypeName)
+		return convertDaMeng(val, dbTypeName), nil
 	default:
-		return val
+		return val, nil
 	}
 }
 
-// convertMySQL 复刻 mysql.go ReadPage(L242-258)的 PG 定制部分。
-// BIT/GEOMETRY 的中立值是 []byte,在此转为 PG 文本形态。
-func convertMySQL(val interface{}, dt string) interface{} {
+// convertMySQL preserves spatial coordinates and SRID in the destination's
+// canonical HEXEWKB text input, shared by COPY and CDC parameter binding.
+func convertMySQL(val interface{}, dt string) (interface{}, error) {
+	if _, spatial := source.MySQLSpatialSubtype(dt); spatial {
+		b, ok := val.([]byte)
+		if !ok {
+			return nil, fmt.Errorf("MySQL 空间值需要原始二进制数据，实际为 %T", val)
+		}
+		return MySQLSpatialHEXEWKB(b, dt)
+	}
 	b, ok := val.([]byte)
 	if !ok {
-		return val
+		return val, nil
 	}
 	switch dt {
 	case "BIT":
-		return hex.EncodeToString(b)[1:]
-	case "GEOMETRY":
-		return hex.EncodeToString(b)[8:]
+		if len(b) == 0 {
+			return nil, fmt.Errorf("MySQL BIT 值为空二进制数据")
+		}
+		return hex.EncodeToString(b)[1:], nil
 	default:
-		return val
+		return val, nil
 	}
 }
 

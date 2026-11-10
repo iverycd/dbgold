@@ -41,6 +41,18 @@ func (d *PostgresDialect) IndexName(idx source.IndexInfo) string {
 }
 
 func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
+	if strings.EqualFold(idx.Method, "gist") {
+		cols := make([]string, len(idx.Columns))
+		for i, column := range idx.Columns {
+			cols[i] = d.QuoteIdent(column)
+			if idx.PGSpatialSchema != "" && idx.PGSpatialOpClass != "" {
+				cols[i] += " " + d.QuoteIdent(idx.PGSpatialSchema) + "." + d.QuoteIdent(idx.PGSpatialOpClass)
+			}
+		}
+		// Spatial indexes always create strictly; the writer verifies a same-name
+		// index's actual table, keys, method and operator class before reusing it.
+		return []Statement{{SQL: fmt.Sprintf("CREATE INDEX %s ON %s USING gist (%s);", d.QuoteIdent(d.IndexName(idx)), d.qualified(schema, idx.TableName), strings.Join(cols, ", "))}}
+	}
 	cols := strings.Join(orderedIndexColumns(d, idx), ", ")
 	table := d.qualified(schema, idx.TableName)
 	if idx.IsPrimary {

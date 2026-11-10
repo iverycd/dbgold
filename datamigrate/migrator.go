@@ -88,6 +88,7 @@ type Migrator struct {
 	compatibilityFunctions *target.CompatibilityFunctionsReport
 	mysqlPGTriggers        []preparedMySQLPGTrigger
 	mysqlPGTriggerError    error
+	mysqlPGSpatial         mysqlPGSpatialState
 	mysqlDMTriggers        []preparedMySQLDamengTrigger
 	mysqlDMTriggerError    error
 	sourceDDLCache         sourceTableDDLCache
@@ -234,6 +235,7 @@ func (m *Migrator) stripViewSchemas(def string) string {
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	m.mainMigrationFinished = false
 	m.compatibilityFunctions = nil
+	m.mysqlPGSpatial = mysqlPGSpatialState{}
 	m.oracleMySQLAuto = nil
 	if r, ok := m.reader.(interface{ ResetOracleMySQLAutoIncrements() }); ok {
 		r.ResetOracleMySQLAutoIncrements()
@@ -274,6 +276,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 		m.dmPlans = nil
 	}
 	report := m.runWithRepair(ctx)
+	report.SpatialCapabilities = m.mysqlPGSpatial.capabilities
 	m.finishPartitions(ctx, &report)
 	if dataValidation != nil {
 		report.DataValidation = dataValidation
@@ -482,6 +485,11 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 			}
 		}
 	}
+	if m.cfg.Content == "data_only" && !m.cfg.objectMode() {
+		if !m.preflightMySQLPGSpatialData(ctx, tables, &report, tablesFailed) {
+			return report
+		}
+	}
 	m.freezeDataValidation(ctx, tables)
 
 	// 仅对象迁移模式:跳过建表、数据迁移、行数对比,只执行 Post-DDL
@@ -592,7 +600,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 	// Phase 2: 迁移数据（并发）
 	report.Data.Total = len(tables) - len(tablesFailed)
-	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
+	if len(tables) > 0 && m.cfg.Content == "data_only" && (m.isMySQLDameng() || m.isMySQLPGSpatial()) {
 		report.Data.Total += report.Data.Failed
 	}
 	if skipData {
@@ -1225,6 +1233,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					blocked(&report.Indexes, idx.IndexName, idx.TableName, "依赖表 "+idx.TableName+" 迁移失败")
 					continue
 				}
+				idx = m.planMySQLPGSpatialIndex(ctx, idx)
 				m.recordOracleMySQLIndexWarning(report, idx)
 				m.recordMySQLPrefixWarning(report, idx)
 				idxCopy := idx

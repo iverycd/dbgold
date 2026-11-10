@@ -12,6 +12,7 @@ docs
 !/docs/dameng-dameng.md
 !/docs/mysql-scan-benchmark.md
 !/docs/mysql-dameng-cdc.md
+!/docs/mysql-pg-spatial.md
 .claude
 log
 uploads

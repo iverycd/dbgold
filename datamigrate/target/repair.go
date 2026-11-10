@@ -209,6 +209,11 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if len(selected) == 0 {
 		return out, fmt.Errorf("未选择执行步骤")
 	}
+	if a.family == "postgres" {
+		if err := preparePGSpatialRepair(ctx, a.db, obj); err != nil {
+			return out, err
+		}
+	}
 	if a.family == "postgres" && repairKind(obj.Kind) == "view" {
 		// Preparation is best effort. Let the selected view SQL determine whether
 		// it actually depends on get_uuid; unrelated views must remain repairable.

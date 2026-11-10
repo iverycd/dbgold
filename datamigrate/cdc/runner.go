@@ -46,6 +46,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer applier.Close()
+	if spatial, ok := applier.(interface {
+		PrepareSpatial(context.Context, []TableInfo) error
+	}); ok {
+		if err = spatial.PrepareSpatial(ctx, tables); err != nil {
+			return err
+		}
+	}
 	if err = applier.CheckBusinessTriggers(ctx, tables); err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/source"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -122,7 +123,38 @@ func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, 
 	if len(result) == 0 {
 		return nil, fmt.Errorf("没有匹配的源表")
 	}
+	if err := loadCDCSpatialSRIDs(ctx, db, database, result); err != nil {
+		return nil, err
+	}
 	return result, nil
+}
+
+func loadCDCSpatialSRIDs(ctx context.Context, db *sql.DB, database string, tables []TableInfo) error {
+	for i := range tables {
+		table := &tables[i]
+		info := &source.TableDDLInfo{TableName: table.Name}
+		spatial := false
+		for j, dt := range table.ColumnTypes {
+			if j >= len(table.Columns) {
+				return fmt.Errorf("表 %s 空间列元数据数量不一致", table.Name)
+			}
+			info.Columns = append(info.Columns, source.ColumnInfo{Name: table.Columns[j], DataType: dt})
+			if _, ok := source.MySQLSpatialSubtype(dt); ok {
+				spatial = true
+			}
+		}
+		if !spatial {
+			continue
+		}
+		if err := source.LoadMySQLSpatialSRIDs(ctx, db, database, info); err != nil {
+			return err
+		}
+		table.ColumnSpatialSRIDs = make([]*uint32, len(info.Columns))
+		for j, column := range info.Columns {
+			table.ColumnSpatialSRIDs[j] = column.SpatialSRID
+		}
+	}
+	return nil
 }
 
 type uniqueIndexBuilder struct {

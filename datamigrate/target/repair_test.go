@@ -238,7 +238,7 @@ func TestInspectHandwrittenIndexAndFKCannotVerifyAgainstOriginalMetadata(t *test
 func TestInspectTableUsesOriginalCaseColumnMapping(t *testing.T) {
 	w, m := repairPGMock(t)
 	m.ExpectQuery("SELECT COUNT.*FROM pg_class").WithArgs("app", "mixed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	m.ExpectQuery("SELECT column_name,data_type").WithArgs("app", "mixed").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "length", "precision", "scale", "nullable", "default", "extra", "ordinal", "time_precision", "generated"}).AddRow("new_id", "integer", 0, 32, 0, "NO", nil, "", 1, 0, ""))
+	m.ExpectQuery("SELECT column_name,CASE WHEN data_type=").WithArgs("app", "mixed").WillReturnRows(sqlmock.NewRows([]string{"name", "type", "length", "precision", "scale", "nullable", "default", "extra", "ordinal", "time_precision", "generated"}).AddRow("new_id", "integer", 0, 32, 0, "NO", nil, "", 1, 0, ""))
 	v, e := InspectRepair(context.Background(), w, repair.Object{Kind: "table", Schema: "app", TargetName: "mixed", Columns: []source.ColumnInfo{{Name: "mixed_id", DataType: "INTEGER"}}, SourceColumns: []source.ColumnInfo{{Name: "Mixed_ID", DataType: "int"}}, ColumnMapping: map[string]string{"Mixed_ID": "new_id"}})
 	require.NoError(t, e)
 	require.Equal(t, "succeeded", v.Status)

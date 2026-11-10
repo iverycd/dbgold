@@ -20,6 +20,15 @@ func init() {
 // MySQLToPG 将 MySQL 列的数据类型转换为 PostgreSQL 类型字符串。
 // charInLength=true 时 char/varchar 长度单位使用 CHAR，useNvarchar2=true 时 varchar/char 转为 nvarchar2（优先级更高）。
 func MySQLToPG(col source.ColumnInfo, charInLength, useNvarchar2 bool) string {
+	if subtype, ok := source.MySQLSpatialSubtype(col.DataType); ok {
+		if col.SpatialSRID != nil {
+			return fmt.Sprintf("geometry(%s,%d)", subtype, *col.SpatialSRID)
+		}
+		if subtype == "Geometry" {
+			return "geometry"
+		}
+		return fmt.Sprintf("geometry(%s)", subtype)
+	}
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 	switch dt {
 	case "tinyint", "smallint", "mediumint", "int":

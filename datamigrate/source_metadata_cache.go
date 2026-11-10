@@ -75,6 +75,10 @@ func cloneSourceTableDDLInfo(info *source.TableDDLInfo) *source.TableDDLInfo {
 	copy(copyInfo.Columns, info.Columns)
 	for i := range copyInfo.Columns {
 		column := &copyInfo.Columns[i]
+		if column.SpatialSRID != nil {
+			value := *column.SpatialSRID
+			column.SpatialSRID = &value
+		}
 		if column.Default != nil {
 			value := *column.Default
 			column.Default = &value

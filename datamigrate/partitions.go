@@ -81,6 +81,7 @@ func partitionSourceReader(r source.Reader) source.Reader {
 // builds its own plan; no client-supplied SQL or readiness is trusted.
 func (m *Migrator) PreflightPartitions(ctx context.Context) *PartitionPreflight {
 	m.oracleMySQL = nil
+	m.mysqlPGSpatial = mysqlPGSpatialState{readOnly: true}
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
 	m.partitionState = nil

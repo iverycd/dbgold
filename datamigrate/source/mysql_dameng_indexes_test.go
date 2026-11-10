@@ -67,7 +67,7 @@ func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 	require.Len(t, indexes, 8)
 	require.Empty(t, indexes[0].Unsupported)
 	require.Equal(t, []string{"TenantID"}, indexes[0].Columns)
-	for _, i := range []int{1, 3, 4, 5, 6} {
+	for _, i := range []int{1, 3, 5, 6} {
 		idx := indexes[i]
 		require.Equal(t, "MixedTable", idx.TableName)
 		require.NotEmpty(t, idx.Unsupported, idx.IndexName)
@@ -84,6 +84,8 @@ func TestMySQLDamengGetIndexesIsolatesUnsupportedDefinitions(t *testing.T) {
 	require.Equal(t, "FULLTEXT", indexes[3].Method)
 	require.Contains(t, indexes[3].Unsupported, "多列全文索引")
 	require.Equal(t, "SPATIAL", indexes[4].Method)
+	require.Equal(t, MySQLSpatialIndexUnsupported, indexes[4].Unsupported)
+	require.Equal(t, []string{"Location"}, indexes[4].Columns, "complete spatial keys remain unsupported until a capable target plans them")
 	require.Contains(t, indexes[6].Unsupported, "排序方向未知")
 	require.Empty(t, indexes[7].Unsupported)
 	require.Equal(t, []string{"DisplayName"}, indexes[7].Columns)

@@ -213,6 +213,12 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 			}
 		}
 		if len(tables) > 0 && targetMetadataReady {
+			if incrementalOnly && cfg.TargetDBType != "dameng" {
+				applier := &PostgresApplier{db: dst, schema: cfg.TargetSchema, lower: cfg.LowerCaseNames}
+				if spatialErr := applier.inspectSpatial(ctx, tables); spatialErr != nil {
+					r.Errors = append(r.Errors, spatialErr.Error())
+				}
+			}
 			if triggerErr := checkTargetBusinessTriggers(ctx, dst, cfg, tables); triggerErr != nil {
 				r.Errors = append(r.Errors, triggerErr.Error())
 			}

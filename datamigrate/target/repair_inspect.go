@@ -27,7 +27,7 @@ func inspectColumns(ctx context.Context, w Writer, table string) ([]source.Colum
 	args := []any{schema, table}
 	switch a.family {
 	case "postgres":
-		query = `SELECT column_name,data_type,COALESCE(character_maximum_length,0),COALESCE(numeric_precision,0),COALESCE(numeric_scale,0),is_nullable,column_default,CASE WHEN column_default LIKE 'nextval(%' OR COALESCE(row_to_json(c)->>'is_identity','NO')='YES' THEN 'auto_increment' ELSE '' END,ordinal_position,COALESCE(datetime_precision,0),CASE WHEN COALESCE(row_to_json(c)->>'is_generated','NEVER')='ALWAYS' THEN COALESCE(row_to_json(c)->>'generation_expression','generated') ELSE '' END FROM information_schema.columns c WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`
+		query = `SELECT column_name,CASE WHEN data_type='USER-DEFINED' AND udt_name='geometry' THEN 'geometry' ELSE data_type END,COALESCE(character_maximum_length,0),COALESCE(numeric_precision,0),COALESCE(numeric_scale,0),is_nullable,column_default,CASE WHEN column_default LIKE 'nextval(%' OR COALESCE(row_to_json(c)->>'is_identity','NO')='YES' THEN 'auto_increment' ELSE '' END,ordinal_position,COALESCE(datetime_precision,0),CASE WHEN COALESCE(row_to_json(c)->>'is_generated','NEVER')='ALWAYS' THEN COALESCE(row_to_json(c)->>'generation_expression','generated') ELSE '' END FROM information_schema.columns c WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`
 	case "mysql":
 		query = `SELECT COLUMN_NAME,COLUMN_TYPE,COALESCE(CHARACTER_MAXIMUM_LENGTH,0),COALESCE(NUMERIC_PRECISION,0),COALESCE(NUMERIC_SCALE,0),IS_NULLABLE,COLUMN_DEFAULT,EXTRA,ORDINAL_POSITION,COALESCE(DATETIME_PRECISION,0),GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`
 	case "oracle":
@@ -69,6 +69,20 @@ func inspectColumns(ctx context.Context, w Writer, table string) ([]source.Colum
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	if a.family == "postgres" {
+		// Resolve geometry only after closing the metadata cursor; a
+		// repair connection pool may contain a single physical connection.
+		for i := range columns {
+			if strings.EqualFold(columns[i].DataType, "geometry") {
+				if err := inspectPGSpatialRepairColumn(ctx, a.db, schema, table, &columns[i]); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	if len(columns) == 0 {
 		return nil, fmt.Errorf("目标表 %s.%s 不存在或列元数据不可见", schema, table)
@@ -207,6 +221,36 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 				return verification("failed", "目标表缺少预期列 "+n)
 			}
 		}
+		if a.family == "postgres" {
+			spatial := false
+			for _, planned := range obj.Columns {
+				if strings.EqualFold(planned.DataType, "geometry") {
+					spatial = true
+					actual, ok := found[planned.Name]
+					if !ok || actual.DataType != "geometry" || planned.TypeSchema == "" || actual.TypeSchema != planned.TypeSchema {
+						return verification("failed", "目标空间列类型或类型 schema 与修复计划不一致")
+					}
+				}
+			}
+			if spatial {
+				caps, err := InspectPGSpatial(ctx, a.db)
+				if err != nil {
+					return repair.Verification{Status: "unknown", Message: err.Error()}, err
+				}
+				if len(obj.SourceColumns) == 0 {
+					return verification("unknown", "缺少源空间列约束快照，不能确认空间类型兼容性")
+				}
+				info := &source.TableDDLInfo{Columns: slices.Clone(obj.SourceColumns)}
+				for i := range info.Columns {
+					if name, ok := obj.ColumnMapping[info.Columns[i].Name]; ok {
+						info.Columns[i].Name = name
+					}
+				}
+				if err := CheckPGSpatialTable(ctx, a.db, obj.Schema, obj.TargetName, info, caps); err != nil {
+					return repair.Verification{Status: "failed", Message: err.Error()}, err
+				}
+			}
+		}
 		// Source types are not target types. Existence + all expected columns is
 		// the structural repair criterion; recovery has a separate compatibility check.
 		return verification("succeeded", "目标表存在且全部预期列可见；数据兼容性在补迁前单独检查")
@@ -269,6 +313,13 @@ func inspectRepairIndex(ctx context.Context, a repairTarget, obj repair.Object) 
 		return verification("unknown", "索引 DDL 已编辑，需要核对修订后的定义")
 	}
 	idx := obj.Index
+	if a.family == "postgres" && strings.EqualFold(idx.Method, "gist") {
+		table := idx.TableName
+		if obj.Table != "" {
+			table = obj.Table
+		}
+		return inspectPGSpatialIndex(ctx, a.db, obj.Schema, table, obj.TargetName, *idx)
+	}
 	if a.family == "dameng" && strings.EqualFold(idx.Method, "FULLTEXT") {
 		return verification("unknown", "达梦全文索引需核对 CONTEXT INDEX 定义及填充状态，不能通过普通 B 树索引目录确认成功")
 	}

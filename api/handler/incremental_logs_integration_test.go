@@ -47,7 +47,7 @@ func TestIncrementalBootstrapJournalIntegration(t *testing.T) {
 		tableNames = append(tableNames, fmt.Sprintf("%ssmall_%03d", journalIntegrationPrefix, index))
 	}
 	bulkTable := journalIntegrationPrefix + "bulk"
-	badTable := journalIntegrationPrefix + "bad_geometry"
+	badTable := journalIntegrationPrefix + "bad_spatial_expression"
 	digitsTable := "log_journal_seed_digits"
 	tableNames = append(tableNames, bulkTable, badTable, digitsTable)
 	cleanupJournalIntegrationFixtures(t, sourceDB, targetDB, tableNames)
@@ -67,7 +67,9 @@ func TestIncrementalBootstrapJournalIntegration(t *testing.T) {
 		"INSERT INTO `%s` (`id`,`payload`) SELECT %s, CONCAT('payload-', %s) FROM `%s` a CROSS JOIN `%s` b CROSS JOIN `%s` c CROSS JOIN `%s` d CROSS JOIN `%s` e WHERE %s <= 20000",
 		bulkTable, expression, expression, digitsTable, digitsTable, digitsTable, digitsTable, digitsTable, expression,
 	)))
-	require.NoError(t, execJournalIntegration(sourceDB, "CREATE TABLE `"+badTable+"` (`id` INT NOT NULL PRIMARY KEY, `shape` GEOMETRY)"))
+	// A generated spatial expression is deliberately unsupported regardless of
+	// whether the target has PostGIS installed. Plain GEOMETRY now migrates.
+	require.NoError(t, execJournalIntegration(sourceDB, "CREATE TABLE `"+badTable+"` (`id` INT NOT NULL PRIMARY KEY, `shape` GEOMETRY GENERATED ALWAYS AS (POINT(id,id)) STORED)"))
 
 	store.Init(&config.Config{SQLitePath: ":memory:"})
 	job := &store.IncrementalMigrationJob{
@@ -101,7 +103,7 @@ func TestIncrementalBootstrapJournalIntegration(t *testing.T) {
 	require.Contains(t, journal, "创建主键 "+bulkTable+" ... OK")
 	require.Contains(t, journal, "行数校验 ["+bulkTable+"]: 源=20001 目标=20001 ... OK")
 	require.Contains(t, journal, "排除候选表 "+badTable)
-	require.Contains(t, journal, `type "geometry" does not exist`)
+	require.Contains(t, journal, "空间生成列表达式不支持自动转换")
 
 	tail, err := store.ListIncrementalMigrationLogs(job.JobID, 0, 0, 500)
 	require.NoError(t, err)

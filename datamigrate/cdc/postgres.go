@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"dbgold/datamigrate/target"
 	"dbgold/datamigrate/valueconv"
 	_ "github.com/lib/pq"
 )
@@ -30,11 +31,13 @@ func (e *RowConflictError) Error() string {
 func (e *RowConflictError) Unwrap() error { return ErrRowConflict }
 
 type PostgresApplier struct {
-	db     *sql.DB
-	schema string
-	jobID  string
-	lower  bool
-	conv   *valueconv.PostgresValueConverter
+	db            *sql.DB
+	schema        string
+	jobID         string
+	lower         bool
+	conv          *valueconv.PostgresValueConverter
+	spatialCaps   *target.PGSpatialCapabilities
+	spatialTables map[string]bool
 }
 
 func NewPostgresApplier(ctx context.Context, dsn, schema, jobID string, lower bool) (*PostgresApplier, error) {
@@ -301,12 +304,18 @@ func (a *PostgresApplier) saveCheckpointTx(ctx context.Context, tx *sql.Tx, p Po
 }
 
 func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Position) (Stats, error) {
+	if err := a.prepareSpatialChanges(ctx, changes); err != nil {
+		return Stats{}, err
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Stats{}, err
 	}
 	defer tx.Rollback()
 	if err = a.checkTransactionTriggers(ctx, tx, changes); err != nil {
+		return Stats{}, err
+	}
+	if err = a.checkTransactionSpatialColumns(ctx, tx, changes); err != nil {
 		return Stats{}, err
 	}
 	var stats Stats
@@ -374,7 +383,11 @@ func (a *PostgresApplier) insert(ctx context.Context, tx *sql.Tx, t *TableInfo, 
 	for i, c := range t.Columns {
 		cols[i] = quoteIdent(a.name(c))
 		marks[i] = fmt.Sprintf("$%d", i+1)
-		vals[i] = a.conv.Convert(row[i], "mysql", t.ColumnTypes[i])
+		var err error
+		vals[i], err = a.convertValue(t, i, row[i])
+		if err != nil {
+			return err
+		}
 	}
 	sqlText := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", a.qualified(t.Name), strings.Join(cols, ","), strings.Join(marks, ","))
 	if t.LocatorStrategy == LocatorPrimaryKey || t.LocatorStrategy == LocatorUniqueKey {
@@ -414,7 +427,13 @@ func (a *PostgresApplier) deleteByLocator(ctx context.Context, tx *sql.Tx, t *Ta
 	vals := make([]any, len(indexes))
 	for i, p := range indexes {
 		where[i] = quoteIdent(a.name(t.Columns[p])) + fmt.Sprintf("=$%d", i+1)
-		vals[i] = a.conv.Convert(row[p], "mysql", t.ColumnTypes[p])
+		if p >= len(row) {
+			return fmt.Errorf("表 %s CDC 定位行列数不足", t.Name)
+		}
+		vals[i], err = a.convertValue(t, p, row[p])
+		if err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, "DELETE FROM "+a.qualified(t.Name)+" WHERE "+strings.Join(where, " AND "), vals...)
 	return err
@@ -453,12 +472,24 @@ func (a *PostgresApplier) updateFullRow(ctx context.Context, tx *sql.Tx, t *Tabl
 	values := make([]any, 0, len(t.Columns)*2)
 	for i, column := range t.Columns {
 		set[i] = quoteIdent(a.name(column)) + fmt.Sprintf("=$%d", i+1)
-		values = append(values, a.conv.Convert(after[i], "mysql", t.ColumnTypes[i]))
+		value, err := a.convertValue(t, i, after[i])
+		if err != nil {
+			return err
+		}
+		values = append(values, value)
 	}
-	for i, column := range t.Columns {
+	for i := range t.Columns {
 		parameter := len(t.Columns) + i + 1
-		where[i] = quoteIdent(a.name(column)) + fmt.Sprintf(" IS NOT DISTINCT FROM $%d", parameter)
-		values = append(values, a.conv.Convert(before[i], "mysql", t.ColumnTypes[i]))
+		predicate, err := a.fullRowPredicate(t, i, parameter)
+		if err != nil {
+			return err
+		}
+		where[i] = predicate
+		value, err := a.convertValue(t, i, before[i])
+		if err != nil {
+			return err
+		}
+		values = append(values, value)
 	}
 	statement := fmt.Sprintf("UPDATE %s SET %s WHERE ctid=(SELECT ctid FROM %s WHERE %s LIMIT 1)",
 		a.qualified(t.Name), strings.Join(set, ","), a.qualified(t.Name), strings.Join(where, " AND "))
@@ -475,9 +506,16 @@ func (a *PostgresApplier) deleteFullRow(ctx context.Context, tx *sql.Tx, t *Tabl
 	}
 	where := make([]string, len(t.Columns))
 	values := make([]any, len(t.Columns))
-	for i, column := range t.Columns {
-		where[i] = quoteIdent(a.name(column)) + fmt.Sprintf(" IS NOT DISTINCT FROM $%d", i+1)
-		values[i] = a.conv.Convert(before[i], "mysql", t.ColumnTypes[i])
+	for i := range t.Columns {
+		predicate, err := a.fullRowPredicate(t, i, i+1)
+		if err != nil {
+			return err
+		}
+		where[i] = predicate
+		values[i], err = a.convertValue(t, i, before[i])
+		if err != nil {
+			return err
+		}
 	}
 	statement := fmt.Sprintf("DELETE FROM %s WHERE ctid=(SELECT ctid FROM %s WHERE %s LIMIT 1)",
 		a.qualified(t.Name), a.qualified(t.Name), strings.Join(where, " AND "))

@@ -32,9 +32,12 @@ type ColumnInfo struct {
 	TypeSchema        string
 	FormattedType     string
 	DateTimePrecision int64
-	Identity          string
-	Generated         string
-	Comment           string
+	// SpatialSRID preserves MySQL's optional column SRID restriction. A nil
+	// value means unrestricted; an explicit zero is a distinct constraint.
+	SpatialSRID *uint32 `json:"SpatialSRID,omitempty"`
+	Identity    string
+	Generated   string
+	Comment     string
 
 	// DamengFloatStorage is refreshed from actual DM descriptors; persisted
 	// recovery plans must re-read it before choosing the target floating type.
@@ -106,8 +109,11 @@ type IndexInfo struct {
 	IsPrimary       bool
 	Attnums         []int
 	Method          string
-	Definition      string
-	Unsupported     string
+	// PG spatial plans resolve the GiST operator class against its actual schema.
+	PGSpatialSchema  string `json:"PGSpatialSchema,omitempty"`
+	PGSpatialOpClass string `json:"PGSpatialOpClass,omitempty"`
+	Definition       string
+	Unsupported      string
 }
 
 // MySQLTargetPrefix distinguishes replaying a source key from automatically

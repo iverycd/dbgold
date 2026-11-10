@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
@@ -15,8 +16,21 @@ import (
 // For converted or disambiguated MySQL keys, create strictly and only reuse a
 // duplicate after verifying the physical definition on the intended table.
 func createPGIndex(ctx context.Context, db *sql.DB, d dialect.Dialect, schema string, idx source.IndexInfo) error {
+	spatial := strings.EqualFold(idx.Method, "gist")
+	if spatial {
+		caps, err := InspectPGSpatial(ctx, db)
+		if err != nil {
+			return err
+		}
+		if caps.GISTError != "" {
+			return fmt.Errorf("目标空间索引能力不足: %s", caps.GISTError)
+		}
+		if idx.PGSpatialSchema != caps.GISTSchema || idx.PGSpatialOpClass != caps.GISTOpClass {
+			return fmt.Errorf("目标空间操作符类与索引计划不一致，请重新生成迁移计划")
+		}
+	}
 	query := dialect.JoinSQL(d.IndexStatements(schema, idx))
-	if len(idx.MySQLPrefixLengths) == 0 && idx.TargetIndexName == "" {
+	if !spatial && len(idx.MySQLPrefixLengths) == 0 && idx.TargetIndexName == "" {
 		_, err := execObserved(ctx, db, query)
 		return err
 	}

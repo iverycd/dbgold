@@ -299,7 +299,16 @@ func (r *MySQLReader) GetTableDDLInfo(ctx context.Context, table string) (*Table
 		col.Extra = extra
 		info.Columns = append(info.Columns, col)
 	}
-	return info, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := r.loadMySQLSpatialSRIDs(ctx, info); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 func (r *MySQLReader) GetPrimaryKey(ctx context.Context, table string) ([]string, error) {
@@ -586,6 +595,16 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			indexes = append(indexes, IndexInfo{TableName: table, IndexName: name, IsUnique: nonUnique == 0, Method: method})
 		}
 		idx := &indexes[i]
+		if IsMySQLSpatialIndex(method) && column.Valid && (!prefix.Valid || prefix.Int64 == 32) &&
+			(idx.Unsupported == "" || idx.Unsupported == MySQLSpatialIndexUnsupported) {
+			// Retain complete keys for the PG spatial planner while every other
+			// target continues to see the explicit unsupported marker.
+			// MySQL reports the fixed 32-byte MBR as SUB_PART for SPATIAL
+			// indexes; it is not a truncated source-column prefix.
+			idx.Unsupported = MySQLSpatialIndexUnsupported
+			idx.Columns = append(idx.Columns, column.String)
+			continue
+		}
 		var reason string
 		switch {
 		case !column.Valid:
@@ -600,7 +619,7 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			reason = "排序方向未知的索引"
 		}
 		if reason != "" {
-			if idx.Unsupported == "" {
+			if idx.Unsupported == "" || idx.Unsupported == MySQLSpatialIndexUnsupported {
 				idx.Unsupported = "暂不支持 MySQL " + reason + "的等价转换，请根据源端定义手工适配"
 			}
 			idx.Columns, idx.Descending, idx.MySQLPrefixLengths = nil, nil, nil
@@ -619,6 +638,10 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 	// cannot accidentally be migrated as a usable single-column definition.
 	for i := range indexes {
 		idx := &indexes[i]
+		if IsMySQLSpatialIndex(idx.Method) && idx.Unsupported == MySQLSpatialIndexUnsupported && (len(idx.Columns) != 1 || idx.IsUnique) {
+			idx.Unsupported = "暂不支持 MySQL 多列或唯一空间索引的等价转换，请根据源端定义手工适配"
+			idx.Columns = nil
+		}
 		if strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" && len(idx.Columns) > 1 {
 			idx.Unsupported = "暂不支持 MySQL 多列全文索引的自动转换，达梦 CONTEXT INDEX 仅支持单个文本列，请根据源端定义手工适配"
 			idx.Columns, idx.Descending, idx.MySQLPrefixLengths = nil, nil, nil

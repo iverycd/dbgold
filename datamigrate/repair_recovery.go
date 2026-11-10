@@ -152,6 +152,9 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
+	if err = inspectMySQLPGSpatialRecovery(ctx, r, w, info, p.TargetTable, p.ColumnMapping); err != nil {
+		return p, err
+	}
 	if r.DBType() == "oracle" && w.DBType() == "mysql" {
 		for _, col := range info.Columns {
 			if col.OracleMySQLAutoType == "" {
