@@ -89,6 +89,7 @@ type Migrator struct {
 	mysqlPGTriggers        []preparedMySQLPGTrigger
 	mysqlPGTriggerError    error
 	mysqlPGSpatial         mysqlPGSpatialState
+	mysqlPGIndexCatalog    *mysqlPGIndexCatalog
 	mysqlDMTriggers        []preparedMySQLDamengTrigger
 	mysqlDMTriggerError    error
 	sourceDDLCache         sourceTableDDLCache
@@ -236,6 +237,8 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	m.mainMigrationFinished = false
 	m.compatibilityFunctions = nil
 	m.mysqlPGSpatial = mysqlPGSpatialState{}
+	m.mysqlPGIndexCatalog = nil
+	defer func() { m.mysqlPGIndexCatalog = nil }()
 	m.oracleMySQLAuto = nil
 	if r, ok := m.reader.(interface{ ResetOracleMySQLAutoIncrements() }); ok {
 		r.ResetOracleMySQLAutoIncrements()
@@ -1233,20 +1236,15 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					blocked(&report.Indexes, idx.IndexName, idx.TableName, "依赖表 "+idx.TableName+" 迁移失败")
 					continue
 				}
-				idx = m.planMySQLPGSpatialIndex(ctx, idx)
+				idxCopy := m.targetPostIndex(ctx, idx)
+				if ctx.Err() != nil {
+					return
+				}
 				m.recordOracleMySQLIndexWarning(report, idx)
 				m.recordMySQLPrefixWarning(report, idx)
-				idxCopy := idx
-				idxCopy.TableName = m.objName(idx.TableName)
-				idxCopy.IndexName = m.objName(idx.IndexName)
-				cols := make([]string, len(idx.Columns))
-				for i, c := range idx.Columns {
-					cols[i] = m.targetColumn(idx.TableName, c)
-				}
-				idxCopy.Columns = cols
 				indexName := dialect.IndexName(m.writer.Dialect(), idxCopy)
 				ddl, stage := "", "execute"
-				if idx.Unsupported == "" {
+				if idxCopy.Unsupported == "" {
 					ddl = dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, idxCopy))
 				} else {
 					stage = "unsupported"
@@ -1273,6 +1271,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 						result.TargetTable = strings.ToUpper(result.TargetTable)
 						result.TargetSchema = strings.ToUpper(result.TargetSchema)
 					}
+					if idxCopy.PGUniqueConstraint && target.IsPGUniqueConstraintViolation(err) {
+						result.Suggestion = fmt.Sprintf("请检查目标表中 %s 两列组合是否重复。", strings.Join(idxCopy.Columns, "、"))
+					}
 					if stage == "unsupported" {
 						result.Suggestion = "请根据源端定义手工适配目标库后创建索引。"
 						if reader, ok := m.reader.(interface {
@@ -1298,6 +1299,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				} else {
 					m.log.Indexf("创建索引 %s ... OK", indexName)
 					report.Indexes.Success++
+					if idxCopy.PGUniqueConstraint {
+						m.recordMySQLPGUniqueConstraintWarning(report, idx, idxCopy)
+					}
 				}
 			}
 		}

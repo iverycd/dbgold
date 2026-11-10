@@ -1,6 +1,7 @@
 package datamigrate
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"slices"
@@ -10,6 +11,42 @@ import (
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/valueconv"
 )
+
+type mysqlPGIndexCatalog struct {
+	indexes []source.IndexInfo
+	err     error
+}
+
+func (m *Migrator) readMySQLPGIndexes(ctx context.Context) ([]source.IndexInfo, error) {
+	if m.mysqlPGIndexCatalog == nil {
+		read := m.reader.GetIndexes
+		if r, ok := m.reader.(interface {
+			GetIndexesForPG(context.Context) ([]source.IndexInfo, error)
+		}); ok && m.cfg.MigrationPurpose != "cdc" {
+			read = r.GetIndexesForPG
+		}
+		indexes, err := read(ctx)
+		m.mysqlPGIndexCatalog = &mysqlPGIndexCatalog{indexes: indexes, err: err}
+	}
+	catalog := m.mysqlPGIndexCatalog
+	if catalog.err != nil {
+		return nil, catalog.err
+	}
+	return m.nameMySQLPGIndexes(catalog.indexes), nil
+}
+
+func (m *Migrator) targetPostIndex(ctx context.Context, idx source.IndexInfo) source.IndexInfo {
+	idx = m.planMySQLPGSpatialIndex(ctx, idx)
+	idx = m.planMySQLPGUniqueConstraint(ctx, idx)
+	table := idx.TableName
+	idx.TableName = m.objName(table)
+	idx.IndexName = m.objName(idx.IndexName)
+	idx.Columns = slices.Clone(idx.Columns)
+	for i, col := range idx.Columns {
+		idx.Columns[i] = m.targetColumn(table, col)
+	}
+	return idx
+}
 
 // Plan against the whole source index catalog, before table selection. An
 // indexes-only retry for one table must choose the same name as a full run.

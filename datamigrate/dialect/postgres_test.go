@@ -70,6 +70,8 @@ func TestPostgresIndexStatements_Golden(t *testing.T) {
 			`ALTER TABLE "s"."t" ADD PRIMARY KEY ("id");`},
 		{source.IndexInfo{TableName: "t", IndexName: "uq_x", IsUnique: true, Columns: []string{"x"}},
 			`CREATE UNIQUE INDEX IF NOT EXISTS "uq_x" ON "s"."t" ("x");`},
+		{source.IndexInfo{TableName: `Mix"ed`, IndexName: "SourceName", TargetIndexName: `Target"Name`, PGUniqueConstraint: true, IsUnique: true, Columns: []string{`Channel"Id`, "OutcaseCode"}},
+			`ALTER TABLE "s"."Mix""ed" ADD CONSTRAINT "Target""Name" UNIQUE ("Channel""Id", "OutcaseCode");`},
 		{source.IndexInfo{TableName: "t", IndexName: "ix_y", Columns: []string{"y", "z"}},
 			`CREATE INDEX IF NOT EXISTS "ix_y" ON "s"."t" ("y", "z");`},
 	}

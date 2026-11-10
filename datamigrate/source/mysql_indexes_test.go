@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +69,85 @@ func TestMySQLGetIndexesExpressionDoesNotBlockOtherIndexes(t *testing.T) {
 	require.Equal(t, "IX_Mixed", indexes[2].IndexName)
 	require.True(t, indexes[2].IsUnique)
 	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "IX_After", Columns: []string{"AfterColumn"}, Method: "BTREE", Descending: []bool{false}}, indexes[3])
+}
+
+const mysqlPGIndexesQuery = `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION, EXPRESSION
+ FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
+ ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`
+
+func mysqlPGIndexRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"TABLE_NAME", "INDEX_NAME", "COLUMN_NAME", "NON_UNIQUE", "SUB_PART", "INDEX_TYPE", "COLLATION", "EXPRESSION"})
+}
+
+func TestMySQLGetIndexesForPGRetainsOnlySingleUniqueBTREEExpression(t *testing.T) {
+	r, mock := newIndexTestMySQLReader(t, "Src")
+	const expr = "(case when (`OutCaseCode` <> _utf8mb4'') then concat(`Channel`,_utf8mb4':',`OutCaseCode`) end)"
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlPGIndexesQuery)).WithArgs("Src").
+		WillReturnRows(mysqlPGIndexRows().
+			AddRow("MixedTable", "Ascending", nil, 0, nil, "BTREE", "A", expr).
+			AddRow("MixedTable", "ColumnThenExpression", "TenantID", 0, nil, "BTREE", "A", nil).
+			AddRow("MixedTable", "ColumnThenExpression", nil, 0, nil, "BTREE", "A", expr).
+			AddRow("MixedTable", "Descending", nil, 0, nil, "BTREE", "D", expr).
+			AddRow("MixedTable", "Empty", nil, 0, nil, "BTREE", "A", "  ").
+			AddRow("MixedTable", "ExpressionThenColumn", nil, 0, nil, "BTREE", "A", expr).
+			AddRow("MixedTable", "ExpressionThenColumn", "TenantID", 0, nil, "BTREE", "A", nil).
+			AddRow("MixedTable", "Hash", nil, 0, nil, "HASH", "A", expr).
+			AddRow("MixedTable", "NonUnique", nil, 1, nil, "BTREE", "A", expr).
+			AddRow("MixedTable", "Plain", "TenantID", 0, 8, "BTREE", "D", nil).
+			AddRow("MixedTable", "Prefix", nil, 0, 8, "BTREE", "A", expr).
+			AddRow("MixedTable", "UnknownDirection", nil, 0, nil, "BTREE", nil, expr)).RowsWillBeClosed()
+
+	indexes, err := r.GetIndexesForPG(context.Background())
+	require.NoError(t, err)
+	require.Len(t, indexes, 10)
+	require.Equal(t, "MixedTable", indexes[0].TableName)
+	require.Equal(t, "Ascending", indexes[0].IndexName)
+	require.True(t, indexes[0].IsUnique)
+	require.Equal(t, expr, indexes[0].MySQLExpression)
+	for _, index := range indexes {
+		if index.IndexName == "Plain" {
+			require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: "Plain", Columns: []string{"TenantID"}, IsUnique: true,
+				Method: "BTREE", Descending: []bool{true}, MySQLPrefixLengths: []int{8}}, index)
+			continue
+		}
+		if index.IndexName == "Descending" {
+			require.Equal(t, expr, index.MySQLExpression)
+		} else if index.IndexName != "Ascending" {
+			require.Empty(t, index.MySQLExpression, index.IndexName)
+		}
+		require.Contains(t, index.Unsupported, "函数/表达式索引", index.IndexName)
+		require.Empty(t, index.Columns, index.IndexName)
+	}
+}
+
+func TestMySQLGetIndexesForPGFallbackOnlyForMissingExpressionColumn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		fallback bool
+	}{
+		{"old server", &mysql.MySQLError{Number: 1054, Message: "Unknown column 'EXPRESSION' in 'field list'"}, true},
+		{"other column", &mysql.MySQLError{Number: 1054, Message: "Unknown column 'EXPRESSION_OTHER' in 'field list'"}, false},
+		{"permission denied", &mysql.MySQLError{Number: 1142, Message: "SELECT command denied for column 'EXPRESSION'"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, mock := newIndexTestMySQLReader(t, "Src")
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlPGIndexesQuery)).WithArgs("Src").WillReturnError(tc.err)
+			if tc.fallback {
+				mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
+					WillReturnRows(mysqlIndexRows().AddRow("MixedTable", "IX_Plain", "CamelCase", 0, nil, "BTREE", "A")).RowsWillBeClosed()
+			}
+			indexes, err := r.GetIndexesForPG(context.Background())
+			if tc.fallback {
+				require.NoError(t, err)
+				require.Equal(t, []IndexInfo{{TableName: "MixedTable", IndexName: "IX_Plain", Columns: []string{"CamelCase"}, IsUnique: true,
+					Method: "BTREE", Descending: []bool{false}}}, indexes)
+			} else {
+				require.ErrorIs(t, err, tc.err)
+				require.Nil(t, indexes)
+			}
+		})
+	}
 }
 
 func TestMySQLGetIndexesKeepsDottedNamesDistinct(t *testing.T) {

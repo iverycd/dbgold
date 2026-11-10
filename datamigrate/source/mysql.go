@@ -4,12 +4,13 @@ package source
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
 
 func (r *MySQLReader) MigrationSchema() string { return r.dbName }
@@ -569,10 +570,29 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
-	rows, err := r.queryContext(ctx, `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION
+	return r.getIndexes(ctx, false)
+}
+
+// GetIndexesForPG retains raw functional keys for the PostgreSQL planner.
+func (r *MySQLReader) GetIndexesForPG(ctx context.Context) ([]IndexInfo, error) {
+	return r.getIndexes(ctx, true)
+}
+
+func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]IndexInfo, error) {
+	query := `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION`
+	if withExpression {
+		query += `, EXPRESSION`
+	}
+	query += `
  FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND INDEX_NAME != 'PRIMARY'
- ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, r.dbName)
+ ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`
+	rows, err := r.queryContext(ctx, query, r.dbName)
 	if err != nil {
+		// MySQL versions without functional keys lack this catalog column.
+		var mysqlErr *mysql.MySQLError
+		if withExpression && errors.As(err, &mysqlErr) && mysqlErr.Number == 1054 && strings.Contains(strings.ToUpper(mysqlErr.Message), "'EXPRESSION'") {
+			return r.GetIndexes(ctx)
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -581,10 +601,14 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 	var indexes []IndexInfo
 	for rows.Next() {
 		var table, name, method string
-		var column, collation sql.NullString
+		var column, collation, expression sql.NullString
 		var prefix sql.NullInt64
 		var nonUnique int
-		if err := rows.Scan(&table, &name, &column, &nonUnique, &prefix, &method, &collation); err != nil {
+		fields := []any{&table, &name, &column, &nonUnique, &prefix, &method, &collation}
+		if withExpression {
+			fields = append(fields, &expression)
+		}
+		if err := rows.Scan(fields...); err != nil {
 			return nil, err
 		}
 		key := indexKey{table: table, name: name}
@@ -595,7 +619,16 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			indexes = append(indexes, IndexInfo{TableName: table, IndexName: name, IsUnique: nonUnique == 0, Method: method})
 		}
 		idx := &indexes[i]
-		if IsMySQLSpatialIndex(method) && column.Valid && (!prefix.Valid || prefix.Int64 == 32) &&
+		ascending := strings.EqualFold(collation.String, "A")
+		descending := strings.EqualFold(collation.String, "D")
+		if ok {
+			// A functional part must be the entire index key to reach the planner.
+			idx.MySQLExpression = ""
+		} else if !column.Valid && expression.Valid && strings.TrimSpace(expression.String) != "" &&
+			idx.IsUnique && strings.EqualFold(method, "BTREE") && (ascending || descending) && !prefix.Valid {
+			idx.MySQLExpression = expression.String
+		}
+		if IsMySQLSpatialIndex(method) && column.Valid && !expression.Valid && (!prefix.Valid || prefix.Int64 == 32) &&
 			(idx.Unsupported == "" || idx.Unsupported == MySQLSpatialIndexUnsupported) {
 			// Retain complete keys for the PG spatial planner while every other
 			// target continues to see the explicit unsupported marker.
@@ -607,7 +640,7 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 		}
 		var reason string
 		switch {
-		case !column.Valid:
+		case !column.Valid || expression.Valid:
 			reason = "函数/表达式索引"
 		case prefix.Valid && (prefix.Int64 <= 0 || !strings.EqualFold(method, "BTREE")):
 			reason = "前缀索引"
@@ -615,7 +648,7 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			// FULLTEXT keys have no B-tree ordering; COLLATION is normally NULL.
 		case !strings.EqualFold(method, "BTREE"):
 			reason = "空间或其他非 BTREE 索引"
-		case !strings.EqualFold(collation.String, "A") && !strings.EqualFold(collation.String, "D"):
+		case !ascending && !descending:
 			reason = "排序方向未知的索引"
 		}
 		if reason != "" {
@@ -627,7 +660,7 @@ func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
 			idx.Columns = append(idx.Columns, column.String)
 			idx.addMySQLPrefix(prefix)
 			if !strings.EqualFold(method, "FULLTEXT") {
-				idx.Descending = append(idx.Descending, strings.EqualFold(collation.String, "D"))
+				idx.Descending = append(idx.Descending, descending)
 			}
 		}
 	}

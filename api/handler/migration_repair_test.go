@@ -12,12 +12,35 @@ import (
 
 	"dbgold/config"
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/store"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPGUniqueConstraintRepairScope(t *testing.T) {
+	d := dialect.NewPostgres("postgres")
+	idx := source.IndexInfo{TableName: "Orders", IndexName: "uq", Columns: []string{"Channel", "Code"}, IsUnique: true, PGUniqueConstraint: true}
+	sql := dialect.JoinSQL(d.IndexStatements("app", idx))
+	obj := repair.Object{Kind: "index", Schema: "app", Table: "Orders", TargetName: "uq", Index: &idx,
+		Units: []repair.Unit{{ID: "step-1", SQL: sql, OriginalSQL: sql, Selected: true}}}
+	require.NoError(t, validateRepairObjectScope(obj, obj.Units, "postgres"))
+	require.Error(t, validateRepairObjectScope(obj, obj.Units, "mysql"))
+
+	for _, editedSQL := range []string{
+		strings.Replace(sql, `"app"."Orders"`, `"other"."Orders"`, 1),
+		strings.Replace(sql, `"app"."Orders"`, `"app"."Other"`, 1),
+		strings.Replace(sql, `"uq"`, `"another"`, 1),
+		strings.Replace(sql, `"Channel", "Code"`, `"Code", "Channel"`, 1),
+		strings.TrimSuffix(sql, ";") + `, DROP COLUMN "Code";`,
+	} {
+		unit := obj.Units[0]
+		unit.SQL = editedSQL
+		require.Error(t, validateRepairObjectScope(obj, []repair.Unit{unit}, "postgres"), editedSQL)
+	}
+}
 
 func repairRequest(t *testing.T, method, path, body string, owner uint, fn gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()

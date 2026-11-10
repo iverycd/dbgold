@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
@@ -146,6 +147,29 @@ func repairErrorStatus(err error) string {
 	return "failed"
 }
 
+// ValidatePGUniqueConstraintRepair binds a generated ALTER TABLE to the saved
+// index object and its column plan. The generic table DDL guard does not check
+// the name or keys of constraints inside an ALTER TABLE statement.
+func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, dbType string) error {
+	idx := obj.Index
+	if !source.IsPGFamily(dbType) || obj.Kind != "index" || obj.Schema == "" || obj.Table == "" ||
+		idx == nil || !idx.PGUniqueConstraint || !idx.IsUnique || idx.IsPrimary || idx.Unsupported != "" ||
+		idx.TableName != obj.Table || len(idx.Columns) != 2 || idx.Columns[0] == "" || idx.Columns[1] == "" ||
+		idx.Columns[0] == idx.Columns[1] {
+		return fmt.Errorf("联合唯一约束与原修复对象不一致")
+	}
+	d := dialect.NewPostgres(dbType)
+	if obj.TargetName == "" || obj.TargetName != d.IndexName(*idx) {
+		return fmt.Errorf("联合唯一约束名称与原修复对象不一致")
+	}
+	sql := dialect.JoinSQL(d.IndexStatements(obj.Schema, *idx))
+	if sql == "" || len(units) != 1 || len(obj.Units) != 1 || units[0].ID != obj.Units[0].ID ||
+		units[0].SQL != sql || units[0].OriginalSQL != sql || obj.Units[0].OriginalSQL != sql {
+		return fmt.Errorf("联合唯一约束修复须保留原表、约束名称及两列定义")
+	}
+	return nil
+}
+
 // ExecuteRepair executes the stored units verbatim. A PL/SQL body is one unit;
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
@@ -179,6 +203,12 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	}
 	if obj.Schema == "" || obj.Schema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
+	}
+	generatedUnique := obj.Index != nil && obj.Index.PGUniqueConstraint
+	if generatedUnique {
+		if err := ValidatePGUniqueConstraintRepair(obj, units, w.DBType()); err != nil {
+			return out, err
+		}
 	}
 	if mysql, ok := w.(*MySQLWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.OracleMySQL != nil {
 		return mysql.executeOracleMySQLAutoRepair(ctx, obj, out, onStep)
@@ -225,7 +255,11 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	var exec func(string) error
 	var releaseIntervalSession func()
 	onlyIntervalMarker := len(selected) == 1 && obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[selected[0]].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan)
-	if onlyIntervalMarker {
+	if generatedUnique {
+		// Use the same strict creation and duplicate verification as migration.
+		// The validation above proved that this executes the saved SQL.
+		exec = func(string) error { return w.CreateIndex(ctx, *obj.Index) }
+	} else if onlyIntervalMarker {
 		// The typed executor qualifies every object itself. A marker-only retry
 		// needs no SQL session and must work with a single-connection pool.
 		exec = func(string) error { return fmt.Errorf("INTERVAL 物化标记不能作为原始 SQL 执行") }

@@ -355,13 +355,10 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		if !selected[v.TableName] {
 			return
 		}
-		v = m.planMySQLPGSpatialIndex(ctx, v)
 		src, originalName := v.TableName, v.IndexName
-		v.TableName = m.objName(src)
-		v.IndexName = m.objName(v.IndexName)
-		v.Columns = slices.Clone(v.Columns)
-		for i, c := range v.Columns {
-			v.Columns[i] = m.targetColumn(src, c)
+		v = m.targetPostIndex(ctx, v)
+		if ctx.Err() != nil {
+			return
 		}
 		kind := "index"
 		if v.IsPrimary {

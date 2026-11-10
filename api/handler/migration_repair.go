@@ -706,6 +706,12 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		repairError(c, fmt.Errorf("执行单元过多"))
 		return
 	}
+	if o.Index != nil && o.Index.PGUniqueConstraint {
+		if err := validateRepairObjectScope(o, out, j.DstDBType); err != nil {
+			repairError(c, err)
+			return
+		}
+	}
 	if o.PartitionPlan != nil {
 		if err := validateRepairObjectScope(o, out, j.DstDBType); err != nil {
 			repairError(c, err)

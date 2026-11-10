@@ -134,6 +134,9 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.Index != nil && obj.Index.PGUniqueConstraint {
+		return target.ValidatePGUniqueConstraintRepair(obj, units, dbType)
+	}
 	if obj.PartitionPlan != nil {
 		plan := obj.PartitionPlan
 		if obj.Kind != "table" || plan.Source == nil || plan.Target == nil || len(plan.Statements) == 0 {

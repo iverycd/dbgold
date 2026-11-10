@@ -103,6 +103,9 @@ type IndexInfo struct {
 	// MySQLPrefixLengths records source BTREE key parts (including UNIQUE).
 	// MySQL targets replay them; other dialects index the complete columns.
 	MySQLPrefixLengths []int `json:"mysql_prefix_lengths,omitempty"`
+	// MySQLExpression retains an eligible raw functional key for PG planning.
+	// It is source SQL and is never persisted as executable target metadata.
+	MySQLExpression string `json:"-"`
 	// TargetIndexName disambiguates table-scoped MySQL names in a PG schema.
 	TargetIndexName string `json:"target_index_name,omitempty"`
 	IsUnique        bool
@@ -112,8 +115,10 @@ type IndexInfo struct {
 	// PG spatial plans resolve the GiST operator class against its actual schema.
 	PGSpatialSchema  string `json:"PGSpatialSchema,omitempty"`
 	PGSpatialOpClass string `json:"PGSpatialOpClass,omitempty"`
-	Definition       string
-	Unsupported      string
+	// PGUniqueConstraint adds a table-level UNIQUE constraint on the mapped Columns.
+	PGUniqueConstraint bool `json:"pg_unique_constraint,omitempty"`
+	Definition         string
+	Unsupported        string
 }
 
 // MySQLTargetPrefix distinguishes replaying a source key from automatically

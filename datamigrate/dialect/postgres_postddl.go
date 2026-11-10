@@ -41,6 +41,14 @@ func (d *PostgresDialect) IndexName(idx source.IndexInfo) string {
 }
 
 func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
+	if idx.PGUniqueConstraint {
+		cols := make([]string, len(idx.Columns))
+		for i, column := range idx.Columns {
+			cols[i] = d.QuoteIdent(column)
+		}
+		return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);",
+			d.qualified(schema, idx.TableName), d.QuoteIdent(d.IndexName(idx)), strings.Join(cols, ", "))}}
+	}
 	if strings.EqualFold(idx.Method, "gist") {
 		cols := make([]string, len(idx.Columns))
 		for i, column := range idx.Columns {
