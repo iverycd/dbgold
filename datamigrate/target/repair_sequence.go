@@ -45,6 +45,9 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 		if s.TableName != table || s.ColumnName == "" || seen[s.ColumnName] {
 			continue
 		}
+		if s.Unsupported != "" {
+			return fmt.Errorf("自增校准 %s.%s: %s", table, s.ColumnName, s.Unsupported)
+		}
 		seen[s.ColumnName] = true
 		switch a.family {
 		case "postgres":

@@ -624,6 +624,11 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	// A column rename cannot recover missing source identity state. Keep the
+	// failure instead of generating a sequence with an invented start value.
+	if o.Sequence != nil && o.Sequence.Unsupported != "" {
+		return o
+	}
 	if o.ManualTrigger != nil {
 		// Manual procedural SQL is the accepted target definition. Regenerating
 		// it from an archived conversion plan would undo the user's repair.

@@ -84,18 +84,24 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 		}
 		if col.Default != nil && col.Extra != "auto_increment" {
 			def := coldefault.Strip(srcType, *col.Default)
-			literal := false
+			ready := false
 			if srcType == "sqlserver" {
 				var err error
-				def, literal, err = sqlServerPGDefault(*col.Default)
+				def, ready, err = sqlServerPGDefault(*col.Default)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+				}
+			} else if srcType == "dameng" {
+				var err error
+				def, ready, err = damengPGDefault(*col.Default, pgType)
 				if err != nil {
 					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
 				}
 			}
 			// MySQL 位串字面量 b'0' / b'1' → PostgreSQL B'0' / B'1'
-			if literal {
-				// SQL Server stores the SQL literal itself, including its quotes.
-				// Classify it before keywords/functions so 'NULL' stays text.
+			if ready {
+				// Complete literals and adapted numeric booleans already are SQL.
+				// Do not classify a quoted 'NULL' or 'TRUE' as a keyword.
 				colDef += " DEFAULT " + def
 			} else if reBitLiteral.MatchString(def) {
 				colDef += fmt.Sprintf(" DEFAULT B'%s'", def[2:len(def)-1])

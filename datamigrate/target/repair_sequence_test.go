@@ -53,6 +53,15 @@ func TestRecoverySequenceMissingBindingWaitsForObjectRepair(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
+func TestRecoverySequenceRejectsUnreadableSourceIdentity(t *testing.T) {
+	w, mock := repairPGMock(t)
+	err := CalibrateRecovery(context.Background(), w, "t", []source.SequenceInfo{{
+		TableName: "t", ColumnName: "id", Unsupported: "源自增列状态不可读取", FailureStage: "metadata",
+	}})
+	require.ErrorContains(t, err, "自增校准 t.id: 源自增列状态不可读取")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestRecoveryMySQLSequencePreservesLargeExistingValue(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)

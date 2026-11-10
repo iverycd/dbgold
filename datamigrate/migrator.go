@@ -1171,7 +1171,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
 					sequenceOwner = m.cfg.TargetSchema
 				}
-				ddl := dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy, sequenceOwner))
+				var ddl string
+				if seqCopy.Unsupported == "" {
+					ddl = dialect.JoinSQL(m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, seqCopy, sequenceOwner))
+				}
 				if err := m.repairSequence(ctx, seqCopy, sequenceOwner); err != nil {
 					if m.stopOracleDamengTask(ctx, err) {
 						return

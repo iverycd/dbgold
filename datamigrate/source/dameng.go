@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
+	"dbgold/datamigrate/damengnative"
+	"dbgold/datamigrate/failure"
 	"dbgold/internal/dmmeta"
 
 	_ "gitee.com/chunanyong/dm"
@@ -307,13 +310,12 @@ func (r *DaMengReader) ReadPage(ctx context.Context, table string, pkCols []stri
 
 func (r *DaMengReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT b.table_name, a.name AS col_name,
-		        (ident_incr(b.owner||'.'||b.table_name) + IDENT_CURRENT(b.owner||'.'||b.table_name)) AS seq_next_val
-		 FROM SYS.SYSCOLUMNS a, all_tables b, all_objects c
-		 WHERE a.INFO2 & 0x01 = 0x01
-		   AND a.id = c.object_id
-		   AND c.object_name = b.table_name
-		   AND b.owner = ?`,
+		`SELECT b.TABLE_NAME, a.NAME AS COLUMN_NAME
+		 FROM ALL_TABLES b
+		 JOIN ALL_OBJECTS c ON c.OWNER = b.OWNER AND c.OBJECT_NAME = b.TABLE_NAME AND c.OBJECT_TYPE = 'TABLE'
+		 JOIN SYS.SYSCOLUMNS a ON a.ID = c.OBJECT_ID
+		 WHERE b.OWNER = ? AND a.INFO2 & 0x01 = 0x01
+		 ORDER BY b.TABLE_NAME, a.COLID`,
 		r.schema)
 	if err != nil {
 		return nil, err
@@ -322,18 +324,49 @@ func (r *DaMengReader) GetSequences(ctx context.Context) ([]SequenceInfo, error)
 	var seqs []SequenceInfo
 	for rows.Next() {
 		var s SequenceInfo
-		var startVal sql.NullInt64
-		if err := rows.Scan(&s.TableName, &s.ColumnName, &startVal); err != nil {
+		if err := rows.Scan(&s.TableName, &s.ColumnName); err != nil {
 			return nil, err
-		}
-		if startVal.Valid {
-			s.StartValue = startVal.Int64
-		} else {
-			s.StartValue = 1
 		}
 		seqs = append(seqs, s)
 	}
-	return seqs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Release the catalog cursor before querying individual tables, including
+	// when the source connection pool has only one connection.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range seqs {
+		s := &seqs[i]
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		qualified := damengnative.Qualified(r.schema, s.TableName)
+		var increment, current sql.NullInt64
+		err := r.db.QueryRowContext(ctx, `SELECT IDENT_INCR(?), IDENT_CURRENT(?)`, qualified, qualified).Scan(&increment, &current)
+		if err == nil {
+			switch {
+			case !increment.Valid || !current.Valid:
+				err = fmt.Errorf("自增列增量或当前值为空")
+			case increment.Int64 == 0:
+				err = fmt.Errorf("自增列增量为零")
+			case increment.Int64 > 0 && current.Int64 > math.MaxInt64-increment.Int64,
+				increment.Int64 < 0 && current.Int64 < math.MinInt64-increment.Int64:
+				err = fmt.Errorf("自增列下一值超出 int64 范围")
+			default:
+				s.StartValue = current.Int64 + increment.Int64
+			}
+		}
+		if err != nil {
+			wrapped := fmt.Errorf("读取自增列 %s.%s 状态失败: %w", qualified, damengnative.Quote(s.ColumnName), err)
+			if failure.IsTaskError(err) {
+				return nil, wrapped
+			}
+			s.Unsupported, s.FailureStage = wrapped.Error(), "metadata"
+		}
+	}
+	return seqs, nil
 }
 
 func (r *DaMengReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {

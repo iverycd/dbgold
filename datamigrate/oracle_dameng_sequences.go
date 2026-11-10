@@ -35,6 +35,15 @@ func (m *Migrator) logOracleDamengSequenceBounds(original, adapted source.Sequen
 func (m *Migrator) sequenceFailure(original, adapted source.SequenceInfo, ddl string, err error) ObjectResult {
 	name := dialect.SequenceName(m.writer.Dialect(), adapted)
 	result := objectResultForError(name, ddl, err)
+	if adapted.Unsupported != "" {
+		result.Stage = adapted.FailureStage
+		if result.Stage == "" {
+			result.Stage = "unsupported"
+		}
+		result.DDL = ""
+		result.Table, result.TargetTable = original.TableName, adapted.TableName
+		result.TargetName, result.TargetSchema = name, m.cfg.TargetSchema
+	}
 	if adapted.OracleMySQL != nil {
 		result.Table, result.TargetTable, result.TargetName, result.TargetSchema = original.TableName, adapted.TableName, name, m.cfg.TargetSchema
 		result.Stage = "execute"
@@ -52,14 +61,10 @@ func (m *Migrator) sequenceFailure(original, adapted source.SequenceInfo, ddl st
 	if !m.isOracleDameng() {
 		return result
 	}
-	result.Stage = "execute"
-	if target.IsOracleDamengSequencePreflight(err) {
-		result.Stage = "preflight"
-	}
-	if adapted.Unsupported != "" {
-		result.Stage = adapted.FailureStage
-		if result.Stage == "" {
-			result.Stage = "unsupported"
+	if adapted.Unsupported == "" {
+		result.Stage = "execute"
+		if target.IsOracleDamengSequencePreflight(err) {
+			result.Stage = "preflight"
 		}
 	}
 	result.Table, result.TargetTable = original.TableName, adapted.TableName
