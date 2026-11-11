@@ -44,7 +44,7 @@ type Config struct {
 	LowerCaseNames     bool
 	CharInLength       bool
 	UseNvarchar2       bool
-	Distributed        bool     // 分布式数据库：建主键前先执行 DISTRIBUTE BY hash
+	Distributed        bool     // MySQL → GaussDB: 在建表时指定 HASH 分布键
 	TargetSchema       string   // 目标库 schema，为空时使用连接默认 search_path
 	ChangeOwner        bool     // 迁移后将表/视图/序列的 owner 改为 TargetSchema
 	TargetDBType       string   // 目标库类型；Oscar 命名策略由此字段启用
@@ -72,6 +72,11 @@ func (c Config) objectMode() bool {
 
 // Migrator 串联三阶段迁移：DDL → 数据 → Post-DDL
 type Migrator struct {
+	gaussKeysRead  bool
+	gaussKeys      []source.IndexInfo
+	gaussKeysErr   error
+	gaussPreparing bool
+	gaussTableKeys map[string][]string
 	// Optional timing observer for the ordinary full-copy comparison.
 	// An empty table marks the boundaries of the whole data phase.
 	observeDataCopy        func(table string, start bool)
@@ -234,6 +239,8 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.gaussKeysRead, m.gaussKeys, m.gaussKeysErr = false, nil, nil
+	m.gaussTableKeys = nil
 	m.mainMigrationFinished = false
 	m.compatibilityFunctions = nil
 	m.mysqlPGSpatial = mysqlPGSpatialState{}
@@ -1111,12 +1118,13 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					cols[i] = m.targetColumn(pk.TableName, c)
 				}
 				pkCopy.Columns = cols
+				pkCopy = m.planGaussDBIndex(ctx, pkCopy)
 				pkName := pkCopy.TableName
 				if m.isOscar() {
 					pkName = dialect.IndexName(m.writer.Dialect(), pkCopy)
 				}
 				ddl := dialect.JoinSQL(m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, pkCopy))
-				if m.cfg.Distributed {
+				if m.cfg.Distributed && !m.isMySQLGaussDB() {
 					if err := m.repairDistribute(ctx, pkCopy.TableName, pkCopy.Columns); err != nil {
 						m.log.Errorf("设置分布列失败 [%s]: %v", pkCopy.TableName, err)
 					}

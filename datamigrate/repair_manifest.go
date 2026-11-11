@@ -100,6 +100,8 @@ func (m *Migrator) recordRepairSaveErrorLocked(err error) error {
 }
 
 func (m *Migrator) beginRepair(ctx context.Context) {
+	m.gaussPreparing = true
+	defer func() { m.gaussPreparing = false }()
 	m.repairs = &repairRecorder{}
 	started := time.Now()
 	defer func() {
@@ -322,6 +324,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				ss, _, e = m.buildCreateTableDDL(ctx, t)
 			}
 		}
+		o.GaussDBDistribution = slices.Clone(m.gaussTableKeys[t])
 		if m.oracleMySQL != nil && m.oracleMySQL.blocked[t] != nil {
 			e, o.DiagnosticOnly = m.oracleMySQL.blocked[t], true
 		}
@@ -366,7 +369,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		}
 		name := dialect.IndexName(m.writer.Dialect(), v)
 		var ss []dialect.Statement
-		if v.Unsupported == "" {
+		if v.Unsupported == "" && !(m.isMySQLGaussDB() && !m.cfg.objectMode() && m.cfg.Content != "data_only" && (v.IsPrimary || v.IsUnique)) {
 			ss = m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v)
 		}
 		add(repair.Object{Kind: kind, Name: name, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: name, Index: &v, Error: v.Unsupported}, ss)
@@ -601,7 +604,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			add(o, m.repairOwnerStatements(kind, parent.TargetName, m.cfg.TargetSchema))
 			m.repairs.objects[len(m.repairs.objects)-1].Dependencies = []string{parent.ID}
 		}
-		if parent.Kind == "primary_key" && parent.Index != nil && m.cfg.Distributed && m.writer.Dialect().Caps().SupportsDistribute {
+		if parent.Kind == "primary_key" && parent.Index != nil && m.cfg.Distributed && m.writer.Dialect().Caps().SupportsDistribute && !m.isMySQLGaussDB() {
 			add(repair.Object{Kind: "distribution", Name: parent.Table, Table: parent.Table, SourceTable: parent.SourceTable, TargetName: parent.Table, Dependencies: []string{parent.ID}}, m.repairDistributeStatements(parent.Table, parent.Index.Columns))
 		}
 	}
@@ -669,6 +672,9 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		idx = r.appendObject(o)
 	}
 	old := &r.objects[idx]
+	if len(o.GaussDBDistribution) > 0 {
+		old.GaussDBDistribution = slices.Clone(o.GaussDBDistribution)
+	}
 	if o.PartitionPlan != nil {
 		old.PartitionPlan = o.PartitionPlan
 	}
@@ -835,7 +841,7 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		item.Error = err.Error()
 	}
 	var indexPreflight dialect.SQLServerIndexPreflightError
-	knownPreflight := errors.As(err, &indexPreflight) || target.IsOracleDamengSequencePreflight(err) || target.IsMySQLPGTriggerPreflight(err) || target.IsMySQLDamengTriggerPreflight(err)
+	knownPreflight := errors.As(err, &indexPreflight) || target.IsOracleDamengSequencePreflight(err) || target.IsMySQLPGTriggerPreflight(err) || target.IsMySQLDamengTriggerPreflight(err) || target.IsGaussDBIndexPreflight(err)
 	for i := range item.Units {
 		u := &item.Units[i]
 		if u.Status == "running" {
@@ -866,6 +872,7 @@ func (m *Migrator) repairTable(ctx context.Context, t string, ss []dialect.State
 		return err
 	}
 	o := repair.Object{Kind: "table", Name: t, SourceName: t, SourceTable: t, Table: m.objName(t), TargetName: m.objName(t)}
+	o.GaussDBDistribution = slices.Clone(m.gaussTableKeys[t])
 	if m.partitionState != nil {
 		if p := m.partitionState.tables[t]; p != nil {
 			o.PartitionPlan = p.Plan

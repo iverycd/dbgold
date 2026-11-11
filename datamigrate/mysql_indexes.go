@@ -45,7 +45,7 @@ func (m *Migrator) targetPostIndex(ctx context.Context, idx source.IndexInfo) so
 	for i, col := range idx.Columns {
 		idx.Columns[i] = m.targetColumn(table, col)
 	}
-	return idx
+	return m.planGaussDBIndex(ctx, idx)
 }
 
 // Plan against the whole source index catalog, before table selection. An

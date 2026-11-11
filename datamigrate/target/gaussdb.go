@@ -46,10 +46,7 @@ func NewGaussDB(dsn, schema string, pool ConnPoolConfig) (*GaussDBWriter, error)
 
 // qualifiedTable 返回带 schema 前缀的表名，schema 为空时直接返回表名
 func (w *GaussDBWriter) qualifiedTable(table string) string {
-	if w.schema == "" {
-		return fmt.Sprintf(`"%s"`, table)
-	}
-	return fmt.Sprintf(`"%s"."%s"`, w.schema, table)
+	return dialect.NewPostgres("gaussdb").QualifyTable(w.schema, table)
 }
 
 func (w *GaussDBWriter) Close() error   { return w.db.Close() }
@@ -76,7 +73,7 @@ func (w *GaussDBWriter) CopyData(ctx context.Context, table string, cols []strin
 	// ogpq.CopyIn 直接拼表名进 SQL，必须用带引号的 qualified 形式保证大小写正确
 	quotedCols := make([]string, len(cols))
 	for i, c := range cols {
-		quotedCols[i] = fmt.Sprintf(`"%s"`, c)
+		quotedCols[i] = dialect.NewPostgres("gaussdb").QuoteIdent(c)
 	}
 	copySQL := fmt.Sprintf(`COPY %s (%s) FROM STDIN`, w.qualifiedTable(table), strings.Join(quotedCols, ", "))
 	stmt, err := tx.PrepareContext(ctx, copySQL)
@@ -138,6 +135,9 @@ func (w *GaussDBWriter) CreateSequence(ctx context.Context, seq source.SequenceI
 }
 
 func (w *GaussDBWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
+	if idx.GaussDB != nil {
+		return w.createGaussDBIndex(ctx, idx)
+	}
 	return createPGIndex(ctx, w.db, w.dia, w.schema, idx)
 }
 

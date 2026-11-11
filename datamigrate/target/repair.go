@@ -174,6 +174,15 @@ func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, db
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error) ([]repair.Unit, error) {
+	if w.DBType() == "gaussdb" && obj.Kind == "distribution" {
+		return units, fmt.Errorf("GaussDB 不支持原地修改分布列；请为失败主键或唯一索引重新生成索引计划，现有数据保持不变")
+	}
+	gaussIndex := obj.Index != nil && obj.Index.GaussDB != nil
+	if gaussIndex {
+		if err := ValidateGaussDBIndexRepair(obj, units, w.DBType()); err != nil {
+			return units, err
+		}
+	}
 	if obj.ManualTrigger != nil {
 		return executeManualTriggerRepair(ctx, w, obj, units, onStep)
 	}
@@ -205,7 +214,7 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
 	generatedUnique := obj.Index != nil && obj.Index.PGUniqueConstraint
-	if generatedUnique {
+	if generatedUnique && !gaussIndex {
 		if err := ValidatePGUniqueConstraintRepair(obj, units, w.DBType()); err != nil {
 			return out, err
 		}
@@ -255,7 +264,7 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	var exec func(string) error
 	var releaseIntervalSession func()
 	onlyIntervalMarker := len(selected) == 1 && obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[selected[0]].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan)
-	if generatedUnique {
+	if generatedUnique || gaussIndex {
 		// Use the same strict creation and duplicate verification as migration.
 		// The validation above proved that this executes the saved SQL.
 		exec = func(string) error { return w.CreateIndex(ctx, *obj.Index) }

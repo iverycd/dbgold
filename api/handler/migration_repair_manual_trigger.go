@@ -79,6 +79,10 @@ func manualTriggerTable(o repair.Object) string {
 }
 
 func repairObjectResponse(j *store.DataMigrationJob, o repair.Object) repair.Object {
+	if j.DstDBType == "gaussdb" && o.Kind == "distribution" {
+		o.DiagnosticOnly = true
+		o.Error = "GaussDB 不支持原地修改分布列；请对失败主键或唯一索引使用“重新生成索引计划”。原失败记录保留，现有数据无需重建。"
+	}
 	o.ManualTriggerEditable = canEditManualTrigger(j, o)
 	if o.ManualTriggerEditable && o.Table == "" {
 		o.Table = manualTriggerTable(o)

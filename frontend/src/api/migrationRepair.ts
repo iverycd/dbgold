@@ -52,6 +52,7 @@ export interface RepairObject {
   columns?: RepairColumn[]
   source_columns?: RepairColumn[]
   sequence?: { Native?: { Name?: string }; Unsupported?: string; FailureStage?: string }
+  index?: { IsPrimary: boolean; IsUnique: boolean; gaussdb?: Record<string, unknown> }
   foreign_key?: { TableName: string; Columns: string[]; RefSchema: string; RefTable: string; RefColumns: string[] }
   legacy: boolean
   requires_review: boolean
@@ -124,7 +125,8 @@ const base = (job: string) => `/migration/data-migrate/${encodeURIComponent(job)
 const objectURL = (job: string, object: string) => `${base(job)}/repairs/${encodeURIComponent(object)}`
 export const listRepairs = (job: string) => api.get<RepairList>(`${base(job)}/repairs`)
 export const bindRepairConnections = (job: string, data: BindingRequest) => api.put(`${base(job)}/repairs/binding`, data)
-export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean; mode?: 'manual_trigger' }) => api.put<RepairRecord>(objectURL(job, object), data)
+export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean; index_plan?: boolean; mode?: 'manual_trigger' }) => api.put<RepairRecord>(objectURL(job, object), data)
+export const refreshIndexRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/index-plan`, data)
 export const refreshSequenceRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/sequence-plan`, data)
 export const previewTriggerRepairPlan = (job: string, object: string, data: { version: number }) => api.post<TriggerRepairPlan>(`${objectURL(job, object)}/trigger-plan`, data)
 export const saveTriggerRepairPlan = (job: string, object: string, data: { version: number; binding_version: number; plan_hash: string; reviewed: true }) => api.put<RepairRecord>(`${objectURL(job, object)}/trigger-plan`, data)

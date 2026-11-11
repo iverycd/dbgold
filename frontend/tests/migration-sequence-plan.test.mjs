@@ -17,7 +17,7 @@ vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityCo
 const batchContext = { exports: {}, require: () => utilityContext.exports }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepairBatch.ts')), batchContext)
 const { descriptor } = parse(file('../src/components/MigrationRepairPanel.vue'))
-const fields = 'records, job, binding, editing, draftUnits, sequencePlanPending, sequencePlanMessage, canRefreshSequencePlan, canExecute, refreshingSequencePlan, openEditor, closeEditor, refreshSequencePlan, saveDraft, restoreOriginal'
+const fields = 'records, job, binding, editing, draftUnits, sequencePlanPending, sequencePlanMessage, canRefreshSequencePlan, canExecute, refreshingSequencePlan, openEditor, closeEditor, refreshSequencePlan, saveDraft, restoreOriginal, refreshIndexPlan, canRefreshIndexPlan, indexPlanPending'
 
 function panel(overrides = {}) {
   const messages = []
@@ -158,4 +158,52 @@ test('a late plan response cannot replace another object editor', async () => {
   assert.equal(app.editing.value.object.id, 'other')
   assert.equal(app.draftUnits.value[0].id, 'create')
   assert.equal(app.sequencePlanPending.value, false)
+})
+
+const indexRecord = () => ({ version: 1, object: { id: 'idx', kind: 'index', name: 'auto_id', target_name: 'auto_id', schema: 'App', table: 'Patients', status: 'failed', units: [unit('create', 'CREATE UNIQUE INDEX "auto_id" ON "App"."Patients" ("auto_id");')], dependencies: [], legacy: false, requires_review: false, index: { IsUnique: true, IsPrimary: false } } })
+const indexCandidate = () => ({ version: 1, object: { ...indexRecord().object, index: { ...indexRecord().object.index, gaussdb: { global: true } }, requires_review: true, units: [unit('index-plan', 'CREATE GLOBAL UNIQUE INDEX "auto_id" ON "App"."Patients" USING ubtree ("auto_id") DISTRIBUTE BY HASH ("auto_id");')] }, has_changes: true, message: '请核对索引计划' })
+
+test('GaussDB index plan remains a local candidate until reviewed save, and preserves SQL on reopen', async () => {
+  const saves = []
+  const app = panel({
+    refreshIndexRepairPlan: async () => ({ data: indexCandidate() }),
+    saveRepairDraft: async (_job, _object, data) => {
+      saves.push(data)
+      return { data: { version: 2, object: { ...indexCandidate().object, requires_review: false, units: data.units } } }
+    },
+  })
+  await tick()
+  app.job.value.src_db_type = 'mysql'; app.job.value.dst_db_type = 'gaussdb'
+  app.records.value = [indexRecord()]
+  app.openEditor(app.records.value[0])
+  assert.equal(app.canRefreshIndexPlan.value, true)
+  await app.refreshIndexPlan()
+  assert.equal(saves.length, 0)
+  assert.equal(app.records.value[0].object.units[0].id, 'create')
+  assert.equal(app.indexPlanPending.value, true)
+  assert.equal(await app.saveDraft(), true)
+  assert.equal(saves[0].index_plan, true)
+  assert.equal(saves[0].reviewed, true)
+  assert.equal(saves[0].units[0].sql, indexCandidate().object.units[0].sql)
+  app.closeEditor(); app.openEditor(app.records.value[0])
+  assert.equal(app.draftUnits.value[0].sql, indexCandidate().object.units[0].sql)
+  assert.equal(app.indexPlanPending.value, false)
+})
+
+test('GaussDB late index response cannot overwrite an edited draft or another editor', async () => {
+  let resolve
+  const app = panel({ refreshIndexRepairPlan: () => new Promise(done => { resolve = done }) })
+  await tick()
+  app.job.value.src_db_type = 'mysql'; app.job.value.dst_db_type = 'gaussdb'
+  app.openEditor(indexRecord())
+  let request = app.refreshIndexPlan()
+  app.draftUnits.value[0].sql = 'manual changes'
+  resolve({ data: indexCandidate() }); await request
+  assert.equal(app.draftUnits.value[0].sql, 'manual changes')
+  assert.equal(app.indexPlanPending.value, false)
+  app.openEditor(indexRecord()); request = app.refreshIndexPlan()
+  app.closeEditor(); const other = indexRecord(); other.object.id = 'other'; app.openEditor(other)
+  resolve({ data: indexCandidate() }); await request
+  assert.equal(app.editing.value.object.id, 'other')
+  assert.equal(app.indexPlanPending.value, false)
 })

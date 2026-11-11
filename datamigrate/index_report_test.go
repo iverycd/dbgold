@@ -47,6 +47,9 @@ func (w *indexReportWriter) CreateIndex(_ context.Context, index source.IndexInf
 	w.indexes = append(w.indexes, index)
 	return w.err
 }
+func (w *indexReportWriter) PlanGaussDBIndex(_ context.Context, index source.IndexInfo) (source.IndexInfo, error) {
+	return index, nil // This report fixture models a compatible target catalog.
+}
 
 func runIndexReport(r *indexReportReader, w *indexReportWriter) MigrationReport {
 	m, _ := newTestMigrator(r, w)

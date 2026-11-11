@@ -119,14 +119,17 @@ func (d *PostgresDialect) CreateTableStatements(schema string, info *source.Tabl
 		cols = append(cols, "  "+colDef)
 	}
 	tblName := name(info.TableName)
-	var qualifiedName string
-	if schema != "" {
-		qualifiedName = fmt.Sprintf(`"%s"."%s"`, schema, tblName)
-	} else {
-		qualifiedName = fmt.Sprintf(`"%s"`, tblName)
-	}
+	qualifiedName := d.QualifyTable(schema, tblName)
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedName)
-	createSQL := fmt.Sprintf("CREATE TABLE %s (\n%s\n);", qualifiedName, strings.Join(cols, ",\n"))
+	suffix := ""
+	if d.name == "gaussdb" && len(opt.GaussDBDistribution) > 0 {
+		keys := make([]string, len(opt.GaussDBDistribution))
+		for i, key := range opt.GaussDBDistribution {
+			keys[i] = d.QuoteIdent(key)
+		}
+		suffix = " DISTRIBUTE BY HASH (" + strings.Join(keys, ", ") + ")"
+	}
+	createSQL := fmt.Sprintf("CREATE TABLE %s (\n%s\n)%s;", qualifiedName, strings.Join(cols, ",\n"), suffix)
 	return []Statement{{SQL: dropSQL}, {SQL: createSQL}}, nil
 }
 

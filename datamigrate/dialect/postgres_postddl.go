@@ -41,6 +41,24 @@ func (d *PostgresDialect) IndexName(idx source.IndexInfo) string {
 }
 
 func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
+	if d.name == "gaussdb" && idx.GaussDB != nil {
+		schema = idx.GaussDB.Base.Schema
+	}
+	if d.name == "gaussdb" && idx.GaussDB != nil && idx.GaussDB.Global {
+		cols := strings.Join(orderedIndexColumns(d, idx), ", ")
+		table := d.qualified(schema, idx.TableName)
+		if idx.IsPrimary {
+			return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s) BY GLOBAL INDEX;", table, cols)}}
+		}
+		if idx.PGUniqueConstraint {
+			return []Statement{{SQL: fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s) BY GLOBAL INDEX;", table, d.QuoteIdent(d.IndexName(idx)), cols)}}
+		}
+		keys := make([]string, len(idx.GaussDB.Columns))
+		for i, key := range idx.GaussDB.Columns {
+			keys[i] = d.QuoteIdent(key)
+		}
+		return []Statement{{SQL: fmt.Sprintf("CREATE GLOBAL UNIQUE INDEX %s ON %s USING ubtree (%s) DISTRIBUTE BY HASH (%s);", d.QuoteIdent(d.IndexName(idx)), table, cols, strings.Join(keys, ", "))}}
+	}
 	if idx.PGUniqueConstraint {
 		cols := make([]string, len(idx.Columns))
 		for i, column := range idx.Columns {
@@ -71,7 +89,7 @@ func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) [
 		unique = "UNIQUE "
 	}
 	ifAbsent := "IF NOT EXISTS "
-	if len(idx.MySQLPrefixLengths) > 0 || idx.TargetIndexName != "" {
+	if len(idx.MySQLPrefixLengths) > 0 || idx.TargetIndexName != "" || idx.GaussDB != nil {
 		// Let the writer verify duplicate definitions before reporting success.
 		ifAbsent = ""
 	}

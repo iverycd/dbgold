@@ -170,6 +170,15 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("succeeded", "序列及关联触发器完整兼容，当前续号已越过源水位和关联列极值")
 	}
 	if kind == "table" {
+		if gauss, ok := w.(*GaussDBWriter); ok && len(obj.GaussDBDistribution) > 0 {
+			actual, err := gauss.InspectGaussDBDistribution(ctx, obj.TargetName)
+			if err != nil {
+				return verification("unknown", err.Error())
+			}
+			if actual.Mode != "H" || !slices.Equal(actual.Columns, obj.GaussDBDistribution) {
+				return verification("failed", "目标表分布键与建表计划不一致")
+			}
+		}
 		var exists bool
 		var e error
 		if obj.PartitionPlan != nil {
@@ -256,6 +265,15 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 		return verification("succeeded", "目标表存在且全部预期列可见；数据兼容性在补迁前单独检查")
 	}
 	if kind == "primary_key" || kind == "index" {
+		if gauss, ok := w.(*GaussDBWriter); ok && obj.Index != nil && obj.Index.GaussDB != nil {
+			if err := gauss.validateGaussDBPlan(ctx, *obj.Index); err != nil {
+				return verification("failed", err.Error())
+			}
+			if err := gauss.verifyGaussDBIndex(ctx, *obj.Index); err != nil {
+				return verification("failed", err.Error())
+			}
+			return verification("succeeded", "索引键、唯一性、有效状态及分布均与计划一致")
+		}
 		return inspectRepairIndex(ctx, a, obj)
 	}
 	if kind == "foreign_key" {

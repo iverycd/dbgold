@@ -12,7 +12,7 @@ import (
 	"dbgold/datamigrate/target"
 )
 
-var repairDDLHead = regexp.MustCompile(`(?is)^\s*(?:CREATE\s+CONTEXT\s+(INDEX)|CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?(?:\s+UNIQUE)?(?:\s+(?:CLUSTERED|NONCLUSTERED))?\s+(TABLE|VIEW|INDEX|SEQUENCE|TRIGGER)|ALTER\s+(TABLE|VIEW|SEQUENCE)|COMMENT\s+ON\s+(TABLE|COLUMN)|DROP\s+(INDEX|VIEW|SEQUENCE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`)
+var repairDDLHead = regexp.MustCompile(`(?is)^\s*(?:CREATE\s+CONTEXT\s+(INDEX)|CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?(?:\s+GLOBAL)?(?:\s+UNIQUE)?(?:\s+(?:CLUSTERED|NONCLUSTERED))?\s+(TABLE|VIEW|INDEX|SEQUENCE|TRIGGER)|ALTER\s+(TABLE|VIEW|SEQUENCE)|COMMENT\s+ON\s+(TABLE|COLUMN)|DROP\s+(INDEX|VIEW|SEQUENCE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`)
 var repairIndexOn = regexp.MustCompile(`(?is)\bON\s+`)
 var repairContextIndexOn = regexp.MustCompile(`(?is)^\s*ON\s+`)
 var repairExecutableComment = regexp.MustCompile(`(?is)/\*\s*!|/\*[mM]!`)
@@ -134,6 +134,12 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if dbType == "gaussdb" && obj.Kind == "distribution" {
+		return fmt.Errorf("GaussDB 不支持原地修改分布列，请重新生成失败主键或唯一索引的索引计划")
+	}
+	if obj.Index != nil && obj.Index.GaussDB != nil {
+		return target.ValidateGaussDBIndexRepair(obj, units, dbType)
+	}
 	if obj.Index != nil && obj.Index.PGUniqueConstraint {
 		return target.ValidatePGUniqueConstraintRepair(obj, units, dbType)
 	}
@@ -211,6 +217,11 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 			return fmt.Errorf("SQL不能为空")
 		}
 		contextIndex := len(tokens) >= 3 && tokens[0] == "CREATE" && tokens[1] == "CONTEXT" && tokens[2] == "INDEX"
+		if len(tokens) > 1 && tokens[0] == "CREATE" && tokens[1] == "GLOBAL" {
+			if dbType != "gaussdb" || len(tokens) < 4 || tokens[2] != "UNIQUE" || tokens[3] != "INDEX" {
+				return fmt.Errorf("GLOBAL UNIQUE INDEX 修复仅支持 GaussDB 目标")
+			}
+		}
 		if contextIndex && dbType != "dameng" {
 			return fmt.Errorf("CONTEXT INDEX 修复仅支持达梦目标")
 		}

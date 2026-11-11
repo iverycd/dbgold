@@ -87,6 +87,12 @@ func (w *partialMigrationWriter) CreateIndex(_ context.Context, index source.Ind
 	w.indexes = append(w.indexes, index)
 	return nil
 }
+
+// The generic failure fixture models a compatible target catalog; dedicated
+// GaussDB tests exercise distribution planning and actual Writer validation.
+func (w *partialMigrationWriter) PlanGaussDBIndex(_ context.Context, index source.IndexInfo) (source.IndexInfo, error) {
+	return index, nil
+}
 func (w *partialMigrationWriter) CreateForeignKey(_ context.Context, fk source.FKInfo) error {
 	w.fks = append(w.fks, fk)
 	return nil

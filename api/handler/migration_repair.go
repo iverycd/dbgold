@@ -600,6 +600,7 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		ColumnMapping map[string]string `json:"column_mapping"`
 		Reviewed      bool              `json:"reviewed"`
 		SequencePlan  bool              `json:"sequence_plan"`
+		IndexPlan     bool              `json:"index_plan"`
 	}
 	if e := c.ShouldBindJSON(&req); e != nil {
 		repairError(c, e)
@@ -637,6 +638,28 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	if !o.CanEditDDL() {
 		repairError(c, fmt.Errorf("此记录仅供诊断或接续数据，不支持编辑对象 DDL"))
 		return
+	}
+	if req.IndexPlan {
+		if !req.Reviewed || req.SequencePlan {
+			repairError(c, fmt.Errorf("请核对完整索引计划后保存"))
+			return
+		}
+		candidate, err := migrationIndexPlan(c, j, binding, o, row.Version)
+		if err != nil {
+			repairError(c, err)
+			return
+		}
+		if len(candidate.Units) != len(req.Units) {
+			repairError(c, fmt.Errorf("索引计划已变化，请重新生成"))
+			return
+		}
+		for i, u := range candidate.Units {
+			if u.ID != req.Units[i].ID || u.SQL != req.Units[i].SQL {
+				repairError(c, fmt.Errorf("索引计划已变化或被编辑，请重新生成并核对"))
+				return
+			}
+		}
+		o = candidate
 	}
 	if req.SequencePlan {
 		if !req.Reviewed {

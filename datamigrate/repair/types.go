@@ -26,6 +26,7 @@ type Unit struct {
 }
 
 type Object struct {
+	GaussDBDistribution   []string             `json:"gaussdb_distribution,omitempty"`
 	PartitionPlan         *partition.Plan      `json:"partition_plan,omitempty"`
 	ManualTrigger         *ManualTriggerPlan   `json:"manual_trigger,omitempty"`
 	ManualTriggerEditable bool                 `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.

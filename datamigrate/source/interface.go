@@ -88,6 +88,7 @@ type SequenceBinding struct {
 
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
+	GaussDB *GaussDBIndexPlan `json:"gaussdb,omitempty"`
 	// Locality is LOCAL or GLOBAL when the source catalog establishes it.
 	// Derived indexes belong to an already represented logical parent index.
 	Locality    string `json:"locality,omitempty"`

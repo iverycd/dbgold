@@ -255,7 +255,7 @@
                       <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">{{ selectedSrc?.db_type === 'oracle' && selectedDst?.db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 nvarchar2' }}</a-checkbox>
                     </a-col>
                     <a-col v-if="!isDamengNative" :span="12">
-                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（DISTRIBUTE BY hash）</a-checkbox>
+                      <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（GaussDB 建表时设置 HASH 分布键，唯一键按需使用 GSI）</a-checkbox>
                     </a-col>
                     <a-col :span="24">
                       <a-checkbox v-model="dataMigrate.validateData" :disabled="dataMigrate.content === 'schema_only'" class="adv-check">迁移后校验数据内容</a-checkbox>
@@ -873,7 +873,7 @@
                   <a-checkbox v-model="objMigrate.changeOwner" :disabled="omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
                 <a-col :span="12">
-                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">分布式库（建主键前设置分布列）</a-checkbox>
+                  <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">GaussDB 分布式（按实际分布键选择普通索引或 GSI）</a-checkbox>
                 </a-col>
               </a-row>
             </a-collapse-item>

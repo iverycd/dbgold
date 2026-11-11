@@ -145,6 +145,9 @@ func (m *Migrator) oracleMySQLTargetVersion(ctx context.Context) (dialect.MySQLV
 }
 
 func (m *Migrator) sourcePrimaryKeys(ctx context.Context) ([]source.IndexInfo, error) {
+	if m.isMySQLGaussDB() {
+		return m.gaussDBPrimaryKeys(ctx)
+	}
 	if m.oracleMySQL != nil {
 		err := m.readOracleMySQLInventory(ctx)
 		return m.oracleMySQLSelectedIndexes(m.oracleMySQL.primaryKeys), err
@@ -289,6 +292,10 @@ func (m *Migrator) planOracleMySQLTable(ctx context.Context, table string, info 
 // never overwritten by the target plan's mapped types or normalized defaults.
 func (m *Migrator) baseCreateTableStatements(ctx context.Context, table string, info *source.TableDDLInfo, opt dialect.TypeOpt) ([]dialect.Statement, error) {
 	var err error
+	opt, err = m.gaussDBTableOptions(ctx, info, opt)
+	if err != nil {
+		return nil, err
+	}
 	opt, err = m.mysqlPGSpatialTypeOptions(ctx, info, opt)
 	if err != nil {
 		return nil, err

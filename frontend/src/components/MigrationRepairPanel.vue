@@ -182,6 +182,7 @@
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.requires_review && !canEditRepairDDL(editing.object) && !editing.object.native && !isGeneratedMySQLTrigger(editing.object)" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
+        <a-alert v-if="indexPlanMessage" type="info">{{ indexPlanMessage }}</a-alert>
         <a-alert v-if="sequencePlanMessage" type="info">{{ sequencePlanMessage }}</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
@@ -206,7 +207,7 @@
           <a-alert v-if="mappingError(mappingForm.values)" type="error">{{ mappingError(mappingForm.values) }}</a-alert>
         </a-form>
         <div v-if="canEditRepairDDL(editing.object)" class="editor-toolbar">
-          <a-space wrap><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="draftUnits.some(unit => unit.original_sql)" size="small" :disabled="busy || saving" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" :disabled="busy || saving" @click="useSuggested">采用建议 DDL</a-button><a-button v-if="editing.object.kind !== 'trigger'" size="small" :disabled="busy || saving || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
+          <a-space wrap><a-button v-if="gaussIndexPlanAvailable" size="small" :loading="refreshingIndexPlan" :disabled="!canRefreshIndexPlan" @click="refreshIndexPlan">重新生成索引计划</a-button><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="draftUnits.some(unit => unit.original_sql)" size="small" :disabled="busy || saving" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" :disabled="busy || saving" @click="useSuggested">采用建议 DDL</a-button><a-button v-if="editing.object.kind !== 'trigger'" size="small" :disabled="busy || saving || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 保存并执行</span>
         </div>
         <div v-for="(unit, index) in !canEditRepairDDL(editing.object) && (isGeneratedMySQLTrigger(editing.object) || editing.object.native || editing.object.manual_trigger) ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
@@ -295,7 +296,7 @@ import { computed, defineAsyncComponent, nextTick, onUnmounted, reactive, ref, w
 import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
-import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
+import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, refreshIndexRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
 import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { formatSQLText } from '@/utils/sqlFormatting'
@@ -325,6 +326,9 @@ const editorVisible = ref(false)
 const editing = ref<RepairRecord | null>(null)
 const draftUnits = ref<RepairUnit[]>([])
 const mappingForm = reactive({ values: {} as Record<string, string>, source: '', target: '' })
+const refreshingIndexPlan = ref(false)
+const indexPlanPending = ref(false)
+const indexPlanMessage = ref('')
 const refreshingSequencePlan = ref(false)
 const sequencePlanPending = ref(false)
 const sequencePlanMessage = ref('')
@@ -371,7 +375,7 @@ let pollSerial = 0
 let disposed = false
 let pendingExecution: { jobID: string; objectID: string; version: number; signature: string; key: string } | null = null
 
-const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value || refreshingTriggerPlan.value)
+const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value || refreshingTriggerPlan.value || refreshingIndexPlan.value)
 const triggerPlanAvailable = computed(() => job.value?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(job.value?.dst_db_type || '') && !!editing.value && canRegenerateTriggerPlan(editing.value.object))
 const canRefreshTriggerPlan = computed(() => triggerPlanAvailable.value && !busy.value && !saving.value && !!binding.value?.configured)
 const nativeOracleDamengSequence = computed(() => job.value?.src_db_type === 'oracle' && job.value?.dst_db_type === 'dameng' && editing.value?.object.kind === 'sequence' && !!editing.value.object.sequence?.Native?.Name)
@@ -379,6 +383,15 @@ const canRefreshSequencePlan = computed(() => {
   const object = editing.value?.object
   if (!nativeOracleDamengSequence.value || !object || busy.value || saving.value || !binding.value?.configured || object.sequence?.Unsupported && object.sequence?.FailureStage !== 'preflight' || object.sequence?.FailureStage === 'metadata') return false
   if (['unknown', 'running', 'unverified', 'needs_verification'].includes(object.status) || object.units.some(unit => ['unknown', 'running', 'unverified', 'needs_verification'].includes(unit.status) || unit.sql !== unit.original_sql)) return false
+  const units = draftUnits.value.filter(unit => unit.sql.trim())
+  return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && (unit.sql === object.units[index].sql || unit.sql === formattedDraftSQL(object.units[index].sql)))
+})
+const gaussIndexPlanAvailable = computed(() => job.value?.src_db_type === 'mysql' && job.value?.dst_db_type === 'gaussdb' && !!editing.value?.object.index && ['primary_key', 'index'].includes(editing.value.object.kind) && (editing.value.object.index.IsPrimary || editing.value.object.index.IsUnique))
+const canRefreshIndexPlan = computed(() => {
+  const object = editing.value?.object
+  if (!gaussIndexPlanAvailable.value || !object || busy.value || saving.value || !binding.value?.configured || indexPlanPending.value) return false
+  const unsafe = (status: string) => ['unknown', 'running', 'unverified', 'needs_verification', 'succeeded'].includes(status)
+  if (unsafe(object.status) || object.units.some(unit => unsafe(unit.status) || unit.sql !== unit.original_sql)) return false
   const units = draftUnits.value.filter(unit => unit.sql.trim())
   return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && (unit.sql === object.units[index].sql || unit.sql === formattedDraftSQL(object.units[index].sql)))
 })
@@ -609,6 +622,7 @@ function openEditor(record: RepairRecord) {
   editorSerial++
   editing.value = record
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  indexPlanPending.value = false; indexPlanMessage.value = ''; refreshingIndexPlan.value = false
   clearTriggerPlan()
   draftUnits.value = editableDraftUnits(record.object)
   if (canEditRepairDDL(record.object) && !draftUnits.value.length && !hasRepairDDL(record.object) && !unitCommitted(record.object.status) && record.object.status !== 'unknown') addUnit()
@@ -626,7 +640,7 @@ function editableDraftUnits(object: RepairObject): RepairUnit[] {
     const sql = object.manual_trigger?.sql ?? create?.sql ?? object.ddl ?? ''
     units = [{ id: create?.id || 'manual-trigger', sql, original_sql: create?.original_sql || object.ddl || sql, status: object.status === 'failed' ? 'failed' : 'pending', error: create?.error || object.error, selected: true, destructive: false }]
   }
-  if (!canEditRepairDDL(object)) return units
+  if (!canEditRepairDDL(object) || object.index?.gaussdb) return units
   return units.map(unit => {
     if (unitCommitted(unit.status) || unit.destructive || !unit.sql.trim()) return unit
     return { ...unit, sql: formattedDraftSQL(unit.sql) }
@@ -639,6 +653,7 @@ function formattedDraftSQL(sql: string): string {
 function closeEditor() {
   editorSerial++; editing.value = null; draftUnits.value = []
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  indexPlanPending.value = false; indexPlanMessage.value = ''; refreshingIndexPlan.value = false
   clearTriggerPlan()
   if (returnToRecovery.value) { returnToRecovery.value = false; recoveryVisible.value = true; void loadPreview() }
 }
@@ -672,20 +687,35 @@ async function saveDraft(options: { silent?: boolean } = {}): Promise<boolean> {
   saving.value = true
   try {
     const units = draftUnits.value.map(unit => {
-      const frozen = sequencePlanPending.value ? editing.value!.object.units.find(original => original.id === unit.id) : undefined
+      const frozen = sequencePlanPending.value || indexPlanPending.value || editing.value!.object.index?.gaussdb ? editing.value!.object.units.find(original => original.id === unit.id) : undefined
       return { ...unit, sql: frozen && unit.sql === formattedDraftSQL(frozen.sql) ? frozen.sql : unit.sql }
     })
-    const saved = (await saveRepairDraft(id, objectID, { version: editing.value.version, units, column_mapping: { ...mappingForm.values }, reviewed: true, ...(editing.value.object.kind === 'trigger' ? { mode: 'manual_trigger' as const } : {}), ...(sequencePlanPending.value ? { sequence_plan: true } : {}) })).data
+    const saved = (await saveRepairDraft(id, objectID, { version: editing.value.version, units, column_mapping: { ...mappingForm.values }, reviewed: true, ...(editing.value.object.kind === 'trigger' ? { mode: 'manual_trigger' as const } : {}), ...(sequencePlanPending.value ? { sequence_plan: true } : {}), ...(indexPlanPending.value ? { index_plan: true } : {}) })).data
     if (!current(scope, id) || serial !== editorSerial) return false
     replaceRecord(saved); editing.value = saved
     if (draftRevision !== revision) { Message.info('已保存提交时的草稿，当前新修改仍保留，请再次保存'); return false }
     draftUnits.value = editableDraftUnits(saved.object)
     sequencePlanPending.value = false; sequencePlanMessage.value = ''
+    indexPlanPending.value = false; indexPlanMessage.value = ''
     mappingForm.values = { ...(saved.object.column_mapping || {}) }
     if (!options.silent) Message.success('草稿已保存')
     return true
   } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e); return false }
   finally { if (current(scope, id)) saving.value = false }
+}
+async function refreshIndexPlan() {
+  if (!canRefreshIndexPlan.value || !editing.value) return
+  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
+  refreshingIndexPlan.value = true
+  try {
+    const candidate = (await refreshIndexRepairPlan(id, objectID, { version: editing.value.version })).data
+    if (!current(scope, id) || serial !== editorSerial) return
+    if (revision !== draftRevision) { Message.info('草稿已变化，未覆盖当前修改'); return }
+    editing.value = { object: candidate.object, version: candidate.version }
+    draftUnits.value = cloneRepairUnits(candidate.object.units)
+    indexPlanPending.value = true; indexPlanMessage.value = candidate.message
+  } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e) }
+  finally { if (current(scope, id) && serial === editorSerial) refreshingIndexPlan.value = false }
 }
 async function refreshSequencePlan() {
   if (!canRefreshSequencePlan.value || !editing.value) return
@@ -882,6 +912,7 @@ watch(() => props.jobID, () => {
   editorVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
   loading.value = false; saving.value = false; submitting.value = false; cancelling.value = false; previewing.value = false; loadingHistory.value = false
   sequencePlanPending.value = false; sequencePlanMessage.value = ''; refreshingSequencePlan.value = false
+  indexPlanPending.value = false; indexPlanMessage.value = ''; refreshingIndexPlan.value = false
   clearTriggerPlan()
   mappingForm.values = {}; mappingForm.source = ''; mappingForm.target = ''
   returnToRecovery.value = false; editing.value = null; recoveryObject.value = null; draftUnits.value = []; recoveryPlan.value = null

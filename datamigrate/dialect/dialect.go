@@ -18,8 +18,10 @@ type NameFunc func(string) string
 
 // TypeOpt 透传给类型映射的选项。
 type TypeOpt struct {
-	CharInLength bool
-	UseNvarchar2 bool
+	// GaussDBDistribution contains already mapped target column names.
+	GaussDBDistribution []string
+	CharInLength        bool
+	UseNvarchar2        bool
 	// SpatialSchema is the verified schema of the target geometry type/functions.
 	SpatialSchema string
 }
