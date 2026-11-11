@@ -229,7 +229,7 @@ func (w *GaussDBWriter) createGaussDBIndex(ctx context.Context, idx source.Index
 	return w.verifyGaussDBIndex(ctx, idx)
 }
 
-const gaussIndexSQL = `SELECT i.oid,i.relkind,am.amname,ix.indisunique,ix.indisprimary,ix.indisvalid,ix.indisready,ix.indpred IS NOT NULL OR ix.indexprs IS NOT NULL,ix.indkey::text,ix.indoption::text
+const gaussIndexSQL = `SELECT i.oid,i.relkind,am.amname,ix.indisunique,ix.indisprimary,ix.indisvalid,ix.indisready,ix.indpred IS NOT NULL OR ix.indexprs IS NOT NULL,ix.indkey::text,ix.indoption::text,ix.indnatts,ix.indnkeyatts
 FROM pg_catalog.pg_index ix JOIN pg_catalog.pg_class t ON t.oid=ix.indrelid
 JOIN pg_catalog.pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_catalog.pg_class i ON i.oid=ix.indexrelid
 JOIN pg_catalog.pg_am am ON am.oid=i.relam
@@ -238,9 +238,10 @@ WHERE ns.nspname=$1 AND t.relname=$2 AND (($3 AND ix.indisprimary) OR (NOT $3 AN
 func (w *GaussDBWriter) verifyGaussDBIndex(ctx context.Context, idx source.IndexInfo) error {
 	var oid uint32
 	var kind, method, keys, options string
+	var totalColumns, keyColumns int
 	var unique, primary, valid, ready, special bool
 	p := idx.GaussDB
-	err := w.db.QueryRowContext(ctx, gaussIndexSQL, p.Base.Schema, idx.TableName, idx.IsPrimary, dialect.IndexName(w.dia, idx)).Scan(&oid, &kind, &method, &unique, &primary, &valid, &ready, &special, &keys, &options)
+	err := w.db.QueryRowContext(ctx, gaussIndexSQL, p.Base.Schema, idx.TableName, idx.IsPrimary, dialect.IndexName(w.dia, idx)).Scan(&oid, &kind, &method, &unique, &primary, &valid, &ready, &special, &keys, &options, &totalColumns, &keyColumns)
 	if err != nil {
 		return fmt.Errorf("核验目标索引: %w", err)
 	}
@@ -277,10 +278,15 @@ func (w *GaussDBWriter) verifyGaussDBIndex(ctx context.Context, idx source.Index
 	}
 	actual := strings.Fields(keys)
 	dirs := strings.Fields(options)
-	if len(actual) != len(idx.Columns) || len(dirs) != len(actual) {
-		return fmt.Errorf("目标索引键数量不匹配")
+	if keyColumns <= 0 || keyColumns > totalColumns || len(actual) != totalColumns || len(dirs) != keyColumns {
+		return fmt.Errorf("目标索引目录元数据异常: 预期键列=%d, indnatts=%d, indnkeyatts=%d, indkey列数=%d, indoption列数=%d", len(idx.Columns), totalColumns, keyColumns, len(actual), len(dirs))
 	}
-	for i, key := range actual {
+	if keyColumns != len(idx.Columns) {
+		return fmt.Errorf("目标索引键数量不匹配: 预期=%d, indnkeyatts=%d, indnatts=%d", len(idx.Columns), keyColumns, totalColumns)
+	}
+	// indkey includes GSI system attributes and other non-key columns. Only
+	// the first indnkeyatts entries define the keys; indoption covers those keys.
+	for i, key := range actual[:keyColumns] {
 		n, e := strconv.Atoi(dirs[i])
 		if e != nil || names[key] != idx.Columns[i] || (n&1 != 0) != (i < len(idx.Descending) && idx.Descending[i]) {
 			return fmt.Errorf("目标索引键列或顺序不匹配")

@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"regexp"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/dialect"
@@ -26,7 +27,7 @@ func gaussExpectTable(mock sqlmock.Sqlmock, oid int, distribution string) {
 	gaussExpectColumns(mock, oid)
 }
 func gaussExpectColumns(mock sqlmock.Sqlmock, oid int) {
-	mock.ExpectQuery(regexp.QuoteMeta(gaussColumnsSQL)).WithArgs(oid).WillReturnRows(sqlmock.NewRows([]string{"n", "name", "type"}).AddRow(1, "patient_id", "integer").AddRow(2, "auto_id", "bigint").AddRow(3, "Tenant", "integer")).RowsWillBeClosed()
+	mock.ExpectQuery(regexp.QuoteMeta(gaussColumnsSQL)).WithArgs(oid).WillReturnRows(sqlmock.NewRows([]string{"n", "name", "type"}).AddRow(1, "patient_id", "integer").AddRow(3, "Tenant", "integer").AddRow(24, "auto_id", "bigint")).RowsWillBeClosed()
 }
 func gaussExpectGTM(mock sqlmock.Sqlmock, version, free, option string) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT version()")).WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
@@ -50,7 +51,7 @@ func TestGaussDBPlanSelectsLocalOrGlobalFromActualDistribution(t *testing.T) {
 	}{
 		{"local primary", "1", []string{"patient_id"}, true, false},
 		{"disjoint unique", "1", []string{"auto_id"}, false, true},
-		{"existing different distribution", "2", []string{"patient_id"}, true, true},
+		{"existing different distribution", "24", []string{"patient_id"}, true, true},
 		{"composite distribution included", "1 3", []string{"Tenant", "patient_id", "auto_id"}, false, false},
 		{"composite distribution incomplete", "1 3", []string{"patient_id"}, false, true},
 	} {
@@ -109,14 +110,21 @@ func TestGaussDBRepairRejectsTableRecreationBeforeDDL(t *testing.T) {
 }
 
 func gaussExpectIndex(mock sqlmock.Sqlmock, valid bool, kind, keys string) {
-	mock.ExpectQuery(regexp.QuoteMeta(gaussIndexSQL)).WithArgs("App", "Patients", false, "auto_id").WillReturnRows(sqlmock.NewRows([]string{"oid", "kind", "method", "unique", "primary", "valid", "ready", "special", "keys", "options"}).AddRow(88, kind, "ubtree", true, false, valid, true, false, keys, "0"))
+	mock.ExpectQuery(regexp.QuoteMeta(gaussIndexSQL)).WithArgs("App", "Patients", false, "auto_id").WillReturnRows(gaussIndexRows(valid, kind, len(strings.Fields(keys)), 1, keys, "0"))
+}
+func gaussIndexRows(valid bool, kind string, totalColumns, keyColumns int, keys, options string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"oid", "kind", "method", "unique", "primary", "valid", "ready", "special", "keys", "options", "indnatts", "indnkeyatts"}).AddRow(88, kind, "ubtree", true, false, valid, true, false, keys, options, totalColumns, keyColumns)
 }
 func gaussExpectGlobalVerification(mock sqlmock.Sqlmock) {
-	gaussExpectIndex(mock, true, "G", "2")
+	// GaussDB 507 reports one unique key plus four appended system attributes.
+	gaussExpectIndex(mock, true, "G", "24 -11 -1 -3 -5")
 	gaussExpectColumns(mock, 42)
+	gaussExpectGlobalDistribution(mock, "1")
+}
+func gaussExpectGlobalDistribution(mock sqlmock.Sqlmock, distribution string) {
 	mock.ExpectQuery("SELECT relname FROM pg_catalog.pg_class WHERE oid=\\$1").WithArgs(88).WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("auto_id"))
-	mock.ExpectQuery(regexp.QuoteMeta(gaussDistributionSQL)).WithArgs("App", "auto_id").WillReturnRows(sqlmock.NewRows([]string{"oid", "mode", "keys", "kind", "persistence", "partition", "options"}).AddRow(88, "H", "1", "G", "p", "n", "{}"))
-	mock.ExpectQuery(regexp.QuoteMeta(gaussColumnsSQL)).WithArgs(88).WillReturnRows(sqlmock.NewRows([]string{"n", "name", "type"}).AddRow(1, "auto_id", "bigint"))
+	mock.ExpectQuery(regexp.QuoteMeta(gaussDistributionSQL)).WithArgs("App", "auto_id").WillReturnRows(sqlmock.NewRows([]string{"oid", "mode", "keys", "kind", "persistence", "partition", "options"}).AddRow(88, "H", distribution, "G", "p", "n", "{}"))
+	mock.ExpectQuery(regexp.QuoteMeta(gaussColumnsSQL)).WithArgs(88).WillReturnRows(sqlmock.NewRows([]string{"n", "name", "type"}).AddRow(1, "auto_id", "bigint").AddRow(2, "Tenant", "integer")).RowsWillBeClosed()
 }
 
 func TestGaussDBUniqueIndexCreationAndDuplicateVerification(t *testing.T) {
@@ -148,7 +156,7 @@ func TestGaussDBIndexVerificationRejectsWrongDefinition(t *testing.T) {
 		name, kind, keys string
 		valid            bool
 	}{
-		{"invalid", "G", "2", false}, {"ordinary same-name index", "i", "2", true}, {"wrong key", "G", "1", true},
+		{"invalid", "G", "24", false}, {"ordinary same-name index", "i", "24", true}, {"wrong key", "G", "1", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, mock := gaussTestWriter(t)
@@ -161,6 +169,113 @@ func TestGaussDBIndexVerificationRejectsWrongDefinition(t *testing.T) {
 				gaussExpectColumns(mock, 42)
 			}
 			require.Error(t, w.verifyGaussDBIndex(context.Background(), idx))
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestGaussDBIndexVerificationSeparatesKeysFromIncludedAttributes(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, keys, options string
+		totalColumns, keyColumns  int
+		columns                   []string
+		descending                []bool
+		want                      string
+	}{
+		{name: "reported GSI catalog", keys: "24 -11 -1 -3 -5", options: "0", totalColumns: 5, keyColumns: 1},
+		{name: "GSI without included attributes", keys: "24", options: "0", totalColumns: 1, keyColumns: 1},
+		{name: "GSI containing user and system attributes", keys: "24 1 3 -11 -1 -3 -5", options: "0", totalColumns: 7, keyColumns: 1},
+		{name: "composite GSI with descending key", keys: "24 3 -11 -1 -3 -5", options: "0 3", totalColumns: 6, keyColumns: 2, columns: []string{"auto_id", "Tenant"}, descending: []bool{false, true}},
+		{name: "ordinary unique index", kind: "i", keys: "1", options: "0", totalColumns: 1, keyColumns: 1, columns: []string{"patient_id"}},
+		{name: "ordinary composite unique index", kind: "i", keys: "1 3", options: "0 1", totalColumns: 2, keyColumns: 2, columns: []string{"patient_id", "Tenant"}, descending: []bool{false, true}},
+		{name: "wrong key with correct count", keys: "3 -11 -1 -3 -5", options: "0", totalColumns: 5, keyColumns: 1, want: "目标索引键列或顺序不匹配"},
+		{name: "wrong composite key order", keys: "3 24 -11 -1 -3 -5", options: "0 3", totalColumns: 6, keyColumns: 2, columns: []string{"auto_id", "Tenant"}, descending: []bool{false, true}, want: "目标索引键列或顺序不匹配"},
+		{name: "wrong descending direction", keys: "24 -11 -1 -3 -5", options: "1", totalColumns: 5, keyColumns: 1, want: "目标索引键列或顺序不匹配"},
+		{name: "extra unique key is not an included attribute", keys: "24 3 -11 -1 -3 -5", options: "0 0", totalColumns: 6, keyColumns: 2, want: "目标索引键数量不匹配: 预期=1, indnkeyatts=2, indnatts=6"},
+		{name: "missing composite unique key", keys: "24 -11 -1 -3 -5", options: "0", totalColumns: 5, keyColumns: 1, columns: []string{"auto_id", "Tenant"}, want: "目标索引键数量不匹配: 预期=2, indnkeyatts=1, indnatts=5"},
+		{name: "no key columns", keys: "-11 -1 -3 -5", totalColumns: 4, keyColumns: 0, want: "目标索引目录元数据异常"},
+		{name: "negative key count", keys: "24", options: "0", totalColumns: 1, keyColumns: -1, want: "目标索引目录元数据异常"},
+		{name: "key count exceeds total", keys: "24", options: "0 0", totalColumns: 1, keyColumns: 2, want: "目标索引目录元数据异常"},
+		{name: "indkey shorter than total", keys: "24 -11 -1 -3 -5", options: "0", totalColumns: 6, keyColumns: 1, want: "目标索引目录元数据异常"},
+		{name: "indkey longer than total", keys: "24 -11 -1 -3 -5", options: "0", totalColumns: 4, keyColumns: 1, want: "目标索引目录元数据异常"},
+		{name: "missing key direction", keys: "24 3 -11 -1 -3 -5", options: "0", totalColumns: 6, keyColumns: 2, columns: []string{"auto_id", "Tenant"}, want: "目标索引目录元数据异常"},
+		{name: "extra key direction", keys: "24 -11 -1 -3 -5", options: "0 0", totalColumns: 5, keyColumns: 1, want: "目标索引目录元数据异常"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, mock := gaussTestWriter(t)
+			idx := gaussUnique()
+			if tc.columns != nil {
+				idx.Columns = tc.columns
+			}
+			idx.Descending = tc.descending
+			kind := tc.kind
+			if kind == "" {
+				kind = "G"
+			}
+			idx.GaussDB = &source.GaussDBIndexPlan{
+				Base:   source.GaussDBDistribution{Schema: "App", Table: "Patients", OID: 42, Mode: "H", Columns: []string{"patient_id"}},
+				Global: kind == "G", Columns: []string{"auto_id"},
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(gaussIndexSQL)).WithArgs("App", "Patients", false, "auto_id").WillReturnRows(gaussIndexRows(true, kind, tc.totalColumns, tc.keyColumns, tc.keys, tc.options))
+			gaussExpectColumns(mock, 42)
+			if kind == "G" && tc.want == "" {
+				gaussExpectGlobalDistribution(mock, "1")
+			}
+			err := w.verifyGaussDBIndex(context.Background(), idx)
+			if tc.want == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+				if tc.want == "目标索引目录元数据异常" {
+					require.ErrorContains(t, err, "预期键列=")
+					require.ErrorContains(t, err, "indnatts=")
+					require.ErrorContains(t, err, "indnkeyatts=")
+					require.ErrorContains(t, err, "indkey列数=")
+					require.ErrorContains(t, err, "indoption列数=")
+				}
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestGaussDBDuplicateIndexRejectsDifferentUniqueKeys(t *testing.T) {
+	w, mock := gaussTestWriter(t)
+	gaussExpectTable(mock, 42, "1")
+	gaussExpectGTM(mock, gaussTestVersion, "off", "1")
+	idx, err := w.PlanGaussDBIndex(context.Background(), gaussUnique())
+	require.NoError(t, err)
+	gaussExpectTable(mock, 42, "1")
+	gaussExpectGTM(mock, gaussTestVersion, "off", "1")
+	mock.ExpectExec(regexp.QuoteMeta(dialect.JoinSQL(w.dia.IndexStatements("App", idx)))).WillReturnError(&pq.Error{Code: "42P07"})
+	mock.ExpectQuery(regexp.QuoteMeta(gaussIndexSQL)).WithArgs("App", "Patients", false, "auto_id").WillReturnRows(gaussIndexRows(true, "G", 6, 2, "24 3 -11 -1 -3 -5", "0 0"))
+	gaussExpectColumns(mock, 42)
+	require.ErrorContains(t, w.CreateIndex(context.Background(), idx), "目标索引键数量不匹配: 预期=1, indnkeyatts=2, indnatts=6")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInspectRepairGaussDBGSIUsesKeyCountAndChecksDistribution(t *testing.T) {
+	for _, tc := range []struct{ name, distribution, status string }{
+		{"matching GSI", "1", "succeeded"},
+		{"different GSI distribution", "2", "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, mock := gaussTestWriter(t)
+			gaussExpectTable(mock, 42, "1")
+			gaussExpectGTM(mock, gaussTestVersion, "off", "1")
+			idx, err := w.PlanGaussDBIndex(context.Background(), gaussUnique())
+			require.NoError(t, err)
+			gaussExpectTable(mock, 42, "1")
+			gaussExpectGTM(mock, gaussTestVersion, "off", "1")
+			gaussExpectIndex(mock, true, "G", "24 -11 -1 -3 -5")
+			gaussExpectColumns(mock, 42)
+			gaussExpectGlobalDistribution(mock, tc.distribution)
+			v, err := InspectRepair(context.Background(), w, repair.Object{Kind: "index", Schema: "App", Table: "Patients", TargetName: "auto_id", Index: &idx})
+			require.NoError(t, err)
+			require.Equal(t, tc.status, v.Status)
+			if tc.status == "failed" {
+				require.Contains(t, v.Message, "目标 GSI 分布列不匹配")
+			}
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
