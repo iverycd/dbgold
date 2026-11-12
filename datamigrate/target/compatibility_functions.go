@@ -122,7 +122,7 @@ func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product stri
 		schema = report.Items[0].Schema
 	}
 	for _, spec := range builtinCompatibilitySpecs {
-		itemReport, err := ensurePGBuiltinCompatibility(ctx, db, schema, spec)
+		itemReport, err := ensurePGBuiltinCompatibility(ctx, db, schema, product, spec)
 		report.Items = append(report.Items, itemReport.Items...)
 		if schema == "" && len(itemReport.Items) > 0 {
 			schema = itemReport.Items[0].Schema

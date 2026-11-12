@@ -392,10 +392,50 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
 }
 
 for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
+  test(`${view} shows compatibility functions and procedures together on the first overview page`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const bindings = `report, overviewRows, exportReport${view === 'DataMigrationJobDetailView' ? ', job' : ''}`
+      const h = scope.run(() => execute(`views/${view}`, bindings, { jobID: 'job-repairs' }))
+      const report = emptyReport()
+      report.compatibility_functions = {
+        total: 20, success: 19, failed: 1, created: 4, reused: 15,
+        items: [
+          ...Array.from({ length: 17 }, (_, index) => ({
+            name: `function_${index}`, schema: 'app', status: index < 3 ? 'created' : 'reused',
+          })),
+          { kind: 'procedure', name: 'changedatatohistory', schema: 'app', status: 'created' },
+          { kind: 'procedure', name: 'changedatatomain', schema: 'app', status: 'reused' },
+          { kind: 'procedure', name: 'createpvi', schema: 'app', status: 'failed', error: 'procedure unavailable' },
+        ],
+      }
+      h.values.report.value = report
+      if (h.values.job) h.values.job.value = { job_id: 'job-repairs' }
+
+      assert.match(h.descriptor.template.content, /<a-table\s+:data="overviewRows"\s+row-key="key"\s+:pagination="\{ pageSize: 10 \}"/)
+      async function pageLabels(current) {
+        const app = Vue.createSSRApp({ render: () => Vue.h(Arco.Table, {
+          data: h.values.overviewRows.value, rowKey: 'key', columns: [{ dataIndex: 'label' }],
+          pagination: { pageSize: 10, current },
+        }) })
+        const html = await renderToString(app)
+        return Array.from(html.matchAll(/class="arco-table-td-content">([^<]+)<\/span>/g), match => match[1])
+      }
+      assert.deepEqual(await pageLabels(1), ['表', '数据写入', '主键', '视图', '索引', '外键', '序列', '注释', '兼容函数', '兼容存储过程'])
+      assert.deepEqual(await pageLabels(2), ['触发器'])
+
+      await h.values.exportReport()
+      const text = await h.downloads[0].text()
+      assert.match(text, /^触发器[^\n]*\n兼容函数\s+总计 17[^\n]*\n兼容存储过程\s+总计 3\s+成功 2\s+失败 1/m)
+    } finally { scope.stop() }
+  })
+}
+
+for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
   test(`${view} exports saved compatibility function results without changing business counts`, async () => {
     const scope = Vue.effectScope()
     try {
-      const h = scope.run(() => execute(`views/${view}`, `report, exportReport${view === 'DataMigrationJobDetailView' ? ', job, categoryRows, failedItems' : ', tableRows'}`, { jobID: 'job-repairs' }))
+      const h = scope.run(() => execute(`views/${view}`, `report, overviewRows, exportReport${view === 'DataMigrationJobDetailView' ? ', job, categoryRows, failedItems' : ', tableRows'}`, { jobID: 'job-repairs' }))
       const empty = () => ({ total: 0, success: 0, failed: 0, items: [] })
       const r = { rowCounts: [], compatibility_functions: { total: 2, success: 1, failed: 1, created: 0, reused: 1, items: [
         { name: 'get_uuid', schema: 'saved_schema', status: 'reused', ddl: 'SAVED DEFINITION', error: '' },
@@ -408,6 +448,7 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
       const text = await h.downloads[0].text()
       for (const value of ['saved_schema.get_uuid：复用', 'saved_schema.GET_UUID：失败', 'SAVED DEFINITION', 'SAVED FAILED DDL', 'permission denied']) assert.ok(text.includes(value), value)
       const rows = h.values.categoryRows?.value ?? h.values.tableRows.value
+      assert.deepEqual(Array.from(h.values.overviewRows.value, row => row.key), Array.from(rows, row => row.key))
       assert.equal(rows.find(row => row.key === 'compatibility_functions').failed, 1)
       assert.equal(rows.find(row => row.key === 'views').total, 0)
       if (h.values.failedItems) assert.equal(h.values.failedItems.value.length, 0)

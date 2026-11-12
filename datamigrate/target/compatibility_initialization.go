@@ -31,6 +31,9 @@ var builtinCompatibilitySpecs = []compatibilityFunctionSpec{
 	{name: "sec_to_dhm", signature: "sec_to_dhm(p_sec bigint)", inputs: []string{"bigint"}},
 	{name: "selectallusercount", signature: "selectallusercount()"},
 	{name: "stuff", signature: "stuff(p_old varchar, p_start integer, p_length integer, p_replace varchar)", inputs: []string{"character varying", "integer", "integer", "character varying"}},
+	{name: "getdate", signature: "getdate()"},
+	{name: "getrowid", signature: "getrowid()"},
+	{name: "isnull", signature: "isnull(i_obj varchar, i_obj2 varchar)", inputs: []string{"character varying", "character varying"}},
 }
 
 func (s compatibilityFunctionSpec) inputPredicate() string {
@@ -64,11 +67,11 @@ func (s compatibilityFunctionSpec) conflictingCallsPredicate() string {
 	return "(" + strings.Join(calls, " OR ") + ")"
 }
 
-func ensurePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema string, spec compatibilityFunctionSpec) (*CompatibilityFunctionsReport, error) {
+func ensurePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema, product string, spec compatibilityFunctionSpec) (*CompatibilityFunctionsReport, error) {
 	var report *CompatibilityFunctionsReport
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		report, err = preparePGBuiltinCompatibility(ctx, db, schema, spec)
+		report, err = preparePGBuiltinCompatibility(ctx, db, schema, product, spec)
 		if err == nil || !compatibilityRace(err) || ctx.Err() != nil {
 			break
 		}
@@ -78,7 +81,7 @@ func ensurePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema string
 
 // Compatibility initialization is deliberately per function: a failed pinyin
 // function must never roll back a successfully committed UUID or row counter.
-func preparePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema string, spec compatibilityFunctionSpec) (report *CompatibilityFunctionsReport, resultErr error) {
+func preparePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema, product string, spec compatibilityFunctionSpec) (report *CompatibilityFunctionsReport, resultErr error) {
 	report = &CompatibilityFunctionsReport{Items: []CompatibilityFunctionResult{{Name: spec.name, Signature: spec.signature, Schema: schema}}}
 	defer func() { report.finish(resultErr) }()
 	item := &report.Items[0]
@@ -157,7 +160,7 @@ func preparePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema strin
 		}
 		return report, nil
 	}
-	item.DDL = builtinFunctionDDL(schema, catalog, spec.name)
+	item.DDL = builtinFunctionDDL(schema, catalog, spec.name, product)
 	if _, err = tx.ExecContext(ctx, item.DDL); err != nil {
 		return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, spec.signature, err)
 	}

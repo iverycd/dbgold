@@ -13,7 +13,7 @@ import Arco from '@arco-design/web-vue'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
-const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems, originalFailuresVisible, originalFailurePage, originalFailures, visibleOriginalFailures, showOriginalFailures, recordedFailureDDL };`, {
+const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, overviewRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems, originalFailuresVisible, originalFailurePage, originalFailures, visibleOriginalFailures, showOriginalFailures, recordedFailureDDL };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const renderCode = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code

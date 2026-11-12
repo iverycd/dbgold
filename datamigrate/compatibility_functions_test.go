@@ -43,6 +43,9 @@ func compatibilityTestItems() []target.CompatibilityFunctionResult {
 		{Name: "sec_to_dhm", Signature: "sec_to_dhm(p_sec bigint)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION sec_to_dhm"},
 		{Name: "selectallusercount", Signature: "selectallusercount()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION selectallusercount"},
 		{Name: "stuff", Signature: "stuff(p_old varchar, p_start integer, p_length integer, p_replace varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION stuff"},
+		{Name: "getdate", Signature: "getdate()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getdate"},
+		{Name: "getrowid", Signature: "getrowid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION getrowid"},
+		{Name: "isnull", Signature: "isnull(i_obj varchar, i_obj2 varchar)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION isnull"},
 		{Name: "changedatatohistory", Kind: "procedure", Signature: "changedatatohistory(p_processversioninstanceguid varchar)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE changedatatohistory"},
 		{Name: "changedatatomain", Kind: "procedure", Signature: "changedatatomain(p_processversioninstanceguid varchar)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE changedatatomain"},
 		{Name: "createpvi", Kind: "procedure", Signature: "createpvi(p_processguid varchar, p_processversioninstanceguid varchar, p_userguid varchar, p_username varchar, p_workitemguid varchar, p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE createpvi"},
@@ -95,7 +98,7 @@ func (r *compatibilityViewReader) GetViews(context.Context) ([]source.ViewInfo, 
 
 func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
 	expectedItems := compatibilityTestItems()
-	require.Len(t, expectedItems, 17)
+	require.Len(t, expectedItems, 20)
 	for _, mode := range []string{"both", "schema_only", "data_only", "objects", "include"} {
 		t.Run(mode, func(t *testing.T) {
 			r := &mockReader{tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}}}
@@ -149,6 +152,9 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 			{"sec_to_dhm", "sec_to_DHM(90061)"},
 			{"selectallusercount", "selectAllUserCount()"},
 			{"stuff", "stuff('abcabc', 1, 3, 'x')"},
+			{"getdate", "GETDATE()"},
+			{"getrowid", "GETROWID()"},
+			{"isnull", "app.ISNULL(NULL, '默认值')"},
 		} {
 			function, call := sample.name, sample.call
 			t.Run(fmt.Sprintf("%t/%s", capture, function), func(t *testing.T) {
@@ -165,6 +171,14 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 				require.Equal(t, total-1, report.CompatibilityFunctions.Success)
 				require.Equal(t, total-1, report.CompatibilityFunctions.Created)
 				require.Equal(t, 1, report.CompatibilityFunctions.Failed)
+				for _, item := range report.CompatibilityFunctions.Items {
+					if item.Name == function {
+						require.Equal(t, "failed", item.Status)
+						require.Contains(t, item.Error, function+" unavailable")
+					} else {
+						require.Equal(t, "created", item.Status)
+					}
+				}
 				require.Equal(t, []string{"prepare", "table", "data", "view", "view"}, w.calls)
 				require.Equal(t, 1, report.Tables.Total)
 				require.Equal(t, 1, report.Tables.Success)

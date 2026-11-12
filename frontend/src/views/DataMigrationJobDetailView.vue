@@ -117,7 +117,7 @@
               <div class="tab-toolbar">
                 <div><h2>分类迁移结果</h2><p>按对象类型核对迁移数量和失败情况。</p></div>
               </div>
-              <a-table :data="categoryRows" row-key="key" :pagination="{ pageSize: 10 }" size="small" :scroll="{ x: 760 }"
+              <a-table :data="overviewRows" row-key="key" :pagination="{ pageSize: 10 }" size="small" :scroll="{ x: 760 }"
                 :row-class="record => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? '' : 'category-no-details'"
                 :expandable="{ icon: (_, record) => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? undefined : null }">
                 <template #columns>
@@ -267,7 +267,7 @@ import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
-import { reportCategories, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
@@ -311,6 +311,7 @@ let loadVersion = 0
 const jobID = computed(() => String(route.params.jobId || ''))
 const timingSummary = computed(() => migrationTimingSummary(job.value))
 const categoryRows = computed(() => report.value ? reportCategories(report.value) : [])
+const overviewRows = computed(() => migrationOverviewRows(categoryRows.value))
 const autoRepairTableCount = computed(() => groupAutoRepairs(report.value?.auto_repairs).length)
 const migratedCategories = computed(() => categoryRows.value.filter(row => !row.isInformational))
 const objectTotalCount = computed(() => migratedCategories.value.reduce((sum, row) => sum + Math.max(row.total, 0), 0))

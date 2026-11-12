@@ -18,7 +18,7 @@ var builtinUnicodeLicense string
 
 // builtinFunctionDDL creates only the requested lowercase canonical function.
 // The initializer checks for existing functions before executing this DDL.
-func builtinFunctionDDL(schema, catalog, name string) string {
+func builtinFunctionDDL(schema, catalog, name, product string) string {
 	cat := source.QuotePGIdent(catalog)
 	switch name {
 	case "auto_increase_itemid":
@@ -30,10 +30,59 @@ func builtinFunctionDDL(schema, catalog, name string) string {
 	case "fun_getpy":
 		body := strings.NewReplacer("{{CAT}}", cat, "{{MAPPING}}", builtinPinyinInitials, "{{LICENSE}}", builtinUnicodeLicense).Replace(pinyinInitialsBody)
 		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "(p_name varchar) RETURNS varchar LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
+	case "getdate":
+		statementTime := cat + ".statement_timestamp()"
+		if product == "vastbase" {
+			// Vastbase 3.0.9 can keep statement_timestamp fixed at BEGIN.
+			// The current backend reports each query's actual start time.
+			activity := cat + ".pg_stat_get_activity(" + cat + ".pg_backend_pid())"
+			statementTime = "coalesce((SELECT query_start FROM " + activity + "), " + statementTime + ")"
+		}
+		body := strings.NewReplacer("{{CAT}}", cat, "{{STATEMENT_TIME}}", statementTime).Replace(getDateBody)
+		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS timestamp without time zone LANGUAGE plpgsql STABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
+	case "getrowid":
+		body := strings.ReplaceAll(getRowIDBody, "{{CAT}}", cat)
+		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS integer LANGUAGE plpgsql VOLATILE SECURITY INVOKER AS " + sqlFunctionBody(body)
+	case "isnull":
+		body := strings.ReplaceAll(isNullBody, "{{CAT}}", cat)
+		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "(i_obj varchar, i_obj2 varchar) RETURNS varchar LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
 	default:
 		return businessFunctionDDL(schema, catalog, name)
 	}
 }
+
+const getDateBody = `BEGIN
+ RETURN {{CAT}}.date_trunc('second', {{STATEMENT_TIME}})::timestamp without time zone;
+END;`
+
+// Some PG-derived engines only expose the one-argument current_setting.
+// Catch a missing setting at the read so invalid seeds and failed writes surface.
+const getRowIDBody = `DECLARE
+ current_value text;
+ next_id integer;
+BEGIN
+ BEGIN
+  current_value := {{CAT}}.current_setting('dbgold.getrowid');
+ EXCEPTION WHEN undefined_object THEN
+  RETURN NULL;
+ END;
+ IF current_value IS NULL OR {{CAT}}.char_length(current_value) = 0 THEN
+  RETURN NULL;
+ END IF;
+ next_id := current_value::integer + 1;
+ PERFORM {{CAT}}.set_config('dbgold.getrowid', next_id::text, false);
+ RETURN next_id;
+END;`
+
+// Enforce the source's character limit explicitly because vendor varchar
+// assignment can truncate silently or measure length in bytes.
+const isNullBody = `BEGIN
+ IF {{CAT}}.char_length({{CAT}}.rtrim(i_obj, ' ')) > 200 OR
+    {{CAT}}.char_length({{CAT}}.rtrim(i_obj2, ' ')) > 200 THEN
+  RAISE EXCEPTION 'value too long for type character varying(200)' USING ERRCODE = '22001';
+ END IF;
+ RETURN coalesce({{CAT}}.left(i_obj, 200), {{CAT}}.left(i_obj2, 200));
+END;`
 
 // Resolve identifiers at invocation time so preparing a schema does not require
 // code_items to exist yet. Restrict lookup to the schema captured at creation;

@@ -90,7 +90,7 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 	for _, spec := range builtinCompatibilitySpecs {
 		name := spec.name
 		t.Run(name, func(t *testing.T) {
-			ddl := builtinFunctionDDL("app", "pg_catalog", name)
+			ddl := builtinFunctionDDL("app", "pg_catalog", name, "postgres")
 			require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "app"."`+name+`"(`))
 			require.Contains(t, ddl, "LANGUAGE plpgsql")
 			require.Contains(t, ddl, "SECURITY INVOKER")
@@ -100,20 +100,20 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 			require.NotContains(t, ddl, "CREATE EXTENSION")
 		})
 	}
-	require.Empty(t, builtinFunctionDDL("app", "pg_catalog", "unknown"))
-	countRows := builtinFunctionDDL("app", "pg_catalog", "count_rows")
+	require.Empty(t, builtinFunctionDDL("app", "pg_catalog", "unknown", "postgres"))
+	countRows := builtinFunctionDDL("app", "pg_catalog", "count_rows", "postgres")
 	require.Contains(t, countRows, "(table_name varchar, owner varchar DEFAULT NULL) RETURNS numeric")
 	require.Contains(t, countRows, `"pg_catalog".quote_ident(table_name)`)
 	require.Contains(t, countRows, `"pg_catalog".quote_ident(owner)`)
 	require.NotContains(t, countRows, "SET search_path")
-	auto := builtinFunctionDDL("app", "pg_catalog", "auto_increase_itemid")
+	auto := builtinFunctionDDL("app", "pg_catalog", "auto_increase_itemid", "postgres")
 	require.Contains(t, auto, `n.nspname=$dbgold$app$dbgold$`)
 	require.Contains(t, auto, `"pg_catalog".lower(c.relname::text)='code_items'`)
 	require.Contains(t, auto, `"pg_catalog".lower(a.attname::text)='itemid'`)
 	require.Contains(t, auto, "num+($1-1)=itemid")
 	require.Contains(t, auto, "INTO itemidfinal USING itemidtemp")
 	require.Contains(t, auto, "RETURN CAST(itemidfinal AS varchar)")
-	pinyin := builtinFunctionDDL("app", "pg_catalog", "fun_getpy")
+	pinyin := builtinFunctionDDL("app", "pg_catalog", "fun_getpy", "postgres")
 	require.Contains(t, pinyin, "IMMUTABLE")
 	require.Contains(t, pinyin, "UNICODE LICENSE V3")
 	require.Contains(t, pinyin, builtinUnicodeLicense)
@@ -130,12 +130,12 @@ func TestBuiltinFunctionDDLQuotesCapturedSchemaAndCatalog(t *testing.T) {
 	const catalog = `native'"\$$$dbgold_1$`
 	for _, spec := range builtinCompatibilitySpecs {
 		name := spec.name
-		ddl := builtinFunctionDDL(schema, catalog, name)
+		ddl := builtinFunctionDDL(schema, catalog, name, "postgres")
 		require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "target'""\$$$dbgold$"."`+name+`"(`))
 		require.Contains(t, ddl, `"native'""\$$$dbgold_1$".`)
 		require.NotContains(t, ddl, "AS 'DECLARE")
 	}
-	auto := builtinFunctionDDL(schema, catalog, "auto_increase_itemid")
+	auto := builtinFunctionDDL(schema, catalog, "auto_increase_itemid", "postgres")
 	require.Contains(t, auto, `n.nspname=$dbgold_1$target'"\$$$dbgold$$dbgold_1$`)
 	// The outer quote must avoid both delimiters present in nested literals.
 	require.Contains(t, auto, "SECURITY INVOKER AS $dbgold_2$DECLARE")
@@ -158,6 +158,9 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 		{"sec_to_dhm", []string{"bigint"}, "varchar", "IMMUTABLE"},
 		{"selectallusercount", nil, "varchar", "VOLATILE"},
 		{"stuff", []string{"character varying", "integer", "integer", "character varying"}, "varchar", "IMMUTABLE"},
+		{"getdate", nil, "timestamp without time zone", "STABLE"},
+		{"getrowid", nil, "integer", "VOLATILE"},
+		{"isnull", []string{"character varying", "character varying"}, "varchar", "IMMUTABLE"},
 	}
 	require.Len(t, builtinCompatibilitySpecs, 3+len(expected))
 	for i, sample := range expected {
@@ -167,14 +170,15 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 			require.Equal(t, sample.inputs, spec.inputs)
 			require.Zero(t, spec.minDefaults)
 			require.True(t, strings.HasPrefix(spec.signature, sample.name+"("))
-			ddl := builtinFunctionDDL("business", "pg_catalog", sample.name)
-			require.Contains(t, ddl, "RETURNS "+sample.returnType+" LANGUAGE plpgsql "+sample.volatility+" SECURITY INVOKER")
+			ddl := builtinFunctionDDL("business", "pg_catalog", sample.name, "postgres")
+			parameters := strings.TrimPrefix(spec.signature, sample.name)
+			require.Contains(t, ddl, parameters+" RETURNS "+sample.returnType+" LANGUAGE plpgsql "+sample.volatility+" SECURITY INVOKER")
 		})
 	}
 }
 
 func TestInterArrayDDLUsesPortableSliceAndIntegerDivision(t *testing.T) {
-	ddl := builtinFunctionDDL("business", "pg_catalog", "inter_arry")
+	ddl := builtinFunctionDDL("business", "pg_catalog", "inter_arry", "postgres")
 	// GaussDB parses :idx as a bind parameter, and / on integers produces
 	// a floating-point quotient. Preserve the original truncated prefix length.
 	require.Contains(t, ddl, "parts_a[1:(idx)]")

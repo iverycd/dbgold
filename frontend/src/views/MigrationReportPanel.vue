@@ -48,7 +48,7 @@
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
           <a-table
-            :data="tableRows"
+            :data="overviewRows"
             row-key="key"
             :pagination="{ pageSize: 10 }"
             :scroll="{ x: 600 }"
@@ -282,7 +282,7 @@ import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrement
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -353,6 +353,7 @@ async function showPreflight() {
 defineExpose({ showPreflight })
 
 const tableRows = computed(() => report.value ? reportCategories(report.value) : [])
+const overviewRows = computed(() => migrationOverviewRows(tableRows.value))
 const autoRepairTableCount = computed(() => groupAutoRepairs(report.value?.auto_repairs).length)
 
 const hasRowCounts = computed(() => (report.value?.rowCounts?.length ?? 0) > 0)

@@ -212,6 +212,19 @@ export function reportCategories(report: MigrationReport) {
   })
 }
 
+export function migrationOverviewRows(rows: ReturnType<typeof reportCategories>) {
+  if (!rows.some(row => row.compatibilityKind === 'procedure')) return rows
+
+  // Keep both compatibility rows together on the first page of the overview.
+  const afterComments = rows.findIndex(row => row.key === 'comments') + 1
+  const remainingRows = rows.slice(afterComments)
+  return [
+    ...rows.slice(0, afterComments),
+    ...remainingRows.filter(row => row.isCompatibility),
+    ...remainingRows.filter(row => !row.isCompatibility),
+  ]
+}
+
 type OriginalFailureEntry = { key: string; category: string } & (
   { name: string; item: ObjectResult; stageLabel: string } | { missing: number }
 )
