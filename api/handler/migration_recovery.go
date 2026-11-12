@@ -380,6 +380,8 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 		var firstErr error
 		sequenceColumns := map[string]bool{}
 		orderedRelated := orderedRecoveryObjects(fresh.Related)
+		var functionNames []string
+		functionNamesLoaded := false
 		for position, item := range orderedRelated {
 			if ctx.Err() != nil {
 				firstErr = ctx.Err()
@@ -401,9 +403,13 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				selectedUnits := nativeRecoveryPhaseUnits(item, "install")
 				units, executeErr := item.Units, error(nil)
 				if item.Native == nil || nativeRecoveryHasSelected(selectedUnits) {
+					if !functionNamesLoaded && pgCompatibilityRepairView(w.DBType(), item) {
+						functionNames = repairCompatibilityFunctionNames(ctx, r, j.JobID)
+						functionNamesLoaded = true
+					}
 					units, executeErr = target.ExecuteRepair(ctx, w, item, selectedUnits, func(units []repair.Unit) error {
 						return persistRepairProgress(a, item, nativeRecoveryMergeSelections(item, units), executedUnits)
-					})
+					}, functionNames...)
 				}
 				units = nativeRecoveryMergeSelections(item, units)
 				for i := range units {

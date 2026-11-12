@@ -1743,23 +1743,37 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 	if !target.SupportsCompatibilityFunctions(m.writer) {
 		return nil
 	}
-	var procedureNames []string
-	var discoveryErr error
+	var names target.CompatibilityRoutineNames
+	var functionDiscoveryErr, procedureDiscoveryErr error
+	names.Functions, functionDiscoveryErr = source.ListFunctionNames(ctx, m.reader)
+	if ctx.Err() != nil {
+		m.log.Warn("任务已取消")
+		return ctx.Err()
+	}
 	if reader, ok := m.reader.(interface {
 		ListProcedureNames(context.Context) ([]string, error)
 	}); ok {
-		procedureNames, discoveryErr = reader.ListProcedureNames(ctx)
-		if discoveryErr != nil {
-			procedureNames = nil
+		names.Procedures, procedureDiscoveryErr = reader.ListProcedureNames(ctx)
+		if procedureDiscoveryErr != nil {
+			names.Procedures = nil
 		}
 		if ctx.Err() != nil {
 			m.log.Warn("任务已取消")
 			return ctx.Err()
 		}
 	}
-	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer, procedureNames...)
-	if discoveryErr != nil {
-		discoveryErr = fmt.Errorf("读取源库存储过程列表失败: %w", discoveryErr)
+	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer, names)
+	for _, discovery := range []struct {
+		kind, label string
+		err         error
+	}{
+		{kind: "function", label: "源库函数列表", err: functionDiscoveryErr},
+		{kind: "procedure", label: "源库存储过程列表", err: procedureDiscoveryErr},
+	} {
+		if discovery.err == nil {
+			continue
+		}
+		discoveryErr := fmt.Errorf("读取%s失败: %w", discovery.label, discovery.err)
 		if report == nil {
 			report = &target.CompatibilityFunctionsReport{}
 		}
@@ -1767,9 +1781,8 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 		if schema == "" && len(report.Items) > 0 {
 			schema = report.Items[0].Schema
 		}
-		const label = "源库存储过程列表"
 		report.Items = append(report.Items, target.CompatibilityFunctionResult{
-			Name: label, Kind: "procedure", Signature: label, Schema: schema, Status: "failed", Error: discoveryErr.Error(),
+			Name: discovery.label, Kind: discovery.kind, Signature: discovery.label, Schema: schema, Status: "failed", Error: discoveryErr.Error(),
 		})
 		report.Total++
 		report.Failed++

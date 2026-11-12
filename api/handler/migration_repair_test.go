@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dbgold/config"
 	"dbgold/datamigrate"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/target"
 	"dbgold/store"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -60,6 +62,41 @@ func seedHandlerRepair(t *testing.T) {
 	obj := repair.Object{ID: "table", Kind: "table", TargetName: "Orders", Table: "Orders", Schema: "app", Status: "failed", RequiresReview: true, Units: []repair.Unit{{ID: "one", SQL: `CREATE TABLE "app"."Orders" (id integer)`, OriginalSQL: `CREATE TABLE "app"."Orders" (id integer)`, Status: "failed", Selected: true}}}
 	require.NoError(t, store.SeedMigrationRepairs(&store.MigrationRepairBinding{JobID: "job", Version: 1}, []store.MigrationRepairObject{{JobID: "job", ObjectID: "table", Version: 1, ObjectJSON: repairJSON(obj)}}))
 }
+
+func TestPGViewRepairAcceptsUnavailableOptionalSource(t *testing.T) {
+	seedHandlerRepair(t)
+	ledger, err := store.DB.DB()
+	require.NoError(t, err)
+	ledger.SetMaxOpenConns(1)
+	src := &store.Connection{OwnerID: 2, DBType: "mysql", Database: "source"}
+	dst := &store.Connection{OwnerID: 1, DBType: "postgres"}
+	require.NoError(t, store.CreateConnection(src))
+	require.NoError(t, store.CreateConnection(dst))
+	require.NoError(t, store.DB.Model(&store.DataMigrationJob{}).Where("job_id = ?", "job").
+		Updates(map[string]any{"src_db_type": src.DBType, "dst_db_type": dst.DBType}).Error)
+	require.NoError(t, store.DB.Model(&store.MigrationRepairBinding{}).Where("job_id = ?", "job").
+		Updates(map[string]any{"src_conn_id": src.ID, "dst_conn_id": dst.ID, "source_database": "source", "target_schema": "app"}).Error)
+	statement := `CREATE VIEW "app"."v" AS SELECT 1`
+	obj := repair.Object{ID: "view", Kind: "view", Name: "v", TargetName: "v", Schema: "app", Status: "failed",
+		Units: []repair.Unit{{ID: "create", SQL: statement, OriginalSQL: statement, Selected: true, Status: "failed"}}}
+	require.NoError(t, store.DB.Create(&store.MigrationRepairObject{JobID: "job", ObjectID: obj.ID, Version: 1, ObjectJSON: repairJSON(obj)}).Error)
+	const targetError = "target writer reached"
+	originalWriter := newMigrationRepairWriter
+	newMigrationRepairWriter = func(*store.Connection, string, target.ConnPoolConfig) (target.Writer, error) {
+		return nil, errors.New(targetError)
+	}
+	t.Cleanup(func() { newMigrationRepairWriter = originalWriter })
+
+	response := repairRequest(t, http.MethodPost, "/jobs/job/repairs/view", `{"version":1,"confirmed":true,"request_id":"view-optional-source"}`, 1, ExecuteMigrationRepair)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+	var attempt store.MigrationRepairAttempt
+	require.Eventually(t, func() bool {
+		return store.DB.First(&attempt, "job_id = ? AND request_id = ?", "job", "view-optional-source").Error == nil && attempt.Status != "running"
+	}, 3*time.Second, 10*time.Millisecond)
+	require.Equal(t, "failed", attempt.Status)
+	require.Equal(t, targetError, attempt.Error)
+}
+
 func TestRepairDraftOwnershipVersionAndStatusCannotBeForged(t *testing.T) {
 	seedHandlerRepair(t)
 	body := `{"version":1,"reviewed":true,"units":[{"id":"one","sql":"CREATE TABLE \"app\".\"Orders\" (id bigint)","status":"succeeded","selected":true}]}`

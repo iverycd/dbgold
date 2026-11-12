@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"dbgold/datamigrate/source"
@@ -44,10 +45,16 @@ type CompatibilityExtensionResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// CompatibilityRoutineNames is the source catalog inventory for one migration scope.
+type CompatibilityRoutineNames struct {
+	Functions  []string
+	Procedures []string
+}
+
 // Optional capability: existing Writer implementations and third-party writers
 // do not acquire a new required method.
 type compatibilityInitializer interface {
-	EnsureCompatibilityFunctions(context.Context, ...string) (*CompatibilityFunctionsReport, error)
+	EnsureCompatibilityFunctions(context.Context, CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error)
 }
 
 func pgCompatibilityInitializer(w Writer) compatibilityInitializer {
@@ -62,27 +69,26 @@ func SupportsCompatibilityFunctions(w Writer) bool {
 	return pgCompatibilityInitializer(w) != nil
 }
 
-// EnsureCompatibilityFunctions initializes PG-family functions and any built-in
-// procedures matching procedureNames case-insensitively. Omit procedureNames to
-// initialize only functions.
-func EnsureCompatibilityFunctions(ctx context.Context, w Writer, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+// EnsureCompatibilityFunctions initializes only built-ins matching a source
+// routine of the same kind and name.
+func EnsureCompatibilityFunctions(ctx context.Context, w Writer, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
 	if initializer := pgCompatibilityInitializer(w); initializer != nil {
-		return initializer.EnsureCompatibilityFunctions(ctx, procedureNames...)
+		return initializer.EnsureCompatibilityFunctions(ctx, names)
 	}
 	return nil, nil
 }
 
-func (w *PostgresWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
+func (w *PostgresWriter) EnsureCompatibilityFunctions(ctx context.Context, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), names)
 }
-func (w *GaussDBWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
+func (w *GaussDBWriter) EnsureCompatibilityFunctions(ctx context.Context, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), names)
 }
-func (w *HighGoWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
+func (w *HighGoWriter) EnsureCompatibilityFunctions(ctx context.Context, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), names)
 }
-func (w *KingbaseWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
+func (w *KingbaseWriter) EnsureCompatibilityFunctions(ctx context.Context, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), names)
 }
 
 func uuidCandidates(product string) []string {
@@ -125,20 +131,20 @@ func compatibilityRace(err error) bool {
 	return code == "42723" || code == "42710" || code == "23505"
 }
 
-func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product string, procedureNames []string) (*CompatibilityFunctionsReport, error) {
-	report, uuidErr := ensurePGUUIDCompatibility(ctx, db, schema, product)
+func hasCompatibilityName(names []string, wanted string) bool {
+	return slices.ContainsFunc(names, func(name string) bool { return strings.EqualFold(name, wanted) })
+}
+
+func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product string, names CompatibilityRoutineNames) (*CompatibilityFunctionsReport, error) {
+	report := &CompatibilityFunctionsReport{}
+	// Each routine accounts for its own rollback. Finish the aggregate even
+	// when cancellation interrupts the inventory.
+	defer report.finish(nil)
 	var failures []error
-	if uuidErr != nil {
-		failures = append(failures, uuidErr)
-	}
-	// Resolve a default schema once so all routines belong to the same target,
-	// even though each routine owns an independent transaction.
-	if schema == "" && len(report.Items) > 0 {
-		schema = report.Items[0].Schema
-	}
-	for _, spec := range builtinCompatibilitySpecs {
-		itemReport, err := ensurePGBuiltinCompatibility(ctx, db, schema, product, spec)
+	add := func(itemReport *CompatibilityFunctionsReport, err error) {
 		report.Items = append(report.Items, itemReport.Items...)
+		report.Extensions = append(report.Extensions, itemReport.Extensions...)
+		// Resolve a default schema once across the independent transactions.
 		if schema == "" && len(itemReport.Items) > 0 {
 			schema = itemReport.Items[0].Schema
 		}
@@ -146,14 +152,18 @@ func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product stri
 			failures = append(failures, err)
 		}
 	}
-	procedureReport, procedureErr := ensurePGProcedureCompatibility(ctx, db, schema, product, procedureNames)
-	report.Items = append(report.Items, procedureReport.Items...)
-	if procedureErr != nil {
-		failures = append(failures, procedureErr)
+	if ctx.Err() == nil && hasCompatibilityName(names.Functions, "get_uuid") {
+		add(ensurePGUUIDCompatibility(ctx, db, schema, product))
 	}
-	// Per-routine reports have already accounted for their own rollback. An
-	// unrelated failure must not relabel committed routines or UUID extensions.
-	report.finish(nil)
+	for _, spec := range builtinCompatibilitySpecs {
+		if ctx.Err() != nil {
+			return report, errors.Join(append(failures, ctx.Err())...)
+		}
+		if hasCompatibilityName(names.Functions, spec.name) {
+			add(ensurePGBuiltinCompatibility(ctx, db, schema, product, spec))
+		}
+	}
+	add(ensurePGProcedureCompatibility(ctx, db, schema, product, names.Procedures))
 	return report, errors.Join(failures...)
 }
 
@@ -194,6 +204,15 @@ func (r *CompatibilityFunctionsReport) finish(err error) {
 				r.Extensions[i].Status = "rolled_back"
 				r.Extensions[i].Error = err.Error()
 			}
+		}
+	}
+}
+
+func (r *CompatibilityFunctionsReport) extensionCommitUnknown(err error) {
+	for i := range r.Extensions {
+		if r.Extensions[i].Status == "installed" {
+			r.Extensions[i].Status = "unknown"
+			r.Extensions[i].Error = err.Error()
 		}
 	}
 }
@@ -256,7 +275,10 @@ func preparePGUUIDCompatibility(ctx context.Context, db *sql.DB, schema, product
 		return report, err
 	}
 	var oid int64
-	err = tx.QueryRowContext(ctx, `SELECT p.oid FROM `+catalog+`.pg_proc p JOIN `+catalog+`.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2 AND p.pronargs=0 AND p.prorettype<>0`, schema, item.Name).Scan(&oid)
+	spec := compatibilityFunctionSpec{name: item.Name}
+	query := `SELECT p.oid FROM ` + catalog + `.pg_proc p JOIN ` + catalog + `.pg_namespace n ON n.oid=p.pronamespace
+		WHERE n.nspname=$1 AND NOT p.proretset AND p.provariadic=0 AND p.prorettype NOT IN (0,2278) AND ` + spec.inputPredicate()
+	err = tx.QueryRowContext(ctx, query+" AND p.proname=$2", schema, item.Name).Scan(&oid)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Compatibility modes can resolve a lowercase call to an existing
 		// uppercase catalog entry. Resolve only our schema-qualified lowercase
@@ -265,7 +287,12 @@ func preparePGUUIDCompatibility(ctx context.Context, db *sql.DB, schema, product
 			return tx.QueryRowContext(ctx, `SELECT $1::regprocedure::oid`, qualifiedFunction(schema, item.Name)+"()").Scan(&oid)
 		})
 		if compatibilitySQLState(err) == "42883" {
-			err = nil // No function resolves to the lowercase call.
+			err = nil // No routine resolves to the lowercase call.
+		} else if err == nil {
+			err = tx.QueryRowContext(ctx, query+" AND p.oid=$2", schema, oid).Scan(&oid)
+			if errors.Is(err, sql.ErrNoRows) {
+				return report, fmt.Errorf("已有 %s.%s() 不是兼容的普通标量函数，已保留原定义", schema, item.Name)
+			}
 		}
 	}
 	if err != nil {
@@ -293,12 +320,7 @@ func preparePGUUIDCompatibility(ctx context.Context, db *sql.DB, schema, product
 	}
 	item.Status = "created"
 	if err = tx.Commit(); err != nil {
-		for i := range report.Extensions {
-			if report.Extensions[i].Status == "installed" {
-				report.Extensions[i].Status = "unknown"
-				report.Extensions[i].Error = err.Error()
-			}
-		}
+		report.extensionCommitUnknown(err)
 		return report, fmt.Errorf("提交 get_uuid 初始化事务失败，执行结果需核验: %w", err)
 	}
 	return report, nil

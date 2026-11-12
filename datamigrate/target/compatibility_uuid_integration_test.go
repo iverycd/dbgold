@@ -125,7 +125,7 @@ func TestCompatibilityKingbaseNativeIntegration(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			report, err := EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
+			report, err := EnsureCompatibilityFunctions(ctx, w, allCompatibilityRoutineNames())
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)

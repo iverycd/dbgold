@@ -3,6 +3,10 @@ package target
 import "strings"
 
 func autoMarkCountDDL(schema, catalog string, native bool) string {
+	return autoMarkCountDDLWithDate(schema, catalog, native, `{{schema}}."getdate"()`)
+}
+
+func autoMarkCountDDLWithDate(schema, catalog string, native bool, dateExpression string) string {
 	tables := []pgProcedureTable{
 		{"examuser", "examuserlist", strings.Fields("examguid userguid code enddate examispass")},
 		{"exam", "examlist", strings.Fields("examguid singlescore multiscore judgescore")},
@@ -12,7 +16,7 @@ func autoMarkCountDDL(schema, catalog string, native bool) string {
 	}
 	const userMatch = ` WHERE u.{{examuser.examguid}}=$1 AND u.{{examuser.userguid}}=$2`
 	const updateScore = `UPDATE {{examuser}} AS u SET {{examuser.code}}=$3`
-	const completeScore = updateScore + `, {{examuser.enddate}}={{schema}}."getdate"(), {{examuser.examispass}}=`
+	completeScore := updateScore + `, {{examuser.enddate}}=` + dateExpression + `, {{examuser.examispass}}=`
 	queries := map[string]string{
 		"INITIAL_SCORE": `SELECT u.{{examuser.code}} FROM {{examuser}} AS u` + userMatch + ` LIMIT 1 FOR UPDATE`,
 		"RESPONSES": `SELECT r.{{result.subjectguid}} AS subject_guid, r.{{result.answerid}} AS answer_id,

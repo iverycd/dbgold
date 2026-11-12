@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,6 +21,7 @@ const compatibilityCreatePVIProcedureSignature = "createpvi(p_processguid varcha
 
 type compatibilityProcedureSpec struct {
 	name, signature string
+	sourceName      string
 	inputs          []string
 	modes           string
 	minDefaults     int
@@ -30,7 +30,7 @@ type compatibilityProcedureSpec struct {
 	ddl             func(schema, catalog string, native bool) string
 }
 
-var compatibilityProcedureSpecs = []compatibilityProcedureSpec{
+var compatibilityProcedureSpecs = append([]compatibilityProcedureSpec{
 	{name: compatibilityProcedureName, signature: compatibilityProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToHistoryDDL},
 	{name: compatibilityMainProcedureName, signature: compatibilityMainProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToMainDDL},
 	{name: compatibilityCreatePVIProcedureName, signature: compatibilityCreatePVIProcedureSignature,
@@ -44,6 +44,13 @@ var compatibilityProcedureSpecs = []compatibilityProcedureSpec{
 		inputs: []string{"character varying"}, modes: "i", ddl: deleteProcessVersionInstanceDDL},
 	{name: "proc_cg_gonggaoinfo_delete", signature: "proc_cg_gonggaoinfo_delete(p_gonggaoguid varchar)",
 		inputs: []string{"character varying"}, modes: "i", ddl: procCGGongGaoInfoDeleteDDL},
+}, demoCompatibilityProcedureSpecs...)
+
+func (s compatibilityProcedureSpec) sourceCatalogName() string {
+	if s.sourceName != "" {
+		return s.sourceName
+	}
+	return s.name
 }
 
 func (s compatibilityProcedureSpec) inputPredicate() string {
@@ -74,11 +81,16 @@ func ensurePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pro
 	report := &CompatibilityFunctionsReport{}
 	var failures []error
 	for _, spec := range compatibilityProcedureSpecs {
-		if !slices.ContainsFunc(procedureNames, func(name string) bool { return strings.EqualFold(name, spec.name) }) {
+		if ctx.Err() != nil {
+			failures = append(failures, ctx.Err())
+			break
+		}
+		if !hasCompatibilityName(procedureNames, spec.sourceCatalogName()) {
 			continue
 		}
 		itemReport, err := ensurePGProcedureSpecCompatibility(ctx, db, schema, product, spec)
 		report.Items = append(report.Items, itemReport.Items...)
+		report.Extensions = append(report.Extensions, itemReport.Extensions...)
 		if schema == "" && len(itemReport.Items) > 0 {
 			schema = itemReport.Items[0].Schema
 		}
@@ -194,10 +206,14 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 			return report, fmt.Errorf("%s 初始化失败: 无法验证 DELETE RETURNING 数据修改 CTE 能力: %w", item.Name, err)
 		}
 	}
+	buildDDL, err := prepareCompatibilityProcedureDDL(ctx, tx, schema, catalog, product, spec, report)
+	if err != nil {
+		return report, fmt.Errorf("准备 %s.%s 失败: %w", schema, item.Signature, err)
+	}
 	preferNative := product == "gaussdb" || product == "vastbase" || product == "gbase" || product == "seabox"
 	var preferredErr error
 	for attempt, native := range []bool{preferNative, !preferNative} {
-		item.DDL = spec.ddl(schema, catalog, native)
+		item.DDL = buildDDL(native)
 		err = compatibilityProbe(ctx, tx, func() error {
 			_, createErr := tx.ExecContext(ctx, item.DDL)
 			return createErr
@@ -218,6 +234,7 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		preferredErr = err
 	}
 	if err = tx.Commit(); err != nil {
+		report.extensionCommitUnknown(err)
 		return report, fmt.Errorf("提交 %s 初始化事务失败，执行结果需核验: %w", item.Name, err)
 	}
 	item.Status = "created"
@@ -233,6 +250,10 @@ func compatibilityProcedureConflictingCallsPredicate(catalog string, spec compat
 	var calls []string
 	for arity := len(spec.inputs) - spec.minDefaults; arity <= len(spec.inputs); arity++ {
 		callable := fmt.Sprintf("((%s)>=%d OR p.provariadic<>0) AND (%s)-p.pronargdefaults-CASE WHEN p.provariadic<>0 THEN 1 ELSE 0 END<=%d", argc, arity, argc, arity)
+		if arity == 0 {
+			calls = append(calls, "("+callable+")")
+			continue
+		}
 		var typed, literal []string
 		for i := 0; i < arity; i++ {
 			argument := fmt.Sprintf("CASE WHEN p.prokind='p' THEN COALESCE(p.proallargtypes[%d],p.proargtypes[%d]) ELSE p.proargtypes[%d] END", i+1, i, i)

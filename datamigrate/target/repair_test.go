@@ -138,8 +138,6 @@ func TestRepairResultPersistenceFailureAfterSQLIsUnknown(t *testing.T) {
 			kind := "index"
 			if transaction {
 				kind = "view"
-				expectUUIDReused(m)
-				expectBuiltinFunctionsReused(m, "app")
 				m.ExpectBegin()
 				m.ExpectExec("SET LOCAL search_path").WillReturnResult(sqlmock.NewResult(0, 0))
 			} else {
@@ -198,16 +196,17 @@ func TestOriginalDDLObserverFailureIsNotIgnoredAsMissingTable(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
-func TestRepairViewUsesOriginalSchemaAndCommit(t *testing.T) {
+func TestRepairViewWithoutSourceInventoryUsesOriginalSchemaAndCommit(t *testing.T) {
 	w, m := repairPGMock(t)
-	expectUUIDReused(m)
-	expectBuiltinFunctionsReused(m, "app")
+	// The target can already contain the referenced function. Without a source
+	// inventory the repair sends the view SQL directly to the target.
+	statement := "CREATE OR REPLACE VIEW app.v AS SELECT get_uuid()"
 	m.ExpectBegin()
 	m.ExpectExec(regexp.QuoteMeta(`SET LOCAL search_path TO "app"`)).WillReturnResult(sqlmock.NewResult(0, 0))
-	m.ExpectExec("CREATE OR REPLACE VIEW").WillReturnResult(sqlmock.NewResult(0, 0))
+	m.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 0))
 	m.ExpectCommit()
 	m.ExpectClose()
-	u, e := ExecuteRepair(context.Background(), w, repair.Object{Kind: "view", Schema: "app"}, []repair.Unit{{SQL: "CREATE OR REPLACE VIEW app.v AS SELECT * FROM t", Selected: true}}, nil)
+	u, e := ExecuteRepair(context.Background(), w, repair.Object{Kind: "view", Schema: "app"}, []repair.Unit{{SQL: statement, Selected: true}}, nil)
 	require.NoError(t, e)
 	require.Equal(t, "succeeded", u[0].Status)
 	require.NoError(t, m.ExpectationsWereMet())

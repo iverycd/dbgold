@@ -52,7 +52,7 @@ func TestCompatibilityBusinessSQLIntegration(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					schema := newBusinessIntegrationSchema(t, ctx, db)
-					report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, product.name), allCompatibilityProcedureNames()...)
+					report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, product.name), allCompatibilityRoutineNames())
 					require.NoError(t, err, "initialization must not require business tables")
 					require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 					require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)

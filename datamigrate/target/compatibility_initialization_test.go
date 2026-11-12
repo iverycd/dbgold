@@ -16,9 +16,25 @@ import (
 func allCompatibilityProcedureNames() []string {
 	names := make([]string, 0, len(compatibilityProcedureSpecs))
 	for _, spec := range compatibilityProcedureSpecs {
-		names = append(names, spec.name)
+		names = append(names, spec.sourceCatalogName())
 	}
 	return names
+}
+
+func allCompatibilityRoutineNames() CompatibilityRoutineNames {
+	names := CompatibilityRoutineNames{Functions: []string{"get_uuid"}, Procedures: allCompatibilityProcedureNames()}
+	for _, spec := range builtinCompatibilitySpecs {
+		names.Functions = append(names.Functions, spec.name)
+	}
+	return names
+}
+
+func expectCompatibilityDependency(m sqlmock.Sqlmock, schema, name, args, result string) {
+	expectUUIDSavepoint(m)
+	m.ExpectQuery(`SELECT EXISTS .*p.oid=\$1::regprocedure::oid`).
+		WithArgs(qualifiedFunction(schema, name)+"("+args+")", schema, result).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectUUIDProbe(m, false)
 }
 
 func expectBuiltinMissingForInitialization(m sqlmock.Sqlmock, schema string, spec compatibilityFunctionSpec) {
@@ -40,6 +56,14 @@ func expectBuiltinNoConflictsForInitialization(m sqlmock.Sqlmock, schema, name s
 
 func expectBuiltinCreatedForInitialization(m sqlmock.Sqlmock, schema string, spec compatibilityFunctionSpec, createErr error) {
 	expectBuiltinMissingForInitialization(m, schema, spec)
+	switch spec.name {
+	case "convertguidlist":
+		expectCompatibilityDependency(m, schema, "convertguid", "character varying,character varying", "character varying")
+	case "getcategoryscore":
+		expectCompatibilityDependency(m, schema, "getscore", "character varying", "integer")
+	case "newid":
+		expectCompatibilityDependency(m, schema, "get_uuid", "", "character varying")
+	}
 	create := m.ExpectExec(regexp.QuoteMeta("CREATE FUNCTION " + qualifiedFunction(schema, spec.name)))
 	if createErr != nil {
 		create.WillReturnError(createErr)
@@ -75,7 +99,7 @@ func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 			for _, spec := range compatibilityProcedureSpecs {
 				expectProcedureCreatedForInitialization(mock, "app", product, nil, spec)
 			}
-			report, err := EnsureCompatibilityFunctions(context.Background(), actual, allCompatibilityProcedureNames()...)
+			report, err := EnsureCompatibilityFunctions(context.Background(), actual, allCompatibilityRoutineNames())
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
@@ -113,22 +137,17 @@ func TestCompatibilityProceduresMatchSourceNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, mock := repairPGMock(t)
-			expectUUIDReused(mock)
-			for _, spec := range builtinCompatibilitySpecs {
-				expectBuiltinCreatedForInitialization(mock, "app", spec, nil)
-			}
 			for _, spec := range tc.want {
 				expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
 			}
 
-			report, err := EnsureCompatibilityFunctions(context.Background(), w, tc.inventory...)
+			report, err := EnsureCompatibilityFunctions(context.Background(), w, CompatibilityRoutineNames{Procedures: tc.inventory})
 			require.NoError(t, err)
-			functionCount := 1 + len(builtinCompatibilitySpecs)
-			require.Equal(t, functionCount+len(tc.want), report.Total)
+			require.Equal(t, len(tc.want), report.Total)
 			require.Equal(t, report.Total, report.Success)
 			require.Len(t, report.Items, report.Total)
 			for i, spec := range tc.want {
-				item := report.Items[functionCount+i]
+				item := report.Items[i]
 				require.Equal(t, "procedure", item.Kind)
 				require.Equal(t, spec.name, item.Name)
 				require.Equal(t, spec.signature, item.Signature)
@@ -167,7 +186,7 @@ func TestCompatibilityFunctionFailuresDoNotRollbackOtherFunctions(t *testing.T) 
 				}
 				expectProcedureCreatedForInitialization(mock, "app", "postgres", procedureErr, spec)
 			}
-			report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityProcedureNames()...)
+			report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityRoutineNames())
 			require.Error(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
@@ -246,7 +265,7 @@ func TestCompatibilityPinsDefaultSchemaForIndependentTransactions(t *testing.T) 
 	for _, spec := range compatibilityProcedureSpecs {
 		expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
 	}
-	report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityProcedureNames()...)
+	report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityRoutineNames())
 	require.NoError(t, err)
 	for _, item := range report.Items {
 		require.Equal(t, "app", item.Schema)

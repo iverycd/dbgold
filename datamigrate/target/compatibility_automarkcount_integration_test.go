@@ -11,7 +11,7 @@ import (
 func TestAutoMarkCountSQLIntegration(t *testing.T) {
 	testPGCompatibilityProducts(t, func(t *testing.T, ctx context.Context, db *sql.DB, product string) {
 		schema := newBusinessIntegrationSchema(t, ctx, db)
-		report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, product), "AutoMarkCount")
+		report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, product), CompatibilityRoutineNames{Procedures: []string{"AutoMarkCount"}})
 		require.NoError(t, err, "initialization must succeed before the exam tables exist")
 		require.Equal(t, "automarkcount", report.Items[len(report.Items)-1].Name)
 		require.Equal(t, "created", report.Items[len(report.Items)-1].Status)

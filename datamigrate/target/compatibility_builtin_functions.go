@@ -31,14 +31,7 @@ func builtinFunctionDDL(schema, catalog, name, product string) string {
 		body := strings.NewReplacer("{{CAT}}", cat, "{{MAPPING}}", builtinPinyinInitials, "{{LICENSE}}", builtinUnicodeLicense).Replace(pinyinInitialsBody)
 		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "(p_name varchar) RETURNS varchar LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
 	case "getdate":
-		statementTime := cat + ".statement_timestamp()"
-		if product == "vastbase" {
-			// Vastbase 3.0.9 can keep statement_timestamp fixed at BEGIN.
-			// The current backend reports each query's actual start time.
-			activity := cat + ".pg_stat_get_activity(" + cat + ".pg_backend_pid())"
-			statementTime = "coalesce((SELECT query_start FROM " + activity + "), " + statementTime + ")"
-		}
-		body := strings.NewReplacer("{{CAT}}", cat, "{{STATEMENT_TIME}}", statementTime).Replace(getDateBody)
+		body := "BEGIN\n RETURN " + getDateExpression(cat, product) + ";\nEND;"
 		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "() RETURNS timestamp without time zone LANGUAGE plpgsql STABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
 	case "getrowid":
 		body := strings.ReplaceAll(getRowIDBody, "{{CAT}}", cat)
@@ -47,13 +40,23 @@ func builtinFunctionDDL(schema, catalog, name, product string) string {
 		body := strings.ReplaceAll(isNullBody, "{{CAT}}", cat)
 		return "CREATE FUNCTION " + qualifiedFunction(schema, name) + "(i_obj varchar, i_obj2 varchar) RETURNS varchar LANGUAGE plpgsql IMMUTABLE SECURITY INVOKER AS " + sqlFunctionBody(body)
 	default:
-		return businessFunctionDDL(schema, catalog, name)
+		if ddl := businessFunctionDDL(schema, catalog, name); ddl != "" {
+			return ddl
+		}
+		return demoFunctionDDL(schema, catalog, name, product)
 	}
 }
 
-const getDateBody = `BEGIN
- RETURN {{CAT}}.date_trunc('second', {{STATEMENT_TIME}})::timestamp without time zone;
-END;`
+func getDateExpression(catalog, product string) string {
+	statementTime := catalog + ".statement_timestamp()"
+	if product == "vastbase" {
+		// Vastbase 3.0.9 can keep statement_timestamp fixed at BEGIN.
+		// The current backend reports each query's actual start time.
+		activity := catalog + ".pg_stat_get_activity(" + catalog + ".pg_backend_pid())"
+		statementTime = "coalesce((SELECT query_start FROM " + activity + "), " + statementTime + ")"
+	}
+	return catalog + ".date_trunc('second', " + statementTime + ")::timestamp without time zone"
+}
 
 // Some PG-derived engines only expose the one-argument current_setting.
 // Catch a missing setting at the read so invalid seeds and failed writes surface.

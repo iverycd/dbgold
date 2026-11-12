@@ -526,17 +526,37 @@ func resolveRepairConnections(c *gin.Context, j *store.DataMigrationJob, b *stor
 	if !needSource {
 		return nil, dst, nil
 	}
-	src, e := store.GetConnectionOwned(b.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	src, e := resolveRepairSourceConnection(c, j, b)
 	if e != nil {
-		return nil, nil, fmt.Errorf("请绑定有权限的原源库连接")
-	}
-	if e = checkRepairConnection(j, src, true); e != nil {
 		return nil, nil, e
 	}
-	if b.SourceFingerprint != "" && b.SourceFingerprint != connectionFingerprint(src) {
-		return nil, nil, fmt.Errorf("源连接已变化，请重新绑定")
-	}
 	return src, dst, nil
+}
+
+func resolveRepairSourceConnection(c *gin.Context, j *store.DataMigrationJob, b *store.MigrationRepairBinding) (*store.Connection, error) {
+	src, e := store.GetConnectionOwned(b.SrcConnID, middleware.GetCurrentUserID(c), middleware.IsAdmin(c))
+	if e != nil {
+		return nil, fmt.Errorf("请绑定有权限的原源库连接")
+	}
+	if e = checkRepairConnection(j, src, true); e != nil {
+		return nil, e
+	}
+	if b.SourceFingerprint != "" && b.SourceFingerprint != connectionFingerprint(src) {
+		return nil, fmt.Errorf("源连接已变化，请重新绑定")
+	}
+	return src, nil
+}
+
+func pgCompatibilityRepairView(dbType string, object repair.Object) bool {
+	return source.IsPGFamily(dbType) && (object.Kind == "view" || object.Kind == "views")
+}
+
+func repairCompatibilityFunctionNames(ctx context.Context, r source.Reader, jobID string) []string {
+	names, err := source.ListFunctionNames(ctx, r)
+	if err != nil {
+		slog.Warn("read source function names for view repair failed", "job", jobID, "err", err)
+	}
+	return names
 }
 
 func validateRepairUnits(units []repair.Unit) error {
@@ -1036,6 +1056,12 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
+	viewCompatibility := pgCompatibilityRepairView(j.DstDBType, o)
+	if viewCompatibility && src == nil && b.SrcConnID != 0 && sourceOverride(b, j.SrcDBType) != "" {
+		// A view can be repaired with the target connection alone. Only consult
+		// the source when its original scope and connection can be validated.
+		src, _ = resolveRepairSourceConnection(c, j, b)
+	}
 	o.Verification = nil
 	o.ManualVerification = nil
 	a := &store.MigrationRepairAttempt{ID: uuid.NewString(), JobID: j.JobID, RequestID: req.RequestID, RequestHash: hash, ObjectID: o.ID, OwnerID: middleware.GetCurrentUserID(c), Kind: "ddl", Status: "running", Scope: migrationScope(dst, b.TargetSchema), SnapshotJSON: repairJSON(gin.H{"object": o, "binding": b}), UnitsJSON: repairJSON(o.Units)}
@@ -1109,9 +1135,19 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			finishRepair(a, o, e)
 			return
 		}
+		var functionNames []string
+		if viewCompatibility && src != nil {
+			r, err := buildSrcReader(src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
+			if err == nil {
+				functionNames = repairCompatibilityFunctionNames(ctx, r, j.JobID)
+				r.Close()
+			} else {
+				slog.Warn("open source for view repair function discovery failed", "job", j.JobID)
+			}
+		}
 		units, e := target.ExecuteRepair(ctx, w, o, o.Units, func(units []repair.Unit) error {
 			return persistRepairProgress(a, o, units, nil)
-		})
+		}, functionNames...)
 		for i := range units {
 			if units[i].Status == "succeeded" {
 				units[i].Selected = false

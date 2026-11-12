@@ -173,7 +173,8 @@ func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, db
 // ExecuteRepair executes the stored units verbatim. A PL/SQL body is one unit;
 // neither semicolons nor client-side delimiters are used to split SQL here.
 // The caller validates statement scope and supplies an immutable object identity.
-func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error) ([]repair.Unit, error) {
+// Source function names, when available, are used to prepare PG-family views.
+func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error, sourceFunctionNames ...string) ([]repair.Unit, error) {
 	if w.DBType() == "gaussdb" && obj.Kind == "distribution" {
 		return units, fmt.Errorf("GaussDB 不支持原地修改分布列；请为失败主键或唯一索引重新生成索引计划，现有数据保持不变")
 	}
@@ -254,10 +255,13 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 	}
 	if a.family == "postgres" && repairKind(obj.Kind) == "view" {
-		// Preparation is best effort. Let the selected view SQL determine whether
-		// it actually depends on get_uuid; unrelated views must remain repairable.
-		if _, err := EnsureCompatibilityFunctions(ctx, w); err != nil && ctx.Err() != nil {
-			return out, ctx.Err()
+		// Preparation is best effort. Run view SQL even when an independent
+		// function could not be initialized.
+		if len(sourceFunctionNames) > 0 {
+			_, _ = EnsureCompatibilityFunctions(ctx, w, CompatibilityRoutineNames{Functions: sourceFunctionNames})
+		}
+		if err := ctx.Err(); err != nil {
+			return out, err
 		}
 	}
 	var tx *sql.Tx

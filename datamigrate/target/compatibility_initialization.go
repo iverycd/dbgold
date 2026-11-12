@@ -17,7 +17,7 @@ type compatibilityFunctionSpec struct {
 	minDefaults int
 }
 
-var builtinCompatibilitySpecs = []compatibilityFunctionSpec{
+var builtinCompatibilitySpecs = append([]compatibilityFunctionSpec{
 	{name: "auto_increase_itemid", signature: "auto_increase_itemid()"},
 	{name: "count_rows", signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", inputs: []string{"character varying", "character varying"}, minDefaults: 1},
 	{name: "fun_getpy", signature: "fun_getpy(p_name varchar)", inputs: []string{"character varying"}},
@@ -34,7 +34,8 @@ var builtinCompatibilitySpecs = []compatibilityFunctionSpec{
 	{name: "getdate", signature: "getdate()"},
 	{name: "getrowid", signature: "getrowid()"},
 	{name: "isnull", signature: "isnull(i_obj varchar, i_obj2 varchar)", inputs: []string{"character varying", "character varying"}},
-}
+	{name: "newid", signature: "newid()"},
+}, demoCompatibilityFunctionSpecs...)
 
 func (s compatibilityFunctionSpec) inputPredicate() string {
 	predicate := fmt.Sprintf("p.pronargs=%d", len(s.inputs))
@@ -160,11 +161,15 @@ func preparePGBuiltinCompatibility(ctx context.Context, db *sql.DB, schema, prod
 		}
 		return report, nil
 	}
-	item.DDL = builtinFunctionDDL(schema, catalog, spec.name, product)
+	item.DDL, err = prepareCompatibilityFunctionDDL(ctx, tx, schema, catalog, product, spec.name, report)
+	if err != nil {
+		return report, fmt.Errorf("准备 %s.%s 失败: %w", schema, spec.signature, err)
+	}
 	if _, err = tx.ExecContext(ctx, item.DDL); err != nil {
 		return report, fmt.Errorf("创建 %s.%s 失败: %w", schema, spec.signature, err)
 	}
 	if err = tx.Commit(); err != nil {
+		report.extensionCommitUnknown(err)
 		return report, fmt.Errorf("提交 %s 初始化事务失败，执行结果需核验: %w", spec.name, err)
 	}
 	item.Status = "created"

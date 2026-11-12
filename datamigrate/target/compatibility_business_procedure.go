@@ -56,6 +56,10 @@ func pgProcedureSQL(query string, identifiers map[string]string) string {
 }
 
 func pgBusinessProcedureDDL(schema, catalog string, native bool, name, parameters string, tables []pgProcedureTable, guard, declarations, statements string, queries map[string]string) string {
+	return pgBusinessProcedureDDLWithDeferredTables(schema, catalog, native, name, parameters, tables, guard, declarations, statements, queries, 0)
+}
+
+func pgBusinessProcedureDDLWithDeferredTables(schema, catalog string, native bool, name, parameters string, tables []pgProcedureTable, guard, declarations, statements string, queries map[string]string, deferredTables int) string {
 	tableArray, columnArray, identifiers := pgProcedureIdentifierBindings(tables)
 	quotedCatalog := source.QuotePGIdent(catalog)
 	quotedSchema := source.QuotePGIdent(schema)
@@ -72,8 +76,15 @@ func pgBusinessProcedureDDL(schema, catalog string, native bool, name, parameter
 	for key, query := range queries {
 		replacements = append(replacements, "{{"+key+"}}", pgProcedureSQL(query, identifiers))
 	}
+	resolveIdentifiers := pgProcedureResolveIdentifiers
+	if deferredTables > 0 {
+		immediateTables := len(tables) - deferredTables
+		resolveIdentifiers = fmt.Sprintf(" FOR table_index IN 1..%d LOOP\n", immediateTables) + pgProcedureResolveIdentifierLoop
+		deferredLoop := fmt.Sprintf(" FOR table_index IN %d..%d LOOP\n", immediateTables+1, len(tables)) + pgProcedureResolveIdentifierLoop
+		replacements = append(replacements, "{{RESOLVE_DEFERRED_TABLES}}", resolver.Replace(deferredLoop))
+	}
 	body := "DECLARE\n" + resolver.Replace(pgProcedureIdentifierDeclarations) + declarations + "\nBEGIN\n" + guard + "\n" +
-		resolver.Replace(pgProcedureResolveIdentifiers) + strings.NewReplacer(replacements...).Replace(statements) + "\nEND;"
+		resolver.Replace(resolveIdentifiers) + strings.NewReplacer(replacements...).Replace(statements) + "\nEND;"
 	return pgProcedureDDL(schema, name, parameters, body, native)
 }
 
@@ -97,8 +108,9 @@ const pgProcedureIdentifierDeclarations = ` required_tables text[] := {{TABLES}}
  actual_column text;
 `
 
-const pgProcedureResolveIdentifiers = ` FOR table_index IN 1..{{CAT}}.array_length(required_tables,1) LOOP
-  SELECT {{CAT}}.count(*),{{CAT}}.min(c.oid::bigint)::oid,{{CAT}}.min(c.relname::text)
+const pgProcedureResolveIdentifiers = " FOR table_index IN 1..{{CAT}}.array_length(required_tables,1) LOOP\n" + pgProcedureResolveIdentifierLoop
+
+const pgProcedureResolveIdentifierLoop = `  SELECT {{CAT}}.count(*),{{CAT}}.min(c.oid::bigint)::oid,{{CAT}}.min(c.relname::text)
    INTO match_count,relation_oid,relation_name
    FROM {{CAT}}.pg_class c JOIN {{CAT}}.pg_namespace n ON n.oid=c.relnamespace
    WHERE n.nspname={{SCHEMA}} AND {{CAT}}.lower(c.relname::text)=required_tables[table_index]

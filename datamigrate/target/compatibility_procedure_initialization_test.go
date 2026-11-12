@@ -36,6 +36,12 @@ func expectProcedureMissingForInitialization(m sqlmock.Sqlmock, schema string, s
 		WillReturnError(&pq.Error{Code: "42883", Message: "procedure does not exist"})
 	expectUUIDProbe(m, true)
 	expectBuiltinNoConflictsForInitialization(m, schema, spec.name, 0)
+	switch spec.name {
+	case "createpvi":
+		expectCompatibilityDependency(m, schema, "get_uuid", "", "character varying")
+	case "automarkcount":
+		expectCompatibilityDependency(m, schema, "getdate", "", "timestamp without time zone")
+	}
 }
 
 func expectProcedureCreatedForInitialization(m sqlmock.Sqlmock, schema, product string, createErr error, specs ...compatibilityProcedureSpec) {
@@ -235,7 +241,7 @@ func TestProcedureRejectsOutInoutVariadicAndAmbiguousOverloads(t *testing.T) {
 					expectProcedureHeaderForInitialization(mock, "app")
 					mock.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.provariadic,COALESCE`).
 						WithArgs("app", spec.name).WillReturnRows(procedureMetadataRows().AddRow(88, 0, sample.variadic, sample.modes))
-					mock.ExpectQuery(`SELECT EXISTS .*p.proname=COALESCE.*pg_type.*typcategory='S'`).WithArgs("app", spec.name, int64(88)).
+					mock.ExpectQuery(`SELECT EXISTS .*p.proname=COALESCE`).WithArgs("app", spec.name, int64(88)).
 						WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(sample.conflict))
 					mock.ExpectRollback()
 					report, err := ensurePGProcedureSpecCompatibility(context.Background(), w.db, "app", "postgres", spec)

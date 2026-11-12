@@ -10,7 +10,11 @@ import (
 // translator for arbitrary source routines. Dependencies are resolved only when
 // invoked, because compatibility preparation runs before tables and views exist.
 func businessFunctionDDL(schema, catalog, name string) string {
-	var signature, result, body, lookup string
+	return businessFunctionDDLWithDependency(schema, catalog, name, true)
+}
+
+func businessFunctionDDLWithDependency(schema, catalog, name string, hasDependency bool) string {
+	var signature, result, body, lookup, scoreLookup string
 	volatility := "VOLATILE"
 	switch name {
 	case "convertguid":
@@ -18,6 +22,9 @@ func businessFunctionDDL(schema, catalog, name string) string {
 		volatility = "IMMUTABLE"
 	case "convertguidlist":
 		signature, result, body = "(p_newguid varchar, p_instr varchar)", "varchar", convertGUIDListBody
+		if !hasDependency {
+			body = convertGUIDListInlineBody
+		}
 	case "getcategoryinfopubcount":
 		signature = "(p_categorynum varchar, p_infostatuscode integer, p_startdate timestamp without time zone, p_enddate timestamp without time zone)"
 		result, body = "integer", categoryInfoPubCountBody
@@ -28,6 +35,10 @@ func businessFunctionDDL(schema, catalog, name string) string {
 	case "getcategoryscore":
 		signature, result, body = "(p_userguid varchar, p_fromdate date, p_todate date)", "integer", categoryScoreBody
 		lookup = businessRelationLookup(name, "webdb_information", "infoid", "userguid", "pubinwebdate")
+		if !hasDependency {
+			body = categoryScoreInlineBody
+			scoreLookup = businessRelationLookup(name, "view_infomain", "infoid", "score")
+		}
 	case "getchildoulist":
 		signature, result, body = "(p_rootid varchar)", "text", childOUListBody
 		lookup = businessRelationLookup(name, "frame_ou", "ouguid", "parentouguid")
@@ -50,6 +61,7 @@ func businessFunctionDDL(schema, catalog, name string) string {
 		body = strings.ReplaceAll(body, "{{RELATION_DECLARATIONS}}", businessRelationDeclarations)
 		body = strings.ReplaceAll(body, "{{LOOKUP}}", lookup)
 	}
+	body = strings.ReplaceAll(body, "{{SCORE_LOOKUP}}", scoreLookup)
 	cat := source.QuotePGIdent(catalog)
 	body = strings.NewReplacer(
 		"{{CAT}}", cat,
@@ -109,36 +121,45 @@ func businessRelationLookup(function, relation string, columns ...string) string
 // SUBSTR's nonpositive start rules differ from PostgreSQL: negative starts count
 // from the untrimmed string's end, zero/out-of-range starts produce an empty value.
 // RTRIM affects only length calculations; it must not trim the actual substring.
-const convertGUIDBody = `DECLARE
- instr_length integer;
+const convertGUIDDeclarations = ` instr_length integer;
  start_index integer;
  take_length integer;
- prefix_value text := '';
- suffix_value text := '';
-BEGIN
- IF p_instr IS NULL THEN
-  RETURN '';
- END IF;
- IF p_newguid IS NULL THEN
-  RETURN NULL;
- END IF;
- instr_length := {{CAT}}.char_length({{CAT}}.rtrim(p_instr));
- IF {{CAT}}.octet_length({{CAT}}.convert_to({{CAT}}.rtrim(p_instr),'UTF8'))<=12 THEN
-  take_length := instr_length;
+ prefix_value text;
+ suffix_value text;
+ converted_value text;
+`
+
+const convertGUIDCalculation = ` IF input_value IS NULL THEN
+  converted_value := '';
+ ELSIF p_newguid IS NULL THEN
+  converted_value := NULL;
  ELSE
-  take_length := 12;
-  IF instr_length>12 THEN
-   prefix_value := {{CAT}}.substr(p_instr,1,instr_length-12);
+  prefix_value := '';
+  suffix_value := '';
+  instr_length := {{CAT}}.char_length({{CAT}}.rtrim(input_value));
+  IF {{CAT}}.octet_length({{CAT}}.convert_to({{CAT}}.rtrim(input_value),'UTF8'))<=12 THEN
+   take_length := instr_length;
+  ELSE
+   take_length := 12;
+   IF instr_length>12 THEN
+    prefix_value := {{CAT}}.substr(input_value,1,instr_length-12);
+   END IF;
   END IF;
+  start_index := {{CAT}}.char_length({{CAT}}.rtrim(p_newguid))-11;
+  IF start_index<0 THEN
+   start_index := {{CAT}}.char_length(p_newguid)+start_index+1;
+  END IF;
+  IF start_index>0 AND take_length>0 THEN
+   suffix_value := {{CAT}}.substr(p_newguid,start_index,take_length);
+  END IF;
+  converted_value := prefix_value||suffix_value;
  END IF;
- start_index := {{CAT}}.char_length({{CAT}}.rtrim(p_newguid))-11;
- IF start_index<0 THEN
-  start_index := {{CAT}}.char_length(p_newguid)+start_index+1;
- END IF;
- IF start_index>0 AND take_length>0 THEN
-  suffix_value := {{CAT}}.substr(p_newguid,start_index,take_length);
- END IF;
- RETURN prefix_value||suffix_value;
+`
+
+const convertGUIDBody = `DECLARE
+ input_value text := p_instr;
+` + convertGUIDDeclarations + `BEGIN
+` + convertGUIDCalculation + ` RETURN converted_value;
 END;`
 
 // Preserve the original byte-based cursor and early-return order, including
@@ -250,6 +271,22 @@ BEGIN
  RETURN work_value||raw_value;
 END;`
 
+const convertGUIDListInlineBody = `DECLARE
+ raw_value text := p_instr;
+ work_value text := '';
+ delimiter_index integer;
+ input_value text;
+` + convertGUIDDeclarations + `BEGIN
+ delimiter_index := {{CAT}}.strpos(raw_value,';');
+ WHILE delimiter_index>0 LOOP
+  input_value := {{CAT}}.substr(raw_value,1,delimiter_index-1);
+` + convertGUIDCalculation + `  work_value := work_value||converted_value||';';
+  raw_value := {{CAT}}.substr(raw_value,delimiter_index+1);
+  delimiter_index := {{CAT}}.strpos(raw_value,';');
+ END LOOP;
+ RETURN work_value||raw_value;
+END;`
+
 const categoryInfoPubCountBody = `DECLARE
 {{RELATION_DECLARATIONS}}
  result_value integer;
@@ -280,6 +317,25 @@ BEGIN
 {{LOOKUP}}
  EXECUTE 'SELECT '||{{CAT_LITERAL}}||'.sum('||{{GETSCORE_LITERAL}}||'(t.'||column_sql[1]||'::varchar)) FROM '||relation_sql||' AS t'
   ||' WHERE t.'||column_sql[2]||'=$1 AND t.'||column_sql[3]||' BETWEEN $2 AND $3'
+ INTO result_value USING p_userguid, p_fromdate, p_todate;
+ RETURN coalesce(result_value,0);
+END;`
+
+const categoryScoreInlineBody = `DECLARE
+{{RELATION_DECLARATIONS}}
+ result_value integer;
+ info_relation text;
+ info_columns text[];
+BEGIN
+{{LOOKUP}}
+ info_relation := relation_sql;
+ info_columns := column_sql;
+ column_sql := ARRAY[]::text[];
+{{SCORE_LOOKUP}}
+ EXECUTE 'SELECT '||{{CAT_LITERAL}}||'.sum(coalesce((SELECT '||{{CAT_LITERAL}}||'.max(s.'||column_sql[2]||')'
+  ||' FROM '||relation_sql||' AS s WHERE s.'||column_sql[1]||'=t.'||info_columns[1]||'::varchar)::integer,0))'
+  ||' FROM '||info_relation||' AS t WHERE t.'||info_columns[2]||'=$1'
+  ||' AND t.'||info_columns[3]||' BETWEEN $2 AND $3'
  INTO result_value USING p_userguid, p_fromdate, p_todate;
  RETURN coalesce(result_value,0);
 END;`

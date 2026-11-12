@@ -28,8 +28,12 @@ var createPVITables = []pgProcedureTable{
 }
 
 func createPVIDDL(schema, catalog string, native bool) string {
+	return createPVIDDLWithUUID(schema, catalog, native, qualifiedFunction(schema, "get_uuid")+"()")
+}
+
+func createPVIDDLWithUUID(schema, catalog string, native bool, uuidExpression string) string {
 	tableArray, columnArray, identifiers := pgProcedureIdentifierBindings(createPVITables)
-	identifiers["uuid"] = sqlFunctionBody(qualifiedFunction(schema, "get_uuid"))
+	identifiers["uuid"] = sqlFunctionBody(uuidExpression)
 	var replacements []string
 	for name, query := range createPVIQueries {
 		replacements = append(replacements, "{{"+name+"}}", pgProcedureSQL(query, identifiers))
@@ -47,7 +51,7 @@ func createPVIDDL(schema, catalog string, native bool) string {
 	replacements = append(replacements,
 		"{{TABLES}}", tableArray, "{{COLUMNS}}", columnArray, "{{PROCEDURE}}", "createpvi",
 		"{{SCHEMA}}", sqlFunctionBody(schema), "{{CAT}}", source.QuotePGIdent(catalog),
-		"{{UUID_QUERY}}", sqlFunctionBody("SELECT "+qualifiedFunction(schema, "get_uuid")+"()::varchar"),
+		"{{UUID_QUERY}}", sqlFunctionBody("SELECT "+uuidExpression+"::varchar"),
 	)
 	body := strings.NewReplacer(replacements...).Replace(createPVIBody)
 	// The optional INOUT value replaces MySQL's SELECT T_HandleURL result set.
@@ -63,10 +67,10 @@ var createPVIQueries = map[string]string{
 	"START_ACTIVITY": `SELECT a.{{activity.activityguid}},a.{{activity.activityname}} FROM {{activity}} AS a WHERE a.{{activity.processversionguid}}=$1 AND a.{{activity.activitytype}}::text='10'`,
 	"TRANSITION":     `SELECT t.{{transition.transitionguid}},t.{{transition.toactivityguid}},t.{{transition.workitemmodename}} FROM {{transition}} AS t WHERE t.{{transition.fromactivityguid}}=$1 AND t.{{transition.is_showasoperationbutton}}::text='20'`,
 	"FIRST_ACTIVITY": `SELECT a.{{activity.activityname}},a.{{activity.handleurl}},a.{{activity.priority}} FROM {{activity}} AS a WHERE a.{{activity.activityguid}}=$1`,
-	"CONTEXT_VALUES": `SELECT {{uuid}}()::varchar,$1,c.{{context.fieldname}},c.{{context.fieldtype}},c.{{context.fieldvalue}} FROM {{context}} AS c WHERE c.{{context.processversionguid}}=$2`,
+	"CONTEXT_VALUES": `SELECT {{uuid}}::varchar,$1,c.{{context.fieldname}},c.{{context.fieldtype}},c.{{context.fieldvalue}} FROM {{context}} AS c WHERE c.{{context.processversionguid}}=$2`,
 	// Keep the outer IN predicate: a MaterialGuid can occur in other versions.
 	"MATERIAL_VALUES":    `SELECT $1,m.{{material.materialname}},$2,'10',$3,m.{{material.materialguid}},m.{{material.materialname}},m.{{material.source}},m.{{material.type}},'',m.{{material.pageurl_readandwrite}},m.{{material.pageurl_read}},m.{{material.pageurl_print}},'10',m.{{material.is_showingrid}},m.{{material.clienttag}},m.{{material.is_initmistable}} FROM {{material}} AS m WHERE m.{{material.materialguid}} IN (SELECT chosen.{{material.materialguid}} FROM {{material}} AS chosen WHERE chosen.{{material.processversionguid}}=$4 AND chosen.{{material.status}}::text='10' AND chosen.{{material.mainpvactivityguid}} IS NULL)`,
-	"MISTABLEROW_VALUES": `SELECT $1,m.{{mistableset.tableid}},m.{{mistableset.sql_tablename}},$2,{{uuid}}()::varchar FROM {{mistableset}} AS m WHERE m.{{mistableset.materialguid}} IN (SELECT chosen.{{material.materialguid}} FROM {{material}} AS chosen WHERE chosen.{{material.processversionguid}}=$3 AND chosen.{{material.status}}::text='10' AND chosen.{{material.mainpvactivityguid}} IS NULL)`,
+	"MISTABLEROW_VALUES": `SELECT $1,m.{{mistableset.tableid}},m.{{mistableset.sql_tablename}},$2,{{uuid}}::varchar FROM {{mistableset}} AS m WHERE m.{{mistableset.materialguid}} IN (SELECT chosen.{{material.materialguid}} FROM {{material}} AS chosen WHERE chosen.{{material.processversionguid}}=$3 AND chosen.{{material.status}}::text='10' AND chosen.{{material.mainpvactivityguid}} IS NULL)`,
 }
 
 const createPVIBody = `DECLARE

@@ -90,6 +90,9 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 	for _, spec := range builtinCompatibilitySpecs {
 		name := spec.name
 		t.Run(name, func(t *testing.T) {
+			if name == "newid" {
+				return // UUID DDL requires a resolved generator.
+			}
 			ddl := builtinFunctionDDL("app", "pg_catalog", name, "postgres")
 			require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "app"."`+name+`"(`))
 			require.Contains(t, ddl, "LANGUAGE plpgsql")
@@ -128,7 +131,7 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 func TestBuiltinFunctionDDLQuotesCapturedSchemaAndCatalog(t *testing.T) {
 	const schema = `target'"\$$$dbgold$`
 	const catalog = `native'"\$$$dbgold_1$`
-	for _, spec := range builtinCompatibilitySpecs {
+	for _, spec := range builtinCompatibilitySpecs[:len(builtinCompatibilitySpecs)-len(demoCompatibilityFunctionSpecs)-1] {
 		name := spec.name
 		ddl := builtinFunctionDDL(schema, catalog, name, "postgres")
 		require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "target'""\$$$dbgold$"."`+name+`"(`))
@@ -162,7 +165,7 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 		{"getrowid", nil, "integer", "VOLATILE"},
 		{"isnull", []string{"character varying", "character varying"}, "varchar", "IMMUTABLE"},
 	}
-	require.Len(t, builtinCompatibilitySpecs, 3+len(expected))
+	require.Len(t, builtinCompatibilitySpecs, 3+len(expected)+17)
 	for i, sample := range expected {
 		t.Run(sample.name, func(t *testing.T) {
 			spec := builtinCompatibilitySpecs[i+3]

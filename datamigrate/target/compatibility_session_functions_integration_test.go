@@ -148,7 +148,7 @@ func TestCompatibilitySessionFunctionsPreserveExistingSQLIntegration(t *testing.
 	businessExec(t, ctx, db, "CREATE FUNCTION "+getrowid+"() RETURNS SETOF integer LANGUAGE sql AS $$SELECT 99$$")
 
 	w := builtinIntegrationWriter(db, schema, "postgres")
-	report, err := EnsureCompatibilityFunctions(ctx, w)
+	report, err := EnsureCompatibilityFunctions(ctx, w, CompatibilityRoutineNames{Functions: []string{"getdate", "getrowid", "isnull"}})
 	require.ErrorContains(t, err, "getrowid")
 	require.Equal(t, 1, report.Failed)
 	statuses := make(map[string]string)
