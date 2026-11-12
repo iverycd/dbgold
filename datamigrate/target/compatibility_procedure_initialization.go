@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,7 +31,7 @@ type compatibilityProcedureSpec struct {
 	ddl             func(schema, catalog string, native bool) string
 }
 
-var compatibilityProcedureSpecs = append([]compatibilityProcedureSpec{
+var compatibilityProcedureSpecs = slices.Concat([]compatibilityProcedureSpec{
 	{name: compatibilityProcedureName, signature: compatibilityProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToHistoryDDL},
 	{name: compatibilityMainProcedureName, signature: compatibilityMainProcedureSignature, inputs: []string{"character varying"}, modes: "i", maxDefaults: 1, writableCTE: true, ddl: changeDataToMainDDL},
 	{name: compatibilityCreatePVIProcedureName, signature: compatibilityCreatePVIProcedureSignature,
@@ -44,7 +45,8 @@ var compatibilityProcedureSpecs = append([]compatibilityProcedureSpec{
 		inputs: []string{"character varying"}, modes: "i", ddl: deleteProcessVersionInstanceDDL},
 	{name: "proc_cg_gonggaoinfo_delete", signature: "proc_cg_gonggaoinfo_delete(p_gonggaoguid varchar)",
 		inputs: []string{"character varying"}, modes: "i", ddl: procCGGongGaoInfoDeleteDDL},
-}, demoCompatibilityProcedureSpecs...)
+}, demoCompatibilityProcedureSpecs, demo2UtilityProcedureSpecs, demo2CleanupProcedureSpecs,
+	demo2WorkflowVersionProcedureSpecs, []compatibilityProcedureSpec{demo2PAStatProcedureSpec})
 
 func (s compatibilityProcedureSpec) sourceCatalogName() string {
 	if s.sourceName != "" {
@@ -183,7 +185,7 @@ func preparePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, pr
 		return report, fmt.Errorf("检查 %s.%s 的重载失败: %w", schema, item.Signature, err)
 	}
 	if conflicting {
-		return report, fmt.Errorf("已有 %s.%s 重载使标准 varchar 或字符串字面量调用不能唯一指向目标过程，已保留原定义", schema, item.Name)
+		return report, fmt.Errorf("已有 %s.%s 重载使标准参数或字符串字面量调用不能唯一指向目标过程，已保留原定义", schema, item.Name)
 	}
 	if oid != 0 {
 		if !spec.compatibleMetadata(defaults, variadic, modes) {
@@ -260,10 +262,13 @@ func compatibilityProcedureConflictingCallsPredicate(catalog string, spec compat
 			argument = fmt.Sprintf("CASE WHEN p.provariadic<>0 AND %d>=(%s)-1 THEN p.provariadic ELSE %s END", i, argc, argument)
 			matchesType := "(" + argument + ")='" + spec.inputs[i] + "'::regtype"
 			typed = append(typed, matchesType)
-			// Only varchar inputs can become unknown string literals in the
-			// documented calls. An integer argument still has its declared type.
-			if spec.inputs[i] == "character varying" {
+			// Uncast string and date literals can resolve to other candidates.
+			// Numeric and cursor arguments use their declared type.
+			switch spec.inputs[i] {
+			case "character varying", "text":
 				matchesType = "EXISTS (SELECT 1 FROM " + catalog + ".pg_type argument_type WHERE argument_type.oid=(" + argument + ") AND argument_type.typcategory='S')"
+			case "timestamp without time zone":
+				matchesType = "EXISTS (SELECT 1 FROM " + catalog + ".pg_type argument_type WHERE argument_type.oid=(" + argument + ") AND argument_type.typcategory IN ('D','S'))"
 			}
 			literal = append(literal, matchesType)
 		}

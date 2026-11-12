@@ -43,7 +43,10 @@ func builtinFunctionDDL(schema, catalog, name, product string) string {
 		if ddl := businessFunctionDDL(schema, catalog, name); ddl != "" {
 			return ddl
 		}
-		return demoFunctionDDL(schema, catalog, name, product)
+		if ddl := demoFunctionDDL(schema, catalog, name, product); ddl != "" {
+			return ddl
+		}
+		return demo2FunctionDDL(schema, catalog, name)
 	}
 }
 

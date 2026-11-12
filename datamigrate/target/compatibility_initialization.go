@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"dbgold/datamigrate/source"
@@ -17,7 +18,7 @@ type compatibilityFunctionSpec struct {
 	minDefaults int
 }
 
-var builtinCompatibilitySpecs = append([]compatibilityFunctionSpec{
+var builtinCompatibilitySpecs = slices.Concat([]compatibilityFunctionSpec{
 	{name: "auto_increase_itemid", signature: "auto_increase_itemid()"},
 	{name: "count_rows", signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", inputs: []string{"character varying", "character varying"}, minDefaults: 1},
 	{name: "fun_getpy", signature: "fun_getpy(p_name varchar)", inputs: []string{"character varying"}},
@@ -35,7 +36,7 @@ var builtinCompatibilitySpecs = append([]compatibilityFunctionSpec{
 	{name: "getrowid", signature: "getrowid()"},
 	{name: "isnull", signature: "isnull(i_obj varchar, i_obj2 varchar)", inputs: []string{"character varying", "character varying"}},
 	{name: "newid", signature: "newid()"},
-}, demoCompatibilityFunctionSpecs...)
+}, demoCompatibilityFunctionSpecs, demo2CompatibilityFunctionSpecs)
 
 func (s compatibilityFunctionSpec) inputPredicate() string {
 	predicate := fmt.Sprintf("p.pronargs=%d", len(s.inputs))

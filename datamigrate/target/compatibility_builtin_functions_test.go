@@ -131,7 +131,8 @@ func TestBuiltinFunctionDDLContracts(t *testing.T) {
 func TestBuiltinFunctionDDLQuotesCapturedSchemaAndCatalog(t *testing.T) {
 	const schema = `target'"\$$$dbgold$`
 	const catalog = `native'"\$$$dbgold_1$`
-	for _, spec := range builtinCompatibilitySpecs[:len(builtinCompatibilitySpecs)-len(demoCompatibilityFunctionSpecs)-1] {
+	legacyCount := len(builtinCompatibilitySpecs) - len(demoCompatibilityFunctionSpecs) - len(demo2CompatibilityFunctionSpecs) - 1
+	for _, spec := range builtinCompatibilitySpecs[:legacyCount] {
 		name := spec.name
 		ddl := builtinFunctionDDL(schema, catalog, name, "postgres")
 		require.True(t, strings.HasPrefix(ddl, `CREATE FUNCTION "target'""\$$$dbgold$"."`+name+`"(`))
@@ -165,7 +166,7 @@ func TestBusinessCompatibilitySignatures(t *testing.T) {
 		{"getrowid", nil, "integer", "VOLATILE"},
 		{"isnull", []string{"character varying", "character varying"}, "varchar", "IMMUTABLE"},
 	}
-	require.Len(t, builtinCompatibilitySpecs, 3+len(expected)+17)
+	require.Len(t, builtinCompatibilitySpecs, 3+len(expected)+1+len(demoCompatibilityFunctionSpecs)+len(demo2CompatibilityFunctionSpecs))
 	for i, sample := range expected {
 		t.Run(sample.name, func(t *testing.T) {
 			spec := builtinCompatibilitySpecs[i+3]

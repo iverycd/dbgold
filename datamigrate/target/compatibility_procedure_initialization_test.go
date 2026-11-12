@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 
 	"dbgold/datamigrate/source"
@@ -41,6 +42,12 @@ func expectProcedureMissingForInitialization(m sqlmock.Sqlmock, schema string, s
 		expectCompatibilityDependency(m, schema, "get_uuid", "", "character varying")
 	case "automarkcount":
 		expectCompatibilityDependency(m, schema, "getdate", "", "timestamp without time zone")
+	case "copyprocessversion":
+		expectCompatibilityDependency(m, schema, "convertguid", "character varying,character varying", "character varying")
+		expectCompatibilityDependency(m, schema, "convertguidlist", "character varying,character varying", "character varying")
+		expectCompatibilityDependency(m, schema, "get_uuid", "", "character varying")
+	case "pastat":
+		expectCompatibilityDependency(m, schema, demo2PAInfoCountSpec.name, strings.Join(demo2PAInfoCountSpec.inputs, ","), "integer")
 	}
 }
 

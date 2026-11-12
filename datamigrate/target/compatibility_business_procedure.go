@@ -121,7 +121,7 @@ const pgProcedureResolveIdentifierLoop = `  SELECT {{CAT}}.count(*),{{CAT}}.min(
    RAISE EXCEPTION '{{PROCEDURE}}: table % is ambiguous in the target schema',required_tables[table_index];
   END IF;
   relation_sql := {{CAT}}.array_append(relation_sql,{{CAT}}.quote_ident({{SCHEMA}})||'.'||{{CAT}}.quote_ident(relation_name));
-  FOREACH required_column IN ARRAY {{CAT}}.string_to_array(required_columns[table_index],',') LOOP
+  FOREACH required_column IN ARRAY coalesce({{CAT}}.string_to_array(required_columns[table_index],','),ARRAY[]::text[]) LOOP
    SELECT {{CAT}}.count(*),{{CAT}}.min(a.attname::text) INTO match_count,actual_column
     FROM {{CAT}}.pg_attribute a
     WHERE a.attrelid=relation_oid AND a.attnum>0 AND NOT a.attisdropped

@@ -65,20 +65,34 @@ func prepareCompatibilityFunctionDDL(ctx context.Context, tx *sql.Tx, schema, ca
 func prepareCompatibilityProcedureDDL(ctx context.Context, tx *sql.Tx, schema, catalog, product string, spec compatibilityProcedureSpec, report *CompatibilityFunctionsReport) (func(bool) string, error) {
 	switch spec.name {
 	case compatibilityCreatePVIProcedureName:
-		exists, err := hasCompatibilityDependency(ctx, tx, schema, catalog, "get_uuid", "character varying")
+		expression, err := compatibilityProcedureUUIDExpression(ctx, tx, schema, catalog, product, report)
 		if err != nil {
 			return nil, err
 		}
-		expression := qualifiedFunction(schema, "get_uuid") + "()"
-		if !exists {
-			generator, typ, err := findUUIDGenerator(ctx, tx, schema, catalog, product, report)
-			if err != nil {
-				return nil, err
-			}
-			report.Items[0].Generator = generator
-			expression = "CAST(coalesce(" + uuidNormalizer(typ, generator+"()") + ",'invalid UUID') AS " + source.QuotePGIdent(catalog) + ".uuid)"
-		}
 		return func(native bool) string { return createPVIDDLWithUUID(schema, catalog, native, expression) }, nil
+	case "copyprocessversion":
+		hasGuid, err := hasCompatibilityDependency(ctx, tx, schema, catalog, "convertguid", "character varying", "character varying", "character varying")
+		if err != nil {
+			return nil, err
+		}
+		hasGuidList, err := hasCompatibilityDependency(ctx, tx, schema, catalog, "convertguidlist", "character varying", "character varying", "character varying")
+		if err != nil {
+			return nil, err
+		}
+		expression, err := compatibilityProcedureUUIDExpression(ctx, tx, schema, catalog, product, report)
+		if err != nil {
+			return nil, err
+		}
+		return func(native bool) string {
+			return demo2CopyProcessVersionDDL(schema, catalog, native, expression+"::varchar", hasGuid, hasGuidList)
+		}, nil
+	case "pastat":
+		dependency := demo2PAInfoCountSpec
+		hasCount, err := hasCompatibilityDependency(ctx, tx, schema, catalog, dependency.name, "integer", dependency.inputs...)
+		if err != nil {
+			return nil, err
+		}
+		return func(native bool) string { return demo2PAStatDDL(schema, catalog, native, hasCount) }, nil
 	case "automarkcount":
 		exists, err := hasCompatibilityDependency(ctx, tx, schema, catalog, "getdate", "timestamp without time zone")
 		if err != nil {
@@ -92,4 +106,20 @@ func prepareCompatibilityProcedureDDL(ctx context.Context, tx *sql.Tx, schema, c
 	default:
 		return func(native bool) string { return spec.ddl(schema, catalog, native) }, nil
 	}
+}
+
+func compatibilityProcedureUUIDExpression(ctx context.Context, tx *sql.Tx, schema, catalog, product string, report *CompatibilityFunctionsReport) (string, error) {
+	exists, err := hasCompatibilityDependency(ctx, tx, schema, catalog, "get_uuid", "character varying")
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return qualifiedFunction(schema, "get_uuid") + "()", nil
+	}
+	generator, typ, err := findUUIDGenerator(ctx, tx, schema, catalog, product, report)
+	if err != nil {
+		return "", err
+	}
+	report.Items[0].Generator = generator
+	return "CAST(coalesce(" + uuidNormalizer(typ, generator+"()") + ",'invalid UUID') AS " + source.QuotePGIdent(catalog) + ".uuid)", nil
 }
