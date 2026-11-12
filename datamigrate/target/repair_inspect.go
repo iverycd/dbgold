@@ -331,6 +331,12 @@ func inspectRepairIndex(ctx context.Context, a repairTarget, obj repair.Object) 
 		return verification("unknown", "索引 DDL 已编辑，需要核对修订后的定义")
 	}
 	idx := obj.Index
+	if idx.PGFulltext {
+		if a.family != "postgres" {
+			return verification("unknown", "当前目标方言无法核验 PostgreSQL 全文索引")
+		}
+		return inspectPGFulltextIndex(ctx, a.db, obj)
+	}
 	if idx.PGUniqueConstraint {
 		if a.family != "postgres" {
 			return verification("unknown", "当前目标方言无法核验 PostgreSQL 唯一约束")

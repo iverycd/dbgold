@@ -16,6 +16,9 @@ import (
 // For converted or disambiguated MySQL keys, create strictly and only reuse a
 // duplicate after verifying the physical definition on the intended table.
 func createPGIndex(ctx context.Context, db *sql.DB, d dialect.Dialect, schema string, idx source.IndexInfo) error {
+	if idx.PGFulltext {
+		return createPGFulltextIndex(ctx, db, d, schema, idx)
+	}
 	if idx.PGUniqueConstraint {
 		return createPGUniqueConstraint(ctx, db, d, schema, idx)
 	}

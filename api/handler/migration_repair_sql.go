@@ -7,6 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -142,6 +143,14 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 	}
 	if obj.Index != nil && obj.Index.PGUniqueConstraint {
 		return target.ValidatePGUniqueConstraintRepair(obj, units, dbType)
+	}
+	if obj.Index != nil && obj.Index.PGFulltext {
+		if !source.IsPGFamily(dbType) {
+			return fmt.Errorf("GIN 全文索引计划仅支持 PostgreSQL 内核目标")
+		}
+		if target.IsGeneratedPGFulltextRepair(dialect.NewPostgres(dbType), obj, units) {
+			return nil
+		}
 	}
 	if obj.PartitionPlan != nil {
 		plan := obj.PartitionPlan

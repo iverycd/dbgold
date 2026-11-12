@@ -44,6 +44,27 @@ func TestPGUniqueConstraintRepairScope(t *testing.T) {
 	}
 }
 
+func TestPGFulltextRepairScope(t *testing.T) {
+	d := dialect.NewPostgres("postgres")
+	idx := source.IndexInfo{TableName: `Frame"Storage`, IndexName: `FT"Index`, Method: "FULLTEXT", PGFulltext: true,
+		Columns: []string{`Body";/*!Tag`, "Title"}}
+	sql := dialect.JoinSQL(d.IndexStatements("app", idx))
+	obj := repair.Object{Kind: "index", Schema: "app", Table: idx.TableName, TargetName: idx.IndexName, Index: &idx,
+		Units: []repair.Unit{{ID: "step-1", SQL: sql, OriginalSQL: sql, Selected: true}}}
+	require.NoError(t, validateRepairUnits(obj.Units))
+	require.NoError(t, validateRepairObjectScope(obj, obj.Units, "postgres"))
+	require.Error(t, validateRepairObjectScope(obj, obj.Units, "mysql"))
+
+	unit := obj.Units[0]
+	unit.SQL = sql + " /*! SELECT 1 */"
+	require.Error(t, validateRepairObjectScope(obj, []repair.Unit{unit}, "postgres"))
+
+	unit.SQL = `CREATE INDEX "FT""Index" ON "app"."Frame""Storage" USING gin (to_tsvector('english', "Title"));`
+	require.NoError(t, validateRepairObjectScope(obj, []repair.Unit{unit}, "postgres"), "a scoped manual edit remains available")
+	unit.SQL = strings.Replace(unit.SQL, `"app"`, `"other"`, 1)
+	require.Error(t, validateRepairObjectScope(obj, []repair.Unit{unit}, "postgres"))
+}
+
 func repairRequest(t *testing.T, method, path, body string, owner uint, fn gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)

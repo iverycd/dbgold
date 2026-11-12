@@ -135,19 +135,57 @@ func TestMySQLGetIndexesForPGFallbackOnlyForMissingExpressionColumn(t *testing.T
 			mock.ExpectQuery(regexp.QuoteMeta(mysqlPGIndexesQuery)).WithArgs("Src").WillReturnError(tc.err)
 			if tc.fallback {
 				mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
-					WillReturnRows(mysqlIndexRows().AddRow("MixedTable", "IX_Plain", "CamelCase", 0, nil, "BTREE", "A")).RowsWillBeClosed()
+					WillReturnRows(mysqlIndexRows().
+						AddRow("MixedTable", "IX_Fulltext", "Title", 1, nil, "FULLTEXT", nil).
+						AddRow("MixedTable", "IX_Fulltext", "Body", 1, nil, "FULLTEXT", nil).
+						AddRow("MixedTable", "IX_Plain", "CamelCase", 0, nil, "BTREE", "A")).RowsWillBeClosed()
 			}
 			indexes, err := r.GetIndexesForPG(context.Background())
 			if tc.fallback {
 				require.NoError(t, err)
-				require.Equal(t, []IndexInfo{{TableName: "MixedTable", IndexName: "IX_Plain", Columns: []string{"CamelCase"}, IsUnique: true,
-					Method: "BTREE", Descending: []bool{false}}}, indexes)
+				require.Equal(t, []IndexInfo{
+					{TableName: "MixedTable", IndexName: "IX_Fulltext", Columns: []string{"Title", "Body"}, Method: "FULLTEXT"},
+					{TableName: "MixedTable", IndexName: "IX_Plain", Columns: []string{"CamelCase"}, IsUnique: true, Method: "BTREE", Descending: []bool{false}},
+				}, indexes)
 			} else {
 				require.ErrorIs(t, err, tc.err)
 				require.Nil(t, indexes)
 			}
 		})
 	}
+}
+
+func TestMySQLGetIndexesForPGRetainsFulltextKeys(t *testing.T) {
+	r, mock := newIndexTestMySQLReader(t, "Src")
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlPGIndexesQuery)).WithArgs("Src").
+		WillReturnRows(mysqlPGIndexRows().
+			AddRow("Frame_AttachStorage", "I_FRAME_ATTACHSTORAGE_CGCT", "CLIENGTAG", 1, nil, "FULLTEXT", nil, nil).
+			AddRow("Frame_AttachStorage", "I_FRAME_ATTACHSTORAGE_CGCT", "CLIENGGUID", 1, nil, "FULLTEXT", nil, nil).
+			AddRow("MixedTable", "Incomplete", "TextA", 1, nil, "FULLTEXT", nil, nil).
+			AddRow("MixedTable", "Incomplete", nil, 1, nil, "FULLTEXT", nil, "lower(`Body`)").
+			AddRow("MixedTable", "Incomplete", "TextZ", 1, nil, "FULLTEXT", nil, nil).
+			AddRow("MixedTable", `Single"Key`, `Bod"y`, 1, nil, "Fulltext", nil, nil)).RowsWillBeClosed()
+
+	indexes, err := r.GetIndexesForPG(context.Background())
+	require.NoError(t, err)
+	require.Len(t, indexes, 3)
+	require.Equal(t, IndexInfo{TableName: "Frame_AttachStorage", IndexName: "I_FRAME_ATTACHSTORAGE_CGCT",
+		Columns: []string{"CLIENGTAG", "CLIENGGUID"}, Method: "FULLTEXT"}, indexes[0])
+	require.Contains(t, indexes[1].Unsupported, "函数/表达式索引")
+	require.Empty(t, indexes[1].Columns)
+	require.Equal(t, IndexInfo{TableName: "MixedTable", IndexName: `Single"Key`, Columns: []string{`Bod"y`}, Method: "Fulltext"}, indexes[2])
+}
+
+func TestMySQLGetIndexesGenericFulltextRemainsUnsupported(t *testing.T) {
+	r, mock := newIndexTestMySQLReader(t, "Src")
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlIndexesQuery)).WithArgs("Src").
+		WillReturnRows(mysqlIndexRows().AddRow("MixedTable", "Fulltext", "Body", 1, nil, "FULLTEXT", nil)).RowsWillBeClosed()
+
+	indexes, err := r.GetIndexes(context.Background())
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+	require.Contains(t, indexes[0].Unsupported, "非 BTREE 索引")
+	require.Empty(t, indexes[0].Columns)
 }
 
 func TestMySQLGetIndexesKeepsDottedNamesDistinct(t *testing.T) {

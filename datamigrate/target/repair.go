@@ -268,7 +268,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	var exec func(string) error
 	var releaseIntervalSession func()
 	onlyIntervalMarker := len(selected) == 1 && obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[selected[0]].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan)
-	if generatedUnique || gaussIndex {
+	if a.family == "postgres" && IsGeneratedPGFulltextRepair(w.Dialect(), obj, units) {
+		exec = func(string) error { return createPGFulltextIndex(ctx, a.db, w.Dialect(), schema, *obj.Index) }
+	} else if generatedUnique || gaussIndex {
 		// Use the same strict creation and duplicate verification as migration.
 		// The validation above proved that this executes the saved SQL.
 		exec = func(string) error { return w.CreateIndex(ctx, *obj.Index) }

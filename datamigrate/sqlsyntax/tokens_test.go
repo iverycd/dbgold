@@ -44,3 +44,14 @@ func TestBooleanPrecedence(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestLexConcatenation(t *testing.T) {
+	tokens, err := Lex(`"a||b" || 'c|d'`)
+	if err != nil || len(tokens) != 3 || tokens[0].Value != "a||b" ||
+		!tokens[1].Is("||") || tokens[2].Value != "c|d" {
+		t.Fatalf("unexpected tokens %v, error %v", tokens, err)
+	}
+	if _, err := Lex("a | b"); err == nil {
+		t.Fatal("unexpected single pipe token")
+	}
+}

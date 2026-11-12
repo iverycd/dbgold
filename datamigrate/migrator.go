@@ -1314,6 +1314,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					if idxCopy.PGUniqueConstraint {
 						m.recordMySQLPGUniqueConstraintWarning(report, idx, idxCopy)
 					}
+					if idxCopy.PGFulltext {
+						m.recordMySQLPGFulltextWarning(report, idx, idxCopy)
+					}
 				}
 			}
 		}

@@ -38,6 +38,14 @@ func (m *Migrator) readMySQLPGIndexes(ctx context.Context) ([]source.IndexInfo, 
 func (m *Migrator) targetPostIndex(ctx context.Context, idx source.IndexInfo) source.IndexInfo {
 	idx = m.planMySQLPGSpatialIndex(ctx, idx)
 	idx = m.planMySQLPGUniqueConstraint(ctx, idx)
+	if m.cfg.MigrationPurpose != "cdc" && m.reader.DBType() == "mysql" && source.IsPGFamily(m.writer.DBType()) &&
+		strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" {
+		if idx.IsPrimary || idx.IsUnique || len(idx.Columns) == 0 {
+			idx.Unsupported = "MySQL 全文索引缺少有效的普通列定义，请根据源端定义手工适配"
+		} else {
+			idx.PGFulltext = true
+		}
+	}
 	table := idx.TableName
 	idx.TableName = m.objName(table)
 	idx.IndexName = m.objName(idx.IndexName)
@@ -100,4 +108,12 @@ func (m *Migrator) recordMySQLPrefixWarning(report *MigrationReport, idx source.
 		Table: idx.TableName, Column: strings.Join(idx.Columns, ", "), Reason: reason, Count: 1,
 	})
 	m.log.Warnf("表 %s: %s", idx.TableName, reason)
+}
+
+func (m *Migrator) recordMySQLPGFulltextWarning(report *MigrationReport, original, planned source.IndexInfo) {
+	reason := fmt.Sprintf("索引 %s 已使用 pg_catalog.simple 创建 GIN 全文索引。请将 MATCH ... AGAINST 改写为使用相同 to_tsvector 表达式和配置的 @@ 全文查询，并核对分词、匹配及排序结果。", original.IndexName)
+	report.Warnings = append(report.Warnings, valueconv.MigrationWarning{
+		Table: original.TableName, Column: strings.Join(planned.Columns, ", "), Reason: reason, Count: 1,
+	})
+	m.log.Warnf("表 %s: %s", original.TableName, reason)
 }

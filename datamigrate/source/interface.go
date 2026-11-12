@@ -118,8 +118,10 @@ type IndexInfo struct {
 	PGSpatialOpClass string `json:"PGSpatialOpClass,omitempty"`
 	// PGUniqueConstraint adds a table-level UNIQUE constraint on the mapped Columns.
 	PGUniqueConstraint bool `json:"pg_unique_constraint,omitempty"`
-	Definition         string
-	Unsupported        string
+	// PGFulltext indexes the mapped Columns as one PostgreSQL GIN expression.
+	PGFulltext  bool `json:"pg_fulltext,omitempty"`
+	Definition  string
+	Unsupported string
 }
 
 // MySQLTargetPrefix distinguishes replaying a source key from automatically

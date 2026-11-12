@@ -570,15 +570,15 @@ func (r *MySQLReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) 
 }
 
 func (r *MySQLReader) GetIndexes(ctx context.Context) ([]IndexInfo, error) {
-	return r.getIndexes(ctx, false)
+	return r.getIndexes(ctx, false, false)
 }
 
-// GetIndexesForPG retains raw functional keys for the PostgreSQL planner.
+// GetIndexesForPG retains raw functional keys and full-text keys for PostgreSQL planning.
 func (r *MySQLReader) GetIndexesForPG(ctx context.Context) ([]IndexInfo, error) {
-	return r.getIndexes(ctx, true)
+	return r.getIndexes(ctx, true, true)
 }
 
-func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]IndexInfo, error) {
+func (r *MySQLReader) getIndexes(ctx context.Context, forPG, withExpression bool) ([]IndexInfo, error) {
 	query := `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SUB_PART, INDEX_TYPE, COLLATION`
 	if withExpression {
 		query += `, EXPRESSION`
@@ -591,7 +591,7 @@ func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]In
 		// MySQL versions without functional keys lack this catalog column.
 		var mysqlErr *mysql.MySQLError
 		if withExpression && errors.As(err, &mysqlErr) && mysqlErr.Number == 1054 && strings.Contains(strings.ToUpper(mysqlErr.Message), "'EXPRESSION'") {
-			return r.GetIndexes(ctx)
+			return r.getIndexes(ctx, forPG, false)
 		}
 		return nil, err
 	}
@@ -619,6 +619,7 @@ func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]In
 			indexes = append(indexes, IndexInfo{TableName: table, IndexName: name, IsUnique: nonUnique == 0, Method: method})
 		}
 		idx := &indexes[i]
+		fulltext := strings.EqualFold(method, "FULLTEXT")
 		ascending := strings.EqualFold(collation.String, "A")
 		descending := strings.EqualFold(collation.String, "D")
 		if ok {
@@ -644,7 +645,9 @@ func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]In
 			reason = "函数/表达式索引"
 		case prefix.Valid && (prefix.Int64 <= 0 || !strings.EqualFold(method, "BTREE")):
 			reason = "前缀索引"
-		case r.damengTarget && strings.EqualFold(method, "FULLTEXT"):
+		case forPG && fulltext && (idx.IsUnique || nonUnique != 1 || column.String == ""):
+			reason = "定义异常的全文索引"
+		case (forPG || r.damengTarget) && fulltext:
 			// FULLTEXT keys have no B-tree ordering; COLLATION is normally NULL.
 		case !strings.EqualFold(method, "BTREE"):
 			reason = "空间或其他非 BTREE 索引"
@@ -659,7 +662,7 @@ func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]In
 		} else if idx.Unsupported == "" {
 			idx.Columns = append(idx.Columns, column.String)
 			idx.addMySQLPrefix(prefix)
-			if !strings.EqualFold(method, "FULLTEXT") {
+			if !fulltext {
 				idx.Descending = append(idx.Descending, descending)
 			}
 		}
@@ -667,15 +670,14 @@ func (r *MySQLReader) getIndexes(ctx context.Context, withExpression bool) ([]In
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Validate only after collecting all keys, so a composite FULLTEXT index
-	// cannot accidentally be migrated as a usable single-column definition.
+	// Check index-wide constraints after all keys have been collected.
 	for i := range indexes {
 		idx := &indexes[i]
 		if IsMySQLSpatialIndex(idx.Method) && idx.Unsupported == MySQLSpatialIndexUnsupported && (len(idx.Columns) != 1 || idx.IsUnique) {
 			idx.Unsupported = "暂不支持 MySQL 多列或唯一空间索引的等价转换，请根据源端定义手工适配"
 			idx.Columns = nil
 		}
-		if strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" && len(idx.Columns) > 1 {
+		if r.damengTarget && !forPG && strings.EqualFold(idx.Method, "FULLTEXT") && idx.Unsupported == "" && len(idx.Columns) > 1 {
 			idx.Unsupported = "暂不支持 MySQL 多列全文索引的自动转换，达梦 CONTEXT INDEX 仅支持单个文本列，请根据源端定义手工适配"
 			idx.Columns, idx.Descending, idx.MySQLPrefixLengths = nil, nil, nil
 		}

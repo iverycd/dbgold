@@ -149,11 +149,11 @@ func Lex(s string) ([]Token, error) {
 		op := s[i : i+n]
 		if i+1 < len(s) {
 			switch s[i : i+2] {
-			case "::", "<=", ">=", "<>", "!=":
+			case "::", "<=", ">=", "<>", "!=", "||":
 				op = s[i : i+2]
 			}
 		}
-		if !strings.Contains("(),.=<>!+-*;:%", string(r)) {
+		if op != "||" && !strings.Contains("(),.=<>!+-*;:%", string(r)) {
 			return nil, fmt.Errorf("不支持的 SQL 符号 %q", r)
 		}
 		i += len(op)

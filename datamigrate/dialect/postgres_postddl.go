@@ -41,6 +41,18 @@ func (d *PostgresDialect) IndexName(idx source.IndexInfo) string {
 }
 
 func (d *PostgresDialect) IndexStatements(schema string, idx source.IndexInfo) []Statement {
+	if idx.PGFulltext {
+		if idx.Unsupported != "" || idx.IsPrimary || idx.IsUnique || len(idx.Columns) == 0 {
+			return nil
+		}
+		parts := make([]string, len(idx.Columns))
+		for i, column := range idx.Columns {
+			parts[i] = fmt.Sprintf("COALESCE(%s::pg_catalog.text, ''::pg_catalog.text)", d.QuoteIdent(column))
+		}
+		document := strings.Join(parts, " OPERATOR(pg_catalog.||) ' '::pg_catalog.text OPERATOR(pg_catalog.||) ")
+		return []Statement{{SQL: fmt.Sprintf("CREATE INDEX %s ON %s USING gin (pg_catalog.to_tsvector('pg_catalog.simple'::pg_catalog.regconfig, %s) pg_catalog.tsvector_ops);",
+			d.QuoteIdent(d.IndexName(idx)), d.qualified(schema, idx.TableName), document)}}
+	}
 	if d.name == "gaussdb" && idx.GaussDB != nil {
 		schema = idx.GaussDB.Base.Schema
 	}
