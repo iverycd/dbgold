@@ -36,6 +36,14 @@ var compatibilityProcedureSpecs = []compatibilityProcedureSpec{
 	{name: compatibilityCreatePVIProcedureName, signature: compatibilityCreatePVIProcedureSignature,
 		inputs: []string{"character varying", "character varying", "character varying", "character varying", "character varying", "character varying", "character varying"},
 		modes:  "i,i,i,i,i,i,b", minDefaults: 1, maxDefaults: 1, ddl: createPVIDDL},
+	{name: "automarkcount", signature: "automarkcount(p_examguid varchar, p_userguid varchar, p_passcode integer)",
+		inputs: []string{"character varying", "character varying", "integer"}, modes: "i,i,i", ddl: autoMarkCountDDL},
+	{name: "proc_cg_afterzbgs", signature: "proc_cg_afterzbgs(p_gonggaoguid varchar)",
+		inputs: []string{"character varying"}, modes: "i", ddl: procCGAfterZBGSDDL},
+	{name: deleteProcessVersionInstanceName, signature: "deleteprocessversioninstance(p_dpviguid varchar)",
+		inputs: []string{"character varying"}, modes: "i", ddl: deleteProcessVersionInstanceDDL},
+	{name: "proc_cg_gonggaoinfo_delete", signature: "proc_cg_gonggaoinfo_delete(p_gonggaoguid varchar)",
+		inputs: []string{"character varying"}, modes: "i", ddl: procCGGongGaoInfoDeleteDDL},
 }
 
 func (s compatibilityProcedureSpec) inputPredicate() string {
@@ -229,8 +237,14 @@ func compatibilityProcedureConflictingCallsPredicate(catalog string, spec compat
 		for i := 0; i < arity; i++ {
 			argument := fmt.Sprintf("CASE WHEN p.prokind='p' THEN COALESCE(p.proallargtypes[%d],p.proargtypes[%d]) ELSE p.proargtypes[%d] END", i+1, i, i)
 			argument = fmt.Sprintf("CASE WHEN p.provariadic<>0 AND %d>=(%s)-1 THEN p.provariadic ELSE %s END", i, argc, argument)
-			typed = append(typed, "("+argument+")='"+spec.inputs[i]+"'::regtype")
-			literal = append(literal, "EXISTS (SELECT 1 FROM "+catalog+".pg_type argument_type WHERE argument_type.oid=("+argument+") AND argument_type.typcategory='S')")
+			matchesType := "(" + argument + ")='" + spec.inputs[i] + "'::regtype"
+			typed = append(typed, matchesType)
+			// Only varchar inputs can become unknown string literals in the
+			// documented calls. An integer argument still has its declared type.
+			if spec.inputs[i] == "character varying" {
+				matchesType = "EXISTS (SELECT 1 FROM " + catalog + ".pg_type argument_type WHERE argument_type.oid=(" + argument + ") AND argument_type.typcategory='S')"
+			}
+			literal = append(literal, matchesType)
 		}
 		calls = append(calls, "("+callable+" AND (("+strings.Join(typed, " AND ")+") OR ("+strings.Join(literal, " AND ")+")))")
 	}

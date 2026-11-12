@@ -1,22 +1,15 @@
 package target
 
 import (
-	"fmt"
-	"regexp"
 	"strings"
 
 	"dbgold/datamigrate/source"
 )
 
-type createPVITableSpec struct {
-	alias, name string
-	columns     []string
-}
-
 // These are the exact read and write dependencies of the supplied CreatePVI.
 // Target columns omitted from its INSERTs retain their database defaults.
 // The source material's attachment field is not read: the instance gets ”.
-var createPVITables = []createPVITableSpec{
+var createPVITables = []pgProcedureTable{
 	{"version", "workflow_processversion", strings.Fields(`processversionguid processversionname status processguid`)},
 	{"process", "workflow_process", strings.Fields(`processname processguid`)},
 	{"activity", "workflow_activity", strings.Fields(`activityguid activityname processversionguid activitytype handleurl priority`)},
@@ -34,49 +27,12 @@ var createPVITables = []createPVITableSpec{
 	{"message", "messages_center", strings.Fields(`messageitemguid title messagetype content sendmode generatedate isschedule schedulesenddate messagetarget targetuser targetdispname fromuser fromdispname frommobile handleurl beizhu ouguid baseouguid isshow jobguid handletype clientidentifier clienttag isdel isnohandle pviguid overtimepoint earlywarningpoint`)},
 }
 
-var createPVIIdentifier = regexp.MustCompile(`\{\{([a-z]+(?:\.[a-z_]+)?)\}\}`)
-
-// Only fixed application statements pass through this renderer. Table and
-// column expressions refer to the quoted catalog names resolved at invocation;
-// every business value is supplied separately by EXECUTE ... USING.
-func createPVISQL(query string, identifiers map[string]string) string {
-	var fragments []string
-	start := 0
-	for _, match := range createPVIIdentifier.FindAllStringSubmatchIndex(query, -1) {
-		if match[0] > start {
-			fragments = append(fragments, sqlFunctionBody(query[start:match[0]]))
-		}
-		token := query[match[2]:match[3]]
-		expression, ok := identifiers[token]
-		if !ok {
-			panic("unknown CreatePVI identifier: " + token)
-		}
-		fragments = append(fragments, expression)
-		start = match[1]
-	}
-	if start < len(query) {
-		fragments = append(fragments, sqlFunctionBody(query[start:]))
-	}
-	return strings.Join(fragments, "||")
-}
-
 func createPVIDDL(schema, catalog string, native bool) string {
-	var tables, columns []string
-	identifiers := map[string]string{"uuid": sqlFunctionBody(qualifiedFunction(schema, "get_uuid"))}
-	columnIndex := 0
-	for i, table := range createPVITables {
-		tables = append(tables, table.name)
-		columns = append(columns, strings.Join(table.columns, ","))
-		identifiers[table.alias] = fmt.Sprintf("relation_sql[%d]", i+1)
-		for _, column := range table.columns {
-			columnIndex++
-			identifiers[table.alias+"."+column] = fmt.Sprintf("column_sql[%d]", columnIndex)
-		}
-	}
-	array := func(values []string) string { return "ARRAY['" + strings.Join(values, "','") + "']::text[]" }
+	tableArray, columnArray, identifiers := pgProcedureIdentifierBindings(createPVITables)
+	identifiers["uuid"] = sqlFunctionBody(qualifiedFunction(schema, "get_uuid"))
 	var replacements []string
 	for name, query := range createPVIQueries {
-		replacements = append(replacements, "{{"+name+"}}", createPVISQL(query, identifiers))
+		replacements = append(replacements, "{{"+name+"}}", pgProcedureSQL(query, identifiers))
 	}
 	// INSERT column order comes from the explicit supplied field lists. Source
 	// projections below remain independently resolved for mixed-case tables.
@@ -86,22 +42,19 @@ func createPVIDDL(schema, catalog string, native bool) string {
 			fields = append(fields, "{{"+table.alias+"."+column+"}}")
 		}
 		prefix := "INSERT INTO {{" + table.alias + "}} (" + strings.Join(fields, ",") + ") "
-		replacements = append(replacements, "{{INSERT_"+strings.ToUpper(table.alias)+"}}", createPVISQL(prefix, identifiers))
+		replacements = append(replacements, "{{INSERT_"+strings.ToUpper(table.alias)+"}}", pgProcedureSQL(prefix, identifiers))
 	}
 	replacements = append(replacements,
-		"{{TABLES}}", array(tables), "{{COLUMNS}}", array(columns),
+		"{{TABLES}}", tableArray, "{{COLUMNS}}", columnArray, "{{PROCEDURE}}", "createpvi",
 		"{{SCHEMA}}", sqlFunctionBody(schema), "{{CAT}}", source.QuotePGIdent(catalog),
 		"{{UUID_QUERY}}", sqlFunctionBody("SELECT "+qualifiedFunction(schema, "get_uuid")+"()::varchar"),
 	)
 	body := strings.NewReplacer(replacements...).Replace(createPVIBody)
 	// The optional INOUT value replaces MySQL's SELECT T_HandleURL result set.
 	// A six-input CALL still works and returns the resulting URL as one row.
-	header := "CREATE PROCEDURE " + qualifiedFunction(schema, "createpvi") +
-		"(IN p_processguid varchar, IN p_processversioninstanceguid varchar, IN p_userguid varchar, IN p_username varchar, IN p_workitemguid varchar, IN p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)"
-	if native {
-		return header + " SECURITY INVOKER AS\n" + body
-	}
-	return header + " LANGUAGE plpgsql SECURITY INVOKER AS " + sqlFunctionBody(body) + ";"
+	return pgProcedureDDL(schema, "createpvi",
+		"IN p_processguid varchar, IN p_processversioninstanceguid varchar, IN p_userguid varchar, IN p_username varchar, IN p_workitemguid varchar, IN p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL",
+		body, native)
 }
 
 var createPVIQueries = map[string]string{
@@ -117,17 +70,7 @@ var createPVIQueries = map[string]string{
 }
 
 const createPVIBody = `DECLARE
- required_tables text[] := {{TABLES}};
- required_columns text[] := {{COLUMNS}};
- relation_sql text[] := ARRAY[]::text[];
- column_sql text[] := ARRAY[]::text[];
- relation_oid oid;
- relation_name text;
- match_count integer;
- table_index integer;
- required_column text;
- actual_column text;
- process_version_guid varchar;
+` + pgProcedureIdentifierDeclarations + ` process_version_guid varchar;
  process_version_name varchar;
  instance_name varchar;
  add_date timestamp;
@@ -148,32 +91,7 @@ const createPVIBody = `DECLARE
  wait_handle_guid varchar;
 BEGIN
  -- Resolve all read and write dependencies before creating any workflow data.
- FOR table_index IN 1..{{CAT}}.array_length(required_tables,1) LOOP
-  SELECT {{CAT}}.count(*),{{CAT}}.min(c.oid::bigint)::oid,{{CAT}}.min(c.relname::text)
-   INTO match_count,relation_oid,relation_name
-   FROM {{CAT}}.pg_class c JOIN {{CAT}}.pg_namespace n ON n.oid=c.relnamespace
-   WHERE n.nspname={{SCHEMA}} AND {{CAT}}.lower(c.relname::text)=required_tables[table_index]
-   AND c.relkind IN ('r','p');
-  IF match_count=0 THEN
-   RAISE EXCEPTION 'createpvi: table % is missing from the target schema',required_tables[table_index];
-  ELSIF match_count<>1 THEN
-   RAISE EXCEPTION 'createpvi: table % is ambiguous in the target schema',required_tables[table_index];
-  END IF;
-  relation_sql := {{CAT}}.array_append(relation_sql,{{CAT}}.quote_ident({{SCHEMA}})||'.'||{{CAT}}.quote_ident(relation_name));
-  FOREACH required_column IN ARRAY {{CAT}}.string_to_array(required_columns[table_index],',') LOOP
-   SELECT {{CAT}}.count(*),{{CAT}}.min(a.attname::text) INTO match_count,actual_column
-    FROM {{CAT}}.pg_attribute a
-    WHERE a.attrelid=relation_oid AND a.attnum>0 AND NOT a.attisdropped
-    AND {{CAT}}.lower(a.attname::text)=required_column;
-   IF match_count=0 THEN
-    RAISE EXCEPTION 'createpvi: column % is missing from %',required_column,required_tables[table_index];
-   ELSIF match_count<>1 THEN
-    RAISE EXCEPTION 'createpvi: column % is ambiguous in %',required_column,required_tables[table_index];
-   END IF;
-   column_sql := {{CAT}}.array_append(column_sql,{{CAT}}.quote_ident(actual_column));
-  END LOOP;
- END LOOP;
-
+` + pgProcedureResolveIdentifiers + `
  BEGIN
   EXECUTE {{VERSION}} INTO STRICT process_version_guid,process_version_name USING p_processguid;
  EXCEPTION WHEN NO_DATA_FOUND OR TOO_MANY_ROWS THEN
