@@ -13,6 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func allCompatibilityProcedureNames() []string {
+	names := make([]string, 0, len(compatibilityProcedureSpecs))
+	for _, spec := range compatibilityProcedureSpecs {
+		names = append(names, spec.name)
+	}
+	return names
+}
+
 func expectBuiltinMissingForInitialization(m sqlmock.Sqlmock, schema string, spec compatibilityFunctionSpec) {
 	expectUUIDHeader(m, schema)
 	m.ExpectQuery(`SELECT p.oid,p.pronargdefaults,p.proretset,p.provariadic,p.prorettype FROM`).
@@ -67,7 +75,7 @@ func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 			for _, spec := range compatibilityProcedureSpecs {
 				expectProcedureCreatedForInitialization(mock, "app", product, nil, spec)
 			}
-			report, err := EnsureCompatibilityFunctions(context.Background(), actual)
+			report, err := EnsureCompatibilityFunctions(context.Background(), actual, allCompatibilityProcedureNames()...)
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
@@ -83,6 +91,47 @@ func TestAllCompatibilityFunctionsAcrossPGProducts(t *testing.T) {
 				require.Equal(t, spec.name, procedure.Name)
 				require.Equal(t, "procedure", procedure.Kind)
 				require.Equal(t, spec.signature, procedure.Signature)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestCompatibilityProceduresMatchSourceNames(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inventory []string
+		want      []compatibilityProcedureSpec
+	}{
+		{name: "empty"},
+		{name: "unmatched", inventory: []string{"test", "changedatatomain_extra", "app.createpvi"}},
+		{
+			name:      "mixed_case_subset_with_duplicates",
+			inventory: []string{"CreatePVI", "test", "CHANGEDATATOHISTORY", "createpvi"},
+			want:      []compatibilityProcedureSpec{compatibilityProcedureSpecs[0], compatibilityProcedureSpecs[2]},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, mock := repairPGMock(t)
+			expectUUIDReused(mock)
+			for _, spec := range builtinCompatibilitySpecs {
+				expectBuiltinCreatedForInitialization(mock, "app", spec, nil)
+			}
+			for _, spec := range tc.want {
+				expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
+			}
+
+			report, err := EnsureCompatibilityFunctions(context.Background(), w, tc.inventory...)
+			require.NoError(t, err)
+			functionCount := 1 + len(builtinCompatibilitySpecs)
+			require.Equal(t, functionCount+len(tc.want), report.Total)
+			require.Equal(t, report.Total, report.Success)
+			require.Len(t, report.Items, report.Total)
+			for i, spec := range tc.want {
+				item := report.Items[functionCount+i]
+				require.Equal(t, "procedure", item.Kind)
+				require.Equal(t, spec.name, item.Name)
+				require.Equal(t, spec.signature, item.Signature)
 			}
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
@@ -118,7 +167,7 @@ func TestCompatibilityFunctionFailuresDoNotRollbackOtherFunctions(t *testing.T) 
 				}
 				expectProcedureCreatedForInitialization(mock, "app", "postgres", procedureErr, spec)
 			}
-			report, err := EnsureCompatibilityFunctions(context.Background(), w)
+			report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityProcedureNames()...)
 			require.Error(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Success)
@@ -197,7 +246,7 @@ func TestCompatibilityPinsDefaultSchemaForIndependentTransactions(t *testing.T) 
 	for _, spec := range compatibilityProcedureSpecs {
 		expectProcedureCreatedForInitialization(mock, "app", "postgres", nil, spec)
 	}
-	report, err := EnsureCompatibilityFunctions(context.Background(), w)
+	report, err := EnsureCompatibilityFunctions(context.Background(), w, allCompatibilityProcedureNames()...)
 	require.NoError(t, err)
 	for _, item := range report.Items {
 		require.Equal(t, "app", item.Schema)

@@ -71,9 +71,6 @@ func expectBuiltinFunctionsReused(m sqlmock.Sqlmock, schema string) {
 		expectUUIDProbe(m, false)
 		m.ExpectRollback()
 	}
-	for _, spec := range compatibilityProcedureSpecs {
-		expectProcedureReusedForInitialization(m, schema, spec)
-	}
 }
 func expectUUIDMissing(m sqlmock.Sqlmock, schema string) {
 	expectUUIDHeader(m, schema)
@@ -381,7 +378,7 @@ func TestCompatibilityViewRepairPreparationFailureStillExecutesViewSQL(t *testin
 	for _, dependent := range []bool{false, true} {
 		t.Run(fmt.Sprint(dependent), func(t *testing.T) {
 			w, m := repairPGMock(t)
-			for i := 0; i < 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs); i++ {
+			for i := 0; i < 1+len(builtinCompatibilitySpecs); i++ {
 				m.ExpectBegin().WillReturnError(errors.New("preparation unavailable"))
 			}
 			m.ExpectBegin()
@@ -436,7 +433,7 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 				require.NoError(t, db.QueryRowContext(ctx, "SELECT pg_get_functiondef($1::regprocedure::oid)", qualifiedFunction(schema, "GET_UUID")+"()").Scan(&uppercaseBefore))
 			}
 			w := &PostgresWriter{db: db, schema: schema, dbType: "postgres", dia: dialect.NewPostgres("postgres")}
-			r, err := EnsureCompatibilityFunctions(ctx, w)
+			r, err := EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Created)
@@ -462,7 +459,7 @@ func TestCompatibilityPostgresIntegration(t *testing.T) {
 			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, a)
 			require.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, b)
 			require.NotEqual(t, a, b)
-			r, err = EnsureCompatibilityFunctions(ctx, w)
+			r, err = EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), r.Reused)

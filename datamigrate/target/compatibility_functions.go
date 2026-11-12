@@ -47,27 +47,42 @@ type CompatibilityExtensionResult struct {
 // Optional capability: existing Writer implementations and third-party writers
 // do not acquire a new required method.
 type compatibilityInitializer interface {
-	EnsureCompatibilityFunctions(context.Context) (*CompatibilityFunctionsReport, error)
+	EnsureCompatibilityFunctions(context.Context, ...string) (*CompatibilityFunctionsReport, error)
 }
 
-func EnsureCompatibilityFunctions(ctx context.Context, w Writer) (*CompatibilityFunctionsReport, error) {
+func pgCompatibilityInitializer(w Writer) compatibilityInitializer {
 	if initializer, ok := w.(compatibilityInitializer); ok && source.IsPGFamily(w.DBType()) {
-		return initializer.EnsureCompatibilityFunctions(ctx)
+		return initializer
+	}
+	return nil
+}
+
+// SupportsCompatibilityFunctions reports whether the writer can prepare PG-family routines.
+func SupportsCompatibilityFunctions(w Writer) bool {
+	return pgCompatibilityInitializer(w) != nil
+}
+
+// EnsureCompatibilityFunctions initializes PG-family functions and any built-in
+// procedures matching procedureNames case-insensitively. Omit procedureNames to
+// initialize only functions.
+func EnsureCompatibilityFunctions(ctx context.Context, w Writer, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+	if initializer := pgCompatibilityInitializer(w); initializer != nil {
+		return initializer.EnsureCompatibilityFunctions(ctx, procedureNames...)
 	}
 	return nil, nil
 }
 
-func (w *PostgresWriter) EnsureCompatibilityFunctions(ctx context.Context) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType())
+func (w *PostgresWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
 }
-func (w *GaussDBWriter) EnsureCompatibilityFunctions(ctx context.Context) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType())
+func (w *GaussDBWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
 }
-func (w *HighGoWriter) EnsureCompatibilityFunctions(ctx context.Context) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType())
+func (w *HighGoWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
 }
-func (w *KingbaseWriter) EnsureCompatibilityFunctions(ctx context.Context) (*CompatibilityFunctionsReport, error) {
-	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType())
+func (w *KingbaseWriter) EnsureCompatibilityFunctions(ctx context.Context, procedureNames ...string) (*CompatibilityFunctionsReport, error) {
+	return ensurePGCompatibility(ctx, w.db, w.schema, w.DBType(), procedureNames)
 }
 
 func uuidCandidates(product string) []string {
@@ -110,7 +125,7 @@ func compatibilityRace(err error) bool {
 	return code == "42723" || code == "42710" || code == "23505"
 }
 
-func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product string) (*CompatibilityFunctionsReport, error) {
+func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product string, procedureNames []string) (*CompatibilityFunctionsReport, error) {
 	report, uuidErr := ensurePGUUIDCompatibility(ctx, db, schema, product)
 	var failures []error
 	if uuidErr != nil {
@@ -131,7 +146,7 @@ func ensurePGCompatibility(ctx context.Context, db *sql.DB, schema, product stri
 			failures = append(failures, err)
 		}
 	}
-	procedureReport, procedureErr := ensurePGProcedureCompatibility(ctx, db, schema, product)
+	procedureReport, procedureErr := ensurePGProcedureCompatibility(ctx, db, schema, product, procedureNames)
 	report.Items = append(report.Items, procedureReport.Items...)
 	if procedureErr != nil {
 		failures = append(failures, procedureErr)

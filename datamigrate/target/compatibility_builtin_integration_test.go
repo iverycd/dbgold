@@ -44,7 +44,7 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 				require.NoError(t, err)
 			})
 			w := builtinIntegrationWriter(db, schema, product.name)
-			report, err := EnsureCompatibilityFunctions(ctx, w)
+			report, err := EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
 			require.NoError(t, err, "initialize before code_items exists")
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
@@ -61,7 +61,7 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 			t.Run("getrowid", func(t *testing.T) { checkGetRowIDSQL(t, ctx, db, schema) })
 			t.Run("isnull", func(t *testing.T) { checkIsNullSQL(t, ctx, db, schema, product.name) })
 			t.Run("invoker_permissions", func(t *testing.T) { checkCountRowsInvokerSQL(t, ctx, db, schema) })
-			report, err = EnsureCompatibilityFunctions(ctx, w)
+			report, err = EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
 			require.NoError(t, err)
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 			require.Zero(t, report.Created)
@@ -74,7 +74,7 @@ func TestCompatibilityBuiltinsSQLIntegration(t *testing.T) {
 				var before, after string
 				query := "SELECT pg_get_functiondef($1::regprocedure::oid)"
 				require.NoError(t, db.QueryRowContext(ctx, query, name+"(varchar,varchar)").Scan(&before))
-				report, err := EnsureCompatibilityFunctions(ctx, w)
+				report, err := EnsureCompatibilityFunctions(ctx, w, allCompatibilityProcedureNames()...)
 				require.Error(t, err)
 				require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 				require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
@@ -276,7 +276,7 @@ func TestCompatibilityBuiltinsConcurrentSQLIntegration(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"))
+			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"), allCompatibilityProcedureNames()...)
 			outcomes <- outcome{report, err}
 		}()
 	}
@@ -317,7 +317,7 @@ func TestCompatibilityBuiltinsDefaultSchemaAndIsolationSQLIntegration(t *testing
 	require.NoError(t, err)
 	var before string
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT pg_get_functiondef($1::regprocedure::oid)", count+"(varchar,varchar)").Scan(&before))
-	report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"))
+	report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"), allCompatibilityProcedureNames()...)
 	require.ErrorContains(t, err, "count_rows")
 	require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 	require.Equal(t, 1, report.Reused)
@@ -338,7 +338,7 @@ func TestCompatibilityBuiltinsDefaultSchemaAndIsolationSQLIntegration(t *testing
 	// implementation that raises if called. Metadata discovery must retain it.
 	_, err = db.ExecContext(ctx, "CREATE OR REPLACE FUNCTION "+qualifiedFunction(schema, "fun_getpy")+"(p_name varchar) RETURNS varchar LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'must not execute existing function'; END;$$")
 	require.NoError(t, err)
-	report, err = EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"))
+	report, err = EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, "", "postgres"), allCompatibilityProcedureNames()...)
 	require.ErrorContains(t, err, "count_rows")
 	require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Reused)
 	require.Zero(t, report.Created)
@@ -373,7 +373,7 @@ func TestCompatibilityBuiltinsRoutineKindSQLIntegration(t *testing.T) {
 			require.NoError(t, err)
 			var before, after int64
 			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regprocedure::oid", name+"(varchar)").Scan(&before))
-			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"))
+			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"), allCompatibilityProcedureNames()...)
 			require.Error(t, err, "aggregate/window object cannot satisfy a scalar compatibility function")
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)
@@ -405,7 +405,7 @@ func TestCompatibilityCountRowsOverloadSQLIntegration(t *testing.T) {
 				_, err = db.ExecContext(ctx, "CREATE FUNCTION "+name+"(table_name varchar,owner varchar DEFAULT NULL) RETURNS numeric LANGUAGE sql AS $$SELECT 888::numeric$$")
 				require.NoError(t, err)
 			}
-			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"))
+			report, err := EnsureCompatibilityFunctions(ctx, builtinIntegrationWriter(db, schema, "postgres"), allCompatibilityProcedureNames()...)
 			require.Error(t, err, "one-argument call would be ambiguous despite a matching two-argument signature")
 			require.Equal(t, 1+len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Total)
 			require.Equal(t, len(builtinCompatibilitySpecs)+len(compatibilityProcedureSpecs), report.Created)

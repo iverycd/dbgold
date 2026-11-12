@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ type compatibilityTestWriter struct {
 	mockWriter
 	calls          []string
 	failedFunction string
+	procedureNames []string
 	product        string
 }
 
@@ -27,8 +29,8 @@ func (w *compatibilityTestWriter) DBType() string {
 	}
 	return "postgres"
 }
-func compatibilityTestItems() []target.CompatibilityFunctionResult {
-	return []target.CompatibilityFunctionResult{
+func compatibilityTestItems(procedureNames ...string) []target.CompatibilityFunctionResult {
+	items := []target.CompatibilityFunctionResult{
 		{Name: "get_uuid", Signature: "get_uuid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION get_uuid"},
 		{Name: "auto_increase_itemid", Signature: "auto_increase_itemid()", Schema: "app", Status: "created", DDL: "CREATE FUNCTION auto_increase_itemid"},
 		{Name: "count_rows", Signature: "count_rows(table_name varchar, owner varchar DEFAULT NULL)", Schema: "app", Status: "created", DDL: "CREATE FUNCTION count_rows"},
@@ -50,10 +52,16 @@ func compatibilityTestItems() []target.CompatibilityFunctionResult {
 		{Name: "changedatatomain", Kind: "procedure", Signature: "changedatatomain(p_processversioninstanceguid varchar)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE changedatatomain"},
 		{Name: "createpvi", Kind: "procedure", Signature: "createpvi(p_processguid varchar, p_processversioninstanceguid varchar, p_userguid varchar, p_username varchar, p_workitemguid varchar, p_ouguid varchar, INOUT p_handleurl varchar DEFAULT NULL)", Schema: "app", Status: "created", DDL: "CREATE PROCEDURE createpvi"},
 	}
+	return slices.DeleteFunc(items, func(item target.CompatibilityFunctionResult) bool {
+		return item.Kind == "procedure" && !slices.ContainsFunc(procedureNames, func(name string) bool {
+			return strings.EqualFold(name, item.Name)
+		})
+	})
 }
-func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(context.Context) (*target.CompatibilityFunctionsReport, error) {
+func (w *compatibilityTestWriter) EnsureCompatibilityFunctions(_ context.Context, procedureNames ...string) (*target.CompatibilityFunctionsReport, error) {
 	w.calls = append(w.calls, "prepare")
-	items := compatibilityTestItems()
+	w.procedureNames = slices.Clone(procedureNames)
+	items := compatibilityTestItems(procedureNames...)
 	r := &target.CompatibilityFunctionsReport{Total: len(items), Success: len(items), Created: len(items), Items: items}
 	for i := range r.Items {
 		if r.Items[i].Name != w.failedFunction {
@@ -84,37 +92,53 @@ func (w *compatibilityTestWriter) CopyData(context.Context, string, []string, []
 	return nil
 }
 
-type compatibilityViewReader struct {
+type compatibilityTestReader struct {
 	mockReader
-	views []source.ViewInfo
+	views          []source.ViewInfo
+	procedureNames []string
+	procedureErr   error
+	procedureCalls int
 }
 
-func (r *compatibilityViewReader) GetViews(context.Context) ([]source.ViewInfo, error) {
+func (r *compatibilityTestReader) GetViews(context.Context) ([]source.ViewInfo, error) {
 	if r.views != nil {
 		return r.views, nil
 	}
 	return []source.ViewInfo{{ViewName: "v", Definition: "SELECT get_uuid()"}}, nil
 }
 
+func (r *compatibilityTestReader) ListProcedureNames(context.Context) ([]string, error) {
+	r.procedureCalls++
+	return r.procedureNames, r.procedureErr
+}
+
 func TestCompatibilityInitializedForEveryMigrationMode(t *testing.T) {
-	expectedItems := compatibilityTestItems()
-	require.Len(t, expectedItems, 20)
-	for _, mode := range []string{"both", "schema_only", "data_only", "objects", "include"} {
+	expectedItems := compatibilityTestItems("changedatatohistory")
+	require.Len(t, expectedItems, 18)
+	for _, mode := range []string{"both", "schema_only", "data_only", "objects", "include", "cdc"} {
 		t.Run(mode, func(t *testing.T) {
-			r := &mockReader{tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}}}
+			r := &compatibilityTestReader{mockReader: mockReader{
+				tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
+			}, views: []source.ViewInfo{}, procedureNames: []string{"ChangeDataToHistory", "test"}}
 			w := &compatibilityTestWriter{}
 			m, _ := newTestMigrator(r, w)
-			m.cfg.Content = mode
-			if mode == "objects" {
+			m.cfg.Content = "both"
+			switch mode {
+			case "objects":
 				m.cfg.Objects = []string{"indexes"}
-			}
-			if mode == "include" {
+			case "include":
 				m.cfg.Mode = "include"
 				m.cfg.Filter = "t"
+			case "cdc":
+				m.cfg.MigrationPurpose = "cdc"
+			default:
+				m.cfg.Content = mode
 			}
 			report := m.Run(context.Background())
 			require.False(t, report.HasFailures())
 			require.NotNil(t, report.CompatibilityFunctions)
+			require.Equal(t, 1, r.procedureCalls)
+			require.Equal(t, r.procedureNames, w.procedureNames)
 			require.Equal(t, "prepare", w.calls[0])
 			require.Equal(t, len(expectedItems), report.CompatibilityFunctions.Total)
 			require.Equal(t, len(expectedItems), report.CompatibilityFunctions.Success)
@@ -158,7 +182,7 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 		} {
 			function, call := sample.name, sample.call
 			t.Run(fmt.Sprintf("%t/%s", capture, function), func(t *testing.T) {
-				r := &compatibilityViewReader{mockReader: mockReader{
+				r := &compatibilityTestReader{mockReader: mockReader{
 					tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
 				}, views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT " + call}, {ViewName: "independent", Definition: "SELECT 1"}}}
 				w := &compatibilityTestWriter{failedFunction: function}
@@ -210,7 +234,8 @@ func TestCompatibilityFailureContinuesTablesDataAndIndependentViews(t *testing.T
 func TestCompatibilityInitializedBeforeStandaloneAndFullViews(t *testing.T) {
 	for _, standalone := range []bool{true, false} {
 		w := &compatibilityTestWriter{}
-		m, _ := newTestMigrator(&compatibilityViewReader{}, w)
+		r := &compatibilityTestReader{procedureNames: []string{"CreatePVI"}}
+		m, _ := newTestMigrator(r, w)
 		if standalone {
 			results := m.MigrateViews(context.Background(), []string{"v"})
 			require.Len(t, results, 1)
@@ -220,15 +245,19 @@ func TestCompatibilityInitializedBeforeStandaloneAndFullViews(t *testing.T) {
 			require.Equal(t, 1, report.Views.Success)
 		}
 		require.Equal(t, []string{"prepare", "view"}, w.calls)
+		require.Equal(t, 1, r.procedureCalls)
+		require.Equal(t, r.procedureNames, w.procedureNames)
 		require.NotNil(t, m.CompatibilityFunctions())
-		require.Equal(t, len(compatibilityTestItems()), m.CompatibilityFunctions().Success)
+		require.Equal(t, len(compatibilityTestItems("createpvi")), m.CompatibilityFunctions().Success)
 	}
 }
 func TestCompatibilityNonPGAndOldReportsStayUnchanged(t *testing.T) {
 	w := &compatibilityTestWriter{product: "mysql"}
-	m, _ := newTestMigrator(&mockReader{}, w)
+	r := &compatibilityTestReader{views: []source.ViewInfo{}, procedureNames: []string{"CreatePVI"}}
+	m, _ := newTestMigrator(r, w)
 	report := m.Run(context.Background())
 	require.Nil(t, report.CompatibilityFunctions)
+	require.Zero(t, r.procedureCalls)
 	require.Empty(t, w.calls)
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
@@ -256,7 +285,7 @@ func TestCompatibilityHistoricalTwoFunctionReportRoundTrip(t *testing.T) {
 
 func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	w := &compatibilityTestWriter{failedFunction: "fun_getpy"}
-	reader := &compatibilityViewReader{views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT fun_getpy('中国')"}, {ViewName: "independent", Definition: "SELECT 1"}}}
+	reader := &compatibilityTestReader{views: []source.ViewInfo{{ViewName: "dependent", Definition: "SELECT fun_getpy('中国')"}, {ViewName: "independent", Definition: "SELECT 1"}}}
 	m, _ := newTestMigrator(reader, w)
 	results := m.MigrateViews(context.Background(), []string{"dependent", "independent"})
 	require.Len(t, results, 2)
@@ -269,17 +298,61 @@ func TestCompatibilityStandaloneFailureStillExecutesAllViews(t *testing.T) {
 	require.Equal(t, []string{"prepare", "view", "view"}, w.calls)
 }
 
+func TestCompatibilityProcedureDiscoveryFailureContinuesMigration(t *testing.T) {
+	for _, mode := range []string{"full", "standalone_views"} {
+		t.Run(mode, func(t *testing.T) {
+			r := &compatibilityTestReader{
+				mockReader: mockReader{
+					tables: []string{"t"},
+					ddl:    map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}},
+					rows:   map[string][][]interface{}{"t": {{1}}},
+				},
+				procedureNames: []string{"ChangeDataToMain"},
+				procedureErr:   errors.New("catalog access denied"),
+			}
+			w := &compatibilityTestWriter{}
+			m, _ := newTestMigrator(r, w)
+			if mode == "standalone_views" {
+				results := m.MigrateViews(context.Background(), []string{"v"})
+				require.Len(t, results, 1)
+				require.Equal(t, "v", results[0].Name)
+				require.Empty(t, results[0].Error)
+				require.Equal(t, []string{"prepare", "view"}, w.calls)
+			} else {
+				report := m.Run(context.Background())
+				require.True(t, report.HasFailures())
+				require.Equal(t, 1, report.Tables.Success)
+				require.Equal(t, 1, report.Data.Success)
+				require.Equal(t, 1, report.Views.Success)
+				require.Equal(t, []string{"prepare", "table", "data", "view"}, w.calls)
+			}
+			require.Equal(t, 1, r.procedureCalls)
+			require.Empty(t, w.procedureNames)
+			report := m.CompatibilityFunctions()
+			require.NotNil(t, report)
+			require.Equal(t, len(compatibilityTestItems())+1, report.Total)
+			require.Equal(t, len(compatibilityTestItems()), report.Success)
+			require.Equal(t, 1, report.Failed)
+			issue := report.Items[len(report.Items)-1]
+			require.Equal(t, "源库存储过程列表", issue.Name)
+			require.Equal(t, "procedure", issue.Kind)
+			require.Equal(t, "failed", issue.Status)
+			require.Contains(t, issue.Error, "catalog access denied")
+		})
+	}
+}
+
 func TestCompatibilityProcedureFailureContinuesMigration(t *testing.T) {
 	for _, procedure := range []string{"changedatatohistory", "changedatatomain", "createpvi"} {
 		t.Run(procedure, func(t *testing.T) {
-			reader := &compatibilityViewReader{mockReader: mockReader{
+			reader := &compatibilityTestReader{mockReader: mockReader{
 				tables: []string{"t"}, ddl: map[string]*source.TableDDLInfo{"t": {TableName: "t", Columns: []source.ColumnInfo{{Name: "id", DataType: "int"}}}}, rows: map[string][][]interface{}{"t": {{1}}},
-			}, views: []source.ViewInfo{{ViewName: "independent", Definition: "SELECT 1"}}}
+			}, views: []source.ViewInfo{{ViewName: "independent", Definition: "SELECT 1"}}, procedureNames: []string{procedure}}
 			w := &compatibilityTestWriter{failedFunction: procedure}
 			m, _ := newTestMigrator(reader, w)
 			report := m.Run(context.Background())
 			require.True(t, report.HasFailures())
-			total := len(compatibilityTestItems())
+			total := len(compatibilityTestItems(procedure))
 			require.Equal(t, total, report.CompatibilityFunctions.Total)
 			require.Equal(t, total-1, report.CompatibilityFunctions.Success)
 			require.Equal(t, 1, report.CompatibilityFunctions.Failed)

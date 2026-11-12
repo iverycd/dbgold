@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -61,10 +62,13 @@ var compatibilityProcedureProbeSequence atomic.Uint64
 // Procedures have different catalog, signature and syntax capabilities from
 // functions. Keep this transaction independent so unsupported older engines
 // retain all compatibility functions that were initialized successfully.
-func ensurePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, product string) (*CompatibilityFunctionsReport, error) {
+func ensurePGProcedureCompatibility(ctx context.Context, db *sql.DB, schema, product string, procedureNames []string) (*CompatibilityFunctionsReport, error) {
 	report := &CompatibilityFunctionsReport{}
 	var failures []error
 	for _, spec := range compatibilityProcedureSpecs {
+		if !slices.ContainsFunc(procedureNames, func(name string) bool { return strings.EqualFold(name, spec.name) }) {
+			continue
+		}
 		itemReport, err := ensurePGProcedureSpecCompatibility(ctx, db, schema, product, spec)
 		report.Items = append(report.Items, itemReport.Items...)
 		if schema == "" && len(itemReport.Items) > 0 {

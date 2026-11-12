@@ -57,11 +57,11 @@ func TestCompatibilityProcedureMainSQLIntegration(t *testing.T) {
 					schema := newBusinessIntegrationSchema(t, ctx, db)
 					// Initialization must not read workflow data or invoke any
 					// procedure: none of their business tables exist yet.
-					report, err := ensurePGProcedureCompatibility(ctx, db, schema, product.name)
+					report, err := ensurePGProcedureCompatibility(ctx, db, schema, product.name, allCompatibilityProcedureNames())
 					require.NoError(t, err)
 					require.Equal(t, len(compatibilityProcedureSpecs), report.Created)
 					require.Len(t, report.Items, len(compatibilityProcedureSpecs))
-					report, err = ensurePGProcedureCompatibility(ctx, db, schema, product.name)
+					report, err = ensurePGProcedureCompatibility(ctx, db, schema, product.name, allCompatibilityProcedureNames())
 					require.NoError(t, err)
 					require.Equal(t, len(compatibilityProcedureSpecs), report.Reused)
 					for i, spec := range compatibilityProcedureSpecs {

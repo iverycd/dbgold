@@ -3,6 +3,7 @@ package datamigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -1739,7 +1740,41 @@ func (m *Migrator) prepareCompatibilityFunctions(ctx context.Context) error {
 		m.log.Warn("任务已取消")
 		return ctx.Err()
 	}
-	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer)
+	if !target.SupportsCompatibilityFunctions(m.writer) {
+		return nil
+	}
+	var procedureNames []string
+	var discoveryErr error
+	if reader, ok := m.reader.(interface {
+		ListProcedureNames(context.Context) ([]string, error)
+	}); ok {
+		procedureNames, discoveryErr = reader.ListProcedureNames(ctx)
+		if discoveryErr != nil {
+			procedureNames = nil
+		}
+		if ctx.Err() != nil {
+			m.log.Warn("任务已取消")
+			return ctx.Err()
+		}
+	}
+	report, err := target.EnsureCompatibilityFunctions(ctx, m.writer, procedureNames...)
+	if discoveryErr != nil {
+		discoveryErr = fmt.Errorf("读取源库存储过程列表失败: %w", discoveryErr)
+		if report == nil {
+			report = &target.CompatibilityFunctionsReport{}
+		}
+		schema := m.cfg.TargetSchema
+		if schema == "" && len(report.Items) > 0 {
+			schema = report.Items[0].Schema
+		}
+		const label = "源库存储过程列表"
+		report.Items = append(report.Items, target.CompatibilityFunctionResult{
+			Name: label, Kind: "procedure", Signature: label, Schema: schema, Status: "failed", Error: discoveryErr.Error(),
+		})
+		report.Total++
+		report.Failed++
+		err = errors.Join(err, discoveryErr)
+	}
 	m.compatibilityFunctions = report
 	if err != nil {
 		m.log.Errorf("兼容项初始化失败，继续迁移，依赖失败函数或存储过程的对象以实际执行结果为准: %v", err)
