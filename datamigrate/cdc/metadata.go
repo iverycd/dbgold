@@ -24,15 +24,19 @@ func OpenSource(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-func LoadTables(ctx context.Context, db *sql.DB, database, mode, filter string) ([]TableInfo, error) {
+type SourceMetadataReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func LoadTables(ctx context.Context, db SourceMetadataReader, database, mode, filter string) ([]TableInfo, error) {
 	return loadTables(ctx, db, database, mode, filter, nil)
 }
 
-func LoadExactTables(ctx context.Context, db *sql.DB, database string, exact []string) ([]TableInfo, error) {
+func LoadExactTables(ctx context.Context, db SourceMetadataReader, database string, exact []string) ([]TableInfo, error) {
 	return loadTables(ctx, db, database, "all", "", exact)
 }
 
-func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, exact []string) ([]TableInfo, error) {
+func loadTables(ctx context.Context, db SourceMetadataReader, database, mode, filter string, exact []string) ([]TableInfo, error) {
 	rows, err := db.QueryContext(ctx, `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.EXTRA, t.ENGINE, c.COLUMN_TYPE, c.CHARACTER_SET_NAME
 		FROM information_schema.COLUMNS c JOIN information_schema.TABLES t
 		ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME
@@ -129,7 +133,7 @@ func loadTables(ctx context.Context, db *sql.DB, database, mode, filter string, 
 	return result, nil
 }
 
-func loadCDCSpatialSRIDs(ctx context.Context, db *sql.DB, database string, tables []TableInfo) error {
+func loadCDCSpatialSRIDs(ctx context.Context, db SourceMetadataReader, database string, tables []TableInfo) error {
 	for i := range tables {
 		table := &tables[i]
 		info := &source.TableDDLInfo{TableName: table.Name}
@@ -162,7 +166,7 @@ type uniqueIndexBuilder struct {
 	valid bool
 }
 
-func loadUniqueIndexes(ctx context.Context, db *sql.DB, database string, tables map[string]*TableInfo) error {
+func loadUniqueIndexes(ctx context.Context, db SourceMetadataReader, database string, tables map[string]*TableInfo) error {
 	rows, err := db.QueryContext(ctx, `SELECT s.TABLE_NAME, s.INDEX_NAME, s.COLUMN_NAME, s.SUB_PART, s.INDEX_TYPE, c.IS_NULLABLE
 		FROM information_schema.STATISTICS s
 		LEFT JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA=s.TABLE_SCHEMA AND c.TABLE_NAME=s.TABLE_NAME AND c.COLUMN_NAME=s.COLUMN_NAME

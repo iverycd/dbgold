@@ -47,6 +47,7 @@ type MySQLReader struct {
 	db              *sql.DB
 	dbName          string
 	snapshotTx      *sql.Tx
+	snapshotTables  []string
 	snapshotCursors map[string]*snapshotCursor
 }
 
@@ -108,6 +109,12 @@ func (r *MySQLReader) queryRowContext(ctx context.Context, query string, args ..
 // repeatable-read snapshot on a dedicated transaction, and captures its binlog
 // position. Call FinishSnapshot after all snapshot reads complete.
 func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosition, error) {
+	return r.CaptureConsistentSnapshotWithMetadata(ctx, nil)
+}
+
+// CaptureConsistentSnapshotWithMetadata runs capture under the global read lock.
+// The callback may pin table metadata on tx until FinishSnapshot.
+func (r *MySQLReader) CaptureConsistentSnapshotWithMetadata(ctx context.Context, capture func(*sql.Tx) error) (BinlogPosition, error) {
 	if r.snapshotTx != nil {
 		return BinlogPosition{}, fmt.Errorf("snapshot already active")
 	}
@@ -131,6 +138,7 @@ func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosi
 		return BinlogPosition{}, err
 	}
 	r.snapshotTx = tx
+	r.snapshotTables = nil
 	r.snapshotCursors = make(map[string]*snapshotCursor)
 	// A consistent read establishes the InnoDB read view while writes are locked.
 	var firstTable string
@@ -151,6 +159,13 @@ func (r *MySQLReader) CaptureConsistentSnapshot(ctx context.Context) (BinlogPosi
 		_ = tx.Rollback()
 		r.snapshotTx = nil
 		return BinlogPosition{}, err
+	}
+	if capture != nil {
+		if err = capture(tx); err != nil {
+			_ = tx.Rollback()
+			r.snapshotTx = nil
+			return BinlogPosition{}, fmt.Errorf("capture snapshot metadata: %w", err)
+		}
 	}
 	pos, err := readBinlogPosition(ctx, lockConn)
 	if err != nil {
@@ -207,6 +222,26 @@ func readBinlogPosition(ctx context.Context, conn *sql.Conn) (BinlogPosition, er
 	return p, nil
 }
 
+// PinSnapshotTables freezes the table manifest and retains MySQL metadata
+// locks on every selected table (including empty tables) until snapshot end.
+// Call while CaptureConsistentSnapshotWithMetadata holds its global lock.
+func (r *MySQLReader) PinSnapshotTables(ctx context.Context, names []string) error {
+	if r.snapshotTx == nil || len(names) == 0 {
+		return fmt.Errorf("pin tables requires an active snapshot and nonempty scope")
+	}
+	for _, name := range names {
+		rows, err := r.snapshotTx.QueryContext(ctx, "SELECT * FROM `"+strings.ReplaceAll(r.dbName, "`", "``")+"`.`"+strings.ReplaceAll(name, "`", "``")+"` LIMIT 0")
+		if err != nil {
+			return err
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+	}
+	r.snapshotTables = append([]string(nil), names...)
+	return nil
+}
+
 func (r *MySQLReader) FinishSnapshot() error {
 	if r.snapshotTx == nil {
 		return nil
@@ -214,6 +249,7 @@ func (r *MySQLReader) FinishSnapshot() error {
 	r.closeSnapshotCursors()
 	err := r.snapshotTx.Commit()
 	r.snapshotTx = nil
+	r.snapshotTables = nil
 	return err
 }
 
@@ -238,6 +274,9 @@ func (r *MySQLReader) ListDatabases(ctx context.Context) ([]string, error) {
 }
 
 func (r *MySQLReader) ListTables(ctx context.Context) ([]string, error) {
+	if r.snapshotTx != nil && r.snapshotTables != nil {
+		return append([]string(nil), r.snapshotTables...), nil
+	}
 	rows, err := r.queryContext(ctx,
 		`SELECT TABLE_NAME FROM information_schema.TABLES
 		 WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'

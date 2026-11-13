@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,6 +173,18 @@ func StartIncremental(c *gin.Context) {
 		excludedBytes, _ := json.Marshal(scopeRecord.ExcludedTables)
 		effectiveJSON, excludedJSON = string(effectiveBytes), string(excludedBytes)
 	}
+	var sourceSchema cdc.SourceSchemaSnapshot
+	if dst.DBType == "dameng" && req.StartMode == "incremental_only" {
+		cfg.TableNames = scopeRecord.EffectiveTables
+		var err error
+		sourceSchema, err = cdc.CaptureSourceSchema(c.Request.Context(), cfg, cfg.Start)
+		if err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		scopeRecord.SourceSchema = sourceSchema
+	}
+	sourceSchemaJSON, _ := json.Marshal(sourceSchema)
 	j := &store.IncrementalMigrationJob{OwnerID: middleware.GetCurrentUserID(c), JobID: jobID, SrcConnID: req.SrcConnID, DstConnID: req.DstConnID,
 		SrcDBType: src.DBType, DstDBType: dst.DBType, SrcDatabase: req.SrcDatabase, TargetSchema: req.TargetSchema,
 		SrcConnName: src.Name, SrcConnHost: src.Host, SrcConnPort: src.Port, SrcConnDatabase: req.SrcDatabase, SrcConnUsername: src.Username,
@@ -182,6 +195,10 @@ func StartIncremental(c *gin.Context) {
 		LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategiesJSON: string(locatorJSON), PrimaryLocatorCount: primaryCount,
 		UniqueLocatorCount: uniqueCount, FullRowLocatorCount: fullRowCount, BootstrapState: "pending", Status: "initializing", Phase: "initializing",
 		EffectiveJSON: effectiveJSON, ExcludedJSON: excludedJSON, EffectiveCount: len(scopeRecord.EffectiveTables), ExcludedCount: len(scopeRecord.ExcludedTables), ManifestHash: scopeRecord.ManifestHash}
+	if dst.DBType == "dameng" {
+		j.SourceSchemaVersion = cdc.SourceSchemaVersion
+		j.SourceSchemaJSON = string(sourceSchemaJSON)
+	}
 	if e := createIncrementalAfterPreflight(j, src, dst, func() {
 		if len(scopeRecord.ExcludedTables) > 0 {
 			names := make([]string, 0, len(scopeRecord.ExcludedTables))
@@ -376,7 +393,26 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		return e
 	}
 	defer r.Close()
-	pos, e := r.CaptureConsistentSnapshot(ctx)
+	var snapshot cdc.SourceSchemaSnapshot
+	var capture func(*sql.Tx) error
+	if dst.DBType == "dameng" {
+		capture = func(tx *sql.Tx) error {
+			tables, err := cdc.LoadTables(ctx, tx, j.SrcDatabase, j.MigrateMode, j.TableFilter)
+			if err != nil {
+				return err
+			}
+			names := make([]string, len(tables))
+			for i, table := range tables {
+				names[i] = table.Name
+			}
+			if err = r.PinSnapshotTables(ctx, names); err != nil {
+				return err
+			}
+			snapshot, err = cdc.NewSourceSchema(j.SrcDatabase, tables)
+			return err
+		}
+	}
+	pos, e := r.CaptureConsistentSnapshotWithMetadata(ctx, capture)
 	if e != nil {
 		return e
 	}
@@ -386,8 +422,19 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	snapshotPosition := cdc.Position{File: pos.File, Pos: pos.Pos, GTID: pos.GTID}
 	appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "info", "已获取一致快照起始位点: "+formatIncrementalPosition(snapshotPosition))
 	cfg := configFromIncremental(j, src, dst)
-	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, cdc.BootstrapRecord{State: "snapshot_in_progress", Position: snapshotPosition, LocatorStrategyVersion: cdc.LocatorStrategyVersion}); e != nil {
+	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, cdc.BootstrapRecord{SourceSchema: snapshot, State: "snapshot_in_progress", Position: snapshotPosition, LocatorStrategyVersion: cdc.LocatorStrategyVersion}); e != nil {
 		return fmt.Errorf("保存全量快照待完成位点失败: %w", e)
+	}
+	if dst.DBType == "dameng" {
+		b, err := json.Marshal(snapshot)
+		if err != nil {
+			return err
+		}
+		j.SourceSchemaJSON = string(b)
+		j.SourceSchemaVersion = snapshot.Version
+		if err = store.UpdateIncrementalJob(j.JobID, map[string]any{"source_schema_version": snapshot.Version, "source_schema_json": string(b)}); err != nil {
+			return err
+		}
 	}
 	j.BootstrapState = "snapshot_in_progress"
 	j.PendingFile, j.PendingPos, j.PendingGTID = pos.File, pos.Pos, pos.GTID
@@ -429,6 +476,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	// fail_all task would terminate with only transient log lines and the exact
 	// failed DDL could no longer be exported.
 	preliminaryReview := cdc.BuildBootstrapReview(snapshotPosition, expectedTables, report, j.LowerCaseNames, nil)
+	preliminaryReview.SourceSchema = snapshot
 	preliminaryReview.State = "snapshot_in_progress"
 	preliminaryReview.LocatorStrategyVersion = cdc.LocatorStrategyVersion
 	preliminaryJSON, _ := json.Marshal(preliminaryReview)
@@ -451,12 +499,17 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		}
 	}
 
-	sourceDB, e := cdc.OpenSource(cfg.SourceDSN)
-	if e != nil {
-		return e
+	var tableInfos []cdc.TableInfo
+	if dst.DBType == "dameng" {
+		tableInfos, e = snapshot.TableInfos(j.SrcDatabase, expectedTables)
+	} else {
+		sourceDB, err := cdc.OpenSource(cfg.SourceDSN)
+		if err != nil {
+			return err
+		}
+		tableInfos, e = cdc.LoadExactTables(ctx, sourceDB, cfg.SourceDatabase, expectedTables)
+		sourceDB.Close()
 	}
-	tableInfos, e := cdc.LoadExactTables(ctx, sourceDB, cfg.SourceDatabase, expectedTables)
-	sourceDB.Close()
 	if e != nil {
 		return fmt.Errorf("读取 CDC 表元数据失败: %w", e)
 	}
@@ -478,6 +531,12 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	for _, strategy := range allStrategies {
 		if effectiveSet[strategy.Table] {
 			review.LocatorStrategies = append(review.LocatorStrategies, strategy)
+		}
+	}
+	if dst.DBType == "dameng" && len(review.EffectiveTables) > 0 {
+		review.SourceSchema, e = snapshot.Select(j.SrcDatabase, review.EffectiveTables)
+		if e != nil {
+			return e
 		}
 	}
 	review.LocatorStrategyVersion = cdc.LocatorStrategyVersion
@@ -531,7 +590,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		j.EffectiveCount, j.ExcludedCount, j.ManifestHash = len(review.EffectiveTables), len(review.ExcludedTables), review.ManifestHash
 		locatorJSON, _ := json.Marshal(review.LocatorStrategies)
 		primaryCount, uniqueCount, fullRowCount := locatorStrategyCounts(review.LocatorStrategies)
-		if e = store.UpdateIncrementalJob(j.JobID, map[string]any{
+		fields := map[string]any{
 			"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
 			"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON), "bootstrap_report_json": string(reviewJSON),
 			"effective_table_count": len(review.EffectiveTables), "excluded_table_count": len(review.ExcludedTables), "bootstrap_manifest_hash": review.ManifestHash,
@@ -539,7 +598,11 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 			"locator_strategy_version": review.LocatorStrategyVersion, "locator_strategies_json": string(locatorJSON),
 			"primary_locator_count": primaryCount, "unique_locator_count": uniqueCount, "full_row_locator_count": fullRowCount,
 			"summary": fmt.Sprintf("全量完成：%d 张表可继续，%d 张表待确认排除", len(review.EffectiveTables), len(review.ExcludedTables)),
-		}); e != nil {
+		}
+		if e = applySourceSchemaFields(j, review.SourceSchema, fields); e != nil {
+			return e
+		}
+		if e = store.UpdateIncrementalJob(j.JobID, fields); e != nil {
 			return e
 		}
 		appendIncrementalLifecycleLog(j.JobID, "bootstrap_review", "warn", "全量存在失败表，等待人工确认排除范围后再启动 CDC")
@@ -617,6 +680,7 @@ func strictBootstrapFailure(report datamigrate.MigrationReport, expectedTables [
 func configFromIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connection) cdc.Config {
 	req := incrementalRequest{SrcDatabase: j.SrcDatabase, TargetSchema: j.TargetSchema, MigrateMode: j.MigrateMode, TableFilter: j.TableFilter, LowerCaseNames: j.LowerCaseNames, ServerID: j.ServerID, StartGTID: j.StartGTID, StartFile: j.StartFile, StartPosition: j.StartPosition}
 	cfg := incrementalConfig(req, j.JobID, src, dst)
+	_ = json.Unmarshal([]byte(j.SourceSchemaJSON), &cfg.SourceSchema)
 	cfg.KeylessChangePolicy = j.KeylessChangePolicy
 	cfg.LocatorStrategyVersion = j.LocatorStrategyVersion
 	_ = json.Unmarshal([]byte(j.LocatorStrategiesJSON), &cfg.LocatorStrategies)
@@ -669,7 +733,26 @@ func applyCompletedBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.
 		fields["effective_table_count"], fields["excluded_table_count"] = len(record.EffectiveTables), len(record.ExcludedTables)
 		fields["bootstrap_manifest_hash"] = record.ManifestHash
 	}
+	if err := applySourceSchemaFields(j, record.SourceSchema, fields); err != nil {
+		return err
+	}
 	return store.UpdateIncrementalJob(j.JobID, fields)
+}
+
+func applySourceSchemaFields(j *store.IncrementalMigrationJob, snapshot cdc.SourceSchemaSnapshot, fields map[string]any) error {
+	if j.DstDBType != "dameng" {
+		return nil
+	}
+	if err := snapshot.Validate(j.SrcDatabase); err != nil {
+		return err
+	}
+	b, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	j.SourceSchemaVersion, j.SourceSchemaJSON = snapshot.Version, string(b)
+	fields["source_schema_version"], fields["source_schema_json"] = snapshot.Version, string(b)
+	return nil
 }
 
 func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.BootstrapRecord) error {
@@ -686,7 +769,7 @@ func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.Boo
 	locatorJSON, _ := json.Marshal(record.LocatorStrategies)
 	primaryCount, uniqueCount, fullRowCount := locatorStrategyCounts(record.LocatorStrategies)
 	j.FailedObjectCount, j.FailedDDLCount = failedCount, failedDDLCount
-	return store.UpdateIncrementalJob(j.JobID, map[string]any{
+	fields := map[string]any{
 		"status": "paused_bootstrap_review", "phase": "bootstrap_review", "bootstrap_state": "review_pending",
 		"pending_file": record.Position.File, "pending_position": record.Position.Pos, "pending_gtid": record.Position.GTID,
 		"effective_tables_json": string(effectiveJSON), "excluded_tables_json": string(excludedJSON),
@@ -695,13 +778,18 @@ func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.Boo
 		"failed_object_count": failedCount, "failed_ddl_count": failedDDLCount,
 		"locator_strategy_version": record.LocatorStrategyVersion, "locator_strategies_json": string(locatorJSON),
 		"primary_locator_count": primaryCount, "unique_locator_count": uniqueCount, "full_row_locator_count": fullRowCount,
-	})
+	}
+	if err := applySourceSchemaFields(j, record.SourceSchema, fields); err != nil {
+		return err
+	}
+	return store.UpdateIncrementalJob(j.JobID, fields)
 }
 
 func runCDC(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) error {
 	cfg := configFromIncremental(j, src, dst)
 	baseI, baseU, baseD, baseS, baseW := j.InsertCount, j.UpdateCount, j.DeleteCount, j.SkippedCount, j.WarningCount
 	var mu sync.Mutex
+	var criticalPersistenceErr error
 	h := cdc.Hooks{Status: func(status, phase, summary string) {
 		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": status, "phase": phase, "summary": summary})
 	},
@@ -715,17 +803,21 @@ func runCDC(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *sto
 			_ = store.UpdateIncrementalJob(j.JobID, fields)
 		},
 		DDL: func(sqlText string, p cdc.Position) {
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "paused_ddl", "phase": "paused", "summary": "检测到源库 DDL，需人工处理", "blocking_ddl": sqlText, "blocking_file": p.File, "blocking_position": p.Pos, "blocking_gtid": p.GTID})
+			criticalPersistenceErr = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "paused_ddl", "phase": "paused", "summary": "检测到源库 DDL，需人工处理", "blocking_ddl": sqlText, "blocking_file": p.File, "blocking_position": p.Pos, "blocking_gtid": p.GTID})
 		},
 		RowConflict: func(conflict cdc.RowConflict) {
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{
+			criticalPersistenceErr = store.UpdateIncrementalJob(j.JobID, map[string]any{
 				"status": "paused_row_conflict", "phase": "paused", "summary": "目标端更新前记录无法唯一定位，请修复后恢复",
 				"conflict_table": conflict.Table, "conflict_action": conflict.Action, "conflict_file": conflict.Position.File,
 				"conflict_position": conflict.Position.Pos, "conflict_gtid": conflict.Position.GTID,
 				"conflict_error": conflict.Error, "conflict_before_hash": conflict.BeforeHash,
 			})
 		}}
-	return cdc.NewRunner(cfg, h).Run(ctx)
+	err := cdc.NewRunner(cfg, h).Run(ctx)
+	if criticalPersistenceErr != nil {
+		return fmt.Errorf("保存增量阻塞状态失败，目标检查点保留: %w", criticalPersistenceErr)
+	}
+	return err
 }
 
 func ownedIncremental(c *gin.Context) (*store.IncrementalMigrationJob, bool) {
@@ -821,6 +913,10 @@ func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
 	defer incrementalStartMu.Unlock()
 	j, ok := ownedIncremental(c)
 	if !ok {
+		return
+	}
+	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
+		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
 		return
 	}
 	if j.Status != "paused_bootstrap_review" && j.BootstrapState != "completed" {
@@ -1133,6 +1229,10 @@ func ResumeIncremental(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
+		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
+		return
+	}
 	if cdc.Registry.Running(j.JobID) {
 		c.JSON(409, gin.H{"error": "任务已在运行"})
 		return
@@ -1199,8 +1299,18 @@ func ResumeIncremental(c *gin.Context) {
 }
 
 func AckIncrementalDDL(c *gin.Context) {
+	incrementalStartMu.Lock()
+	defer incrementalStartMu.Unlock()
 	j, ok := ownedIncremental(c)
 	if !ok {
+		return
+	}
+	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
+		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
+		return
+	}
+	if cdc.Registry.Running(j.JobID) {
+		c.JSON(409, gin.H{"error": "任务尚未退出，请稍后确认 DDL"})
 		return
 	}
 	if j.Status != "paused_ddl" {
@@ -1219,11 +1329,33 @@ func AckIncrementalDDL(c *gin.Context) {
 	}
 	cfg := configFromIncremental(j, src, dst)
 	p := cdc.Position{File: j.BlockingFile, Pos: j.BlockingPos, GTID: j.BlockingGTID}
-	if e = cdc.AcknowledgeDDL(c.Request.Context(), cfg, p); e != nil {
+	fields := map[string]any{"blocking_ddl": "", "blocking_file": "", "blocking_position": 0, "blocking_gtid": "", "checkpoint_file": p.File, "checkpoint_position": p.Pos, "checkpoint_gtid": p.GTID, "status": "initializing", "last_error": ""}
+	if dst.DBType == "dameng" {
+		record, err := cdc.AcknowledgeDamengDDL(c.Request.Context(), cfg, p)
+		if err != nil {
+			c.JSON(409, gin.H{"error": err.Error()})
+			return
+		}
+		if err = applySourceSchemaFields(j, record.SourceSchema, fields); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		locators, err := json.Marshal(record.LocatorStrategies)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		j.LocatorStrategiesJSON = string(locators)
+		fields["locator_strategies_json"] = string(locators)
+		primary, unique, full := locatorStrategyCounts(record.LocatorStrategies)
+		fields["primary_locator_count"], fields["unique_locator_count"], fields["full_row_locator_count"] = primary, unique, full
+		p = record.Position
+		fields["checkpoint_file"], fields["checkpoint_position"], fields["checkpoint_gtid"] = p.File, p.Pos, p.GTID
+	} else if e = cdc.AcknowledgeDDL(c.Request.Context(), cfg, p); e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
-	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"paused_ddl"}, map[string]any{"blocking_ddl": "", "blocking_file": "", "blocking_position": 0, "blocking_gtid": "", "checkpoint_file": p.File, "checkpoint_position": p.Pos, "checkpoint_gtid": p.GTID, "status": "initializing"})
+	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"paused_ddl"}, fields)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return

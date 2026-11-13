@@ -40,12 +40,10 @@ var dhParaG = "5"
 var defaultIV = []byte{0x20, 0x21, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
 	0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a,
 	0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x20}
-var p *big.Int
-var g *big.Int
 
 func NewClientKeyPair() (key *DhKey, err error) {
-	p, _ = new(big.Int).SetString(dhParaP, 16)
-	g, _ = new(big.Int).SetString(dhParaG, 16)
+	p, _ := new(big.Int).SetString(dhParaP, 16)
+	g, _ := new(big.Int).SetString(dhParaG, 16)
 	dhGroup := newDhGroup(p, g)
 	key, err = dhGroup.GeneratePrivateKey(nil)
 	if err != nil {
@@ -57,7 +55,7 @@ func NewClientKeyPair() (key *DhKey, err error) {
 func ComputeSessionKey(clientPrivKey *DhKey, serverPubKey []byte) []byte {
 	serverKeyX := bytes2Bn(serverPubKey)
 	clientPrivKeyX := clientPrivKey.GetX()
-	sessionKeyBN := serverKeyX.Exp(serverKeyX, clientPrivKeyX, p)
+	sessionKeyBN := serverKeyX.Exp(serverKeyX, clientPrivKeyX, clientPrivKey.group.p)
 	return Bn2Bytes(sessionKeyBN, 0)
 }
 

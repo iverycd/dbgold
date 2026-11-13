@@ -70,6 +70,8 @@ type TargetTableIssue struct {
 }
 
 type Config struct {
+	SourceSchema SourceSchemaSnapshot
+
 	JobID                  string
 	SourceDSN              string
 	SourceHost             string
@@ -113,6 +115,8 @@ type BootstrapFailedObject struct {
 }
 
 type BootstrapRecord struct {
+	SourceSchema SourceSchemaSnapshot `json:"source_schema,omitempty"`
+
 	State                  string                  `json:"state"`
 	Position               Position                `json:"position"`
 	EffectiveTables        []string                `json:"effective_tables"`

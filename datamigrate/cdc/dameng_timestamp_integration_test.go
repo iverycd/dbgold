@@ -90,6 +90,8 @@ func runDamengTimestampBinlogTest(t *testing.T, mysqlDSN, dmDSN, zone string) {
 	tables, err = ResolveLocatorStrategies(ctx, cfg, tables)
 	require.NoError(t, err)
 	cfg.LocatorStrategies = LocatorStrategiesFromTables(tables)
+	cfg.SourceSchema, err = NewSourceSchema(cfg.SourceDatabase, tables)
+	require.NoError(t, err)
 	ready := make(chan struct{}, 1)
 	runner := NewRunner(cfg, Hooks{Stats: func(s Stats) {
 		if s.CaughtUp {

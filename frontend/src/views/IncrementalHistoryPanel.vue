@@ -45,7 +45,7 @@
             <div class="status-cell">
               <a-tooltip :content="record.last_error || record.summary || incrementalStatusText(record.status)" mini>
                 <a-tag :color="incrementalStatusColor(record.status)">
-                  {{ record.locator_strategy_version !== 1 ? '版本升级后已废弃' : incrementalStatusText(record.status) }}
+                  {{ record.status !== 'stopped' && (record.locator_strategy_version !== 1 || legacyDamengSchema(record)) ? '版本升级后已废弃' : incrementalStatusText(record.status) }}
                 </a-tag>
               </a-tooltip>
               <span :class="['progress-note', { caught: record.caught_up }]">{{ progressText(record) }}</span>
@@ -147,6 +147,7 @@ import {
   pausable,
   preparable,
   resumable,
+  legacyDamengSchema,
 } from '@/utils/incrementalJob'
 
 type PageSize = 20 | 50 | 100
@@ -292,7 +293,7 @@ function availableActions(job: IncrementalJob): RowAction[] {
   const actions: RowAction[] = []
   if (pausable(job)) actions.push({ value: 'pause', label: '暂停', type: 'secondary' })
   if (resumable(job)) actions.push({ value: 'resume', label: '恢复', type: 'primary' })
-  if (job.status === 'paused_ddl') actions.push({ value: 'ack', label: '确认 DDL', type: 'primary' })
+  if (job.status === 'paused_ddl' && !legacyDamengSchema(job)) actions.push({ value: 'ack', label: '确认 DDL', type: 'primary' })
   if (job.status === 'paused_bootstrap_review') actions.push({ value: 'detail', label: '处理', type: 'primary' })
   if (preparable(job.status)) actions.push({ value: 'prepare', label: '准备切换', type: 'primary' })
   if (cancelable(job.status)) actions.push({ value: 'cancel', label: '取消切换', type: 'secondary' })

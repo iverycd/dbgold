@@ -110,11 +110,11 @@ func TestMergeGTID(t *testing.T) {
 
 func TestDDLPredicate(t *testing.T) {
 	for _, q := range []string{"ALTER TABLE users ADD x int", " create index ix on t(id)", "TRUNCATE TABLE t"} {
-		if !ddlPrefix.MatchString(q) {
+		if !sourceDDL(q, "db", "db") {
 			t.Fatalf("DDL not detected: %s", q)
 		}
 	}
-	if ddlPrefix.MatchString("UPDATE users SET name='x'") {
+	if sourceDDL("UPDATE users SET name='x'", "db", "db") {
 		t.Fatal("DML detected as DDL")
 	}
 }

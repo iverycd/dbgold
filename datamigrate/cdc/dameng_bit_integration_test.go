@@ -87,6 +87,8 @@ func TestDamengBit64SnapshotBinlogIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, LocatorFullRow, tables[0].LocatorStrategy)
 	cfg.LocatorStrategies = LocatorStrategiesFromTables(tables)
+	cfg.SourceSchema, err = NewSourceSchema(cfg.SourceDatabase, tables)
+	require.NoError(t, err)
 	ready := make(chan struct{}, 1)
 	done := make(chan error, 1)
 	runCtx, stop := context.WithCancel(ctx)

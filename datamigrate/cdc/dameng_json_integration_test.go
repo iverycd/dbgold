@@ -102,6 +102,8 @@ func runDamengJSONBinlogTest(t *testing.T, mysqlDSN, dmDSN, unsupported string) 
 	tables, err = ResolveLocatorStrategies(ctx, cfg, tables)
 	require.NoError(t, err)
 	cfg.LocatorStrategies = LocatorStrategiesFromTables(tables)
+	cfg.SourceSchema, err = NewSourceSchema(cfg.SourceDatabase, tables)
+	require.NoError(t, err)
 	ready := make(chan struct{}, 1)
 	done := make(chan error, 1)
 	runner := NewRunner(cfg, Hooks{Stats: func(s Stats) {

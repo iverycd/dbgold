@@ -172,10 +172,7 @@ func (a *DamengApplier) Apply(ctx context.Context, changes []Change, p Position)
 	}
 	var metadata targetSchemaMetadata
 	if len(tables) > 0 {
-		if err = checkDamengEnabledTriggers(ctx, tx, a.cfg, tables); err != nil {
-			return Stats{}, err
-		}
-		metadata, err = loadDamengTargetSchemaMetadata(ctx, tx, a.schema)
+		metadata, err = loadDamengTransactionMetadata(ctx, tx, a.cfg, tables)
 		if err != nil {
 			return Stats{}, err
 		}
@@ -199,16 +196,24 @@ func (a *DamengApplier) Apply(ctx context.Context, changes []Change, p Position)
 		}
 		return nil
 	}
+	statements := newDamengStatements(tx)
+	defer statements.Close()
+	rows := make(map[string]*damengRow, len(tables))
 	for _, change := range changes {
 		target := metadata.Tables[a.name(change.Table.Name)]
 		if target == nil {
 			return Stats{}, fmt.Errorf("目标表不存在: %s", a.qualified(change.Table.Name))
 		}
-		row, e := newDamengRow(a, change.Table, target)
-		if e != nil {
-			return Stats{}, e
+		row := rows[change.Table.Name]
+		if row == nil {
+			var e error
+			row, e = newDamengRow(a, change.Table, target)
+			if e != nil {
+				return Stats{}, e
+			}
+			rows[change.Table.Name] = row
 		}
-		if e = row.apply(ctx, tx, change, setIdentity); e != nil {
+		if e := row.apply(ctx, statements, change, setIdentity); e != nil {
 			return Stats{}, fmt.Errorf("apply %s %s: %w", change.Action, change.Table.Name, e)
 		}
 		switch change.Action {
@@ -221,6 +226,9 @@ func (a *DamengApplier) Apply(ctx context.Context, changes []Change, p Position)
 		}
 	}
 	if err = setIdentity(""); err != nil {
+		return Stats{}, err
+	}
+	if err = statements.Close(); err != nil {
 		return Stats{}, err
 	}
 	if err = a.saveCheckpointTx(ctx, tx, p); err != nil {

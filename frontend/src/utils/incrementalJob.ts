@@ -51,8 +51,12 @@ export function unsafeBootstrap(job: IncrementalJob) {
   return job.start_mode === 'full_then_cdc' && !job.bootstrap_completed && ['paused_restart', 'failed'].includes(job.status)
 }
 
+export function legacyDamengSchema(job: IncrementalJob) {
+  return job.dst_db_type === 'dameng' && job.source_schema_version !== 1
+}
+
 export function resumable(job: IncrementalJob) {
-  return ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(job.status) && job.locator_strategy_version === 1
+  return !legacyDamengSchema(job) && ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(job.status) && job.locator_strategy_version === 1
 }
 
 export function preparable(status: string) {

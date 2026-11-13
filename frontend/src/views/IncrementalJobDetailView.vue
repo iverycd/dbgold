@@ -21,7 +21,7 @@
           <div class="title-line">
             <h1>增量迁移任务</h1>
             <a-tag :color="incrementalStatusColor(job.status)">
-              {{ job.locator_strategy_version !== 1 ? '版本升级后已废弃' : incrementalStatusText(job.status) }}
+              {{ job.status !== 'stopped' && (job.locator_strategy_version !== 1 || legacyDamengSchema(job)) ? '版本升级后已废弃' : incrementalStatusText(job.status) }}
             </a-tag>
             <span v-if="refreshing" class="refreshing"><icon-loading /> 正在刷新</span>
           </div>
@@ -35,7 +35,7 @@
         <div class="task-actions">
           <a-button v-if="pausable(job)" :loading="acting" @click="pause">暂停</a-button>
           <a-button v-if="resumable(job)" type="primary" :loading="acting" @click="resume">恢复任务</a-button>
-          <a-button v-if="job.status === 'paused_ddl'" type="primary" :loading="acting" @click="ack">确认 DDL</a-button>
+          <a-button v-if="job.status === 'paused_ddl' && !legacyDamengSchema(job)" type="primary" :loading="acting" @click="ack">确认 DDL</a-button>
           <a-popconfirm v-if="preparable(job.status)" content="仅当整个源 MySQL 实例已停写、目标库也无业务写入时才能继续。确认？" @ok="prepare">
             <a-button type="primary" :loading="acting">准备切换</a-button>
           </a-popconfirm>
@@ -297,6 +297,7 @@ import {
   positionText,
   preparable,
   resumable,
+  legacyDamengSchema,
   unsafeBootstrap,
 } from '@/utils/incrementalJob'
 
@@ -387,7 +388,8 @@ const risks = computed<RiskItem[]>(() => {
   })
   if (unsafeBootstrap(job.value)) items.push({ key: 'bootstrap', level: 'danger', title: '全量完成状态不安全', description: '恢复前会检查目标 Checkpoint；没有完成位点时任务将拒绝恢复。' })
   if (job.value.locator_strategy_version !== 1) items.push({ key: 'legacy', level: 'warning', title: '旧版定位策略任务已废弃', description: '该任务不能恢复，目标表、Checkpoint、日志和迁移数据均未自动删除。' })
-  if (job.value.last_error) items.push({ key: 'last-error', level: 'danger', title: '最近一次错误', description: '请根据错误信息修复环境或数据后再执行恢复。', detail: job.value.last_error })
+  if (legacyDamengSchema(job.value)) items.push({ key: 'legacy-schema', level: 'warning', title: '旧版达梦任务需要重建', description: '该任务未保存可恢复的源表结构快照，请重新建立全量或增量起点。目标数据、检查点和历史报告均保留。' })
+  if (job.value.last_error) items.push({ key: 'last-error', level: 'danger', title: '最近一次错误', description: '请按错误详情处理；若提示历史事件不受支持或源结构无法确认，需要重新建立起点。', detail: job.value.last_error })
   if (job.value.status === 'paused_row_conflict') items.push({
     key: 'row-conflict', level: 'danger', title: `表 ${job.value.conflict_table || '—'} 发生行定位冲突`,
     description: `${(job.value.conflict_action || '').toUpperCase()} 无法唯一定位更新前记录，Checkpoint 尚未推进。`,

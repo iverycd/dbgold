@@ -311,3 +311,33 @@ func TestHasOpenIncrementalTarget(t *testing.T) {
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
+
+func TestDiscardLegacyDamengPreservesOtherTargetsAndReports(t *testing.T) {
+	setupTestDB(t)
+	for _, tc := range []struct {
+		id, dbtype string
+		version    int
+		status     string
+	}{
+		{"old-dm", "dameng", 0, "paused_ddl"}, {"new-dm", "dameng", 1, "paused_manual"},
+		{"pg", "postgres", 0, "paused_manual"}, {"done-dm", "dameng", 0, "stopped"},
+	} {
+		require.NoError(t, CreateIncrementalJob(&IncrementalMigrationJob{JobID: tc.id, DstConnID: 1, TargetSchema: tc.id, DstDBType: tc.dbtype, SourceSchemaVersion: tc.version, LocatorStrategyVersion: 1, Status: tc.status, BootstrapReport: "retained report"}))
+	}
+	require.NoError(t, DiscardLegacyIncrementalJobs())
+	old, err := GetIncrementalJob("old-dm")
+	require.NoError(t, err)
+	require.Equal(t, "aborted", old.Status)
+	require.Equal(t, "retained report", old.BootstrapReport)
+	occupied, err := HasOpenIncrementalTarget(1, "old-dm")
+	require.NoError(t, err)
+	require.False(t, occupied)
+	for _, id := range []string{"new-dm", "pg"} {
+		job, err := GetIncrementalJob(id)
+		require.NoError(t, err)
+		require.Equal(t, "paused_manual", job.Status)
+	}
+	done, err := GetIncrementalJob("done-dm")
+	require.NoError(t, err)
+	require.Equal(t, "stopped", done.Status)
+}

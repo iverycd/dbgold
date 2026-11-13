@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 
@@ -762,10 +763,16 @@ func (conn *DmConnection) CompatibleMysql() bool {
 	return conn.dmConnector.compatibleMode == COMPATIBLE_MODE_MYSQL
 }
 
-func (conn *DmConnection) cancel(err error) {
+func (conn *DmConnection) cancel(err error, socket net.Conn) {
 	conn.canceled.Set(err)
-	conn.close()
-
+	// The watcher runs concurrently with SQL/statement execution. Only abort
+	// transport I/O here; close() rolls back and frees statement maps using the
+	// same protocol buffers as that execution. Disconnect also rolls back the
+	// server transaction and releases its statements/locks.
+	if conn.closed.TrySet(true) {
+		close(conn.closech)
+		_ = socket.Close()
+	}
 }
 
 func (conn *DmConnection) finish() {
@@ -780,6 +787,7 @@ func (conn *DmConnection) finish() {
 }
 
 func (conn *DmConnection) startWatcher() {
+	socket := conn.Access.dm_build_3
 	watcher := make(chan context.Context, 1)
 	conn.watcher = watcher
 	finished := make(chan struct{})
@@ -795,7 +803,7 @@ func (conn *DmConnection) startWatcher() {
 
 			select {
 			case <-ctx.Done():
-				conn.cancel(ctx.Err())
+				conn.cancel(ctx.Err(), socket)
 			case <-finished:
 			case <-conn.closech:
 				return

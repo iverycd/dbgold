@@ -117,12 +117,20 @@ func TestDamengTriggerGuardFailsClosed(t *testing.T) {
 	}
 }
 
+func scopedTestQuery(query string) string {
+	scoped, err := scopeDamengMetadataQuery(query, []string{"ITEMS"})
+	if err != nil {
+		panic(err)
+	}
+	return scoped
+}
+
 func expectDamengApplyMetadata(mock sqlmock.Sqlmock, identity string) {
-	mock.ExpectQuery(damengBusinessTriggersSQL).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TRIGGER_NAME", "STATUS"}))
-	mock.ExpectQuery(loadDamengTargetTablesSQL).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("ITEMS"))
-	mock.ExpectQuery(loadDamengTargetColumnsSQL).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "COLUMN_NAME", "NULLABLE", "DATA_DEFAULT", "DATA_TYPE", "IDENTITY"}).AddRow("ITEMS", "ID", "N", nil, "BIGINT", identity).AddRow("ITEMS", "VALUE", "Y", nil, "VARCHAR", "NO"))
-	mock.ExpectQuery(loadDamengTargetIndexesSQL).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "UNIQUENESS", "STATUS", "INDEX_TYPE"}))
-	mock.ExpectQuery(loadDamengTargetIndexColumnsSQL).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"INDEX_OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "COLUMN_NAME", "COLUMN_POSITION"}))
+	mock.ExpectQuery(scopedTestQuery(damengBusinessTriggersSQL)).WithArgs("APP", "ITEMS").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TRIGGER_NAME", "STATUS"}))
+	mock.ExpectQuery(scopedTestQuery(loadDamengTargetTablesSQL)).WithArgs("APP", "ITEMS").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("ITEMS"))
+	mock.ExpectQuery(scopedTestQuery(loadDamengTargetColumnsSQL)).WithArgs("APP", "ITEMS").WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "COLUMN_NAME", "NULLABLE", "DATA_DEFAULT", "DATA_TYPE", "IDENTITY"}).AddRow("ITEMS", "ID", "N", nil, "BIGINT", identity).AddRow("ITEMS", "VALUE", "Y", nil, "VARCHAR", "NO"))
+	mock.ExpectQuery(scopedTestQuery(loadDamengTargetIndexesSQL)).WithArgs("APP", "ITEMS").WillReturnRows(sqlmock.NewRows([]string{"OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "UNIQUENESS", "STATUS", "INDEX_TYPE"}))
+	mock.ExpectQuery(scopedTestQuery(loadDamengTargetIndexColumnsSQL)).WithArgs("APP", "ITEMS").WillReturnRows(sqlmock.NewRows([]string{"INDEX_OWNER", "INDEX_NAME", "TABLE_OWNER", "TABLE_NAME", "COLUMN_NAME", "COLUMN_POSITION"}))
 }
 
 func TestDamengApplyRollsBackAndClearsIdentityOnDMLFailure(t *testing.T) {
@@ -132,10 +140,10 @@ func TestDamengApplyRollsBackAndClearsIdentityOnDMLFailure(t *testing.T) {
 	mock.ExpectQuery(damengTriggerLockSQL).WillReturnRows(sqlmock.NewRows([]string{"PARA_VALUE"}).AddRow("0"))
 	mock.ExpectExec(`LOCK TABLE "APP"."ITEMS" IN ROW EXCLUSIVE MODE`).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectDamengApplyMetadata(mock, "YES")
-	mock.ExpectExec(`UPDATE "APP"."ITEMS" SET "VALUE"=? WHERE "ID"=?`).WithArgs("bad", int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`DELETE FROM "APP"."ITEMS" WHERE "ID"=?`).WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectPrepare(`UPDATE "APP"."ITEMS" SET "VALUE"=? WHERE "ID"=?`).WillBeClosed().ExpectExec().WithArgs("bad", int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectPrepare(`DELETE FROM "APP"."ITEMS" WHERE "ID"=?`).WillBeClosed().ExpectExec().WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`SET IDENTITY_INSERT "APP"."ITEMS" ON`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`INSERT INTO "APP"."ITEMS" ("ID","VALUE") VALUES (?,?)`).WithArgs(int64(1), "bad").WillReturnError(errors.New("constraint failed"))
+	mock.ExpectPrepare(`INSERT INTO "APP"."ITEMS" ("ID","VALUE") VALUES (?,?)`).WillBeClosed().ExpectExec().WithArgs(int64(1), "bad").WillReturnError(errors.New("constraint failed"))
 	mock.ExpectRollback()
 	mock.ExpectExec(`SET IDENTITY_INSERT "APP"."ITEMS" OFF`).WillReturnResult(sqlmock.NewResult(0, 0))
 	stats, err := r.applier.Apply(context.Background(), []Change{{Action: "insert", Table: r.table, After: []any{int64(1), "bad"}}}, Position{File: "bin.000001", Pos: 9})
@@ -158,7 +166,7 @@ func TestDamengApplyCheckpointFailureRollsBackRows(t *testing.T) {
 	mock.ExpectQuery(damengTriggerLockSQL).WillReturnRows(sqlmock.NewRows([]string{"PARA_VALUE"}).AddRow("0"))
 	mock.ExpectExec(`LOCK TABLE "APP"."ITEMS" IN ROW EXCLUSIVE MODE`).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectDamengApplyMetadata(mock, "NO")
-	mock.ExpectExec(`UPDATE "APP"."ITEMS" SET "VALUE"=? WHERE "ID"=?`).WithArgs("ok", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectPrepare(`UPDATE "APP"."ITEMS" SET "VALUE"=? WHERE "ID"=?`).WillBeClosed().ExpectExec().WithArgs("ok", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE "APP"."__DBGOLD_CDC_CHECKPOINT" SET BINLOG_FILE=?,BINLOG_POSITION=?,GTID=?,UPDATED_AT=CURRENT_TIMESTAMP WHERE JOB_ID=? AND BOOTSTRAP_STATE='completed'`).WithArgs("bin.000001", int64(99), nil, "dm-unit").WillReturnError(errors.New("checkpoint unavailable"))
 	mock.ExpectRollback()
 	stats, err := r.applier.Apply(context.Background(), []Change{{Action: "insert", Table: r.table, After: []any{int64(1), "ok"}}}, Position{File: "bin.000001", Pos: 99})

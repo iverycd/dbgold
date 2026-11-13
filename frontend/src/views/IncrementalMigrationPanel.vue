@@ -82,6 +82,11 @@
       </template>
     </a-form-item>
 
+    <a-alert v-if="isDamengTarget" type="warning" style="margin-bottom: 16px">
+      达梦增量暂不支持压缩事务和显式 XA，遇到时停止并保留检查点。修改配置不会改变历史 binlog。
+      全量复制期间，所选源表的结构变更需等待快照结束；历史增量起点若跨越结构变更，会拒绝启动。
+    </a-alert>
+
     <a-form-item v-if="form.start_mode === 'full_then_cdc'" label="全量失败处理">
       <a-radio-group v-model="form.bootstrap_failure_policy">
         <a-radio value="review_and_exclude">暂停审阅，确认排除后继续</a-radio>

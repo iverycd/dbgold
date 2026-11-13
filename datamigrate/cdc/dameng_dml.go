@@ -2,7 +2,6 @@ package cdc
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -158,7 +157,7 @@ func (r *damengRow) allIndexes() []int {
 	}
 	return indexes
 }
-func (r *damengRow) insert(ctx context.Context, tx *sql.Tx, row []any, setIdentity func(string) error) error {
+func (r *damengRow) insert(ctx context.Context, tx damengDMLExecutor, row []any, setIdentity func(string) error) error {
 	if len(r.identity) > 0 {
 		if err := setIdentity(r.qualified()); err != nil {
 			return err
@@ -177,7 +176,7 @@ func (r *damengRow) insert(ctx context.Context, tx *sql.Tx, row []any, setIdenti
 	_, err := tx.ExecContext(ctx, "INSERT INTO "+r.qualified()+" ("+strings.Join(cols, ",")+") VALUES ("+strings.Join(marks, ",")+")", args...)
 	return err
 }
-func (r *damengRow) delete(ctx context.Context, tx *sql.Tx, before []any, full bool) error {
+func (r *damengRow) delete(ctx context.Context, tx damengDMLExecutor, before []any, full bool) error {
 	indexes := r.allIndexes()
 	if !full {
 		var err error
@@ -202,7 +201,7 @@ func (r *damengRow) delete(ctx context.Context, tx *sql.Tx, before []any, full b
 	}
 	return nil
 }
-func (r *damengRow) update(ctx context.Context, tx *sql.Tx, before, after []any, full bool) (int64, error) {
+func (r *damengRow) update(ctx context.Context, tx damengDMLExecutor, before, after []any, full bool) (int64, error) {
 	identity := map[int]bool{}
 	for _, i := range r.identity {
 		identity[i] = true
@@ -257,7 +256,7 @@ func (r *damengRow) update(ctx context.Context, tx *sql.Tx, before, after []any,
 	}
 	return result.RowsAffected()
 }
-func (r *damengRow) upsert(ctx context.Context, tx *sql.Tx, row []any, setIdentity func(string) error) error {
+func (r *damengRow) upsert(ctx context.Context, tx damengDMLExecutor, row []any, setIdentity func(string) error) error {
 	if r.table.LocatorStrategy == LocatorFullRow {
 		return r.insert(ctx, tx, row, setIdentity)
 	}
@@ -279,7 +278,7 @@ func (r *damengRow) upsert(ctx context.Context, tx *sql.Tx, row []any, setIdenti
 	}
 	return r.insert(ctx, tx, row, setIdentity)
 }
-func (r *damengRow) apply(ctx context.Context, tx *sql.Tx, ch Change, setIdentity func(string) error) error {
+func (r *damengRow) apply(ctx context.Context, tx damengDMLExecutor, ch Change, setIdentity func(string) error) error {
 	var before, after []any
 	var err error
 	if ch.Action != "insert" {

@@ -31,6 +31,12 @@ var damengCheckpointColumns = []struct{ name, definition string }{
 	{"LOCATOR_STRATEGY_VERSION", "INT DEFAULT 0 NOT NULL"},
 	{"LOCATOR_STRATEGIES", "CLOB"},
 	{"CLEANUP_PLAN", "CLOB"},
+	{"SOURCE_SCHEMA_VERSION", "INT DEFAULT 0 NOT NULL"},
+	{"SOURCE_SCHEMA", "CLOB"},
+	{"SOURCE_SCHEMA_HASH", "VARCHAR(64)"},
+	{"ACK_DDL_FILE", "VARCHAR(1024)"},
+	{"ACK_DDL_POSITION", "BIGINT DEFAULT 0 NOT NULL"},
+	{"ACK_DDL_GTID", "CLOB"},
 	{"UPDATED_AT", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL"},
 }
 
@@ -106,9 +112,10 @@ func (a *DamengApplier) LoadCheckpoint(ctx context.Context) (Position, bool, err
 func (a *DamengApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecord, bool, error) {
 	var r BootstrapRecord
 	var n int64
-	var file, gtid, effective, excluded, hash, failures, locators sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES FROM `+a.checkpointTable()+` WHERE JOB_ID=?`, a.jobID).
-		Scan(&file, &n, &gtid, &r.State, &effective, &excluded, &hash, &failures, &r.FailureReportVersion, &r.LocatorStrategyVersion, &locators)
+	var file, gtid, effective, excluded, hash, failures, locators, sourceSchema, schemaHash sql.NullString
+	var schemaVersion int
+	err := a.db.QueryRowContext(ctx, `SELECT BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES,SOURCE_SCHEMA_VERSION,SOURCE_SCHEMA,SOURCE_SCHEMA_HASH FROM `+a.checkpointTable()+` WHERE JOB_ID=?`, a.jobID).
+		Scan(&file, &n, &gtid, &r.State, &effective, &excluded, &hash, &failures, &r.FailureReportVersion, &r.LocatorStrategyVersion, &locators, &schemaVersion, &sourceSchema, &schemaHash)
 	if err == sql.ErrNoRows {
 		return r, false, nil
 	}
@@ -127,6 +134,7 @@ func (a *DamengApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecor
 	}{
 		{"effective_tables", effective, &r.EffectiveTables}, {"excluded_tables", excluded, &r.ExcludedTables},
 		{"failed_objects", failures, &r.FailedObjects}, {"locator_strategies", locators, &r.LocatorStrategies},
+		{"source_schema", sourceSchema, &r.SourceSchema},
 	} {
 		if !field.raw.Valid || field.raw.String == "" {
 			continue
@@ -135,19 +143,22 @@ func (a *DamengApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecor
 			return r, false, fmt.Errorf("解析达梦 checkpoint %s: %w", field.name, err)
 		}
 	}
+	if r.SourceSchema.Version != schemaVersion || r.SourceSchema.Hash != schemaHash.String {
+		return r, false, fmt.Errorf("达梦 CDC 源结构快照版本或摘要不一致")
+	}
 	return r, true, nil
 }
 
 func damengBootstrapValues(r BootstrapRecord) ([]any, error) {
 	var payloads []any
-	for _, value := range []any{r.EffectiveTables, r.ExcludedTables, r.FailedObjects, r.LocatorStrategies} {
+	for _, value := range []any{r.EffectiveTables, r.ExcludedTables, r.FailedObjects, r.LocatorStrategies, r.SourceSchema} {
 		b, err := json.Marshal(value)
 		if err != nil {
 			return nil, err
 		}
 		payloads = append(payloads, dm.NewClob(string(b)))
 	}
-	return []any{r.Position.File, int64(r.Position.Pos), damengOptionalClob(r.Position.GTID), r.State, payloads[0], payloads[1], r.ManifestHash, payloads[2], r.FailureReportVersion, r.LocatorStrategyVersion, payloads[3]}, nil
+	return []any{r.Position.File, int64(r.Position.Pos), damengOptionalClob(r.Position.GTID), r.State, payloads[0], payloads[1], r.ManifestHash, payloads[2], r.FailureReportVersion, r.LocatorStrategyVersion, payloads[3], r.SourceSchema.Version, payloads[4], r.SourceSchema.Hash}, nil
 }
 
 func damengOptionalClob(value string) any {
@@ -157,7 +168,7 @@ func damengOptionalClob(value string) any {
 	return dm.NewClob(value)
 }
 
-const damengBootstrapAssignments = `BINLOG_FILE=?,BINLOG_POSITION=?,GTID=?,BOOTSTRAP_STATE=?,EFFECTIVE_TABLES=?,EXCLUDED_TABLES=?,MANIFEST_HASH=?,FAILED_OBJECTS=?,FAILURE_REPORT_VERSION=?,LOCATOR_STRATEGY_VERSION=?,LOCATOR_STRATEGIES=?,UPDATED_AT=CURRENT_TIMESTAMP`
+const damengBootstrapAssignments = `BINLOG_FILE=?,BINLOG_POSITION=?,GTID=?,BOOTSTRAP_STATE=?,EFFECTIVE_TABLES=?,EXCLUDED_TABLES=?,MANIFEST_HASH=?,FAILED_OBJECTS=?,FAILURE_REPORT_VERSION=?,LOCATOR_STRATEGY_VERSION=?,LOCATOR_STRATEGIES=?,SOURCE_SCHEMA_VERSION=?,SOURCE_SCHEMA=?,SOURCE_SCHEMA_HASH=?,UPDATED_AT=CURRENT_TIMESTAMP`
 
 func (a *DamengApplier) SaveBootstrapRecord(ctx context.Context, r BootstrapRecord) error {
 	damengBootstrapMu.Lock()
@@ -241,7 +252,7 @@ func (a *DamengApplier) SaveBootstrapRecord(ctx context.Context, r BootstrapReco
 		return err
 	}
 	if n == 0 {
-		_, err = tx.ExecContext(ctx, `INSERT INTO `+a.checkpointTable()+` (BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES,JOB_ID) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, append(values, a.jobID)...)
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+a.checkpointTable()+` (BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES,SOURCE_SCHEMA_VERSION,SOURCE_SCHEMA,SOURCE_SCHEMA_HASH,JOB_ID) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, append(values, a.jobID)...)
 		if err != nil {
 			return err
 		}

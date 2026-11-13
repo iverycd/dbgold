@@ -345,6 +345,7 @@ export interface IncrementalConnectionSnapshot {
 }
 
 export interface IncrementalJob {
+  source_schema_version: number
   id: number
   job_id: string
   src_conn_id: number

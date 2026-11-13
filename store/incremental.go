@@ -8,7 +8,7 @@ import (
 )
 
 // IncrementalMigrationJob stores CDC configuration and operational state. The
-// authoritative apply checkpoint lives in the target PostgreSQL transaction.
+// authoritative apply checkpoint lives in the target database transaction.
 type IncrementalMigrationJobWithConn struct {
 	IncrementalMigrationJob
 	SrcConn *ConnSnapshot `json:"src_conn"`
@@ -16,6 +16,9 @@ type IncrementalMigrationJobWithConn struct {
 }
 
 type IncrementalMigrationJob struct {
+	SourceSchemaVersion int    `gorm:"not null;default:0" json:"source_schema_version"`
+	SourceSchemaJSON    string `json:"-"`
+
 	ID                     uint       `gorm:"primaryKey" json:"id"`
 	OwnerID                uint       `gorm:"index;not null" json:"owner_id"`
 	JobID                  string     `gorm:"uniqueIndex;not null" json:"job_id"`
@@ -363,6 +366,14 @@ func PauseInterruptedIncrementalJobs() error {
 // strategies were frozen from resuming with changed row-addressing semantics.
 func DiscardLegacyIncrementalJobs() error {
 	now := time.Now()
+	if err := DB.Model(&IncrementalMigrationJob{}).
+		Where("dst_db_type = ? AND source_schema_version <> ? AND status NOT IN ?", "dameng", 1, []string{"stopped", "aborted"}).
+		Updates(map[string]any{"status": "aborted", "phase": "aborted", "finished_at": &now,
+			"summary":    "达梦 CDC 源结构快照已升级，旧任务不能恢复，请重新建立全量或增量起点",
+			"last_error": "达梦 CDC 源结构快照已升级，旧任务不能恢复，请重新建立全量或增量起点"}).Error; err != nil {
+		return err
+	}
+
 	return DB.Model(&IncrementalMigrationJob{}).
 		Where("status NOT IN ? AND locator_strategy_version <> ?", []string{"stopped", "aborted"}, 1).
 		Updates(map[string]any{

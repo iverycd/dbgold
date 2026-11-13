@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ import (
 var ErrDDLPause = errors.New("source DDL requires manual acknowledgement")
 var ErrCutoverReady = errors.New("cutover boundary reached")
 var ErrBootstrapReview = errors.New("bootstrap exclusions require manual review")
-var ddlPrefix = regexp.MustCompile(`(?is)^\s*(CREATE|ALTER|DROP|RENAME|TRUNCATE)\s+`)
 
 type Runner struct {
 	cfg   Config
@@ -36,16 +34,30 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer src.Close()
-	tables, err := LoadConfiguredTables(ctx, src, r.cfg)
-	if err != nil {
-		return err
-	}
-	byName := tableMap(tables)
 	applier, err := newTargetApplier(ctx, r.cfg)
 	if err != nil {
 		return err
 	}
 	defer applier.Close()
+	record, recordExists, err := applier.LoadBootstrapRecord(ctx)
+	if err != nil {
+		return err
+	}
+	var tables []TableInfo
+	if r.cfg.TargetDBType == "dameng" {
+		snapshot := r.cfg.SourceSchema
+		names := r.cfg.TableNames
+		if recordExists {
+			snapshot, names = record.SourceSchema, record.EffectiveTables
+		}
+		tables, err = snapshot.TableInfos(r.cfg.SourceDatabase, names)
+	} else {
+		tables, err = LoadConfiguredTables(ctx, src, r.cfg)
+	}
+	if err != nil {
+		return err
+	}
+	byName := tableMap(tables)
 	if spatial, ok := applier.(interface {
 		PrepareSpatial(context.Context, []TableInfo) error
 	}); ok {
@@ -54,10 +66,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	if err = applier.CheckBusinessTriggers(ctx, tables); err != nil {
-		return err
-	}
-	record, recordExists, err := applier.LoadBootstrapRecord(ctx)
-	if err != nil {
 		return err
 	}
 	if recordExists {
@@ -74,7 +82,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err = ApplyLocatorStrategies(tables, r.cfg.LocatorStrategies); err != nil {
 			return err
 		}
-		record = BootstrapRecord{State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables), ExcludedTables: r.cfg.ScopeExclusions,
+		record = BootstrapRecord{SourceSchema: r.cfg.SourceSchema, State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables), ExcludedTables: r.cfg.ScopeExclusions,
 			ManifestHash: r.cfg.ScopeManifestHash, LocatorStrategyVersion: LocatorStrategyVersion, LocatorStrategies: r.cfg.LocatorStrategies}
 		if record.ManifestHash == "" {
 			record.ManifestHash = HashBootstrapManifest(record)
@@ -136,11 +144,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	pos := start
+	state := newTransactionState(r.cfg, tables, start)
 	applied := start
-	useGTID := start.GTID != ""
-	currentGTID := start.GTID
-	var changes []Change
 	totals := Stats{Position: start}
 	head := Position{}
 	lastHeadCheck := time.Time{}
@@ -208,36 +213,36 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	commit := func(eventTime time.Time) error {
-		if PositionReached(applied, pos) {
+		if PositionReached(applied, state.Position) {
 			// go-mysql may replay the most recently committed GTID after an
 			// internal reconnect. The target checkpoint is authoritative, so a
 			// replayed transaction (especially an INSERT into a no-PK table) must
 			// not be applied twice.
-			changes = nil
+			state.Changes = nil
 		} else {
 			var stats Stats
 			var e error
 			if r.cfg.TargetDBType == "dameng" {
-				changes, e = normalizeDamengTimestamps(eventCtx, src, changes)
+				state.Changes, e = normalizeDamengTimestamps(eventCtx, src, state.Changes)
 				if e == nil {
-					changes, e = normalizeDamengJSON(eventCtx, src, changes)
+					state.Changes, e = normalizeDamengJSON(eventCtx, src, state.Changes)
 				}
 			}
 			if e == nil {
-				stats, e = applier.Apply(eventCtx, changes, pos)
+				stats, e = applier.Apply(eventCtx, state.Changes, state.Position)
 			}
 			if e != nil {
 				var conflict *RowConflictError
 				if errors.As(e, &conflict) && r.hooks.RowConflict != nil {
-					r.hooks.RowConflict(RowConflict{Table: conflict.Table, Action: conflict.Action, Position: pos, Error: conflict.Error(), BeforeHash: conflict.BeforeHash})
+					r.hooks.RowConflict(RowConflict{Table: conflict.Table, Action: conflict.Action, Position: state.Position, Error: conflict.Error(), BeforeHash: conflict.BeforeHash})
 				}
 				totals.Position, totals.SourceHead = applied, head
 				emitStats(true)
 				return e
 			}
-			changes = nil
+			state.Changes = nil
 			totals = addStats(totals, stats)
-			applied = pos
+			applied = state.Position
 		}
 		if err := publish(eventTime, false); err != nil {
 			totals.Position, totals.SourceHead = applied, head
@@ -252,7 +257,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	for {
 		ev, err := streamer.GetEvent(eventCtx)
 		if err != nil {
-			if ctx.Err() != nil && !gracefulStop && len(changes) > 0 {
+			if ctx.Err() != nil && !gracefulStop && len(state.Changes) > 0 {
 				// Pause/stop only after the source transaction currently buffered is
 				// atomically applied. A timeout still leaves the previous checkpoint
 				// valid, so a later resume safely replays the transaction.
@@ -270,87 +275,23 @@ func (r *Runner) Run(ctx context.Context) error {
 			emitStats(true)
 			return err
 		}
-		if ev.Header.LogPos > 0 {
-			pos.Pos = ev.Header.LogPos
+		outcome, consumeErr := state.Consume(ev)
+		if consumeErr != nil {
+			totals.Position, totals.SourceHead = applied, head
+			emitStats(true)
+			return consumeErr
 		}
-		switch e := ev.Event.(type) {
-		case *replication.RotateEvent:
-			pos.File = string(e.NextLogName)
-			pos.Pos = uint32(e.Position)
-		case *replication.GTIDEvent:
-			nextGTID := fmt.Sprintf("%s:%d", formatSID(e.SID), e.GNO)
-			if nextGTID == currentGTID && len(changes) > 0 {
-				// Reconnect during a GTID transaction restarts that transaction
-				// from its GTID event; discard the partial pre-disconnect buffer.
-				changes = nil
+		if outcome.DDL != "" {
+			totals.Position, totals.SourceHead = applied, head
+			emitStats(true)
+			if r.hooks.DDL != nil {
+				r.hooks.DDL(outcome.DDL, state.Position)
 			}
-			currentGTID = nextGTID
-		case *replication.RowsEvent:
-			if string(e.Table.Schema) != r.cfg.SourceDatabase {
-				continue
-			}
-			t := byName[string(e.Table.Table)]
-			if t == nil {
-				continue
-			}
-			switch e.Type() {
-			case replication.EnumRowsEventTypeInsert:
-				for _, row := range e.Rows {
-					changes = append(changes, Change{Action: "insert", Table: t, After: row})
-				}
-			case replication.EnumRowsEventTypeDelete:
-				for _, row := range e.Rows {
-					changes = append(changes, Change{Action: "delete", Table: t, Before: row})
-				}
-			case replication.EnumRowsEventTypeUpdate:
-				for i := 0; i+1 < len(e.Rows); i += 2 {
-					changes = append(changes, Change{Action: "update", Table: t, Before: e.Rows[i], After: e.Rows[i+1]})
-				}
-			}
-		case *replication.XIDEvent:
-			if useGTID && e.GSet != nil {
-				pos.GTID = e.GSet.String()
-			} else if useGTID && currentGTID != "" {
-				pos.GTID = mergeGTID(pos.GTID, currentGTID)
-			}
-			eventTime := time.Time{}
-			if ev.Header.Timestamp > 0 {
-				eventTime = time.Unix(int64(ev.Header.Timestamp), 0)
-			}
-			if err := commit(eventTime); err != nil {
+			return ErrDDLPause
+		}
+		if outcome.Commit {
+			if err := commit(outcome.Time); err != nil {
 				return err
-			}
-		case *replication.QueryEvent:
-			query := strings.TrimSpace(string(e.Query))
-			upper := strings.ToUpper(query)
-			if ddlPrefix.MatchString(query) && (string(e.Schema) == r.cfg.SourceDatabase || strings.Contains(query, r.cfg.SourceDatabase)) {
-				if useGTID {
-					pos.GTID = mergeGTID(pos.GTID, currentGTID)
-				}
-				if r.hooks.DDL != nil {
-					totals.Position, totals.SourceHead = applied, head
-					emitStats(true)
-					r.hooks.DDL(query, pos)
-				}
-				return ErrDDLPause
-			}
-			if upper == "BEGIN" || strings.HasPrefix(upper, "SAVEPOINT") || strings.HasPrefix(upper, "XA ") {
-				break
-			}
-			if upper == "ROLLBACK" {
-				changes = nil
-			}
-			if upper == "COMMIT" || upper == "ROLLBACK" || len(changes) == 0 {
-				if useGTID {
-					pos.GTID = mergeGTID(pos.GTID, currentGTID)
-				}
-				eventTime := time.Time{}
-				if ev.Header.Timestamp > 0 {
-					eventTime = time.Unix(int64(ev.Header.Timestamp), 0)
-				}
-				if err := commit(eventTime); err != nil {
-					return err
-				}
 			}
 		}
 		if time.Since(lastHeadCheck) >= time.Second {
@@ -452,6 +393,10 @@ func addStats(a, b Stats) Stats {
 }
 
 func AcknowledgeDDL(ctx context.Context, cfg Config, p Position) error {
+	if cfg.TargetDBType == "dameng" {
+		_, err := AcknowledgeDamengDDL(ctx, cfg, p)
+		return err
+	}
 	a, e := newTargetApplier(ctx, cfg)
 	if e != nil {
 		return e
