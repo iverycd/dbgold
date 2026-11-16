@@ -2,8 +2,21 @@ package handler
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
+
+func validateCheckConstraintMigration(src, dst string, objects []string) error {
+	if !slices.Contains(objects, "check_constraints") {
+		return nil
+	}
+	for _, pair := range supportedPairs {
+		if pair.Source == src && pair.Target == dst && pair.SupportsCheckConstraints {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s → %s 暂不支持单独迁移 CHECK 约束", src, dst)
+}
 
 // resolveChangeOwner preserves explicit choices, including false. Only PostgreSQL
 // compatible targets default to changing the owner to the schema's namesake role.

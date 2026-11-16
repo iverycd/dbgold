@@ -315,6 +315,9 @@ func (m *Migrator) logPreparationComplete(ctx context.Context) {
 }
 
 func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
+	if m.isPGOracle() {
+		return m.runPGOracle(ctx)
+	}
 	if m.isDamengNative() {
 		return m.runDamengNative(ctx)
 	}
@@ -1674,6 +1677,19 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	}
 	if m.isSQLServerDameng() {
 		return m.migrateSQLServerDamengViews(ctx, viewNames)
+	}
+	if m.isPGOracle() {
+		m.cfg.ViewNames = viewNames
+		report := m.Run(ctx)
+		out := append([]ObjectResult{}, report.Views.Items...)
+		if p := report.PGOraclePreflight; p != nil && p.globalError {
+			for _, issue := range p.Issues {
+				if issue.Severity == "error" {
+					out = append(out, ObjectResult{Name: issue.Object.Name, Error: issue.Reason, Stage: "preflight"})
+				}
+			}
+		}
+		return out
 	}
 	if m.isOracle() {
 		return m.migrateOracleViews(ctx, viewNames)

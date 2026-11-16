@@ -323,7 +323,7 @@
           </section>
 
           <DamengNativePreflightPanel v-if="isDamengNative" :result="nativeCheck" :busy="nativeCheckBusy" :disabled="dataMigrate.running || databaseSelectionBlocked('data')" @check="runNativeCheck" />
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('data')"
+          <PGPreflightPanel v-if="isPGPreflightSelection('data')" :target-type="pgTargetType('data')"
             :result="pgTaskSummaries.data ? (pgTaskSummaries.data.preflight ?? pgTaskSummaries.data.preview) : pgChecks.data"
             :compact="!!pgTaskSummaries.data" :summary-source="pgTaskSummaries.data?.preflight ? 'report' : 'page'"
             :excluded="pgExclusions.data" :busy="pgBusy.data" :disabled="dataMigrate.running || databaseSelectionBlocked('data')"
@@ -615,7 +615,7 @@
 
           </section>
 
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views" :disabled="viewMigrate.running || databaseSelectionBlocked('views')"
+          <PGPreflightPanel v-if="isPGPreflightSelection('views')" :target-type="pgTargetType('views')" :result="pgChecks.views" :excluded="pgExclusions.views" :busy="pgBusy.views" :disabled="viewMigrate.running || databaseSelectionBlocked('views')"
             @check="runPGCheck('views')" @exclude="excludePGObject('views', $event)" @restore="restorePGObject('views', $event)" />
 
           <CompatibilityFunctionsPanel v-for="group in vmCompatibilityGroups" :key="group.key" :report="group.report" :kind="group.kind" />
@@ -881,7 +881,7 @@
 
           </section>
 
-          <PGMySQLPreflightPanel v-if="isPGMySQLSelection('objects')"
+          <PGPreflightPanel v-if="isPGPreflightSelection('objects')" :target-type="pgTargetType('objects')"
             :result="pgTaskSummaries.objects ? (pgTaskSummaries.objects.preflight ?? pgTaskSummaries.objects.preview) : pgChecks.objects"
             :compact="!!pgTaskSummaries.objects" :summary-source="pgTaskSummaries.objects?.preflight ? 'report' : 'page'"
             :excluded="pgExclusions.objects" :busy="pgBusy.objects" :disabled="objMigrate.running || databaseSelectionBlocked('objects')"
@@ -988,8 +988,8 @@ import { copyText } from '@/utils/clipboard'
 import MigrationActionBar from '@/components/MigrationActionBar.vue'
 import MigrationReportPanel from './MigrationReportPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
-import { compatibilityReportGroups, preflightCanStart } from '@/utils/migrationReport'
-import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
+import { compatibilityReportGroups, preflightCanStart, migrationPGPreflight } from '@/utils/migrationReport'
+import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
@@ -1003,8 +1003,8 @@ import {
   preflightDataMigration,
   preflightDamengNative,
   type DamengNativePreflight,
-  type PGMySQLPreflight,
-  type PGMySQLPreflightRequest,
+  type PGPreflight,
+  type PGPreflightRequest,
   type PartitionPreflight,
   type PartitionPreflightResponse,
   type MigrationObjectRef,
@@ -1280,7 +1280,7 @@ async function startDataMigration() {
   dataMigrateResultTab.value = 'logs'
   pgSubmissions.data = null
   try {
-    if (isPGMySQLSelection('data')) {
+    if (isPGPreflightSelection('data')) {
       dataMigrate.logs.push('[INFO] 正在执行迁移预检…')
       if (!preflightCanStart(await ensurePGCheck('data'))) {
         dataMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
@@ -1288,7 +1288,7 @@ async function startDataMigration() {
         return
       }
     }
-    if (!isDamengNative.value && !isPGMySQLSelection('data')) {
+    if (!isDamengNative.value && !isPGPreflightSelection('data')) {
       if (!preflightCanStart(await ensurePartitionCheck())) {
         dataMigrate.logs.push(partitionCheckError.value
           ? `[ERROR] ${partitionCheckError.value}，尚未启动任务。处理后再次点击开始迁移。`
@@ -1573,7 +1573,7 @@ async function handleMigrateViews() {
   viewMigrate.results = []
   viewMigrate.compatibilityFunctions = undefined
   try {
-    if (isPGMySQLSelection('views') && !preflightCanStart(await ensurePGCheck('views'))) return
+    if (isPGPreflightSelection('views') && !preflightCanStart(await ensurePGCheck('views'))) return
     const res = await apiMigrateViews({
       excluded_objects: pgExclusions.views,
       src_conn_id: viewMigrate.srcConnId!,
@@ -1607,6 +1607,7 @@ const OBJECT_TYPE_OPTIONS: { label: string; value: MigrateObjectType }[] = [
   { label: '索引', value: 'indexes' },
   { label: '序列（自增列）', value: 'sequences' },
   { label: '外键', value: 'foreign_keys' },
+  { label: 'CHECK 约束', value: 'check_constraints' },
   { label: '注释', value: 'comments' },
   { label: '触发器', value: 'triggers' },
 ]
@@ -1641,7 +1642,12 @@ const omSelectedSrc = computed(() => connections.value.find((c) => c.id === objM
 const omSelectedDst = computed(() => connections.value.find((c) => c.id === objMigrate.dstConnId))
 
 const objectSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === omSelectedSrc.value?.db_type && pair.target === omSelectedDst.value?.db_type && pair.supports_triggers))
-const objectTypeOptions = computed(() => OBJECT_TYPE_OPTIONS.filter(option => option.value !== 'triggers' || objectSupportsTriggers.value))
+const objectSupportsChecks = computed(() => supportedPairs.value.some(pair => pair.source === omSelectedSrc.value?.db_type && pair.target === omSelectedDst.value?.db_type && pair.supports_check_constraints))
+const objectTypeOptions = computed(() => OBJECT_TYPE_OPTIONS.filter(option =>
+  (option.value !== 'triggers' || objectSupportsTriggers.value) &&
+  (option.value !== 'check_constraints' || objectSupportsChecks.value)
+).map(option => option.value === 'sequences' && omSelectedDst.value?.db_type === 'oracle' ? { ...option, label: '序列与自动编号' } : option))
+watch(objectSupportsChecks, supported => { if (!supported) objMigrate.objects = objMigrate.objects.filter(kind => kind !== 'check_constraints') })
 watch(objectSupportsTriggers, supported => { if (!supported) objMigrate.objects = objMigrate.objects.filter(kind => kind !== 'triggers') })
 
 const omFilteredRows = computed(() => {
@@ -1746,7 +1752,7 @@ async function startObjectMigration() {
   pgSubmissions.objects = null
   objMigrate.logs = ['[INFO] 正在提交迁移任务…']
   try {
-    if (isPGMySQLSelection('objects')) {
+    if (isPGPreflightSelection('objects')) {
       objMigrate.logs.push('[INFO] 正在执行迁移预检…')
       if (!preflightCanStart(await ensurePGCheck('objects'))) {
         objMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
@@ -1980,7 +1986,7 @@ function onConnectionDatabaseSaved(connection: Connection) {
 
 // Preview state is scoped to the three existing migration workflows.
 type PGCheckKind = 'data' | 'views' | 'objects'
-const pgChecks = reactive<Record<PGCheckKind, PGMySQLPreflight | null>>({ data: null, views: null, objects: null })
+const pgChecks = reactive<Record<PGCheckKind, PGPreflight | null>>({ data: null, views: null, objects: null })
 const pgExclusions = reactive<Record<PGCheckKind, MigrationObjectRef[]>>({ data: [], views: [], objects: [] })
 const pgBusy = reactive<Record<PGCheckKind, boolean>>({ data: false, views: false, objects: false })
 const pgAbort = new Map<PGCheckKind, AbortController>()
@@ -1991,8 +1997,8 @@ type PGTaskKind = 'data' | 'objects'
 interface PGSubmission {
   jobID: string
   requestKey: string
-  preview: PGMySQLPreflight
-  preflight: PGMySQLPreflight | null
+  preview: PGPreflight
+  preflight: PGPreflight | null
 }
 const pgSubmissions = reactive<Record<PGTaskKind, PGSubmission | null>>({ data: null, objects: null })
 const dataReportPanel = ref<InstanceType<typeof MigrationReportPanel> | null>(null)
@@ -2008,7 +2014,7 @@ const pgTaskSummaries = computed(() => ({ data: matchingPGSubmission('data'), ob
 function preparePGSubmission(kind: PGTaskKind): Omit<PGSubmission, 'jobID'> | null {
   const preview = pgChecks[kind]
   const requestKey = JSON.stringify(pgRequest(kind))
-  return isPGMySQLSelection(kind) && preview && preflightCanStart(preview) && pgCheckRequests.get(kind) === requestKey
+  return isPGPreflightSelection(kind) && preview && preflightCanStart(preview) && pgCheckRequests.get(kind) === requestKey
     ? { requestKey, preview, preflight: null } : null
 }
 function savePGSubmission(kind: PGTaskKind, jobID: string, submitted: Omit<PGSubmission, 'jobID'> | null) {
@@ -2021,7 +2027,7 @@ function onPGReportLoaded(kind: PGTaskKind, jobID: string, report: MigrationRepo
   const state = kind === 'data' ? dataMigrate : objMigrate
   if (state.currentJobId !== jobID) return
   const submitted = matchingPGSubmission(kind)
-  if (submitted) submitted.preflight = report.preflight ?? null
+  if (submitted) submitted.preflight = migrationPGPreflight(report)
   const tab = kind === 'data' ? dataMigrateResultTab : objMigrateResultTab
   tab.value = 'report'
 }
@@ -2042,13 +2048,17 @@ async function showPGTaskResult(kind: PGTaskKind, destination: 'logs' | 'report'
   }
 }
 
-function isPGMySQLSelection(kind: PGCheckKind) {
+function isPGPreflightSelection(kind: PGCheckKind) {
   const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
   const src = connections.value.find(c => c.id === state.srcConnId)
   const dst = connections.value.find(c => c.id === state.dstConnId)
-  return !!src && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && dst?.db_type === 'mysql'
+  return !!src && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && (dst?.db_type === 'mysql' || dst?.db_type === 'oracle')
 }
-function dataMigrationRequest(): PGMySQLPreflightRequest {
+function pgTargetType(kind: PGCheckKind): 'mysql' | 'oracle' {
+  const state = migrationState(kind)
+  return connections.value.find(c => c.id === state.dstConnId)?.db_type === 'oracle' ? 'oracle' : 'mysql'
+}
+function dataMigrationRequest(): PGPreflightRequest {
 return {
       src_conn_id: dataMigrate.srcConnId!,
       dst_conn_id: dataMigrate.dstConnId!,
@@ -2087,7 +2097,7 @@ const partitionCheck = ref<PartitionPreflight | null>(null)
 const partitionCheckBusy = ref(false)
 const partitionCheckError = ref('')
 const dataPartitionCheck = computed(() => isDamengNative.value ? null
-  : isPGMySQLSelection('data') ? pgChecks.data?.partition_preflight ?? null : partitionCheck.value)
+  : isPGPreflightSelection('data') ? pgChecks.data?.partition_preflight ?? null : partitionCheck.value)
 const partitionCheckIssues = computed(() => {
   const result = dataPartitionCheck.value
   return result && (result.fatal_error || !result.ready || result.issues?.length || result.tables.some(table => table.error)) ? result : null
@@ -2109,7 +2119,7 @@ async function ensurePartitionCheck() {
 }
 async function runPartitionCheck() {
   clearPartitionCheck()
-  if (isDamengNative.value || isPGMySQLSelection('data') || databaseSelectionBlocked('data') || !dataMigrate.srcConnId || !dataMigrate.dstConnId) return
+  if (isDamengNative.value || isPGPreflightSelection('data') || databaseSelectionBlocked('data') || !dataMigrate.srcConnId || !dataMigrate.dstConnId) return
   const controller = new AbortController()
   partitionCheckAbort = controller
   partitionCheckBusy.value = true
@@ -2159,7 +2169,7 @@ async function runNativeCheck() {
     if (nativeCheckAbort === controller) { nativeCheckAbort = null; nativeCheckBusy.value = false }
   }
 }
-function pgRequest(kind: PGCheckKind): PGMySQLPreflightRequest {
+function pgRequest(kind: PGCheckKind): PGPreflightRequest {
   if (kind === 'data') return dataMigrationRequest()
   const state = kind === 'views' ? viewMigrate : objMigrate
   return {

@@ -58,6 +58,19 @@ func TestValidationColumnClassificationsAreExplicit(t *testing.T) {
 		})
 	}
 }
+
+func TestPGOracleSpecialTextValidationUsesExplicitNativeSerializer(t *testing.T) {
+	for _, native := range []string{"xml", "inet", "cidr", "macaddr", "macaddr8"} {
+		c := Column{Name: "v", DatabaseType: native}
+		ClassifyColumn("postgres", &c)
+		require.Equal(t, Text, c.Kind, native)
+		projection, err := ValidationProjection("postgres", c)
+		require.NoError(t, err)
+		require.Equal(t, `"v"::text`, projection)
+		ClassifyColumn("oracle", &c)
+		require.Equal(t, Unsupported, c.Kind, "Oracle XMLTYPE has no generic string fallback")
+	}
+}
 func TestValidationSQLServerRejectsAmbiguousSchemas(t *testing.T) {
 	db, mock, e := sqlmock.New()
 	require.NoError(t, e)

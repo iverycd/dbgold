@@ -12,6 +12,7 @@ import (
 
 // ObjectResult 单个失败对象的详情
 type ObjectResult struct {
+	ObjectKind    string                       `json:"object_kind,omitempty"`
 	Name          string                       `json:"name"`
 	SourceName    string                       `json:"source_name,omitempty"`
 	TargetName    string                       `json:"target_name,omitempty"`
@@ -22,6 +23,8 @@ type ObjectResult struct {
 	DDL           string                       `json:"ddl"`
 	SourceDDL     string                       `json:"source_ddl,omitempty"` // Source definition for reference, never executable target SQL.
 	Error         string                       `json:"error"`
+	CommittedRows int64                        `json:"committed_rows,omitempty"`
+	FailedPage    int                          `json:"failed_page,omitempty"`
 	SuggestedDDL  string                       `json:"suggested_ddl,omitempty"`
 	Suggestion    string                       `json:"suggestion,omitempty"`
 	ColumnRenames []dialect.DamengColumnRename `json:"column_renames,omitempty"`
@@ -99,6 +102,7 @@ type MigrationReport struct {
 	AutoRepairs             []AutoRepair                         `json:"auto_repairs,omitempty"`
 	Warnings                []valueconv.MigrationWarning         `json:"warnings,omitempty"`
 	Preflight               *PGMySQLPreflight                    `json:"preflight,omitempty"`
+	PGOraclePreflight       *PGOraclePreflight                   `json:"pg_oracle_preflight,omitempty"`
 	Tables                  CategoryReport                       `json:"tables"`
 	Data                    CategoryReport                       `json:"data"`
 	PrimaryKeys             CategoryReport                       `json:"primaryKeys"`
@@ -201,6 +205,9 @@ func (r MigrationReport) HasFailures() bool {
 		return true
 	}
 	if r.Preflight != nil && !r.Preflight.Ready {
+		return true
+	}
+	if r.PGOraclePreflight != nil && !r.PGOraclePreflight.Ready {
 		return true
 	}
 	for _, c := range []CategoryReport{r.Tables, r.Data, r.PrimaryKeys, r.Views, r.Indexes, r.Constraints, r.Sequences, r.Comments, r.Triggers} {

@@ -301,6 +301,10 @@ func ClassifyColumn(family string, c *Column) {
 		return
 	}
 	switch t {
+	case "xml", "inet", "cidr", "macaddr", "macaddr8":
+		if family == "postgres" {
+			c.Kind = Text
+		}
 	case "char", "character", "nchar", "varchar", "nvarchar", "varchar2", "nvarchar2", "character varying", "national character varying", "national character", "text", "ntext", "tinytext", "mediumtext", "longtext", "clob", "nclob", "bpchar", "enum", "set":
 		c.Kind = Text
 	case "bfile":
@@ -395,6 +399,10 @@ func ValidationProjection(family string, c Column) (string, error) {
 			return fmt.Sprintf("LPAD(BIN(CAST(%s AS UNSIGNED)),%d,'0')", q, c.Length), nil
 		}
 	case "postgres":
+		switch strings.ToLower(c.DatabaseType) {
+		case "xml", "inet", "cidr", "macaddr", "macaddr8":
+			return q + "::text", nil
+		}
 		switch c.Kind {
 		case Bits:
 			// Kingbase can render BIT as escaped characters or hex. Read each

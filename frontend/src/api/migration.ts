@@ -3,6 +3,7 @@ import api from './index'
 // ===== 数据迁移 =====
 
 export interface SupportedPair {
+  supports_check_constraints?: boolean
   supports_full_schema?: boolean
   supports_triggers?: boolean
   source: string
@@ -125,6 +126,7 @@ export const createDataMigrateEventSource = (jobID: string): EventSource => {
 // ===== 迁移报告 =====
 
 export interface ObjectResult {
+  object_kind?: string
   name: string
   source_name?: string
   target_name?: string
@@ -135,6 +137,8 @@ export interface ObjectResult {
   ddl: string
   source_ddl?: string
   error: string
+  committed_rows?: number
+  failed_page?: number
   suggested_ddl?: string
   suggestion?: string
   column_renames?: { source: string; target: string }[]
@@ -256,6 +260,7 @@ export interface MigrationReport {
 	 auto_repairs?: AutoRepair[]
 	 warnings?: { table: string; column: string; reason: string; count: number }[]
   preflight?: PGMySQLPreflight
+  pg_oracle_preflight?: PGOraclePreflight
   tables: CategoryReport
   data: CategoryReport
   primaryKeys: CategoryReport
@@ -544,7 +549,7 @@ export const migrateViews = (data: MigrateViewsRequest) =>
 // ===== 对象迁移（主键/索引/序列/外键）=====
 
 // 对象迁移支持的对象类型
-export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'comments' | 'triggers'
+export type MigrateObjectType = 'primary_keys' | 'indexes' | 'sequences' | 'foreign_keys' | 'check_constraints' | 'comments' | 'triggers'
 
 // listConnectionTables 列出源连接指定库下的全部表名
 export const listConnectionTables = (connId: number, database?: string, targetType?: string) =>
@@ -697,6 +702,7 @@ export interface CompatibilityIssue {
   definition?: string
 }
 export interface PGMySQLPreflight {
+  kind?: 'pg_mysql'
   partition_preflight?: PartitionPreflight
   check_scope?: 'structure'
   ready: boolean
@@ -708,12 +714,18 @@ export interface PGMySQLPreflight {
   objects: { object: MigrationObjectRef; target: string; stage: string; statements: { SQL: string }[] }[]
   rows_checked: number
 }
+export interface PGOraclePreflight extends Omit<PGMySQLPreflight, 'kind' | 'target'> {
+  kind: 'pg_oracle'
+  target: { product: string; version: string; schema: string; charset: string; ncharset: string; verification: string }
+}
+export type PGPreflight = PGMySQLPreflight | PGOraclePreflight
 export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
   migrate_objects?: MigrateObjectType[]
   table_names?: string[]
   view_names?: string[]
 }
-export const preflightDataMigration = <T = PGMySQLPreflight>(data: PGMySQLPreflightRequest, signal?: AbortSignal) =>
+export type PGPreflightRequest = PGMySQLPreflightRequest
+export const preflightDataMigration = <T = PGPreflight>(data: PGPreflightRequest, signal?: AbortSignal) =>
   api.post<T>('/migration/data/preflight', data, { timeout: 0, signal })
 
 export interface PartitionValue { kind: 'number' | 'string' | 'date' | 'timestamp' | 'null' | 'minvalue' | 'maxvalue'; text?: string }

@@ -22,7 +22,7 @@ func encodeExcludedObjects(objects []datamigrate.ObjectRef) string {
 
 type preflightDataMigrationRequest struct {
 	startDataMigrationRequest
-	MigrateObjects []string `json:"migrate_objects" binding:"omitempty,dive,oneof=primary_keys indexes sequences foreign_keys comments"`
+	MigrateObjects []string `json:"migrate_objects" binding:"omitempty,dive,oneof=primary_keys indexes sequences foreign_keys check_constraints comments"`
 	TableNames     []string `json:"table_names"`
 	ViewNames      []string `json:"view_names"`
 }
@@ -48,6 +48,10 @@ func PreflightDataMigration(c *gin.Context) {
 	native := isDamengNativePair(src.DBType, dst.DBType)
 	if !isSupportedPair(src.DBType, dst.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的源库与目标库迁移组合"})
+		return
+	}
+	if err := validateCheckConstraintMigration(src.DBType, dst.DBType, req.MigrateObjects); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if len(req.MigrateObjects) > 0 && len(req.ViewNames) > 0 {
@@ -92,6 +96,20 @@ func PreflightDataMigration(c *gin.Context) {
 	}
 	if source.IsPGFamily(src.DBType) && dst.DBType == "mysql" {
 		c.JSON(http.StatusOK, m.PreflightPGMySQL(c.Request.Context()))
+		return
+	}
+	if source.IsPGFamily(src.DBType) && dst.DBType == "oracle" {
+		schema, err := target.ResolveRepairSchema(c.Request.Context(), writer)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		ctx, err := withPGOracleMigrationEvidence(c.Request.Context(), middleware.GetCurrentUserID(c), src, dst, req.SrcDatabase, schema)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, m.PreflightPGOracle(ctx))
 		return
 	}
 	p := m.PreflightPartitions(c.Request.Context())

@@ -27,6 +27,8 @@ type OracleColumn struct {
 	Nullable                                 bool
 	Precision, Scale, DataLength, CharLength int64
 	CharUsed                                 string
+	// ScaleKnown distinguishes unconstrained NUMBER from NUMBER(*,0).
+	ScaleKnown bool
 }
 
 func OracleText(v interface{}) string {

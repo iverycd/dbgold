@@ -35,6 +35,10 @@ func (d *OracleDialect) QualifyTable(schema, table string) string {
 	return d.QuoteIdent(schema) + "." + d.QuoteIdent(table)
 }
 func (d *OracleDialect) MapType(c source.ColumnInfo, src string, opt TypeOpt) string {
+	if source.IsPGFamily(src) {
+		t, _ := typemap.PGToOracleChecked(c, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
+		return t
+	}
 	t, _ := typemap.OracleType(c, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
 	return t
 }
@@ -62,7 +66,23 @@ func ValidateOracleName(s string) error {
 	return nil
 }
 
+// ValidatePGOracleName checks syntax before the target encoding is available.
+// Oracle's 30-byte limit is checked with the real database codec by the Writer;
+// a GBK identifier can occupy fewer bytes than its UTF-8 representation here.
+func ValidatePGOracleName(s string) error {
+	if s == "" || utf8.RuneCountInString(s) > 30 || strings.ContainsAny(s, "\x00\r\n\"") || !utf8.ValidString(s) {
+		return fmt.Errorf("Oracle 对象名 %q 不是有效标识符或必然超过 30 字节", s)
+	}
+	if s == "ROWID" {
+		return fmt.Errorf("Oracle 不允许使用大写 ROWID 作为列名")
+	}
+	return nil
+}
+
 func (d *OracleDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, src string, opt TypeOpt, name NameFunc) ([]Statement, error) {
+	if source.IsPGFamily(src) {
+		return d.pgCreateTableStatements(schema, info, opt, name)
+	}
 	if src != "mysql" {
 		return nil, fmt.Errorf("Oracle 目标仅支持 MySQL 源库")
 	}

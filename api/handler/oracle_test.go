@@ -28,7 +28,10 @@ func TestOracleTargetRegistrationAndEscapedDSN(t *testing.T) {
 	require.Equal(t, "x:/?#@%", password)
 	require.Equal(t, "/service", u.Path)
 	require.True(t, isSupportedPair("mysql", "oracle"))
-	for _, src := range []string{"postgres", "oracle", "dameng", "sqlserver"} {
+	for _, src := range []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
+		require.True(t, isSupportedPair(src, "oracle"))
+	}
+	for _, src := range []string{"oracle", "dameng", "sqlserver"} {
 		require.False(t, isSupportedPair(src, "oracle"))
 	}
 	require.Equal(t, "oracle", normalizeDBType("ORACLE"))

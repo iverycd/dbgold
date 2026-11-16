@@ -263,10 +263,10 @@
       </a-modal>
       <DamengNativePreflightPanel v-if="report.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
       <PartitionPreflightPanel v-if="report.partition_migration" :result="report.partition_migration" readonly />
-      <div v-if="report.preflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
+      <div v-if="savedPGPreflight" ref="preflightSection" style="margin-top: 16px" tabindex="-1" aria-label="迁移前预检记录">
         <a-collapse v-model:active-key="preflightActiveKeys">
-          <a-collapse-item key="preflight" :header="`迁移前预检记录（${preflightStatusLabel(report.preflight)}）`">
-            <PGMySQLPreflightPanel :result="report.preflight" :excluded="report.preflight.excluded" readonly />
+          <a-collapse-item key="preflight" :header="`迁移前预检记录（${preflightStatusLabel(savedPGPreflight)}）`">
+            <PGPreflightPanel :result="savedPGPreflight" :excluded="savedPGPreflight.excluded" readonly />
           </a-collapse-item>
         </a-collapse>
       </div>
@@ -282,9 +282,9 @@ import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrement
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel, migrationPGPreflight } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
-import PGMySQLPreflightPanel from './PGMySQLPreflightPanel.vue'
+import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
@@ -306,6 +306,7 @@ const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
 const activeTab = ref('overview')
 const repairSummary = ref<RepairSummary>({ jobID: props.jobID, state: 'loading', repaired: 0, attention: 0 })
 const report = ref<MigrationReport | null>(null)
+const savedPGPreflight = computed(() => migrationPGPreflight(report.value))
 const timingJob = ref<DataMigrationJob | null>(null)
 const timingLoading = ref(false)
 const timingUnavailable = ref(false)
@@ -344,7 +345,7 @@ async function goToRepair(kind: string, item: Omit<RepairFocusTarget, 'kind'>) {
 }
 
 async function showPreflight() {
-  if (!report.value?.preflight) return
+  if (!savedPGPreflight.value) return
   preflightActiveKeys.value = ['preflight']
   await nextTick()
   preflightSection.value?.focus({ preventScroll: true })
@@ -414,7 +415,8 @@ async function loadReport() {
     const res = await getDataMigrationReport(jobID)
     if (request !== reportRequest) return
     report.value = res.data
-    preflightActiveKeys.value = res.data.preflight && !res.data.preflight.ready ? ['preflight'] : []
+    const preflight = migrationPGPreflight(res.data)
+    preflightActiveKeys.value = preflight && !preflight.ready ? ['preflight'] : []
     emit('loaded', jobID, res.data)
   } catch (e: any) {
     if (request !== reportRequest) return
@@ -446,7 +448,8 @@ async function exportReport() {
     lines.push('')
 
     for (const line of formatAutoRepairs(r.auto_repairs)) lines.push(line)
-    if (r.preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(r.preflight, null, 2), '') }
+    const preflight = migrationPGPreflight(r)
+    if (preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(preflight, null, 2), '') }
     if (r.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(r.partition_migration, null, 2), '')
     if (r.warnings?.length) {
       lines.push('=== 迁移告警 ===')

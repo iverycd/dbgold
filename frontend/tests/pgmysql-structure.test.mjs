@@ -34,6 +34,36 @@ async function render(result, props = {}) {
   return renderToString(app)
 }
 
+test('shared preflight panel renders Oracle metadata and retains MySQL legacy headings', async () => {
+  const result = { ...legacy, kind: 'pg_oracle', check_scope: 'structure', target: { product: 'oracle', version: '11.2.0.4', schema: 'APP', charset: 'AL32UTF8', ncharset: 'AL16UTF16', verification: '待实库验证' } }
+  const html = await render(result)
+  assert.match(html, /PG → Oracle 兼容检查结果/)
+  assert.match(html, /11\.2\.0\.4 \/ APP/)
+  assert.match(html, /AL32UTF8 \/ AL16UTF16/)
+  assert.match(html, /空字符串、自增列及默认值/)
+  assert.doesNotMatch(html, /MySQL|undefined/)
+  assert.match(await render(null, { readonly: false, targetType: 'oracle' }), /PG → Oracle 兼容预检/)
+  assert.match(await render(legacy), /PG → MySQL 兼容检查结果/)
+})
+
+test('Oracle generated trigger failures stay visible and CHECK results have an accurate label', () => {
+  const report = {
+    pg_oracle_preflight: { ...legacy, kind: 'pg_oracle' }, trigger_migration_enabled: true, rowCounts: [],
+    triggers: { total: 1, success: 0, failed: 1, items: [{ name: 'TRG_ORDERS_ID', stage: 'create', ddl: 'CREATE TRIGGER TRG_ORDERS_ID ...', error: '创建失败' }] },
+    constraints: { total: 1, success: 1, failed: 0, items: [] },
+  }
+  const rows = migrationReportUtils.reportCategories(report)
+  const trigger = rows.find(row => row.key === 'triggers')
+  assert.equal(trigger.label, '自动编号触发器')
+  assert.equal(trigger.failed, 1)
+  assert.equal(trigger.isInformational, false)
+  assert.equal(trigger.items[0].ddl, 'CREATE TRIGGER TRG_ORDERS_ID ...')
+  assert.equal(rows.find(row => row.key === 'constraints').label, '外键与 CHECK 约束')
+  const exported = migrationReportUtils.formatReportCategories(report).join('\n')
+  assert.match(exported, /自动编号触发器\s+总计 1\s+成功 0\s+失败 1/)
+  assert.match(exported, /创建失败/)
+})
+
 test('structure and legacy report templates distinguish planned objects from checked rows', async () => {
   const oldHTML = await render(legacy)
   assert.match(oldHTML, /已检查行数/)

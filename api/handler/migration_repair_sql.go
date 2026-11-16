@@ -135,6 +135,9 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.PGOracleSequence != nil {
+		return target.ValidatePGOracleSequenceRepair(obj, units, dbType)
+	}
 	if dbType == "gaussdb" && obj.Kind == "distribution" {
 		return fmt.Errorf("GaussDB 不支持原地修改分布列，请重新生成失败主键或唯一索引的索引计划")
 	}

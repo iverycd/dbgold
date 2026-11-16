@@ -18,7 +18,7 @@ function page(preflight, starts, errors, options = {}) {
   const helpers = load(readFileSync(new URL('../src/utils/migrationOptions.ts', import.meta.url), 'utf8'), () => {})
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
   return load(`${descriptor.scriptSetup.content}
-    export { connections, dataMigrate, viewMigrate, vmCompatibilityGroups, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
+    export { connections, supportedPairs, objectTypeOptions, objectSupportsChecks, dataMigrate, viewMigrate, vmCompatibilityGroups, objMigrate, pgChecks, pgBusy, pgExclusions, runPGCheck, excludePGObject, restorePGObject, startDataMigration, handleMigrateViews, startObjectMigration, pgTaskSummaries, onPGReportLoaded, resetDataMigration, resetObjectMigration, showPGTaskResult, dataMigrateResultTab, objMigrateResultTab, dataReportPanel, objectReportPanel };`, id => {
     switch (id) {
       case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
       case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
@@ -49,6 +49,57 @@ async function select(p) {
   p.dataMigrate.dstSchema = 'target'
   await Vue.nextTick()
 }
+
+for (const source of ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase']) {
+  test(`${source} → Oracle: all three entries require the shared preflight and preserve selected scope`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const checks = [], starts = []
+      const preview = { kind: 'pg_oracle', ready: false, can_start: true, check_scope: 'structure', issues: [] }
+      const p = scope.run(() => page(async request => { checks.push(request); return { data: preview } }, starts))
+      p.connections.value = [{ id: 1, db_type: source }, { id: 2, db_type: 'oracle' }]
+      p.supportedPairs.value = [{ source, target: 'oracle', supports_check_constraints: true }]
+      for (const [kind, stateKey, launchKey] of [['data', 'dataMigrate', 'startDataMigration'], ['views', 'viewMigrate', 'handleMigrateViews'], ['objects', 'objMigrate', 'startObjectMigration']]) {
+        const state = p[stateKey]
+        Object.assign(state, { srcConnId: 1, dstConnId: 2, srcDatabase: 'MixedSchema', dstSchema: 'APP' })
+        if (kind !== 'data') state.selected = ['MixedTable']
+        if (kind === 'objects') state.objects = ['check_constraints']
+        await Vue.nextTick()
+        const before = starts.length
+        await p[launchKey]()
+        assert.equal(starts.length, before + 1)
+        assert.equal(checks.length, before + 1, 'Oracle must use PG structural preflight, not partition-only checking')
+        assert.equal(checks.at(-1).src_database, 'MixedSchema')
+        assert.equal(checks.at(-1).target_schema, 'APP')
+        assert.equal(starts.at(-1).lower_case_names, false)
+        assert.equal(starts.at(-1).change_owner, false)
+        if (kind === 'objects') assert.deepEqual([...starts.at(-1).migrate_objects], ['check_constraints'])
+        if (kind !== 'views') {
+          p.onPGReportLoaded(kind, 'job', { pg_oracle_preflight: preview })
+          assert.equal(p.pgTaskSummaries.value[kind].preflight.kind, 'pg_oracle')
+        }
+      }
+    } finally { scope.stop() }
+  })
+}
+
+test('CHECK object selection follows the advertised capability and is removed on target change', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => page(async () => ({ data: { ready: true } }), []))
+    p.connections.value = [{ id: 1, db_type: 'postgres' }, { id: 2, db_type: 'oracle' }, { id: 3, db_type: 'mysql' }]
+    p.supportedPairs.value = [{ source: 'postgres', target: 'oracle', supports_check_constraints: true }, { source: 'postgres', target: 'mysql' }]
+    Object.assign(p.objMigrate, { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'APP' })
+    await Vue.nextTick()
+    assert.equal(p.objectSupportsChecks.value, true)
+    assert.equal(p.objectTypeOptions.value.some(item => item.value === 'check_constraints'), true)
+    p.objMigrate.objects = ['check_constraints', 'indexes']
+    p.objMigrate.dstConnId = 3
+    await Vue.nextTick()
+    assert.equal(p.objectTypeOptions.value.some(item => item.value === 'check_constraints'), false)
+    assert.deepEqual([...p.objMigrate.objects], ['indexes'])
+  } finally { scope.stop() }
+})
 
 test('PG/MySQL launch blocks on preflight and carries explicit exclusions into a fresh check and launch', async () => {
   const scope = Vue.effectScope()

@@ -22,11 +22,12 @@ type PGProfile struct {
 	Verification string          `json:"verification"`
 }
 type PGObject struct {
-	Kind       string `json:"kind"`
-	Table      string `json:"table,omitempty"`
-	Name       string `json:"name"`
-	Definition string `json:"definition,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	PG         *PGConstraintMetadata `json:"pg,omitempty"`
+	Kind       string                `json:"kind"`
+	Table      string                `json:"table,omitempty"`
+	Name       string                `json:"name"`
+	Definition string                `json:"definition,omitempty"`
+	Reason     string                `json:"reason,omitempty"`
 }
 type PGTable struct {
 	Info     TableDDLInfo
@@ -43,6 +44,7 @@ type PGTable struct {
 }
 type PGSequence struct {
 	SequenceInfo
+	OID       int64
 	Name      string
 	Schema    string
 	Increment int64
@@ -51,12 +53,44 @@ type PGSequence struct {
 	Cycle     bool
 	Shared    bool
 	Identity  string
+	LastValue int64
+	IsCalled  bool
+	Cache     int64
+	Exhausted bool
+	Bindings  []PGSequenceBinding
+}
+
+// PGSequenceBinding retains source identities, including consumers outside the
+// selected migration scope. Default is the untouched pg_get_expr result.
+type PGSequenceBinding struct {
+	Schema, TableName, ColumnName, Default, Identity string
+	Owned                                            bool
+}
+
+// PGConstraintMetadata describes source semantics without deciding whether a
+// particular target can reproduce them.
+type PGConstraintMetadata struct {
+	Type, Match, Definition                  string
+	Deferrable, InitiallyDeferred, Validated bool
+	NoInherit                                bool
+}
+
+type PGIndexMetadata struct {
+	KeyCount                                 int
+	KeyDefinitions                           []string
+	Expressions, Predicate                   string
+	Options                                  []int
+	NullsNotDistinct, Valid, Immediate       bool
+	ConstraintName, ConstraintType           string
+	Deferrable, InitiallyDeferred, Validated bool
+	NonDefaultOpClass, NonDefaultCollation   bool
 }
 type PGSnapshot struct {
-	Profile PGProfile
-	Tables  []PGTable
-	Views   []ViewInfo
-	Objects []PGObject
+	Profile   PGProfile
+	Tables    []PGTable
+	Views     []ViewInfo
+	Objects   []PGObject
+	Sequences []PGSequence
 }
 
 func IsPGFamily(s string) bool {
@@ -110,7 +144,11 @@ func (r *PostgresReader) detectProfile(ctx context.Context, product string) erro
 	if r.profile.Catalog == "" {
 		return fmt.Errorf("无法识别 PG 系统目录: %v", last)
 	}
-	for _, f := range []string{"pg_attribute.atttypid", "pg_index.indkey", "pg_constraint.conkey", "pg_constraint.confkey", "pg_depend.refobjid", "pg_type.typtype"} {
+	fieldsRequired := []string{"pg_attribute.atttypid", "pg_index.indkey", "pg_constraint.conkey", "pg_constraint.confkey", "pg_depend.refobjid", "pg_type.typtype"}
+	if r.oracleMetadata {
+		fieldsRequired = []string{"pg_attribute.atttypid", "pg_type.typtype"}
+	}
+	for _, f := range fieldsRequired {
 		if !r.profile.Fields[f] {
 			return fmt.Errorf("源库缺少必要元数据 %s", f)
 		}
@@ -134,7 +172,11 @@ func (r *PostgresReader) detectProfile(ctx context.Context, product string) erro
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"pg_get_expr", "pg_get_indexdef", "pg_get_constraintdef", "pg_get_triggerdef", "pg_get_viewdef", "col_description", "obj_description", "format_type", "oidvectortypes", "has_table_privilege"} {
+	functionsRequired := []string{"pg_get_expr", "pg_get_indexdef", "pg_get_constraintdef", "pg_get_triggerdef", "pg_get_viewdef", "col_description", "obj_description", "format_type", "oidvectortypes", "has_table_privilege"}
+	if r.oracleMetadata {
+		functionsRequired = []string{"pg_get_expr", "format_type", "has_table_privilege"}
+	}
+	for _, name := range functionsRequired {
 		if !r.profile.Functions[name] {
 			return fmt.Errorf("缺少元数据函数 %s 或 EXECUTE 权限", name)
 		}
@@ -190,10 +232,17 @@ func ParsePGNumbers(raw string) ([]int, error) {
 }
 
 func (r *PostgresReader) pgColumns(ctx context.Context, table string) (*TableDDLInfo, error) {
+	return r.pgColumnsForTarget(ctx, table, r.oracleMetadata)
+}
+
+func (r *PostgresReader) pgColumnsForTarget(ctx context.Context, table string, neutral bool) (*TableDDLInfo, error) {
 	identity := r.field("pg_attribute", "attidentity", "a", "''")
 	generated := r.field("pg_attribute", "attgenerated", "a", "''")
 	q := `SELECT a.attnum,a.attname,t.typname,t.typtype,tn.nspname,a.atttypmod,NOT a.attnotnull,pg_get_expr(d.adbin,d.adrelid),` + identity + `,` + generated + `,col_description(c.oid,a.attnum),format_type(a.atttypid,a.atttypmod)
  FROM ` + r.qcat("pg_class") + ` c JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=c.relnamespace JOIN ` + r.qcat("pg_attribute") + ` a ON a.attrelid=c.oid JOIN ` + r.qcat("pg_type") + ` t ON t.oid=a.atttypid JOIN ` + r.qcat("pg_namespace") + ` tn ON tn.oid=t.typnamespace LEFT JOIN ` + r.qcat("pg_attrdef") + ` d ON d.adrelid=c.oid AND d.adnum=a.attnum WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`
+	if neutral && !r.pgMetadataFunction("col_description") {
+		q = strings.Replace(q, "col_description(c.oid,a.attnum)", "NULL::text", 1)
+	}
 	rows, err := r.db.QueryContext(ctx, q, r.schema, table)
 	if err != nil {
 		return nil, err
@@ -255,21 +304,40 @@ func (r *PostgresReader) pgColumns(ctx context.Context, table string) (*TableDDL
 }
 
 func (r *PostgresReader) pgIndexes(ctx context.Context) ([]IndexInfo, error) {
+	return r.pgIndexesForTarget(ctx, false)
+}
+
+func (r *PostgresReader) pgIndexesForTarget(ctx context.Context, neutral bool) ([]IndexInfo, error) {
+	if neutral && !r.pgMetadataFunction("pg_get_indexdef") {
+		return nil, fmt.Errorf("缺少元数据函数 pg_get_indexdef 或 EXECUTE 权限")
+	}
 	keyCount := r.field("pg_index", "indnkeyatts", "ix", "ix.indnatts")
 	nulls := r.field("pg_index", "indnullsnotdistinct", "ix", "false")
 	q := `SELECT t.relname,i.relname,ix.indkey::text,ix.indisunique,ix.indisprimary,am.amname,ix.indexprs IS NOT NULL,ix.indpred IS NOT NULL,` + keyCount + `,ix.indnatts,` + nulls + `,ix.indisvalid,ix.indimmediate,ix.indoption::text,pg_get_indexdef(ix.indexrelid)
  FROM ` + r.qcat("pg_index") + ` ix JOIN ` + r.qcat("pg_class") + ` i ON i.oid=ix.indexrelid JOIN ` + r.qcat("pg_class") + ` t ON t.oid=ix.indrelid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_am") + ` am ON am.oid=i.relam WHERE n.nspname=$1 ORDER BY t.relname,i.relname`
+	if neutral {
+		extra := `,ix.indexrelid,COALESCE(pg_get_expr(ix.indexprs,ix.indrelid),''),COALESCE(pg_get_expr(ix.indpred,ix.indrelid),''),COALESCE(con.conname,''),COALESCE(con.contype::text,''),COALESCE(con.condeferrable,false),COALESCE(con.condeferred,false),COALESCE(con.convalidated,true),EXISTS(SELECT 1 FROM ` + r.qcat("pg_collation") + ` coll JOIN ` + r.qcat("pg_namespace") + ` cn ON cn.oid=coll.collnamespace WHERE coll.oid=ANY(ix.indcollation) AND NOT (cn.nspname IN ('pg_catalog','sys_catalog') AND coll.collname='default'))`
+		q = strings.Replace(q, "\n FROM ", extra+"\n FROM ", 1)
+		q = strings.Replace(q, " WHERE n.nspname=$1 ORDER BY", ` LEFT JOIN `+r.qcat("pg_constraint")+` con ON con.conindid=ix.indexrelid AND con.contype IN ('p','u') WHERE n.nspname=$1 ORDER BY`, 1)
+	}
 	rows, err := r.db.QueryContext(ctx, q, r.schema)
 	if err != nil {
 		return nil, err
 	}
 	var indexes []IndexInfo
+	var indexOIDs []int64
 	for rows.Next() {
 		var idx IndexInfo
 		var keys, options string
 		var nkeys, total int
 		var expr, partial, nd, valid, immediate bool
-		if err = rows.Scan(&idx.TableName, &idx.IndexName, &keys, &idx.IsUnique, &idx.IsPrimary, &idx.Method, &expr, &partial, &nkeys, &total, &nd, &valid, &immediate, &options, &idx.Definition); err != nil {
+		values := []any{&idx.TableName, &idx.IndexName, &keys, &idx.IsUnique, &idx.IsPrimary, &idx.Method, &expr, &partial, &nkeys, &total, &nd, &valid, &immediate, &options, &idx.Definition}
+		var oid int64
+		if neutral {
+			idx.PG = &PGIndexMetadata{}
+			values = append(values, &oid, &idx.PG.Expressions, &idx.PG.Predicate, &idx.PG.ConstraintName, &idx.PG.ConstraintType, &idx.PG.Deferrable, &idx.PG.InitiallyDeferred, &idx.PG.Validated, &idx.PG.NonDefaultCollation)
+		}
+		if err = rows.Scan(values...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -332,8 +400,18 @@ func (r *PostgresReader) pgIndexes(ctx context.Context) ([]IndexInfo, error) {
 				}
 			}
 		}
-		idx.Unsupported = strings.Join(why, "、")
+		if neutral {
+			idx.PG.KeyCount, idx.PG.Options = nkeys, opts
+			idx.PG.NullsNotDistinct, idx.PG.Valid, idx.PG.Immediate = nd, valid, immediate
+			idx.Descending = make([]bool, nkeys)
+			for i, option := range opts {
+				idx.Descending[i] = option&1 != 0
+			}
+		} else {
+			idx.Unsupported = strings.Join(why, "、")
+		}
 		indexes = append(indexes, idx)
+		indexOIDs = append(indexOIDs, oid)
 	}
 	err = rows.Err()
 	rows.Close()
@@ -354,6 +432,17 @@ func (r *PostgresReader) pgIndexes(ctx context.Context) ([]IndexInfo, error) {
 				return nil, fmt.Errorf("索引 %s 引用未知列 %d", indexes[i].IndexName, n)
 			}
 			indexes[i].Columns = append(indexes[i].Columns, name)
+		}
+		if neutral {
+			// The server renders each key independently: no string splitting of
+			// expressions containing commas, casts, quoted names or literals.
+			for key := 1; key <= indexes[i].PG.KeyCount; key++ {
+				var definition string
+				if err := r.db.QueryRowContext(ctx, `SELECT pg_get_indexdef($1::oid,$2,true)`, indexOIDs[i], key).Scan(&definition); err != nil {
+					return nil, fmt.Errorf("读取索引 %s 第 %d 个键: %w", indexes[i].IndexName, key, err)
+				}
+				indexes[i].PG.KeyDefinitions = append(indexes[i].PG.KeyDefinitions, definition)
+			}
 		}
 	}
 	return indexes, nil
@@ -380,7 +469,17 @@ func (r *PostgresReader) pgAttributeNames(ctx context.Context) (map[string]map[i
 }
 
 func (r *PostgresReader) pgForeignKeys(ctx context.Context) ([]FKInfo, error) {
+	return r.pgForeignKeysForTarget(ctx, false)
+}
+
+func (r *PostgresReader) pgForeignKeysForTarget(ctx context.Context, neutral bool) ([]FKInfo, error) {
+	if neutral && !r.pgMetadataFunction("pg_get_constraintdef") {
+		return nil, fmt.Errorf("缺少元数据函数 pg_get_constraintdef 或 EXECUTE 权限")
+	}
 	q := `SELECT c.conname,t.relname,rn.nspname,rt.relname,c.conkey::text,c.confkey::text,c.confdeltype,c.confupdtype,c.condeferrable,c.confmatchtype,c.confrelid FROM ` + r.qcat("pg_constraint") + ` c JOIN ` + r.qcat("pg_class") + ` t ON t.oid=c.conrelid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace JOIN ` + r.qcat("pg_class") + ` rt ON rt.oid=c.confrelid JOIN ` + r.qcat("pg_namespace") + ` rn ON rn.oid=rt.relnamespace WHERE n.nspname=$1 AND c.contype='f' ORDER BY t.relname,c.conname`
+	if neutral {
+		q = strings.Replace(q, " FROM ", ",c.condeferred,c.convalidated,pg_get_constraintdef(c.oid) FROM ", 1)
+	}
 	rows, err := r.db.QueryContext(ctx, q, r.schema)
 	if err != nil {
 		return nil, err
@@ -395,7 +494,12 @@ func (r *PostgresReader) pgForeignKeys(ctx context.Context) ([]FKInfo, error) {
 		var f fkRaw
 		var keys, refs, del, upd, match string
 		var deferred bool
-		if err = rows.Scan(&f.fk.ConstraintName, &f.fk.TableName, &f.fk.RefSchema, &f.fk.RefTable, &keys, &refs, &del, &upd, &deferred, &match, &f.oid); err != nil {
+		values := []any{&f.fk.ConstraintName, &f.fk.TableName, &f.fk.RefSchema, &f.fk.RefTable, &keys, &refs, &del, &upd, &deferred, &match, &f.oid}
+		if neutral {
+			f.fk.PG = &PGConstraintMetadata{Type: "f"}
+			values = append(values, &f.fk.PG.InitiallyDeferred, &f.fk.PG.Validated, &f.fk.PG.Definition)
+		}
+		if err = rows.Scan(values...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -418,7 +522,9 @@ func (r *PostgresReader) pgForeignKeys(ctx context.Context) ([]FKInfo, error) {
 		}
 		f.fk.OnDelete = action(del)
 		f.fk.OnUpdate = action(upd)
-		if deferred || match != "s" || f.fk.OnDelete == "" || f.fk.OnUpdate == "" {
+		if neutral {
+			f.fk.PG.Deferrable, f.fk.PG.Match = deferred, match
+		} else if deferred || match != "s" || f.fk.OnDelete == "" || f.fk.OnUpdate == "" {
 			f.fk.Unsupported = "延迟外键或非 MATCH SIMPLE"
 		}
 		raw = append(raw, f)
@@ -496,7 +602,27 @@ func (r *PostgresReader) ReadPGMigrationSnapshot(ctx context.Context, tables []s
 	}
 	return r.readPGSnapshot(ctx, selected, true)
 }
+
+// ReadPGOracleSnapshot retains raw PG object semantics and complete named
+// sequence state. A nil selection means all tables; an empty selection means
+// no tables. Independent sequences in this schema remain visible in either
+// case, and shared generators retain consumers outside the selected tables.
+func (r *PostgresReader) ReadPGOracleSnapshot(ctx context.Context, tables []string) (*PGSnapshot, error) {
+	var selected map[string]bool
+	if tables != nil {
+		selected = make(map[string]bool, len(tables))
+		for _, table := range tables {
+			selected[table] = true
+		}
+	}
+	return r.readPGSnapshotForTarget(ctx, selected, true, true)
+}
+
 func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string]bool, partial bool) (*PGSnapshot, error) {
+	return r.readPGSnapshotForTarget(ctx, selected, partial, false)
+}
+
+func (r *PostgresReader) readPGSnapshotForTarget(ctx context.Context, selected map[string]bool, partial, neutral bool) (*PGSnapshot, error) {
 	snap := &PGSnapshot{Profile: r.profile}
 	found := make(map[string]bool, len(selected))
 	partition := "false"
@@ -511,6 +637,9 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		security = "c.relrowsecurity"
 	}
 	q := `SELECT c.oid,c.relname,c.relkind,(` + partition + ` OR EXISTS(SELECT 1 FROM ` + r.qcat("pg_inherits") + ` h WHERE h.inhrelid=c.oid OR h.inhparent=c.oid)),obj_description(c.oid,'pg_class'),has_table_privilege(c.oid,'SELECT'),` + security + ` FROM ` + r.qcat("pg_class") + ` c JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind IN ('r','p','f','m') ORDER BY c.relname`
+	if neutral && !r.pgMetadataFunction("obj_description") {
+		q = strings.Replace(q, "obj_description(c.oid,'pg_class')", "NULL::text", 1)
+	}
 	declarative := r.profile.Fields["pg_class.relispartition"] && r.profile.Fields["pg_class.relpartbound"] && r.profile.Fields["pg_partitioned_table.partstrat"]
 	nativePartitionCatalog := r.profile.Fields["pg_partition.partstrategy"] && r.profile.Fields["pg_partition.parentid"]
 	if declarative {
@@ -563,22 +692,29 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 			snap.Tables = append(snap.Tables, PGTable{Info: TableDDLInfo{TableName: name}, Unsupported: []PGObject{{Kind: "table", Name: name, Table: name, Reason: "选择的源表不存在或身份已变化"}}})
 		}
 	}
-	indexes, err := r.pgIndexes(ctx)
+	indexes, err := r.pgIndexesForTarget(ctx, neutral)
 	if err != nil {
-		return nil, err
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "index", "索引元数据", err)
+		pgObjectMetadataFailure(snap, "primary_key", "主键元数据", err)
 	}
-	fks, err := r.pgForeignKeys(ctx)
+	fks, err := r.pgForeignKeysForTarget(ctx, neutral)
 	if err != nil {
-		return nil, err
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "foreign_key", "外键元数据", err)
 	}
 	byName := map[string]*PGTable{}
 	for i := range snap.Tables {
 		t := &snap.Tables[i]
 		byName[t.Info.TableName] = t
-		if partial && len(t.Unsupported) > 0 {
+		if partial && (neutral && pgTableMetadataBlocked(t.Unsupported) || !neutral && len(t.Unsupported) > 0) {
 			continue
 		}
-		info, e := r.pgColumns(ctx, t.Info.TableName)
+		info, e := r.pgColumnsForTarget(ctx, t.Info.TableName, neutral)
 		if e != nil {
 			if !partial || failure.IsTaskError(e) {
 				return nil, e
@@ -588,6 +724,9 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		}
 		info.Comment = t.Info.Comment
 		t.Info = *info
+		if neutral && (!r.pgMetadataFunction("obj_description") || !r.pgMetadataFunction("col_description")) {
+			snap.Objects = append(snap.Objects, PGObject{Kind: "comment", Table: t.Info.TableName, Name: t.Info.TableName + " 注释", Reason: "缺少 obj_description/col_description 元数据函数或 EXECUTE 权限"})
+		}
 		byName[t.Info.TableName] = t
 		if declarative && t.Kind == "p" && !t.PartitionChild || nativePartitionCatalog && t.Kind == "r" && t.Inherits {
 			part, partitionErr := r.PartitionMetadata(ctx, t.Info.TableName)
@@ -612,24 +751,37 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		}
 	}
 	// CHECK and exclusion constraints are not represented by ordinary indexes.
-	rows, err = r.db.QueryContext(ctx, `SELECT t.relname,c.conname,c.contype,pg_get_constraintdef(c.oid),c.convalidated FROM `+r.qcat("pg_constraint")+` c JOIN `+r.qcat("pg_class")+` t ON t.oid=c.conrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND c.contype IN ('c','x') ORDER BY t.relname,c.conname`, r.schema)
+	constraintQuery := `SELECT t.relname,c.conname,c.contype,pg_get_constraintdef(c.oid),c.convalidated FROM ` + r.qcat("pg_constraint") + ` c JOIN ` + r.qcat("pg_class") + ` t ON t.oid=c.conrelid JOIN ` + r.qcat("pg_namespace") + ` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND c.contype IN ('c','x') ORDER BY t.relname,c.conname`
+	if neutral {
+		constraintQuery = strings.Replace(constraintQuery, " FROM ", ",c.condeferrable,c.condeferred,"+r.field("pg_constraint", "connoinherit", "c", "false")+" FROM ", 1)
+	}
+	rows, err = r.pgOptionalObjectQuery(ctx, snap, neutral, "check", "检查/排除约束元数据", "pg_get_constraintdef", constraintQuery, r.schema)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
+	for rows != nil && rows.Next() {
 		var o PGObject
 		var kind string
 		var valid bool
-		if err = rows.Scan(&o.Table, &o.Name, &kind, &o.Definition, &valid); err != nil {
+		values := []any{&o.Table, &o.Name, &kind, &o.Definition, &valid}
+		if neutral {
+			o.PG = &PGConstraintMetadata{}
+			values = append(values, &o.PG.Deferrable, &o.PG.InitiallyDeferred, &o.PG.NoInherit)
+		}
+		if err = rows.Scan(values...); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		o.Kind = "check"
 		if kind == "x" {
 			o.Kind = "constraint"
-			o.Reason = "排除约束不支持"
+			if !neutral {
+				o.Reason = "排除约束不支持"
+			}
 		}
-		if !valid {
+		if neutral {
+			o.PG.Type, o.PG.Validated, o.PG.Definition = kind, valid, o.Definition
+		} else if !valid {
 			o.Reason = "未验证约束不支持"
 		}
 		if t := byName[o.Table]; t != nil {
@@ -640,19 +792,28 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 			}
 		}
 	}
-	err = rows.Err()
-	rows.Close()
+	err = pgFinishOptionalRows(rows)
+	if err != nil {
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "check", "检查/排除约束元数据", err)
+	}
+	if err := r.markPGOperatorClassesForTarget(ctx, byName, neutral); err != nil {
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		for _, table := range byName {
+			for i := range table.Indexes {
+				table.Indexes[i].Unsupported = "索引操作符类元数据无法核验: " + err.Error()
+			}
+		}
+	}
+	rows, err = r.pgOptionalObjectQuery(ctx, snap, neutral, "trigger", "触发器元数据", "pg_get_triggerdef", `SELECT t.relname,g.tgname,pg_get_triggerdef(g.oid) FROM `+r.qcat("pg_trigger")+` g JOIN `+r.qcat("pg_class")+` t ON t.oid=g.tgrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND NOT g.tgisinternal ORDER BY t.relname,g.tgname`, r.schema)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.markPGOperatorClasses(ctx, byName); err != nil {
-		return nil, err
-	}
-	rows, err = r.db.QueryContext(ctx, `SELECT t.relname,g.tgname,pg_get_triggerdef(g.oid) FROM `+r.qcat("pg_trigger")+` g JOIN `+r.qcat("pg_class")+` t ON t.oid=g.tgrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND NOT g.tgisinternal ORDER BY t.relname,g.tgname`, r.schema)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
+	for rows != nil && rows.Next() {
 		o := PGObject{Kind: "trigger", Reason: "触发器需要人工适配"}
 		if err = rows.Scan(&o.Table, &o.Name, &o.Definition); err != nil {
 			rows.Close()
@@ -660,10 +821,12 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		}
 		snap.Objects = append(snap.Objects, o)
 	}
-	err = rows.Err()
-	rows.Close()
+	err = pgFinishOptionalRows(rows)
 	if err != nil {
-		return nil, err
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "trigger", "触发器元数据", err)
 	}
 	// Do not claim a routine is absent because information_schema hides it.
 	prokind := r.field("pg_proc", "prokind", "p", "'f'")
@@ -671,11 +834,11 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 	if r.profile.Fields["pg_proc.prokind"] {
 		filter = `p.prokind IN ('f','p')`
 	}
-	rows, err = r.db.QueryContext(ctx, `SELECT p.proname,oidvectortypes(p.proargtypes),`+prokind+` FROM `+r.qcat("pg_proc")+` p JOIN `+r.qcat("pg_namespace")+` n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND `+filter+` ORDER BY p.proname,p.oid`, r.schema)
+	rows, err = r.pgOptionalObjectQuery(ctx, snap, neutral, "routine", "函数/过程元数据", "oidvectortypes", `SELECT p.proname,oidvectortypes(p.proargtypes),`+prokind+` FROM `+r.qcat("pg_proc")+` p JOIN `+r.qcat("pg_namespace")+` n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND `+filter+` ORDER BY p.proname,p.oid`, r.schema)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
+	for rows != nil && rows.Next() {
 		var n, args, k string
 		if err = rows.Scan(&n, &args, &k); err != nil {
 			rows.Close()
@@ -683,16 +846,18 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		}
 		snap.Objects = append(snap.Objects, PGObject{Kind: "routine", Name: n + "(" + args + ")", Reason: "函数/过程仅支持原始定义导出，不进行跨库转换"})
 	}
-	err = rows.Err()
-	rows.Close()
+	err = pgFinishOptionalRows(rows)
+	if err != nil {
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "routine", "函数/过程元数据", err)
+	}
+	rows, err = r.pgOptionalObjectQuery(ctx, snap, neutral, "view", "视图元数据", "pg_get_viewdef", `SELECT c.relname,pg_get_viewdef(c.oid,true) FROM `+r.qcat("pg_class")+` c JOIN `+r.qcat("pg_namespace")+` n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='v' ORDER BY c.relname`, r.schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err = r.db.QueryContext(ctx, `SELECT c.relname,pg_get_viewdef(c.oid,true) FROM `+r.qcat("pg_class")+` c JOIN `+r.qcat("pg_namespace")+` n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='v' ORDER BY c.relname`, r.schema)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
+	for rows != nil && rows.Next() {
 		var v ViewInfo
 		var def sql.NullString
 		if err = rows.Scan(&v.ViewName, &def); err != nil {
@@ -710,13 +875,15 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		v.Definition = strings.TrimRight(strings.TrimSpace(def.String), ";")
 		snap.Views = append(snap.Views, v)
 	}
-	err = rows.Err()
-	rows.Close()
+	err = pgFinishOptionalRows(rows)
 	if err != nil {
-		return nil, err
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "view", "视图元数据", err)
 	}
 	for i := range snap.Views {
-		info, e := r.pgColumns(ctx, snap.Views[i].ViewName)
+		info, e := r.pgColumnsForTarget(ctx, snap.Views[i].ViewName, neutral)
 		if e != nil {
 			if !partial || failure.IsTaskError(e) {
 				return nil, e
@@ -726,8 +893,16 @@ func (r *PostgresReader) readPGSnapshot(ctx context.Context, selected map[string
 		}
 		snap.Views[i].Columns = info.Columns
 	}
-	if err = r.loadPGSequencesForTablesPartial(ctx, snap, selected, partial); err != nil {
-		return nil, err
+	if neutral {
+		err = r.loadPGOracleSequences(ctx, snap, selected)
+	} else {
+		err = r.loadPGSequencesForTablesPartial(ctx, snap, selected, partial)
+	}
+	if err != nil {
+		if !neutral || failure.IsTaskError(err) {
+			return nil, err
+		}
+		pgObjectMetadataFailure(snap, "sequence", "序列元数据", err)
 	}
 	return snap, nil
 }
@@ -885,6 +1060,10 @@ func pgSimpleNextval(raw string) bool {
 }
 
 func (r *PostgresReader) markPGOperatorClasses(ctx context.Context, byName map[string]*PGTable) error {
+	return r.markPGOperatorClassesForTarget(ctx, byName, false)
+}
+
+func (r *PostgresReader) markPGOperatorClassesForTarget(ctx context.Context, byName map[string]*PGTable, neutral bool) error {
 	// Source collations are intentionally ignored; MySQL inherits its own defaults.
 	// Non-default operator classes still require semantic adaptation.
 	rows, err := r.db.QueryContext(ctx, `SELECT t.relname,i.relname FROM `+r.qcat("pg_index")+` ix JOIN `+r.qcat("pg_class")+` t ON t.oid=ix.indrelid JOIN `+r.qcat("pg_class")+` i ON i.oid=ix.indexrelid JOIN `+r.qcat("pg_namespace")+` n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND EXISTS (SELECT 1 FROM `+r.qcat("pg_opclass")+` op WHERE op.oid=ANY(ix.indclass) AND NOT op.opcdefault)`, r.schema)
@@ -900,7 +1079,14 @@ func (r *PostgresReader) markPGOperatorClasses(ctx context.Context, byName map[s
 		if table := byName[t]; table != nil {
 			for j := range table.Indexes {
 				if table.Indexes[j].IndexName == n {
-					table.Indexes[j].Unsupported = strings.TrimPrefix(table.Indexes[j].Unsupported+"、非默认操作符类", "、")
+					if neutral {
+						if table.Indexes[j].PG == nil {
+							table.Indexes[j].PG = &PGIndexMetadata{}
+						}
+						table.Indexes[j].PG.NonDefaultOpClass = true
+					} else {
+						table.Indexes[j].Unsupported = strings.TrimPrefix(table.Indexes[j].Unsupported+"、非默认操作符类", "、")
+					}
 				}
 			}
 		}

@@ -26,6 +26,7 @@ type OracleWriter struct {
 	mu               sync.Mutex
 	columns          map[string]map[string]valueconv.OracleColumn
 	warnings         map[string]valueconv.MigrationWarning
+	pgColumns        map[string]map[string]source.ColumnInfo
 }
 
 var _ Writer = (*OracleWriter)(nil)
@@ -98,7 +99,22 @@ func (w *OracleWriter) initialize(ctx context.Context) error {
 	return nil
 }
 
-func (w *OracleWriter) DBType() string           { return "oracle" }
+func (w *OracleWriter) DBType() string { return "oracle" }
+
+// ConfigurePGOracle freezes source constraints under target table/column names.
+// A configured PG writer never falls back to MySQL conversion for missing metadata.
+func (w *OracleWriter) ConfigurePGOracle(tables map[string][]source.ColumnInfo) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pgColumns = make(map[string]map[string]source.ColumnInfo, len(tables))
+	for table, columns := range tables {
+		byName := make(map[string]source.ColumnInfo, len(columns))
+		for _, column := range columns {
+			byName[column.Name] = column
+		}
+		w.pgColumns[table] = byName
+	}
+}
 func (w *OracleWriter) Dialect() dialect.Dialect { return w.dia }
 func (w *OracleWriter) EffectiveSchema() string  { return w.schema }
 func (w *OracleWriter) Close() error             { return w.db.Close() }
@@ -274,6 +290,7 @@ func (w *OracleWriter) loadColumns(ctx context.Context, table string) (map[strin
 			return nil, err
 		}
 		c.Nullable, c.Precision, c.Scale, c.CharLength, c.CharUsed = nullable == "Y", p.Int64, s.Int64, clen.Int64, used.String
+		c.ScaleKnown = s.Valid
 		cols[c.Name] = c
 	}
 	if err = rows.Err(); err != nil {
@@ -309,6 +326,16 @@ func (w *OracleWriter) CopyData(ctx context.Context, table string, cols, srcType
 	metadata, err := w.loadColumns(ctx, table)
 	if err != nil {
 		return err
+	}
+	w.mu.Lock()
+	pgMode, pgColumns := w.pgColumns != nil, w.pgColumns[table]
+	w.mu.Unlock()
+	if pgMode {
+		for _, name := range cols {
+			if _, ok := pgColumns[name]; !ok {
+				return fmt.Errorf("PG→Oracle 表 %s 列 %s 缺少冻结源元数据", table, name)
+			}
+		}
 	}
 	codecs := make([]converters.IStringConverter, len(cols))
 	quoted, expressions := make([]string, len(cols)), make([]string, len(cols))
@@ -380,13 +407,23 @@ func (w *OracleWriter) CopyData(ctx context.Context, table string, cols, srcType
 				if ci < len(srcTypes) {
 					src = srcTypes[ci]
 				}
-				v, warning, e := valueconv.ConvertOracle(raw, src, metadata[cols[ci]], codecs[ci])
+				var v any
+				var warning string
+				var e error
+				if pgMode {
+					v, warning, e = valueconv.ConvertPGOracle(raw, pgColumns[cols[ci]], metadata[cols[ci]], codecs[ci])
+				} else {
+					v, warning, e = valueconv.ConvertOracle(raw, src, metadata[cols[ci]], codecs[ci])
+				}
 				if e != nil {
 					return fmt.Errorf("表 %s 列 %s 页内第 %d 行: %w", table, cols[ci], ri+1, e)
 				}
 				bound := v
 				if bound == nil {
 					bound = oracleNullBinding(metadata[cols[ci]].DataType)
+					if pgMode && strings.HasPrefix(metadata[cols[ci]].DataType, "TIMESTAMP") && strings.Contains(metadata[cols[ci]].DataType, "WITH TIME ZONE") {
+						bound = (*goora.TimeStampTZ)(nil)
+					}
 				}
 				arrays[binds[ci]][ri-offset] = bound
 				if eb := emptyBinds[ci]; eb >= 0 {

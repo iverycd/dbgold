@@ -42,6 +42,7 @@ func TestOracleTypeBoundaries(t *testing.T) {
 	mapper, ok := Get("mysql", "oracle")
 	require.True(t, ok)
 	require.Equal(t, "NUMBER(20,0)", mapper(source.ColumnInfo{DataType: "bigint"}, false, false))
-	_, ok = Get("postgres", "oracle")
-	require.False(t, ok)
+	mapper, ok = Get("postgres", "oracle")
+	require.True(t, ok)
+	require.Equal(t, "NUMBER(19,0)", mapper(source.ColumnInfo{DataType: "int8"}, false, false))
 }

@@ -103,6 +103,11 @@
       <section class="detail-tabs-surface">
         <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
         <PartitionPreflightPanel v-if="report?.partition_migration" :result="report.partition_migration" readonly />
+        <a-collapse v-if="savedPGPreflight" style="margin: 16px 0">
+          <a-collapse-item key="pg-preflight" :header="`迁移前预检记录（${preflightStatusLabel(savedPGPreflight)}）`">
+            <PGPreflightPanel :result="savedPGPreflight" :excluded="savedPGPreflight.excluded" readonly />
+          </a-collapse-item>
+        </a-collapse>
         <div v-if="report?.auto_repairs?.length" class="auto-repair-summary" aria-label="自动修复汇总">
           <span>自动修复涉及 <strong>{{ autoRepairTableCount }}</strong> 张表、<strong>{{ report.auto_repairs.length }}</strong> 项字段调整</span>
           <a-button type="text" size="small" @click="activeTab = 'auto-repairs'">查看明细</a-button>
@@ -265,9 +270,10 @@
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
+import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
-import { reportCategories, migrationOverviewRows, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary, migrationPGPreflight, preflightStatusLabel } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
@@ -294,6 +300,7 @@ const router = useRouter()
 const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
 const job = ref<DataMigrationJob | null>(null)
 const report = ref<MigrationReport | null>(null)
+const savedPGPreflight = computed(() => migrationPGPreflight(report.value))
 const loading = ref(false)
 const refreshing = ref(false)
 const loadError = ref('')
@@ -428,6 +435,7 @@ async function exportReport() {
   const current = job.value
   const lines = ['单次迁移报告', `Job ID: ${current.job_id}`, ...formatMigrationTiming(current), `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   for (const line of formatAutoRepairs(report.value.auto_repairs)) lines.push(line)
+  if (savedPGPreflight.value) lines.push('=== 兼容预检与计划 ===', JSON.stringify(savedPGPreflight.value, null, 2), '')
   for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
   if (report.value.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(report.value.partition_migration, null, 2), '')

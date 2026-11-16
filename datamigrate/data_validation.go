@@ -21,6 +21,7 @@ type frozenValidationTable struct {
 	note               string
 	appendBaseline     *validation.AppendBaseline
 	partitionBaselines map[string]*validation.AppendBaseline
+	pgOracleTarget     *validation.Table // complete target metadata frozen before append
 }
 
 func (m *Migrator) dataValidationEnabled() bool {
@@ -72,6 +73,9 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 			frozen.metadata.PrimaryKey = slices.Clone(frozen.metadata.PrimaryKey)
 		}
 		m.stopMigrationTask(ctx, frozen.err)
+		if frozen.err == nil {
+			m.freezePGOracleAppendContent(ctx, &frozen)
+		}
 		if frozen.err == nil {
 			m.freezePartitionAppendContent(ctx, &frozen)
 		}
@@ -147,12 +151,14 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 							table.Error = "物理 ROWID 语义核验后的行数不同"
 						}
 					} else {
-						validationSource, validationTarget := src, dst
+						validationSource, validationTarget, scanErr := m.pgOracleValidationScanners(ctx, src, dst, frozen, plan)
 						if len(frozen.rebasedRowIDs) > 0 {
 							validationSource = &nativeRowIDProjectionScanner{Scanner: src, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
 							validationTarget = &nativeRowIDProjectionScanner{Scanner: dst, expected: frozen.metadata, ignored: frozen.rebasedRowIDs}
 						}
-						if frozen.appendBaseline != nil {
+						if scanErr != nil {
+							table.Status, table.Error = validation.StatusError, scanErr.Error()
+						} else if frozen.appendBaseline != nil {
 							table = validation.ValidateAppend(ctx, validationSource, validationTarget, plan, frozen.appendBaseline)
 						} else {
 							table = validation.Validate(ctx, validationSource, validationTarget, plan)
@@ -162,7 +168,10 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 			}
 		}
 		if frozen.note != "" {
-			table.Note = frozen.note
+			if table.Note != "" {
+				table.Note += "；"
+			}
+			table.Note += frozen.note
 		}
 		result.Tables = append(result.Tables, table)
 		if table.Status == validation.StatusPassed {
@@ -192,7 +201,7 @@ func (m *Migrator) dataValidationPlan(ctx context.Context, dst validation.Scanne
 	if err != nil {
 		return plan, fmt.Errorf("读取目标列元数据失败: %w", err)
 	}
-	if len(metadata.Columns) != len(plan.SourceColumns) {
+	if len(metadata.Columns) != len(plan.SourceColumns) && !m.isPGOracle() {
 		return plan, fmt.Errorf("源目标列数量不同: 源=%d 目标=%d", len(plan.SourceColumns), len(metadata.Columns))
 	}
 	actual := make(map[string]validation.Column, len(metadata.Columns))
@@ -211,7 +220,7 @@ func (m *Migrator) dataValidationPlan(ctx context.Context, dst validation.Scanne
 		plan.TargetColumns = append(plan.TargetColumns, mapped)
 		delete(actual, name)
 	}
-	if len(actual) > 0 {
+	if len(actual) > 0 && !m.isPGOracle() {
 		return plan, fmt.Errorf("目标存在未映射列")
 	}
 	if len(frozen.rebasedRowIDs) > 0 {
@@ -231,6 +240,16 @@ func (m *Migrator) dataValidationPlan(ctx context.Context, dst validation.Scanne
 			}
 		}
 		plan.SourceColumns, plan.TargetColumns, plan.PrimaryKey = sourceColumns, targetColumns, keys
+	}
+	if m.isPGOracle() {
+		plan.SourceColumns = slices.Clone(plan.SourceColumns)
+		for i := range plan.SourceColumns {
+			// PG bits migrate to full bit strings, including their leading zeroes
+			// and width. The older numeric BIT comparator discards this evidence.
+			if plan.SourceColumns[i].Kind == validation.Bits {
+				plan.SourceColumns[i].Kind = validation.Text
+			}
+		}
 	}
 	return plan, nil
 }

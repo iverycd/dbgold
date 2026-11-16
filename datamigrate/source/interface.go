@@ -89,6 +89,7 @@ type SequenceBinding struct {
 // IndexInfo 表示一个索引或唯一约束
 type IndexInfo struct {
 	GaussDB *GaussDBIndexPlan `json:"gaussdb,omitempty"`
+	PG      *PGIndexMetadata  `json:"pg,omitempty"`
 	// Locality is LOCAL or GLOBAL when the source catalog establishes it.
 	// Derived indexes belong to an already represented logical parent index.
 	Locality    string `json:"locality,omitempty"`
@@ -142,6 +143,7 @@ func (idx IndexInfo) MySQLTargetPrefix(i int) int {
 
 // FKInfo 表示一个外键约束
 type FKInfo struct {
+	PG             *PGConstraintMetadata `json:"pg,omitempty"`
 	TableName      string
 	ConstraintName string
 	Columns        []string

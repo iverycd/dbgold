@@ -1,5 +1,10 @@
 import type { DataValidationValue, DataValidationReport, CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
 
+// Historical PG/MySQL reports keep their original field and wire shape.
+export function migrationPGPreflight(report?: Pick<MigrationReport, 'preflight' | 'pg_oracle_preflight'> | null) {
+  return report?.pg_oracle_preflight ?? report?.preflight ?? null
+}
+
 // ready means every object passed. can_start also allows a healthy subset, and
 // an explicit top-level refusal always overrides a nested partition result.
 export function preflightCanStart(result?: { can_start?: boolean; partition_preflight?: { can_start?: boolean }; ready?: boolean } | null): boolean {
@@ -158,7 +163,10 @@ export function reportCategories(report: MigrationReport) {
   ] as const
   const sources = [
     ...categories.map(([key, label]) => ({
-      key, label: key === 'triggers' && adaptation ? '源端触发器' : key === 'constraints' && report.native_schema ? '约束' : label,
+      key, label: key === 'triggers' && report.pg_oracle_preflight ? '自动编号触发器'
+        : key === 'triggers' && adaptation ? '源端触发器'
+        : key === 'constraints' && report.pg_oracle_preflight ? '外键与 CHECK 约束'
+        : key === 'constraints' && report.native_schema ? '约束' : label,
       category: report[key] ?? { total: 0, success: 0, failed: 0, items: [] },
       compatibilityReport: undefined as CompatibilityFunctionsReport | undefined,
       compatibilityKind: undefined as 'function' | 'procedure' | undefined,

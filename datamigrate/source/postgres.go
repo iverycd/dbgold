@@ -22,9 +22,10 @@ func (r *PostgresReader) MigrationSchema() string { return r.schema }
 // PostgreSQL 的迁移单元是「库内的 schema」：连接的 dbname 固定在 DSN 中，
 // schema 字段对应本次迁移的 pg schema（类比达梦/Oracle 的 OWNER）。
 type PostgresReader struct {
-	db      *sql.DB
-	schema  string // 本次迁移的 pg schema，空则默认 public
-	profile PGProfile
+	db             *sql.DB
+	schema         string // 本次迁移的 pg schema，空则默认 public
+	profile        PGProfile
+	oracleMetadata bool
 }
 
 // NewPostgres 创建并连接 PostgreSQL Reader（使用标准 lib/pq 驱动）。
@@ -44,6 +45,16 @@ func NewPostgresCompatible(driverName, dsn, schema string, pool ConnPoolConfig) 
 }
 
 func NewPostgresProduct(product, driverName, dsn, schema string, pool ConnPoolConfig) (*PostgresReader, error) {
+	return newPostgresProduct(product, driverName, dsn, schema, pool, false)
+}
+
+// NewPostgresProductForOracle keeps table-reading requirements strict while
+// leaving optional object metadata permissions to the per-object snapshot.
+func NewPostgresProductForOracle(product, driverName, dsn, schema string, pool ConnPoolConfig) (*PostgresReader, error) {
+	return newPostgresProduct(product, driverName, dsn, schema, pool, true)
+}
+
+func newPostgresProduct(product, driverName, dsn, schema string, pool ConnPoolConfig, oracleMetadata bool) (*PostgresReader, error) {
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, err
@@ -56,7 +67,7 @@ func NewPostgresProduct(product, driverName, dsn, schema string, pool ConnPoolCo
 	if schema == "" {
 		schema = "public"
 	}
-	r := &PostgresReader{db: db, schema: schema}
+	r := &PostgresReader{db: db, schema: schema, oracleMetadata: oracleMetadata}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := r.detectProfile(ctx, product); err != nil {

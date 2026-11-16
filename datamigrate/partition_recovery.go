@@ -132,22 +132,28 @@ func recoverPartitionRows(ctx context.Context, r source.Reader, w target.Writer,
 }
 
 type partitionRecoveryValidation struct {
-	source, target             validation.Scanner
-	sourceLeaves, targetLeaves validation.PartitionScanner
-	plan                       validation.Plan
+	source, target                 validation.Scanner
+	sourceLeaves, targetLeaves     validation.PartitionScanner
+	plan                           validation.Plan
+	pgOracle                       bool
+	sourceMetadata, targetMetadata validation.Table
 }
 
 // Freeze before preparation/truncation. Recovery may use an explicitly repaired
 // column mapping, so bind that exact mapping instead of deriving object casing.
 func freezePartitionRecoveryValidation(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview) (*partitionRecoveryValidation, error) {
-	if !cfg.ValidateData || p.PartitionPlan == nil {
+	pgOracle := source.IsPGFamily(r.DBType()) && w.DBType() == "oracle"
+	if !cfg.ValidateData || p.PartitionPlan == nil && !pgOracle {
 		return nil, nil
 	}
 	src, sourceOK := validationSource(r)
 	dst, targetOK := w.(validation.Scanner)
 	sourceLeaves, sourceLeavesOK := partitionSourceReader(r).(validation.PartitionScanner)
 	targetLeaves, targetLeavesOK := w.(validation.PartitionScanner)
-	if !sourceOK || !targetOK || !sourceLeavesOK || !targetLeavesOK {
+	if !sourceOK || !targetOK || p.PartitionPlan != nil && (!sourceLeavesOK || !targetLeavesOK) {
+		if p.PartitionPlan == nil {
+			return nil, fmt.Errorf("恢复原值校验要求源和目标支持原值扫描")
+		}
 		return nil, fmt.Errorf("分区恢复原值校验要求源和目标支持根表及逐叶扫描")
 	}
 	metadata, err := src.DescribeValidationTable(ctx, p.SourceTable)
@@ -161,7 +167,7 @@ func freezePartitionRecoveryValidation(ctx context.Context, r source.Reader, w t
 	if err != nil {
 		return nil, fmt.Errorf("冻结恢复目标原值列: %w", err)
 	}
-	if len(actual.Columns) != len(metadata.Columns) {
+	if len(actual.Columns) != len(metadata.Columns) && !pgOracle {
 		return nil, fmt.Errorf("恢复源目标原值列数量不同")
 	}
 	byName := make(map[string]validation.Column, len(actual.Columns))
@@ -183,7 +189,16 @@ func freezePartitionRecoveryValidation(ctx context.Context, r source.Reader, w t
 		plan.TargetColumns = append(plan.TargetColumns, mapped)
 		delete(byName, mapped.Name)
 	}
-	return &partitionRecoveryValidation{src, dst, sourceLeaves, targetLeaves, plan}, nil
+	if pgOracle {
+		for i := range plan.SourceColumns {
+			if plan.SourceColumns[i].Kind == validation.Bits {
+				plan.SourceColumns[i].Kind = validation.Text
+			}
+		}
+	}
+	metadata.Columns, metadata.PrimaryKey = slices.Clone(metadata.Columns), slices.Clone(metadata.PrimaryKey)
+	actual.Columns, actual.PrimaryKey = slices.Clone(actual.Columns), slices.Clone(actual.PrimaryKey)
+	return &partitionRecoveryValidation{source: src, target: dst, sourceLeaves: sourceLeaves, targetLeaves: targetLeaves, plan: plan, pgOracle: pgOracle, sourceMetadata: metadata, targetMetadata: actual}, nil
 }
 
 func (v *partitionRecoveryValidation) validate(ctx context.Context, r source.Reader, w target.Writer, p repair.RecoveryPreview) error {
@@ -196,8 +211,22 @@ func (v *partitionRecoveryValidation) validate(ctx context.Context, r source.Rea
 		}
 		return fmt.Errorf("分区恢复原值校验 %s: %s，缺失=%d 多余=%d 内容不同=%d 重复键=%d %s", result.SourceTable, result.Status, result.MissingRows, result.ExtraRows, result.ChangedRows, result.DuplicateKeys, result.Error)
 	}
-	if err := checked(validation.Validate(ctx, v.source, v.target, v.plan)); err != nil {
+	scanners := func(src, dst validation.Scanner) (validation.Scanner, validation.Scanner, error) {
+		if !v.pgOracle {
+			return src, dst, nil
+		}
+		m := &Migrator{reader: r, writer: w}
+		return m.pgOracleValidationScanners(ctx, src, dst, frozenValidationTable{metadata: v.sourceMetadata, pgOracleTarget: &v.targetMetadata}, v.plan)
+	}
+	src, dst, err := scanners(v.source, v.target)
+	if err != nil {
 		return err
+	}
+	if err := checked(validation.Validate(ctx, src, dst, v.plan)); err != nil {
+		return err
+	}
+	if p.PartitionPlan == nil {
+		return nil
 	}
 	for _, mapping := range p.PartitionPlan.Mapping {
 		sourceLocation, sourceOK := partitionLocation(p.PartitionPlan.Source, mapping.SourceSchema, mapping.SourceName, 0)
@@ -205,7 +234,11 @@ func (v *partitionRecoveryValidation) validate(ctx context.Context, r source.Rea
 		if !sourceOK || !targetOK {
 			return fmt.Errorf("恢复原值校验缺少冻结叶分区身份")
 		}
-		result := validation.Validate(ctx, partitionValueScanner{v.source, v.sourceLeaves, p.SourceTable, sourceLocation}, partitionValueScanner{v.target, v.targetLeaves, p.TargetTable, targetLocation}, v.plan)
+		src, dst, err := scanners(partitionValueScanner{v.source, v.sourceLeaves, p.SourceTable, sourceLocation}, partitionValueScanner{v.target, v.targetLeaves, p.TargetTable, targetLocation})
+		if err != nil {
+			return err
+		}
+		result := validation.Validate(ctx, src, dst, v.plan)
 		result.SourceTable = p.SourceTable + " PARTITION " + partition.LeafKey(mapping.SourceSchema, mapping.SourceName)
 		if err := checked(result); err != nil {
 			return err

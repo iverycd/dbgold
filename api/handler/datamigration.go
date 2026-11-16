@@ -23,10 +23,11 @@ import (
 
 // SupportedPair 表示一个支持的迁移组合
 type SupportedPair struct {
-	Source             string `json:"source"`
-	Target             string `json:"target"`
-	SupportsTriggers   bool   `json:"supports_triggers"`
-	SupportsFullSchema bool   `json:"supports_full_schema"`
+	SupportsCheckConstraints bool   `json:"supports_check_constraints"`
+	Source                   string `json:"source"`
+	Target                   string `json:"target"`
+	SupportsTriggers         bool   `json:"supports_triggers"`
+	SupportsFullSchema       bool   `json:"supports_full_schema"`
 }
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
@@ -36,6 +37,13 @@ var supportedPairs = []SupportedPair{
 	{Source: "sqlserver", Target: "dameng"},
 	{Source: "mysql", Target: "sqlserver"},
 	{Source: "mysql", Target: "oracle"},
+	{Source: "postgres", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "gaussdb", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "highgo", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "vastbase", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "gbase", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "seabox", Target: "oracle", SupportsCheckConstraints: true},
+	{Source: "kingbase", Target: "oracle", SupportsCheckConstraints: true},
 	{Source: "postgres", Target: "mysql"},
 	{Source: "gaussdb", Target: "mysql"},
 	{Source: "highgo", Target: "mysql"},
@@ -458,6 +466,16 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 	if !startup.finish("初始化迁移准备信息", started, repairErr) {
 		return
 	}
+	if source.IsPGFamily(srcConn.DBType) && dstConn.DBType == "oracle" {
+		started, proceed = startup.begin("读取历史序列身份")
+		if !proceed {
+			return
+		}
+		ctx, repairErr = withPGOracleMigrationEvidence(ctx, dbJob.OwnerID, srcConn, dstConn, dbJob.SourceSchema, cfg.TargetSchema)
+		if !startup.finish("读取历史序列身份", started, repairErr) {
+			return
+		}
+	}
 	m := datamigrate.NewMigrator(reader, writer, job, cfg)
 	report := m.Run(ctx)
 
@@ -493,7 +511,7 @@ type startObjectMigrationRequest struct {
 	ExcludedObjects    []datamigrate.ObjectRef `json:"excluded_objects"`
 	SrcConnID          uint                    `json:"src_conn_id" binding:"required"`
 	DstConnID          uint                    `json:"dst_conn_id" binding:"required"`
-	MigrateObjects     []string                `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys comments triggers"`
+	MigrateObjects     []string                `json:"migrate_objects" binding:"required,min=1,dive,oneof=primary_keys indexes sequences foreign_keys check_constraints comments triggers"`
 	TableNames         []string                `json:"table_names" binding:"required,min=1"`
 	SrcDatabase        string                  `json:"src_database"`
 	TargetSchema       string                  `json:"target_schema"`
@@ -548,6 +566,10 @@ func StartObjectMigration(c *gin.Context) {
 	}
 
 	if err := validateTriggerMigration(srcConn.DBType, dstConn.DBType, "schema_only", slices.Contains(req.MigrateObjects, "triggers")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateCheckConstraintMigration(srcConn.DBType, dstConn.DBType, req.MigrateObjects); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -628,7 +650,7 @@ func StartObjectMigration(c *gin.Context) {
 			MaxIdleConns:    req.DstMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.DstConnMaxLifetime) * time.Second,
 		}
-		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool)
+		writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, dstPool, srcConn.DBType)
 		if writerErr == nil {
 			defer writer.Close()
 		}
@@ -676,6 +698,16 @@ func StartObjectMigration(c *gin.Context) {
 		}
 		if !startup.finish("初始化迁移准备信息", started, repairErr) {
 			return
+		}
+		if source.IsPGFamily(srcConn.DBType) && dstConn.DBType == "oracle" {
+			started, proceed = startup.begin("读取历史序列身份")
+			if !proceed {
+				return
+			}
+			ctx, repairErr = withPGOracleMigrationEvidence(ctx, dbJob.OwnerID, srcConn, dstConn, dbJob.SourceSchema, cfg.TargetSchema)
+			if !startup.finish("读取历史序列身份", started, repairErr) {
+				return
+			}
 		}
 		m := datamigrate.NewMigrator(reader, writer, job, cfg)
 		report := m.Run(ctx)
@@ -759,6 +791,13 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	}
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "dameng" {
 		return source.NewMySQLForDameng(dsn, db, pool)
+	}
+	if source.IsPGFamily(conn.DBType) && len(targetTypes) > 0 && targetTypes[0] == "oracle" {
+		driverName := pgCompatibleDriverName(conn.DBType)
+		if conn.DBType == "gaussdb" {
+			driverName = "opengauss"
+		}
+		return source.NewPostgresProductForOracle(conn.DBType, driverName, dsn, srcDatabase, pool)
 	}
 	switch conn.DBType {
 	case "sqlserver":
@@ -953,7 +992,7 @@ func MigrateViews(c *gin.Context) {
 	}
 	defer reader.Close()
 
-	writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, target.ConnPoolConfig{})
+	writer, writerErr := buildDstWriter(dstConn, req.TargetSchema, target.ConnPoolConfig{}, srcConn.DBType)
 	if writerErr != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接目标库失败: %v", writerErr)})
 		return

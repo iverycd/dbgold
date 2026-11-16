@@ -175,6 +175,9 @@ func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, db
 // The caller validates statement scope and supplies an immutable object identity.
 // Source function names, when available, are used to prepare PG-family views.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error, sourceFunctionNames ...string) ([]repair.Unit, error) {
+	if obj.PGOracleSequence != nil {
+		return executePGOracleSequenceRepair(ctx, w, obj, units, onStep)
+	}
 	if w.DBType() == "gaussdb" && obj.Kind == "distribution" {
 		return units, fmt.Errorf("GaussDB 不支持原地修改分布列；请为失败主键或唯一索引重新生成索引计划，现有数据保持不变")
 	}

@@ -152,6 +152,11 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
+	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
+		if err = preparePGOracleRecovery(ctx, r, w, &p, related); err != nil {
+			return p, err
+		}
+	}
 	if err = inspectMySQLPGSpatialRecovery(ctx, r, w, info, p.TargetTable, p.ColumnMapping); err != nil {
 		return p, err
 	}
@@ -382,7 +387,8 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 			obj.DataStatus = "not_required"
 		}
 	}
-	fresh, e := previewRecovery(ctx, r, w, cfg, obj, p.Related, p.ColumnMapping, ops)
+	previewContext := WithPGOracleRecoveryEvidence(ctx, p.PGOracleSequences)
+	fresh, e := previewRecovery(previewContext, r, w, cfg, obj, p.Related, p.ColumnMapping, ops)
 	if e != nil {
 		return finish(e)
 	}
@@ -391,6 +397,9 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if repair.Hash(fresh.PartitionSourceRows) != repair.Hash(p.PartitionSourceRows) || repair.Hash(fresh.PartitionTargetRows) != repair.Hash(p.PartitionTargetRows) {
 		return finish(fmt.Errorf("源／目标逐分区行数已变化，请重新预览并确认"))
+	}
+	if repair.Hash(fresh.PGOracleSequences) != repair.Hash(p.PGOracleSequences) {
+		return finish(fmt.Errorf("PG 序列状态或工具身份已变化，请重新预览并确认"))
 	}
 	// Runtime source metadata (such as DM's actual floating storage family) is
 	// deliberately not serialized in the preview. Use the freshly read copy.
@@ -527,6 +536,18 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 		return finish(e)
 	}
 	res.DataStatus = "succeeded"
+	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
+		plans := fresh.PGOracleSequences[:0]
+		for _, plan := range fresh.PGOracleSequences {
+			if plan.Identity != nil {
+				plans = append(plans, plan)
+			}
+		}
+		if e = target.CalibratePGOracleRecovery(ctx, w, p.TargetTable, plans); e != nil {
+			return finish(fmt.Errorf("数据已导入并核验，PG 序列校准失败: %w", e))
+		}
+		return finish(nil)
+	}
 	sequences, e := RecoverySequences(ctx, r, w, cfg, p)
 	if e != nil {
 		return finish(e)
@@ -551,6 +572,10 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	return finish(nil)
 }
 func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview) ([]source.SequenceInfo, error) {
+	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
+		_, err := PGOracleRecoveryPlans(ctx, r, w, p, p.Related)
+		return nil, err // The generic AUTO_INCREMENT model cannot carry PG identity.
+	}
 	values, err := r.GetSequences(ctx)
 	if err != nil {
 		return nil, err
@@ -624,6 +649,17 @@ func checkRecoveryPageColumns(p repair.RecoveryPreview, cols []string) error {
 }
 
 func regenerateRepairCandidate(w target.Writer, cfg Config, table, o repair.Object, mapping map[string]string) repair.Object {
+	if o.PGOracleSequence != nil {
+		for _, binding := range o.PGOracleSequence.Bindings {
+			if binding.SourceTable == table.SourceTable || binding.SourceTable == table.SourceName {
+				if mapping[binding.SourceColumn] != binding.Column || table.Table != binding.Table {
+					o.RequiresReview, o.DiagnosticOnly, o.Status, o.Error = true, true, "blocked", "PG 序列/触发器列映射已改变，冻结程序不能自动改绑"
+					return o
+				}
+			}
+		}
+		return o
+	}
 	// A column rename cannot recover missing source identity state. Keep the
 	// failure instead of generating a sequence with an invented start value.
 	if o.Sequence != nil && o.Sequence.Unsupported != "" {

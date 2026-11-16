@@ -1354,6 +1354,9 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 				continue
 			}
 			o := repair.Object{ID: repair.Hash([]any{c.kind, i, item.Name, item.DDL, item.Error})[:32], Kind: c.kind, Name: item.Name, SourceName: item.Name, TargetName: item.Name, Schema: schema, DDL: item.DDL, SuggestedDDL: item.SuggestedDDL, Error: item.Error, Status: "failed", Legacy: true, OriginalStatus: "failed", OriginalError: item.Error, RequiresReview: true, Dependencies: []string{}, Units: []repair.Unit{}}
+			if item.ObjectKind != "" && report.PGOraclePreflight != nil {
+				o.Kind = item.ObjectKind
+			}
 			o.SourceDDL = item.SourceDDL
 			o.DiagnosticOnly = repairDiagnostic(item)
 			if c.kind == "trigger" {

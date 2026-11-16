@@ -395,6 +395,19 @@ func partitionKeyColumns(spec *source.PartitionSpec) ([]string, bool) {
 
 func (m *Migrator) checkPartitionConstraints(ctx context.Context) {
 	s := m.partitionState
+	if m.isPGOracle() {
+		// The generic PG Reader keeps its historical MySQL compatibility flags.
+		// PG→Oracle plans raw index/constraint metadata separately and isolates
+		// unsupported objects instead of blocking an otherwise valid table.
+		for _, t := range s.preflight.Tables {
+			if t.Plan != nil && !s.blocked[t.SourceTable] {
+				if err := verifyPartitionKeySourceChecks(ctx, m.reader, t.SourceTable, t.Plan); err != nil {
+					m.blockPartitionTable(t, err)
+				}
+			}
+		}
+		return
+	}
 	pks, pe := m.reader.GetPrimaryKeys(ctx)
 	indexes, ie := m.reader.GetIndexes(ctx)
 	fks, fe := m.reader.GetForeignKeys(ctx)

@@ -8,6 +8,7 @@ import (
 	"dbgold/datamigrate/mysqldmtrigger"
 	"dbgold/datamigrate/mysqltrigger"
 	"dbgold/datamigrate/partition"
+	"dbgold/datamigrate/pgoracle"
 	"dbgold/datamigrate/source"
 	"encoding/hex"
 	"encoding/json"
@@ -26,15 +27,16 @@ type Unit struct {
 }
 
 type Object struct {
-	GaussDBDistribution   []string             `json:"gaussdb_distribution,omitempty"`
-	PartitionPlan         *partition.Plan      `json:"partition_plan,omitempty"`
-	ManualTrigger         *ManualTriggerPlan   `json:"manual_trigger,omitempty"`
-	ManualTriggerEditable bool                 `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.
-	Native                *damengnative.Object `json:"native,omitempty"`
-	NativeFingerprint     string               `json:"native_fingerprint,omitempty"`
-	NativeTable           *damengnative.Table  `json:"native_table,omitempty"`
-	MySQLPGTrigger        *mysqltrigger.Plan   `json:"mysql_pg_trigger,omitempty"`
-	MySQLDamengTrigger    *mysqldmtrigger.Plan `json:"mysql_dameng_trigger,omitempty"`
+	PGOracleSequence      *pgoracle.SequencePlan `json:"pg_oracle_sequence,omitempty"`
+	GaussDBDistribution   []string               `json:"gaussdb_distribution,omitempty"`
+	PartitionPlan         *partition.Plan        `json:"partition_plan,omitempty"`
+	ManualTrigger         *ManualTriggerPlan     `json:"manual_trigger,omitempty"`
+	ManualTriggerEditable bool                   `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.
+	Native                *damengnative.Object   `json:"native,omitempty"`
+	NativeFingerprint     string                 `json:"native_fingerprint,omitempty"`
+	NativeTable           *damengnative.Table    `json:"native_table,omitempty"`
+	MySQLPGTrigger        *mysqltrigger.Plan     `json:"mysql_pg_trigger,omitempty"`
+	MySQLDamengTrigger    *mysqldmtrigger.Plan   `json:"mysql_dameng_trigger,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -141,6 +143,9 @@ func (o *Object) NormalizeLegacyExecution() bool {
 
 // CanEditDDL requires an object identity, not just a report category label.
 func (o Object) CanEditDDL() bool {
+	if o.PGOracleSequence != nil {
+		return false
+	}
 	if o.ManualTrigger != nil {
 		return o.TrustedManualTrigger()
 	}
@@ -163,6 +168,9 @@ func (o Object) CanEditDDL() bool {
 // Generated MySQL trigger programs can be retried as a complete immutable
 // transaction, while remaining unavailable to the general SQL draft editor.
 func (o Object) CanExecuteDDL() bool {
+	if o.PGOracleSequence != nil {
+		return o.TrustedPGOracleSequence()
+	}
 	if o.ManualTrigger != nil {
 		return o.TrustedManualTrigger()
 	}
@@ -170,6 +178,37 @@ func (o Object) CanExecuteDDL() bool {
 		return o.TrustedNative()
 	}
 	return o.CanEditDDL() || (!o.DiagnosticOnly && o.Kind == "trigger" && (o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil) && o.Schema != "" && o.TargetName != "")
+}
+
+// TrustedPGOracleSequence keeps generated sequence and trigger programs tied to
+// the durable source/target identities; they are never editable SQL drafts.
+func (o Object) TrustedPGOracleSequence() bool {
+	p := o.PGOracleSequence
+	if p == nil || o.DiagnosticOnly || p.Schema != o.Schema || p.Validate() != nil || len(o.Units) != 1 {
+		return false
+	}
+	var expected, alternate string
+	if o.Kind == "sequence" && o.TargetName == p.Name {
+		original := *p
+		original.Identity = nil
+		statements, err := original.SequenceStatements()
+		if err != nil || len(statements) != 1 {
+			return false
+		}
+		expected = statements[0].SQL
+		if p.Identity != nil {
+			if calibrated, err := p.CalibrationStatements(); err == nil && len(calibrated) == 1 {
+				alternate = calibrated[0].SQL
+			}
+		}
+	} else if o.Kind == "trigger" {
+		for _, b := range p.Bindings {
+			if b.Trigger == o.TargetName && b.Table == o.Table {
+				expected = p.TriggerSQL(b)
+			}
+		}
+	}
+	return o.Units[0].SQL == o.Units[0].OriginalSQL && (expected != "" && o.Units[0].SQL == expected || alternate != "" && o.Units[0].SQL == alternate)
 }
 
 // TrustedNative binds the immutable server-side plan and every physical unit.
@@ -187,27 +226,28 @@ func (o Object) TrustedNative() bool {
 }
 
 type RecoveryPreview struct {
-	PartitionPlan       *partition.Plan      `json:"partition_plan,omitempty"`
-	PartitionSourceRows map[string]int64     `json:"partition_source_rows,omitempty"`
-	PartitionTargetRows map[string]int64     `json:"partition_target_rows,omitempty"`
-	NativeTable         *damengnative.Table  `json:"native_table,omitempty"`
-	NativeObject        *damengnative.Object `json:"native_object,omitempty"`
-	NativeUnits         []Unit               `json:"native_units,omitempty"`
-	NativeDisable       []damengnative.Unit  `json:"native_disable,omitempty"`
-	NativeRestore       []damengnative.Unit  `json:"native_restore,omitempty"`
-	ObjectID            string               `json:"object_id"`
-	SourceTable         string               `json:"source_table"`
-	TargetTable         string               `json:"target_table"`
-	QualifiedTarget     string               `json:"qualified_target"`
-	SourceRows          int64                `json:"source_rows"`
-	TargetRows          int64                `json:"target_rows"`
-	ColumnMapping       map[string]string    `json:"column_mapping"`
-	SourceColumns       []source.ColumnInfo  `json:"source_columns"`
-	TargetColumns       []source.ColumnInfo  `json:"target_columns"`
-	Related             []Object             `json:"related"`
-	DataRequired        bool                 `json:"data_required"`
-	Fingerprint         string               `json:"fingerprint"`
-	Warnings            []string             `json:"warnings"`
+	PGOracleSequences   []pgoracle.SequencePlan `json:"pg_oracle_sequences,omitempty"`
+	PartitionPlan       *partition.Plan         `json:"partition_plan,omitempty"`
+	PartitionSourceRows map[string]int64        `json:"partition_source_rows,omitempty"`
+	PartitionTargetRows map[string]int64        `json:"partition_target_rows,omitempty"`
+	NativeTable         *damengnative.Table     `json:"native_table,omitempty"`
+	NativeObject        *damengnative.Object    `json:"native_object,omitempty"`
+	NativeUnits         []Unit                  `json:"native_units,omitempty"`
+	NativeDisable       []damengnative.Unit     `json:"native_disable,omitempty"`
+	NativeRestore       []damengnative.Unit     `json:"native_restore,omitempty"`
+	ObjectID            string                  `json:"object_id"`
+	SourceTable         string                  `json:"source_table"`
+	TargetTable         string                  `json:"target_table"`
+	QualifiedTarget     string                  `json:"qualified_target"`
+	SourceRows          int64                   `json:"source_rows"`
+	TargetRows          int64                   `json:"target_rows"`
+	ColumnMapping       map[string]string       `json:"column_mapping"`
+	SourceColumns       []source.ColumnInfo     `json:"source_columns"`
+	TargetColumns       []source.ColumnInfo     `json:"target_columns"`
+	Related             []Object                `json:"related"`
+	DataRequired        bool                    `json:"data_required"`
+	Fingerprint         string                  `json:"fingerprint"`
+	Warnings            []string                `json:"warnings"`
 }
 
 type RecoveryResult struct {

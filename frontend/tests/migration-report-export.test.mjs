@@ -97,6 +97,21 @@ async function exportedText(h) {
 }
 
 for (const view of views) {
+  test(`${view} exports the saved Oracle structural plan without substituting a historical MySQL plan`, async () => {
+    const h = harness(view)
+    try {
+      const plan = { kind: 'pg_oracle', ready: false, can_start: true, objects: [{ object: { kind: 'check', table: 'Orders', name: 'positive' }, statements: [{ SQL: 'ALTER TABLE "APP"."ORDERS" ADD CONSTRAINT "POSITIVE" CHECK ("ID" > 0)' }] }], issues: [{ severity: 'error', reason: 'unsupported index' }] }
+      h.page.report.value.pg_oracle_preflight = plan
+      h.page.report.value.preflight = { kind: 'pg_mysql', objects: [{ target: 'old-unrelated-plan' }] }
+      const text = await exportedText(h)
+      assert.match(text, /兼容预检与计划/)
+      assert.match(text, /pg_oracle/)
+      assert.match(text, /unsupported index/)
+      assert.ok(text.includes(JSON.stringify(plan, null, 2)))
+      assert.doesNotMatch(text, /old-unrelated-plan/)
+    } finally { h.stop() }
+  })
+
   test(`${view} exports saved partition mappings and leaf verification without changing SQL`, async () => {
     const h = harness(view)
     try {

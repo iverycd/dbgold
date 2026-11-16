@@ -81,9 +81,10 @@ func (m *Migrator) validatePartitionContent(ctx context.Context, report *Migrati
 				if e != nil {
 					result.Status, result.Error = validation.StatusError, e.Error()
 				} else {
-					sourceScan := partitionValueScanner{src, sp, t.SourceTable, sl}
-					targetScan := partitionValueScanner{dst, dp, t.TargetTable, dl}
-					if len(t.Baseline) > 0 && !allPartitionCountsZero(t.Baseline) {
+					sourceScan, targetScan, scanErr := m.pgOracleValidationScanners(ctx, partitionValueScanner{src, sp, t.SourceTable, sl}, partitionValueScanner{dst, dp, t.TargetTable, dl}, frozen, plan)
+					if scanErr != nil {
+						result.Status, result.Error = validation.StatusError, scanErr.Error()
+					} else if len(t.Baseline) > 0 && !allPartitionCountsZero(t.Baseline) {
 						baseline := frozen.partitionBaselines[partition.LeafKey(mapping.TargetSchema, mapping.TargetName)]
 						result = validation.ValidateAppend(ctx, sourceScan, targetScan, plan, baseline)
 					} else {
@@ -154,7 +155,12 @@ func (m *Migrator) freezePartitionAppendContent(ctx context.Context, frozen *fro
 		frozen.err = err
 		return
 	}
-	frozen.appendBaseline, err = validation.CaptureAppendBaseline(ctx, dst, plan)
+	_, targetScan, err := m.pgOracleValidationScanners(ctx, nil, dst, *frozen, plan)
+	if err != nil {
+		frozen.err = err
+		return
+	}
+	frozen.appendBaseline, err = validation.CaptureAppendBaseline(ctx, targetScan, plan)
 	if err != nil {
 		frozen.err = fmt.Errorf("冻结追加前根表内容: %w", err)
 		return
@@ -167,7 +173,12 @@ func (m *Migrator) freezePartitionAppendContent(ctx context.Context, frozen *fro
 			frozen.err = fmt.Errorf("冻结计划缺少目标叶分区身份")
 			return
 		}
-		baseline, err := validation.CaptureAppendBaseline(ctx, partitionValueScanner{dst, dp, t.TargetTable, location}, plan)
+		_, leafScan, err := m.pgOracleValidationScanners(ctx, nil, partitionValueScanner{dst, dp, t.TargetTable, location}, *frozen, plan)
+		if err != nil {
+			frozen.err = err
+			return
+		}
+		baseline, err := validation.CaptureAppendBaseline(ctx, leafScan, plan)
 		if err != nil {
 			frozen.err = fmt.Errorf("冻结追加前分区 %s 内容: %w", mapping.TargetName, err)
 			return

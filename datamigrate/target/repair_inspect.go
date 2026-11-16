@@ -134,6 +134,33 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 	if schema != obj.Schema {
 		return verification("failed", "目标 schema 与原对象不一致")
 	}
+	if obj.PGOracleSequence != nil {
+		ow, ok := w.(*OracleWriter)
+		if !ok || !obj.TrustedPGOracleSequence() || obj.PGOracleSequence.Identity == nil {
+			return verification("unknown", "PG 序列修复缺少完整冻结方案或持久化工具身份")
+		}
+		plan := *obj.PGOracleSequence
+		if err := ow.InspectPGOracleSequence(ctx, plan); err != nil {
+			return repair.Verification{Status: "failed", Message: err.Error()}, err
+		}
+		if err := ow.ValidatePGOracleSequenceBindings(ctx, plan, false); err != nil {
+			return repair.Verification{Status: "failed", Message: err.Error()}, err
+		}
+		if obj.Kind == "trigger" {
+			for _, b := range plan.Bindings {
+				if b.Trigger == obj.TargetName {
+					exists, err := ow.inspectPGOracleSequenceTrigger(ctx, plan, b)
+					if err != nil {
+						return repair.Verification{Status: "failed", Message: err.Error()}, err
+					}
+					if !exists {
+						return verification("failed", "冻结绑定触发器尚不存在")
+					}
+				}
+			}
+		}
+		return verification("succeeded", "PG 序列对象身份及冻结定义一致；未消耗 NEXTVAL")
+	}
 	kind := repairKind(obj.Kind)
 	if mysql, ok := w.(*MySQLWriter); ok && kind == "sequence" && obj.Sequence != nil && obj.Sequence.OracleMySQL != nil {
 		if repairDefinitionEdited(obj) {

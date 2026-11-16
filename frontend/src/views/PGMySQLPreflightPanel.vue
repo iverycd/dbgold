@@ -15,7 +15,7 @@
     <template v-else>
     <div class="preflight-heading">
       <div>
-        <h3>{{ readonly ? 'PG → MySQL 兼容检查结果' : 'PG → MySQL 兼容预检' }}</h3>
+        <h3>PG → {{ targetLabel }} {{ readonly ? '兼容检查结果' : '兼容预检' }}</h3>
         <p>{{ readonly ? '本次迁移执行前保存的检查记录' : '检查对象结构兼容性，确认目标库执行计划' }}</p>
       </div>
       <a-space wrap>
@@ -29,6 +29,10 @@
       数据在复制或创建约束时验证；已建表和已提交批次可能保留。
     </a-alert>
     <a-alert v-else type="info" class="preflight-notice">查看报告不会重新执行预检。<template v-if="structureCheck">此记录仅包含结构预检，不代表全量数据校验通过。</template></a-alert>
+    <a-alert v-if="isOracle" type="warning" class="preflight-notice">
+      Oracle 对象名统一大写，按 11g 的 30 字节限制检查重名和超长名称。空字符串、自增列及默认值的兼容差异会列入预检或迁移告警；无法转换的类型、对象和依赖会说明原因，不会静默忽略。
+      函数、存储过程和业务触发器通过原样导出后人工适配。
+    </a-alert>
     <div v-if="excluded.length" class="preflight-excluded">
       <span>已明确排除 {{ excluded.length }} 项</span>
       <a-tag v-for="item in excluded" :key="objectKey(item)" :closable="!readonly && !busy && !disabled" color="orange" @close="$emit('restore', item)">
@@ -47,7 +51,7 @@
         <a-collapse-item key="versions" header="数据库版本与兼容信息">
           <dl class="preflight-metadata">
             <dt>源库</dt><dd>{{ result.source.product }} · {{ result.source.version }} · {{ result.source.mode || '默认兼容模式' }}</dd>
-            <dt>目标库</dt><dd>MySQL {{ result.target.version }} / {{ result.target.database }} · {{ result.target.target_charset || '' }} / {{ result.target.target_collation }}</dd>
+            <dt>目标库</dt><dd>{{ targetDescription }}</dd>
             <dt>验证说明</dt><dd>{{ result.source.verification }}；{{ result.target.verification }}</dd>
           </dl>
         </a-collapse-item>
@@ -108,8 +112,16 @@ import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { copyText } from '@/utils/clipboard'
 import { preflightCanStart, preflightStatusLabel } from '@/utils/migrationReport'
-import type { MigrationObjectRef, PGMySQLPreflight } from '@/api/migration'
-const props = withDefaults(defineProps<{ result?: PGMySQLPreflight | null; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
+import type { MigrationObjectRef, PGPreflight } from '@/api/migration'
+const props = withDefaults(defineProps<{ result?: PGPreflight | null; targetType?: 'mysql' | 'oracle'; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
+const isOracle = computed(() => props.result?.kind === 'pg_oracle' || (!props.result && props.targetType === 'oracle'))
+const targetLabel = computed(() => isOracle.value ? 'Oracle' : 'MySQL')
+const targetDescription = computed(() => {
+  const result = props.result
+  if (!result) return ''
+  if (result.kind === 'pg_oracle') return `Oracle ${result.target.version} / ${result.target.schema} · ${result.target.charset} / ${result.target.ncharset}`
+  return `MySQL ${result.target.version} / ${result.target.database} · ${result.target.target_charset || ''} / ${result.target.target_collation}`
+})
 const structureCheck = computed(() => props.result ? props.result.check_scope === 'structure' : !props.readonly)
 const statusClass = computed(() => !props.result ? '' : !preflightCanStart(props.result) ? 'text-danger' : props.result.ready ? 'text-success' : 'text-warning')
 const summaryStatus = computed(() => props.summarySource === 'report'
@@ -154,7 +166,7 @@ async function copySQL() {
 }
 function download() {
   const url = URL.createObjectURL(new Blob([JSON.stringify(props.result, null, 2)], { type: 'application/json;charset=utf-8' }))
-  const a = document.createElement('a'); a.href = url; a.download = 'pg-mysql-preflight.json'; a.click(); URL.revokeObjectURL(url)
+  const a = document.createElement('a'); a.href = url; a.download = isOracle.value ? 'pg-oracle-preflight.json' : 'pg-mysql-preflight.json'; a.click(); URL.revokeObjectURL(url)
 }
 </script>
 <style scoped>

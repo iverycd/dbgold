@@ -8,6 +8,7 @@ import (
 
 	"dbgold/datamigrate"
 	"dbgold/datamigrate/damengnative"
+	"dbgold/datamigrate/pgoracle"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
@@ -99,6 +100,40 @@ func recoveryRelated(jobID string, o repair.Object, ids []string) ([]repair.Obje
 	}
 	return related, versions, nil
 }
+
+// Successful generated sequences are evidence, not selected repair work. Read
+// them independently from recoveryRelated, which intentionally excludes success.
+func pgOracleRecoveryEvidence(ctx context.Context, jobID string, table repair.Object, srcType, dstType string) (context.Context, error) {
+	if !source.IsPGFamily(srcType) || dstType != "oracle" {
+		return ctx, nil
+	}
+	objects, _, err := repairObjects(jobID)
+	if err != nil {
+		return ctx, err
+	}
+	sourceTable := table.SourceTable
+	if sourceTable == "" {
+		sourceTable = table.SourceName
+	}
+	targetTable := table.Table
+	if targetTable == "" {
+		targetTable = table.TargetName
+	}
+	var plans []pgoracle.SequencePlan
+	for _, obj := range objects {
+		if obj.PGOracleSequence == nil {
+			continue
+		}
+		for _, binding := range obj.PGOracleSequence.Bindings {
+			if binding.SourceTable == sourceTable && binding.Table == targetTable {
+				plans = append(plans, *obj.PGOracleSequence)
+				break
+			}
+		}
+	}
+	return datamigrate.WithPGOracleRecoveryEvidence(ctx, plans), nil
+}
+
 func PreviewMigrationRecovery(c *gin.Context) {
 	j, b, row, o, ok := loadRepairObject(c, true)
 	if !ok {
@@ -156,7 +191,12 @@ func PreviewMigrationRecovery(c *gin.Context) {
 	}
 	defer r.Close()
 	defer w.Close()
-	p, e := datamigrate.PreviewRecovery(c.Request.Context(), r, w, cfg, previewObject, related, mapping)
+	previewContext, e := pgOracleRecoveryEvidence(c.Request.Context(), j.JobID, previewObject, src.DBType, dst.DBType)
+	if e != nil {
+		repairError(c, e)
+		return
+	}
+	p, e := datamigrate.PreviewRecovery(previewContext, r, w, cfg, previewObject, related, mapping)
 	if e != nil {
 		repairError(c, e)
 		return
@@ -323,6 +363,11 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			finishRepair(a, o, e)
 			return
 		}
+		ctx, e = pgOracleRecoveryEvidence(ctx, j.JobID, previewObject, src.DBType, dst.DBType)
+		if e != nil {
+			finishRepair(a, o, e)
+			return
+		}
 		fresh, e := datamigrate.PreviewRecovery(ctx, r, w, cfg, previewObject, p.Related, p.ColumnMapping)
 		if e != nil {
 			finishRepair(a, o, e)
@@ -454,17 +499,39 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				}
 			}
 			orderedRelated[position] = item
+			if item.Kind == "sequence" && item.Status == "succeeded" && item.PGOracleSequence != nil {
+				for i := range orderedRelated {
+					if _, identityErr := inheritPGOracleSequenceIdentity(&orderedRelated[i], *item.PGOracleSequence); identityErr != nil {
+						a.Status, firstErr = "unknown", identityErr
+						break
+					}
+				}
+				if a.Status == "unknown" {
+					break
+				}
+			}
 			if e = store.DB.Model(&store.MigrationRepairObject{}).Where("job_id = ? AND object_id = ?", j.JobID, item.ID).Updates(map[string]any{"object_json": repairJSON(item), "version": gorm.Expr("version + 1")}).Error; e != nil {
 				a.Status = "unknown"
 				firstErr = e
 				break
 			}
 		}
-		if ctx.Err() == nil && cfg.Content != "schema_only" && len(sequenceColumns) > 0 {
-			sequences, calibrationErr := datamigrate.RecoverySequences(ctx, r, w, cfg, fresh)
-			if calibrationErr == nil {
-				sequences = recoveryCalibrationScope(sequences, sequenceColumns)
-				calibrationErr = target.CalibrateRecovery(observedContext, w, fresh.TargetTable, sequences)
+		pgOracleRecovery := source.IsPGFamily(r.DBType()) && w.DBType() == "oracle"
+		if ctx.Err() == nil && cfg.Content != "schema_only" && (len(sequenceColumns) > 0 || pgOracleRecovery) {
+			var calibrationErr error
+			if pgOracleRecovery {
+				plans, planErr := datamigrate.PGOracleRecoveryPlans(ctx, r, w, fresh, orderedRelated)
+				calibrationErr = planErr
+				if calibrationErr == nil {
+					calibrationErr = target.CalibratePGOracleRecovery(observedContext, w, fresh.TargetTable, plans)
+				}
+			} else {
+				sequences, planErr := datamigrate.RecoverySequences(ctx, r, w, cfg, fresh)
+				calibrationErr = planErr
+				if calibrationErr == nil {
+					sequences = recoveryCalibrationScope(sequences, sequenceColumns)
+					calibrationErr = target.CalibrateRecovery(observedContext, w, fresh.TargetTable, sequences)
+				}
 			}
 			if calibrationErr != nil && firstErr == nil {
 				firstErr = fmt.Errorf("数据已完成，最终自增校准失败: %w", calibrationErr)
