@@ -242,6 +242,9 @@ package_windows() {
 }
 
 write_release_metadata() {
+  local target separator=""
+  local targets=(linux-amd64 linux-arm64 windows-amd64)
+  if (( PORTABLE )); then targets=("${PORTABLE_TARGETS[@]}"); fi
   (
     cd "$OUTPUT_DIR"
     shasum -a 256 dbgold-* > SHA256SUMS
@@ -249,8 +252,13 @@ write_release_metadata() {
   {
     printf '{\n'
     if (( PORTABLE )); then printf '  "edition": "portable",\n'; fi
-    printf '  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "artifacts": ["linux/amd64", "linux/arm64", "windows/amd64"]\n}\n' \
+    printf '  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "artifacts": [' \
       "$VERSION" "$GIT_COMMIT" "$BUILD_TIME"
+    for target in "${targets[@]}"; do
+      printf '%s"%s/%s"' "$separator" "${target%-*}" "${target#*-}"
+      separator=", "
+    done
+    printf ']\n}\n'
   } > "$OUTPUT_DIR/release-manifest.json"
 }
 
@@ -313,7 +321,7 @@ run_stage "Frontend install, security audit, and build" build_frontend
 run_stage "Go vet and tests" validate_go
 run_stage "Oscar JDBC helper build and handshake" build_jdbc_bridge
 if (( PORTABLE )); then
-  for target in linux-amd64 linux-arm64 windows-amd64; do
+  for target in "${PORTABLE_TARGETS[@]}"; do
     run_stage "Portable $target package" build_portable_package "${target%-*}" "${target#*-}"
   done
 else

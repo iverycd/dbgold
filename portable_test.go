@@ -38,7 +38,7 @@ func TestPortableConfigSurvivesRestartAndMove(t *testing.T) {
 	require.Equal(t, "uploads", first.UploadDir)
 	require.Equal(t, filepath.Join(root, "tmp"), first.OscarTempDir)
 	require.Equal(t, first.OscarTempDir, os.TempDir())
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		require.Equal(t, "127.0.0.1", first.ListenHost)
 	} else {
 		require.Equal(t, "0.0.0.0", first.ListenHost)

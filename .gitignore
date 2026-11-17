@@ -15,6 +15,10 @@ docs
 !/docs/mysql-pg-spatial.md
 !/docs/pg-oracle.md
 !/docs/dameng-sqlserver-oracle.md
+!/docs/getting-started.md
+!/docs/images/
+/docs/images/*
+!/docs/images/getting-started/
 .claude
 log
 uploads

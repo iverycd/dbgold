@@ -4,6 +4,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"runtime"
 
 	"golang.org/x/sys/unix"
 )
@@ -14,5 +16,9 @@ func tryPortableLock(file *os.File) error {
 
 func closePortableLock(file *os.File) { file.Close() }
 
-// Linux portable releases print the server's LAN address for the DBA.
-func openPortableBrowser(string) error { return nil }
+func openPortableBrowser(url string) error {
+	if runtime.GOOS == "darwin" {
+		return exec.Command("/usr/bin/open", url).Run()
+	}
+	return nil
+}

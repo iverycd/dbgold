@@ -1,8 +1,10 @@
 # dbgold
 
+第一次使用？请阅读 [DBGold：项目介绍与快速上手](docs/getting-started.md)，从 Windows、Linux 或 macOS 解压启动开始，按图完成 MySQL 到 PostgreSQL 内核系列或达梦的迁移。
+
 数据库迁移工具：后端 Go + Gin，前端 Vue 3 + Vite + Arco Design。
 
-生产发布采用统一 HTTP 入口，Go 服务同时提供前端页面、`/api/*` 和健康检查。默认端口为 `18089`。服务器部署可从内网访问，Windows 单目录包默认只接受本机连接。
+生产发布采用统一 HTTP 入口，Go 服务同时提供前端页面、`/api/*` 和健康检查。默认端口为 `18089`。服务器部署可从内网访问，Windows 和 macOS 单目录包默认只接受本机连接。
 
 ```text
 http://服务器IP:18089/
@@ -13,14 +15,23 @@ http://服务器IP:18089/api/health/ready
 
 ## 单目录离线包（普通账号）
 
-Linux x86_64 选 `portable-linux-amd64.tar.gz`，Linux aarch64 选 `portable-linux-arm64.tar.gz`，Windows x64 选 `portable-windows-amd64.zip`。将压缩包解压到自己可写、其他账号不能读取的目录。三个包的顶层目录都叫 `dbgold/`，包含程序、前端和神通 JDBC 驱动。普通账号可直接启动。只有连接神通数据库时才需要在目标机配置 Java。
+| 系统和架构 | 文件名后缀 |
+|---|---|
+| Linux x86_64 | `portable-linux-amd64.tar.gz` |
+| Linux aarch64 | `portable-linux-arm64.tar.gz` |
+| Windows x64 | `portable-windows-amd64.zip` |
+| macOS 12 或更新版本，Intel | `portable-darwin-amd64.tar.gz` |
+| macOS 12 或更新版本，Apple Silicon | `portable-darwin-arm64.tar.gz` |
+
+将压缩包解压到自己可写、其他账号不能读取的目录。包的顶层目录都叫 `dbgold/`，包含程序、前端和神通 JDBC 驱动。普通账号可直接启动。只有连接神通数据库时才需要在目标机配置 Java。
 
 | 平台 | 启动 | 浏览器访问 |
 |---|---|---|
 | Linux | 在解压目录运行 `./start.sh`，保持终端或 SSH 会话打开 | 默认监听 `0.0.0.0:18089`，在办公电脑打开终端列出的可达内网地址 |
 | Windows | 双击 `start.cmd`，保持启动窗口打开 | 就绪后自动打开 `http://127.0.0.1:18089/` |
+| macOS | 在解压目录运行 `./start.sh`，保持终端打开 | 就绪后自动打开 `http://127.0.0.1:18089/`，也可手动访问终端显示的地址 |
 
-首次启动生成 `config/dbgold.env`，终端显示管理员 `admin` 的初始密码。可在该文件中修改 `LISTEN_HOST` 和 `PORT`（1024–65535），然后重启。Windows 自用模式默认仅监听本机。Linux 从办公电脑直连时，服务器防火墙需允许相应内网来源访问该端口。关闭浏览器后任务继续运行；结束迁移任务后可在启动窗口按 Ctrl+C 停止。
+首次启动生成 `config/dbgold.env`，终端显示管理员 `admin` 的初始密码。可在该文件中修改 `LISTEN_HOST` 和 `PORT`（1024–65535），然后重启。macOS 可用 `./start.sh --no-browser` 关闭自动打开浏览器。Linux 从办公电脑直连时，服务器防火墙需允许相应内网来源访问该端口。关闭浏览器后任务继续运行。结束迁移任务后可在启动窗口按 Ctrl+C 停止。
 
 ```text
 dbgold/
@@ -47,11 +58,14 @@ dbgold/
 ### 单目录包升级
 
 1. 确认没有正在运行的迁移任务，关闭旧实例。准备足够空间容纳程序、配置、SQLite、上传文件及日志的冷备份。
-2. 将同平台新版解压到**独立的临时目录**。在新版目录中执行升级命令，`--target` 指向原安装目录。
+2. 将同平台、同架构的新版解压到**独立的临时目录**。在新版目录中执行升级命令，`--target` 指向原安装目录。
 
 ```sh
 # Linux
 ./dbgold portable-upgrade --target "/data/迁移工具/dbgold" --confirm-no-running-tasks
+
+# macOS（假设原目录位于当前用户的 Documents 下）
+./dbgold portable-upgrade --target "$HOME/Documents/迁移工具/dbgold" --confirm-no-running-tasks
 ```
 
 ```powershell
@@ -69,7 +83,7 @@ dbgold/
 GO_BIN=/Users/kay/sdk/go1.25.5/bin/go ./release.sh --portable v1.2.3
 ```
 
-构建机使用 Go 1.25.5、Node/npm、JDK 和归档工具。JDK 用于编译和验证随包发布的桥接 JAR。输出在 `release/portable/v1.2.3/`，包含三个压缩包、`SHA256SUMS` 和版本清单。每个压缩包另含文件级 `manifest.sha256`。发布前须确认神通 JDBC 再分发许可，并提供 `third_party/oscar/LICENSE` 与指定校验值的驱动。
+构建机使用 Go 1.25.5、Node/npm、JDK 和归档工具。JDK 用于编译和验证随包发布的桥接 JAR。输出在 `release/portable/v1.2.3/`，包含五个压缩包、`SHA256SUMS` 和版本清单。每个压缩包另含文件级 `manifest.sha256`。发布前须确认神通 JDBC 再分发许可，并提供 `third_party/oscar/LICENSE` 与指定校验值的驱动。
 
 可在目标系统用普通账号运行 `python3 deploy/tests/smoke_portable.py <刚解压的dbgold目录>`。脚本在临时副本中验证启动登录、附件路径、整目录搬移、端口冲突回退及升级后的历史记录，需本机端口 18089 可用。配置好系统 Java 后，加 `--check-oscar-java` 可验证 dbgold 能启动外部 Java 并加载神通驱动。现场验收时，连接实际神通测试库并迁移一张含主键及中文文本的小表，核对目标行数和字段值。
 

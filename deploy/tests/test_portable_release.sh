@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify all four native archives without downloading runtimes or redistributing vendor files.
+# Verify the portable archives and Windows service ZIP using fixture files.
 set -Eeuo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -14,6 +14,7 @@ GIT_COMMIT=test
 BUILD_TIME=2026-11-04T00:00:00Z
 LDFLAGS="-s -w"
 GO_BIN="${GO_BIN:-go}"
+PORTABLE=1
 mkdir -p "$ROOT_DIR"/{deploy/portable,frontend/dist,jdbcbridge/java/build,third_party/oscar} "$WORK_DIR" "$OUTPUT_DIR"
 cp -R "$repo/deploy/windows" "$ROOT_DIR/deploy/"
 printf 'Release test\n' > "$ROOT_DIR/README.md"
@@ -27,11 +28,31 @@ OSCAR_JDBC_SHA256="$(shasum -a 256 "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" 
 
 curl() { echo 'Unexpected release download' >&2; return 1; }
 
-for target in linux-amd64 linux-arm64 windows-amd64; do
+for target in "${PORTABLE_TARGETS[@]}"; do
   build_portable_package "${target%-*}" "${target#*-}"
-  validate_portable_archive "${target%-*}" "${target#*-}"
 done
-if check_binary_target linux-arm64 "$WORK_DIR/portable-linux-amd64/dbgold/dbgold"; then
+write_release_metadata
+validate_portable_artifacts
+node - "$OUTPUT_DIR" "$WORK_DIR" <<'JS'
+const { deepStrictEqual, strictEqual } = require('node:assert');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
+const [outputDir, workDir] = process.argv.slice(2);
+const readManifest = (dir) => JSON.parse(readFileSync(join(dir, 'release-manifest.json'), 'utf8'));
+const release = readManifest(outputDir);
+const expectedTargets = ['linux/amd64', 'linux/arm64', 'windows/amd64', 'darwin/amd64', 'darwin/arm64'];
+strictEqual(release.edition, 'portable');
+deepStrictEqual(release.artifacts, expectedTargets);
+for (const target of expectedTargets) {
+  const [os, arch] = target.split('/');
+  const manifest = readManifest(join(workDir, `portable-${os}-${arch}`, 'dbgold'));
+  deepStrictEqual([manifest.edition, manifest.os, manifest.architecture], ['portable', os, arch]);
+}
+JS
+
+if check_binary_target linux-arm64 "$WORK_DIR/portable-linux-amd64/dbgold/dbgold" ||
+   check_binary_target darwin-amd64 "$WORK_DIR/portable-darwin-arm64/dbgold/dbgold" ||
+   check_binary_target darwin-arm64 "$WORK_DIR/portable-darwin-amd64/dbgold/dbgold"; then
   echo "Wrong application architecture was accepted" >&2; exit 1
 fi
 build_windows
@@ -47,12 +68,19 @@ if validate_windows_archive; then
   echo "Windows archive containing a runtime was accepted" >&2; exit 1
 fi
 
+# Invoke archive negative tests in fresh shells with the release entrypoint's errexit semantics.
+export WORK_DIR OUTPUT_DIR VERSION GIT_COMMIT BUILD_TIME OSCAR_JDBC_SHA256
+chmod 0644 "$WORK_DIR/portable-darwin-arm64/dbgold/start.sh"
+COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/dbgold-$VERSION-portable-darwin-arm64.tar.gz" \
+  -C "$WORK_DIR/portable-darwin-arm64" dbgold
+if bash -ec 'source "$1"; validate_portable_archive darwin arm64' bash "$repo/deploy/portable/package.sh"; then
+  echo "Mac archive with a non-executable launcher was accepted" >&2; exit 1
+fi
+
 # Simulate a damaged download of the application.
 printf '\nmodified\n' >> "$WORK_DIR/portable-linux-amd64/dbgold/web/index.html"
 COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/dbgold-$VERSION-portable-linux-amd64.tar.gz" \
   -C "$WORK_DIR/portable-linux-amd64" dbgold
-# Invoke in a separate shell so the negative test uses the release entrypoint's errexit semantics.
-export WORK_DIR OUTPUT_DIR VERSION OSCAR_JDBC_SHA256
 if bash -ec 'source "$1"; validate_portable_archive linux amd64' bash "$repo/deploy/portable/package.sh"; then
   echo "Corrupt archive was accepted" >&2; exit 1
 fi

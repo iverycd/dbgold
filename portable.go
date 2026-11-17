@@ -20,7 +20,7 @@ import (
 
 func runPortableCommand(args []string) error {
 	flags := flag.NewFlagSet("portable", flag.ContinueOnError)
-	noBrowser := flags.Bool("no-browser", false, "do not open the Windows browser")
+	noBrowser := flags.Bool("no-browser", false, "do not open the default browser")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func runPortableCommand(args []string) error {
 		for _, url := range portableAccessURLs(cfg) {
 			fmt.Println(url)
 		}
-		if runtime.GOOS == "windows" && !*noBrowser {
+		if !*noBrowser {
 			if err := openPortableBrowser(localServerURL(cfg)); err != nil {
 				fmt.Fprintln(os.Stderr, "未能自动打开浏览器，请手动访问上面的地址。", err)
 			}
@@ -205,7 +205,7 @@ func loadPortableConfig(root string) (*config.Config, error) {
 }
 
 func portableDefaultHost() string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		return "127.0.0.1"
 	}
 	return "0.0.0.0"

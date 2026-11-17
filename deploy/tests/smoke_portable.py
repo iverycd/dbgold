@@ -27,11 +27,11 @@ def request(path, data=None, headers=None, timeout=5):
 
 
 @contextlib.contextmanager
-def running(root, cwd):
+def running(root, cwd, launcher=None):
     if os.name == "nt":
         command = [str(root / EXE), "portable", "--no-browser"]
     else:
-        command = [str(root / "start.sh")]
+        command = [str(launcher or root / "start.sh"), "--no-browser"]
     with tempfile.TemporaryFile() as output:
         proc = subprocess.Popen(
             command, cwd=cwd, stdout=output, stderr=subprocess.STDOUT,
@@ -102,7 +102,11 @@ def smoke(package, work, check_java=False):
     cwd = work / "other-cwd"
     cwd.mkdir()
     assert not (root / "runtime").exists(), "native packages must not bundle a Java runtime"
-    with running(root, cwd):
+    launcher = None
+    if os.name != "nt":
+        launcher = work / "启动 dbgold"
+        launcher.symlink_to(Path(root.name) / "start.sh")
+    with running(root, cwd, launcher):
         headers = login(root)
         if check_java:
             check_oscar_java(root, headers)

@@ -1,11 +1,20 @@
 # Sourced by release.sh on the build host.
+PORTABLE_TARGETS=(linux-amd64 linux-arm64 windows-amd64 darwin-amd64 darwin-arm64)
+
 check_binary_target() {
-  local description
+  local description cpu=""
   description="$(LC_ALL=C file -b "$2")"
   case "$1:$description" in
     linux-amd64:ELF\ 64-bit*x86-64*|linux-arm64:ELF\ 64-bit*aarch64*|windows-amd64:PE32+*x86-64*) return 0 ;;
-    *) printf 'Wrong binary for %s: %s (%s)\n' "$1" "$2" "$description" >&2; return 1 ;;
+    darwin-amd64:Mach-O\ 64-bit\ *) cpu=x86_64 ;;
+    darwin-arm64:Mach-O\ 64-bit\ *) cpu='(arm64|aarch64)' ;;
   esac
+  # BSD and GNU file report the CPU and executable type in different orders.
+  if [[ -n "$cpu" && "$description " =~ [[:space:]]$cpu[[:space:],] && "$description " =~ [[:space:]]executable[[:space:],] ]]; then
+    return 0
+  fi
+  printf 'Wrong binary for %s: %s (%s)\n' "$1" "$2" "$description" >&2
+  return 1
 }
 
 check_no_bundled_java() {
@@ -23,6 +32,11 @@ portable_manifest() {
   )
 }
 
+portable_release_metadata() {
+  printf '{\n  "edition": "portable",\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "%s",\n  "architecture": "%s"\n}\n' \
+    "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" "$1" "$2"
+}
+
 build_portable_package() {
   local os="$1" arch="$2" name="dbgold-$VERSION-portable-$1-$2"
   local stage="$WORK_DIR/portable-$1-$2" bin=dbgold start=start.sh
@@ -34,14 +48,13 @@ build_portable_package() {
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$pkg/$bin" .
   )
   cp "$ROOT_DIR/deploy/portable/$start" "$pkg/$start"
-  if [[ "$os" == linux ]]; then chmod 0755 "$pkg/$start" "$pkg/$bin"; fi
+  if [[ "$os" != windows ]]; then chmod 0755 "$pkg/$start" "$pkg/$bin"; fi
   cp -R "$ROOT_DIR/frontend/dist/." "$pkg/web/"
   cp "$ROOT_DIR/jdbcbridge/java/build/dbgold-oscar-bridge.jar" "$ROOT_DIR/third_party/oscar/oscarJDBC8.jar" "$pkg/lib/"
   cp "$ROOT_DIR/third_party/oscar/README.md" "$pkg/lib/OSCAR-JDBC-NOTICE.md"
   cp "$ROOT_DIR/third_party/oscar/LICENSE" "$pkg/lib/OSCAR-JDBC-LICENSE"
   printf '%s\n' "$VERSION" > "$pkg/VERSION"
-  printf '{\n  "edition": "portable",\n  "version": "%s",\n  "git_commit": "%s",\n  "build_time": "%s",\n  "os": "%s",\n  "architecture": "%s"\n}\n' \
-    "$VERSION" "$GIT_COMMIT" "$BUILD_TIME" "$os" "$arch" > "$pkg/release-manifest.json"
+  portable_release_metadata "$os" "$arch" > "$pkg/release-manifest.json"
   portable_manifest "$pkg"
   if [[ "$os" == windows ]]; then
     (cd "$stage" && zip -qrX "$OUTPUT_DIR/$name.zip" dbgold)
@@ -80,9 +93,16 @@ validate_portable_archive() {
     [[ -s "$pkg/$path" ]] || { printf 'Missing %s in %s\n' "$path" "$name" >&2; return 1; }
   done
   [[ "$(cat "$pkg/VERSION")" == "$VERSION" ]]
+  if ! cmp -s "$pkg/release-manifest.json" <(portable_release_metadata "$os" "$arch"); then
+    printf 'Unexpected release manifest in %s\n' "$name" >&2
+    return 1
+  fi
   [[ "$(shasum -a 256 "$pkg/lib/oscarJDBC8.jar" | awk '{print $1}')" == "$OSCAR_JDBC_SHA256" ]]
   check_binary_target "$target" "$pkg/$bin"
-  if [[ "$os" == linux ]]; then [[ -x "$pkg/$start" && -x "$pkg/$bin" ]]; fi
+  if [[ "$os" != windows && ( ! -x "$pkg/$start" || ! -x "$pkg/$bin" ) ]]; then
+    printf 'Missing execute permission in %s\n' "$name" >&2
+    return 1
+  fi
   # Recompute from all archived files to detect both corruption and omissions.
   mv "$pkg/manifest.sha256" "$unpacked/archived.sha256"
   portable_manifest "$pkg"
@@ -92,7 +112,7 @@ validate_portable_archive() {
 
 validate_portable_artifacts() {
   local target
-  for target in linux-amd64 linux-arm64 windows-amd64; do
+  for target in "${PORTABLE_TARGETS[@]}"; do
     validate_portable_archive "${target%-*}" "${target#*-}"
   done
   (cd "$OUTPUT_DIR" && shasum -a 256 -c SHA256SUMS)
