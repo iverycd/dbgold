@@ -98,7 +98,7 @@ func TestPostgresForeignKey_Golden(t *testing.T) {
 func TestPostgresSequence_Golden(t *testing.T) {
 	d := NewPostgres("postgres")
 	seq := source.SequenceInfo{TableName: "t", ColumnName: "id", StartValue: 100}
-	want := `CREATE SEQUENCE IF NOT EXISTS "s"."seq_t_id" INCREMENT BY 1 START 100;
+	want := `CREATE SEQUENCE "s"."seq_t_id" INCREMENT BY 1 START 100;
 ALTER TABLE "s"."t" ALTER COLUMN "id" SET DEFAULT nextval('"s"."seq_t_id"');
 ALTER SEQUENCE "s"."seq_t_id" OWNED BY "s"."t"."id"`
 	if got := JoinSQL(d.SequenceStatements("s", seq, "")); got != want {
@@ -109,7 +109,7 @@ ALTER SEQUENCE "s"."seq_t_id" OWNED BY "s"."t"."id"`
 func TestPostgresSequence_QuotedNames(t *testing.T) {
 	d := NewPostgres("gaussdb")
 	seq := source.SequenceInfo{TableName: "Code_ItemLev", ColumnName: "SYSID", StartValue: 1}
-	want := `CREATE SEQUENCE IF NOT EXISTS "TargetSchema"."seq_Code_ItemLev_SYSID" INCREMENT BY 1 START 1;
+	want := `CREATE SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" INCREMENT BY 1 START 1;
 ALTER TABLE "TargetSchema"."Code_ItemLev" ALTER COLUMN "SYSID" SET DEFAULT nextval('"TargetSchema"."seq_Code_ItemLev_SYSID"');
 ALTER SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" OWNER TO "TargetSchema";
 ALTER SEQUENCE "TargetSchema"."seq_Code_ItemLev_SYSID" OWNED BY "TargetSchema"."Code_ItemLev"."SYSID"`
@@ -173,5 +173,22 @@ func TestPostgresComment_Golden(t *testing.T) {
 	col := source.CommentInfo{TableName: "users", ColumnName: "name", Comment: "it's name"}
 	if got := JoinSQL(d.CommentStatements("s", col)); got != `COMMENT ON COLUMN "s"."users"."name" IS 'it''s name';` {
 		t.Errorf("column comment mismatch: %s", got)
+	}
+}
+
+func TestPGFamilySequenceUsesPortableCreate(t *testing.T) {
+	for _, product := range []string{"postgres", "gaussdb", "highgo", "kingbase", "vastbase", "gbase", "seabox"} {
+		t.Run(product, func(t *testing.T) {
+			d := NewPostgres(product)
+			seq := source.SequenceInfo{TableName: "Orders", ColumnName: "ID", StartValue: 123}
+			ss := d.SequenceStatements("MixedSchema", seq, "Owner")
+			want := `CREATE SEQUENCE "MixedSchema"."seq_Orders_ID" INCREMENT BY 1 START 123;
+ALTER TABLE "MixedSchema"."Orders" ALTER COLUMN "ID" SET DEFAULT nextval('"MixedSchema"."seq_Orders_ID"');
+ALTER SEQUENCE "MixedSchema"."seq_Orders_ID" OWNER TO "Owner";
+ALTER SEQUENCE "MixedSchema"."seq_Orders_ID" OWNED BY "MixedSchema"."Orders"."ID"`
+			if got := JoinSQL(ss); got != want {
+				t.Fatalf("unexpected sequence DDL:\n%s", got)
+			}
+		})
 	}
 }

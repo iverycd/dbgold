@@ -305,3 +305,40 @@ func TestMigratorRun_ContextCancelled(t *testing.T) {
 	}
 	assert.True(t, hasCancelled)
 }
+
+type selectiveSequenceFailureWriter struct {
+	mockWriter
+	attempted []string
+}
+
+func (w *selectiveSequenceFailureWriter) CreateSequence(_ context.Context, seq source.SequenceInfo, _ string) error {
+	w.attempted = append(w.attempted, seq.TableName)
+	if seq.TableName == "Broken" {
+		return fmt.Errorf("同名对象不是序列，拒绝复用")
+	}
+	return nil
+}
+
+func TestMigratorSequenceFailureContinuesIndependentSequences(t *testing.T) {
+	reader := &mockReader{
+		tables: []string{"Broken", "Healthy"},
+		sequences: []source.SequenceInfo{
+			{TableName: "Broken", ColumnName: "ID", StartValue: 1},
+			{TableName: "Healthy", ColumnName: "ID", StartValue: 10},
+		},
+	}
+	writer := &selectiveSequenceFailureWriter{}
+	m, job := newTestMigrator(reader, writer)
+	m.cfg.Objects = []string{"sequences"}
+	m.cfg.TargetSchema = "App"
+	report := m.Run(context.Background())
+	drainLogs(job)
+	assert.Equal(t, []string{"Broken", "Healthy"}, writer.attempted)
+	assert.Equal(t, 1, report.Sequences.Failed)
+	assert.Equal(t, 1, report.Sequences.Success)
+	if assert.Len(t, report.Sequences.Items, 1) {
+		assert.Contains(t, report.Sequences.Items[0].Error, "不是序列")
+		assert.Contains(t, report.Sequences.Items[0].DDL, `CREATE SEQUENCE "App"."seq_Broken_ID"`)
+		assert.NotContains(t, report.Sequences.Items[0].DDL, "IF NOT EXISTS")
+	}
+}

@@ -10,18 +10,17 @@ import (
 
 // 以下 PostDDL 方法复刻 target/postgres.go 中 writer 实际执行的 SQL,
 // 作为「报告展示」与「实际执行」的唯一真相来源。
-// 注意:writer 原先用 IF NOT EXISTS、带 schema 前缀,与 report.go 旧的
-// IndexDDL/SequenceDDL/FKDDL(不带 schema)不同。统一以 writer 行为为准。
+// 序列使用基础 CREATE 语法，由 writer 核验重复对象，兼容旧 PG 内核。
 
 func (d *PostgresDialect) qualified(schema, table string) string {
 	return d.QualifyTable(schema, table)
 }
 
-// SequenceStatements 复刻 PostgresWriter.CreateSequence(postgres.go:111-130)。
+// SequenceStatements 同时用于执行与报告，重复序列由 target 层核验。
 func (d *PostgresDialect) SequenceStatements(schema string, seq source.SequenceInfo, owner string) []Statement {
 	seqBase := fmt.Sprintf("seq_%s_%s", seq.TableName, seq.ColumnName)
 	quotedSeq := d.qualified(schema, seqBase)
-	createSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
+	createSQL := fmt.Sprintf("CREATE SEQUENCE %s INCREMENT BY 1 START %d", quotedSeq, seq.StartValue)
 	alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" SET DEFAULT nextval('%s')`,
 		d.qualified(schema, seq.TableName), seq.ColumnName, quotedSeq)
 	ownedBySQL := fmt.Sprintf(`ALTER SEQUENCE %s OWNED BY %s."%s"`,

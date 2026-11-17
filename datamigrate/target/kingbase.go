@@ -122,7 +122,7 @@ func (w *KingbaseWriter) execStatements(ctx context.Context, stmts []dialect.Sta
 }
 
 func (w *KingbaseWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
-	return w.execStatements(ctx, w.dia.SequenceStatements(w.schema, seq, owner))
+	return createPGSequence(ctx, w.db, w.dia, w.schema, seq, owner)
 }
 
 func (w *KingbaseWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
