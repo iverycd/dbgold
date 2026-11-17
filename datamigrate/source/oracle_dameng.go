@@ -14,8 +14,9 @@ import (
 // PostgreSQL conversion path. Source identifiers are never case-normalized.
 type OracleDamengReader struct {
 	*OracleReader
-	metadataMu sync.RWMutex
-	metadata   map[string]*TableDDLInfo
+	readDefaultOnNull bool
+	metadataMu        sync.RWMutex
+	metadata          map[string]*TableDDLInfo
 }
 
 func WrapOracleForDameng(r *OracleReader) *OracleDamengReader {
@@ -90,12 +91,17 @@ func (r *OracleDamengReader) GetTableDDLInfo(ctx context.Context, table string) 
 	if cached != nil {
 		return cached, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT c.COLUMN_NAME, c.DATA_TYPE,
+	query := `SELECT c.COLUMN_NAME, c.DATA_TYPE,
  NVL(c.CHAR_LENGTH,0), c.DATA_LENGTH, NVL(c.DATA_PRECISION,0), NVL(c.DATA_SCALE,0),
- c.NULLABLE, c.DATA_DEFAULT, NVL(c.CHAR_USED,'B'), c.COLUMN_ID, c.DATA_TYPE_OWNER, vc.VIRTUAL_COLUMN
+ c.NULLABLE, c.DATA_DEFAULT, NVL(c.CHAR_USED,'B'), c.COLUMN_ID, c.DATA_TYPE_OWNER, vc.VIRTUAL_COLUMN`
+	if r.readDefaultOnNull {
+		query += `, c.DEFAULT_ON_NULL`
+	}
+	query += `
  FROM ALL_TAB_COLUMNS c JOIN ALL_TAB_COLS vc
  ON vc.OWNER=c.OWNER AND vc.TABLE_NAME=c.TABLE_NAME AND vc.COLUMN_NAME=c.COLUMN_NAME
- WHERE c.OWNER=:1 AND c.TABLE_NAME=:2 ORDER BY c.COLUMN_ID`, r.owner, table)
+ WHERE c.OWNER=:1 AND c.TABLE_NAME=:2 ORDER BY c.COLUMN_ID`
+	rows, err := r.db.QueryContext(ctx, query, r.owner, table)
 	if err != nil {
 		return nil, err
 	}
@@ -103,13 +109,18 @@ func (r *OracleDamengReader) GetTableDDLInfo(ctx context.Context, table string) 
 	for rows.Next() {
 		var c ColumnInfo
 		var nullable, virtual string
-		var def, typeOwner sql.NullString
-		if err = rows.Scan(&c.Name, &c.DataType, &c.Length, &c.DataLength, &c.Precision, &c.Scale,
-			&nullable, &def, &c.CharUsed, &c.Ordinal, &typeOwner, &virtual); err != nil {
+		var def, typeOwner, defaultOnNull sql.NullString
+		values := []any{&c.Name, &c.DataType, &c.Length, &c.DataLength, &c.Precision, &c.Scale,
+			&nullable, &def, &c.CharUsed, &c.Ordinal, &typeOwner, &virtual}
+		if r.readDefaultOnNull {
+			values = append(values, &defaultOnNull)
+		}
+		if err = rows.Scan(values...); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		c.IsNullable = nullable == "Y"
+		c.DefaultOnNull = defaultOnNull.String == "YES"
 		c.FormattedType = c.DataType
 		if c.Length == 0 {
 			c.Length = c.DataLength
@@ -154,6 +165,7 @@ func (r *OracleDamengReader) GetTableDDLInfo(ctx context.Context, table string) 
 			for i := range info.Columns {
 				if info.Columns[i].Name == name {
 					info.Columns[i].Identity = oracleDamengGeneration(generation, onNull)
+					info.Columns[i].DefaultOnNull = false
 					// The internal sequence default is installed through its binding,
 					// after bulk loading explicit source identity values.
 					info.Columns[i].Default = nil

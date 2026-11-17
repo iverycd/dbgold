@@ -25,6 +25,21 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 	}
 	seen := map[string]bool{}
 	for _, s := range sequences {
+		if s.Native != nil && a.family == "sqlserver" {
+			if table != "" {
+				bound := false
+				for _, b := range s.Native.Bindings {
+					bound = bound || b.Kind != "ownership" && b.TableName == table
+				}
+				if !bound {
+					continue
+				}
+			}
+			if e = w.(*SQLServerWriter).applySQLServerNativeSequence(ctx, s, false); e != nil {
+				return e
+			}
+			continue
+		}
 		if s.Native != nil && a.family == "dameng" {
 			n := *s.Native
 			n.Bindings = nil
@@ -60,7 +75,12 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 				e = calibrateMySQL(ctx, w, a, schema, s)
 			}
 		case "sqlserver":
-			e = calibrateSQLServer(ctx, w.(*SQLServerWriter), s)
+			sw := w.(*SQLServerWriter)
+			if src := sw.dia.SourceType(); src != "" && src != "mysql" {
+				e = sw.CreateSequence(ctx, s, "")
+			} else {
+				e = calibrateSQLServer(ctx, sw, s)
+			}
 		case "oracle":
 			e = calibrateOracle(ctx, w.(*OracleWriter), s)
 		case "dameng":

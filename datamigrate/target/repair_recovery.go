@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 )
 
@@ -247,16 +248,36 @@ func PrepareRecovery(ctx context.Context, w Writer, table string, columns []sour
 	if sw, ok := w.(*SQLServerWriter); ok {
 		casts := map[string]string{}
 		info := slices.Clone(columns)
+		src := sw.dia.SourceType()
+		cross := src != "" && src != "mysql"
 		for i, c := range info {
 			a := byName[c.Name]
 			switch strings.ToLower(a.DataType) {
 			case "tinyint", "smallint", "int", "bigint", "bit", "decimal", "numeric", "real", "float", "nvarchar", "nchar", "varbinary", "binary", "date", "datetime2", "time":
+			case "datetimeoffset", "uniqueidentifier":
+				if !cross {
+					return fmt.Errorf("SQL Server 修复列 %s 类型 %s 尚不支持安全绑定", c.Name, a.DataType)
+				}
 			default:
 				return fmt.Errorf("SQL Server 修复列 %s 类型 %s 尚不支持安全绑定", c.Name, a.DataType)
 			}
+			if cross {
+				mapped, err := sw.dia.ColumnType(c)
+				if err != nil {
+					return err
+				}
+				actualType := strings.Replace(a.FormattedType, "NUMERIC(", "DECIMAL(", 1)
+				if actualType != mapped || (a.Extra == "auto_increment") != dialect.SQLServerHasIdentity(c, src) {
+					return fmt.Errorf("SQL Server 修复列 %s.%s 类型或自增状态不匹配: %s，预期 %s", table, c.Name, actualType, mapped)
+				}
+				if err := sw.validateSQLServerIdentityIncrement(ctx, table, c); err != nil {
+					return err
+				}
+			} else {
+				info[i].Extra = a.Extra
+			}
 			casts[c.Name] = a.FormattedType
 			info[i].IsNullable = a.IsNullable
-			info[i].Extra = a.Extra
 		}
 		if sw.recoveryCasts == nil {
 			sw.recoveryCasts = map[string]map[string]string{}

@@ -6,12 +6,12 @@ import (
 	"database/sql/driver"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
-	"dbgold/datamigrate/typemap"
 	"dbgold/datamigrate/valueconv"
 	"encoding/xml"
 	"fmt"
 	_ "github.com/microsoft/go-mssqldb"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -63,6 +63,24 @@ func (w *SQLServerWriter) DBType() string           { return "sqlserver" }
 func (w *SQLServerWriter) Dialect() dialect.Dialect { return w.dia }
 func (w *SQLServerWriter) EffectiveSchema() string  { return w.schema }
 func (w *SQLServerWriter) Close() error             { return w.db.Close() }
+func (w *SQLServerWriter) SetSourceType(src string) { w.dia.SetSourceType(src) }
+
+func (w *SQLServerWriter) SQLServerVersion(ctx context.Context) (major, minor int, err error) {
+	var version string
+	if err := w.db.QueryRowContext(ctx, `SELECT CONVERT(varchar(128),SERVERPROPERTY('ProductVersion'))`).Scan(&version); err != nil {
+		return 0, 0, err
+	}
+	segments := strings.Split(version, ".")
+	if len(segments) < 2 {
+		return 0, 0, fmt.Errorf("无法识别 SQL Server 版本 %q", version)
+	}
+	major, a := strconv.Atoi(segments[0])
+	minor, b := strconv.Atoi(segments[1])
+	if a != nil || b != nil || major <= 0 || minor < 0 {
+		return 0, 0, fmt.Errorf("无法识别 SQL Server 版本 %q", version)
+	}
+	return major, minor, nil
+}
 func (w *SQLServerWriter) SchemaExists(ctx context.Context, s string) (bool, error) {
 	var n int
 	e := w.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sys.schemas WHERE name=@p1", s).Scan(&n)
@@ -129,8 +147,15 @@ func (w *SQLServerWriter) CreateComment(ctx context.Context, c source.CommentInf
 	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, c))
 }
 func (w *SQLServerWriter) CreateSequence(ctx context.Context, s source.SequenceInfo, owner string) error {
+	if s.Unsupported != "" {
+		return fmt.Errorf("%s", s.Unsupported)
+	}
+	if s.Native != nil {
+		return w.createSQLServerNativeSequence(ctx, s)
+	}
 	col, ok := w.dia.Column(s.TableName, s.ColumnName)
-	if !ok || !strings.Contains(col.Extra, "auto_increment") {
+	src := w.dia.SourceType()
+	if !ok || !dialect.SQLServerHasIdentity(col, src) {
 		return fmt.Errorf("自增列不存在: %s.%s", s.TableName, s.ColumnName)
 	}
 	next := s.StartValueText
@@ -138,10 +163,10 @@ func (w *SQLServerWriter) CreateSequence(ctx context.Context, s source.SequenceI
 		next = fmt.Sprint(s.StartValue)
 	}
 	n, ok := new(big.Int).SetString(next, 10)
-	if !ok || n.Sign() < 1 {
+	if !ok || (src == "" || src == "mysql") && n.Sign() < 1 {
 		return fmt.Errorf("自增起点无效: %s", next)
 	}
-	if _, e := valueconv.ConvertSQLServer(next, col); e != nil {
+	if _, e := valueconv.ConvertSQLServerForSource(n.String(), col, src); e != nil {
 		return e
 	}
 	ss := w.dia.SequenceStatements(w.schema, s, owner)
@@ -159,6 +184,8 @@ func (w *SQLServerWriter) CopyData(ctx context.Context, table string, cols, type
 		return fmt.Errorf("无效列数")
 	}
 	info := make([]source.ColumnInfo, len(cols))
+	castTypes := make([]string, len(cols))
+	src := w.dia.SourceType()
 	identity := false
 	for i, n := range cols {
 		c, ok := w.dia.Column(table, n)
@@ -166,7 +193,15 @@ func (w *SQLServerWriter) CopyData(ctx context.Context, table string, cols, type
 			return fmt.Errorf("缺少写入列元数据: %s.%s", table, n)
 		}
 		info[i] = c
-		identity = identity || strings.Contains(c.Extra, "auto_increment")
+		identity = identity || dialect.SQLServerHasIdentity(c, src)
+		mapped, err := w.dia.ColumnType(c)
+		if err != nil {
+			return err
+		}
+		if actual := w.recoveryCasts[table][n]; actual != "" {
+			mapped = actual
+		}
+		castTypes[i] = mapped
 	}
 	conn, close, e := w.session(ctx)
 	if e != nil {
@@ -205,16 +240,12 @@ func (w *SQLServerWriter) CopyData(ctx context.Context, table string, cols, type
 			}
 			ps := make([]string, len(cols))
 			for ci, v := range rows[ri] {
-				cv, err := valueconv.ConvertSQLServer(v, info[ci])
+				cv, err := valueconv.ConvertSQLServerForSource(v, info[ci], src)
 				if err != nil {
 					return fmt.Errorf("表 %s 批次行 %d: %w", table, ri+1, err)
 				}
 				args = append(args, cv)
-				t, _ := typemap.SQLServerType(info[ci])
-				if actual := w.recoveryCasts[table][cols[ci]]; actual != "" {
-					t = actual
-				}
-				ps[ci] = fmt.Sprintf("CAST(@p%d AS %s)", len(args), t)
+				ps[ci] = fmt.Sprintf("CAST(@p%d AS %s)", len(args), castTypes[ci])
 			}
 			values = append(values, "("+strings.Join(ps, ",")+")")
 		}
@@ -312,6 +343,9 @@ func (w *SQLServerWriter) ValidateExisting(ctx context.Context, info *source.Tab
 	if e = rows.Err(); e != nil {
 		return e
 	}
+	if e = rows.Close(); e != nil {
+		return e
+	}
 	if len(found) != len(info.Columns) {
 		return fmt.Errorf("目标表 %s 不存在或列数不一致", info.TableName)
 	}
@@ -320,7 +354,7 @@ func (w *SQLServerWriter) ValidateExisting(ctx context.Context, info *source.Tab
 		if !ok {
 			return fmt.Errorf("目标缺少列 %s.%s", info.TableName, c.Name)
 		}
-		want, e := typemap.SQLServerType(c)
+		want, e := w.dia.ColumnType(c)
 		if e != nil {
 			return e
 		}
@@ -340,16 +374,41 @@ func (w *SQLServerWriter) ValidateExisting(ctx context.Context, info *source.Tab
 			}
 		case "DECIMAL", "NUMERIC":
 			got = fmt.Sprintf("DECIMAL(%d,%d)", actual.precision, actual.scale)
-		case "DATETIME2", "TIME":
+		case "DATETIME2", "DATETIMEOFFSET", "TIME":
 			got += fmt.Sprintf("(%d)", actual.scale)
 		case "FLOAT":
 			got = fmt.Sprintf("FLOAT(%d)", actual.precision)
 		}
-		if got != want || actual.computed || actual.nullable != c.IsNullable || actual.identity != strings.Contains(c.Extra, "auto_increment") {
+		if got != want || actual.computed || actual.nullable != c.IsNullable || actual.identity != dialect.SQLServerHasIdentity(c, w.dia.SourceType()) {
 			return fmt.Errorf("目标列 %s.%s 类型/可空/自增不匹配: %s，预期 %s", info.TableName, c.Name, got, want)
+		}
+		if e := w.validateSQLServerIdentityIncrement(ctx, info.TableName, c); e != nil {
+			return e
 		}
 	}
 	return nil
+}
+
+func (w *SQLServerWriter) validateSQLServerIdentityIncrement(ctx context.Context, table string, c source.ColumnInfo) error {
+	if c.SQLServerIdentityIncrement == "" {
+		return nil
+	}
+	var got string
+	if err := w.db.QueryRowContext(ctx, `SELECT CONVERT(varchar(50),increment_value) FROM sys.identity_columns WHERE object_id=OBJECT_ID(@p1,N'U') AND name=@p2`, w.dia.QualifyTable(w.schema, table), c.Name).Scan(&got); err != nil {
+		return err
+	}
+	if got != c.SQLServerIdentityIncrement {
+		return fmt.Errorf("目标列 %s.%s 的 IDENTITY 步长为 %s，预期 %s", table, c.Name, got, c.SQLServerIdentityIncrement)
+	}
+	return nil
+}
+
+func (w *SQLServerWriter) SQLServerExistingDecimal(ctx context.Context, table, column string) (precision, scale int64, err error) {
+	err = w.db.QueryRowContext(ctx, `SELECT c.precision,c.scale FROM sys.columns c JOIN sys.types t ON c.user_type_id=t.user_type_id WHERE c.object_id=OBJECT_ID(@p1,N'U') AND c.name=@p2 AND c.is_computed=0 AND t.name IN ('decimal','numeric')`, w.dia.QualifyTable(w.schema, table), column).Scan(&precision, &scale)
+	if err == sql.ErrNoRows {
+		err = fmt.Errorf("目标列 %s.%s 不是可写 DECIMAL/NUMERIC", table, column)
+	}
+	return precision, scale, err
 }
 
 // RebuildDependencies observes all foreign keys before returning any DROP.

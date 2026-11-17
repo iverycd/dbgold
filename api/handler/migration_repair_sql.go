@@ -138,6 +138,9 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 	if obj.PGOracleSequence != nil {
 		return target.ValidatePGOracleSequenceRepair(obj, units, dbType)
 	}
+	if target.IsSQLServerSequenceRepair(obj, dbType) {
+		return target.ValidateSQLServerSequenceRepair(obj, units, dbType)
+	}
 	if dbType == "gaussdb" && obj.Kind == "distribution" {
 		return fmt.Errorf("GaussDB 不支持原地修改分布列，请重新生成失败主键或唯一索引的索引计划")
 	}

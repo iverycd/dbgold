@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"dbgold/datamigrate/failure"
 )
 
 func (r *OracleDamengReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
@@ -20,6 +22,10 @@ func (r *OracleDamengReader) GetViewsForTarget(ctx context.Context, targetType s
 	if targetType != "dameng" {
 		return r.OracleReader.GetViewsForTarget(ctx, targetType)
 	}
+	return r.readRawOracleViews(ctx, false)
+}
+
+func (r *OracleDamengReader) readRawOracleViews(ctx context.Context, perObject bool) ([]ViewInfo, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT VIEW_NAME,TEXT FROM ALL_VIEWS WHERE OWNER=:1 ORDER BY VIEW_NAME`, r.owner)
 	if err != nil {
 		return nil, err
@@ -27,10 +33,20 @@ func (r *OracleDamengReader) GetViewsForTarget(ctx context.Context, targetType s
 	var out []ViewInfo
 	for rows.Next() {
 		var view ViewInfo
-		if err = rows.Scan(&view.ViewName, &view.Definition); err != nil {
+		var definition sql.NullString
+		if err = rows.Scan(&view.ViewName, &definition); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if strings.TrimSpace(definition.String) == "" {
+			err = fmt.Errorf("视图 %s 的定义不可读取", view.ViewName)
+			if !perObject {
+				rows.Close()
+				return nil, err
+			}
+			view.Unsupported = err.Error()
+		}
+		view.Definition = definition.String
 		out = append(out, view)
 	}
 	err = rows.Err()
@@ -44,6 +60,21 @@ func (r *OracleDamengReader) GetViewsForTarget(ctx context.Context, targetType s
 	for i := range out {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if out[i].Unsupported != "" {
+			continue
+		}
+		if perObject {
+			info, err := r.GetTableDDLInfo(ctx, out[i].ViewName)
+			if err != nil {
+				if failure.IsTaskError(err) {
+					return nil, err
+				}
+				out[i].Unsupported = fmt.Sprintf("读取视图 %s 的列: %v", out[i].ViewName, err)
+				continue
+			}
+			out[i].Columns = info.Columns
+			continue
 		}
 		columns, err := r.db.QueryContext(ctx, `SELECT COLUMN_NAME,DATA_TYPE,NVL(DATA_SCALE,0) FROM ALL_TAB_COLUMNS WHERE OWNER=:1 AND TABLE_NAME=:2 ORDER BY COLUMN_ID`, r.owner, out[i].ViewName)
 		if err != nil {

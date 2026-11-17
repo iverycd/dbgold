@@ -95,6 +95,8 @@ func migrationSourceLocation(j *store.DataMigrationJob, c *store.Connection, ove
 		}
 	} else if c.DBType == "oscar" {
 		j.SourceSchema = override
+	} else if c.DBType == "oracle" && j.DstDBType == "sqlserver" {
+		j.SourceSchema = override
 	} else if c.DBType == "oracle" || c.DBType == "dameng" {
 		j.SourceSchema = c.Database
 		if override != "" {

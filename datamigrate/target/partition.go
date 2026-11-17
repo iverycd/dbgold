@@ -475,7 +475,22 @@ func (w *SQLServerWriter) partitionInspector() dbPartitionInspector {
 	return dbPartitionInspector{w.db, w.DBType(), w.schema}
 }
 func (w *SQLServerWriter) InspectPartitionProfile(ctx context.Context) (partition.Profile, error) {
-	return w.partitionInspector().profile(ctx)
+	p, err := w.partitionInspector().profile(ctx)
+	if err != nil || w.dia.SourceType() == "" || w.dia.SourceType() == "mysql" {
+		return p, err
+	}
+	major := partitionVersionMajor(p.Version)
+	if major <= 13 {
+		var edition int
+		var level string
+		if err = w.db.QueryRowContext(ctx, `SELECT CONVERT(int,SERVERPROPERTY('EngineEdition')),CONVERT(varchar(32),SERVERPROPERTY('ProductLevel'))`).Scan(&edition, &level); err != nil {
+			return p, err
+		}
+		if (major < 13 || strings.EqualFold(level, "RTM")) && edition != 3 && edition != 5 && edition != 8 {
+			return p, fmt.Errorf("SQL Server %s %s 的当前版本不支持原生分区", p.Version, level)
+		}
+	}
+	return p, nil
 }
 func (w *SQLServerWriter) InspectPartitionTable(ctx context.Context, t string) (*source.PartitionSpec, error) {
 	return w.partitionInspector().table(ctx, t)

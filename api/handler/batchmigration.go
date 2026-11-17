@@ -507,7 +507,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			DstConnDatabase:    r.DstDatabase,
 			DstConnUsername:    r.DstUsername,
 		}
-		if r.SrcDBType == "oscar" {
+		if r.SrcDBType == "oscar" || isOraclePGSQLServerPair(r.SrcDBType, r.DstDBType) {
 			migrationSourceLocation(dbJob, srcConn, r.SrcSchema)
 		}
 		if err := store.CreateDataMigrationJob(dbJob); err != nil {
@@ -517,7 +517,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		}
 
 		sourceSchema := ""
-		if source.IsPGFamily(r.SrcDBType) || r.SrcDBType == "oscar" {
+		if source.IsPGFamily(r.SrcDBType) || r.SrcDBType == "oscar" || isOraclePGSQLServerPair(r.SrcDBType, r.DstDBType) {
 			sourceSchema = r.SrcSchema
 		}
 		p := migrationParams{

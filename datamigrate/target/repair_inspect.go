@@ -104,7 +104,7 @@ func actualColumnType(c source.ColumnInfo, family string) string {
 		if c.Precision > 0 {
 			return fmt.Sprintf("%s(%d,%d)", t, c.Precision, c.Scale)
 		}
-	case "DATETIME2", "TIME":
+	case "DATETIME2", "DATETIMEOFFSET", "TIME":
 		if family == "sqlserver" {
 			return fmt.Sprintf("%s(%d)", t, c.DateTimePrecision)
 		}
@@ -195,6 +195,15 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 			return verification("failed", "序列定义兼容但仍需向前校准，请刷新序列修复方案")
 		}
 		return verification("succeeded", "序列及关联触发器完整兼容，当前续号已越过源水位和关联列极值")
+	}
+	if sw, ok := w.(*SQLServerWriter); ok && IsSQLServerSequenceRepair(obj, w.DBType()) {
+		if repairDefinitionEdited(obj) {
+			return verification("unknown", "SQL Server 序列修复包含已编辑的 SQL")
+		}
+		if err := sw.verifySQLServerSequence(ctx, *obj.Sequence); err != nil {
+			return repair.Verification{Status: "failed", Message: err.Error()}, err
+		}
+		return verification("succeeded", "序列定义和绑定已核对，续号已覆盖源进度及目标数据边界")
 	}
 	if kind == "table" {
 		if gauss, ok := w.(*GaussDBWriter); ok && len(obj.GaussDBDistribution) > 0 {

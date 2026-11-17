@@ -158,6 +158,10 @@ func (r *PostgresReader) GetPrimaryKeys(ctx context.Context) ([]IndexInfo, error
 }
 
 func (r *PostgresReader) ReadPage(ctx context.Context, table string, pkCols []string, offset, limit int64) ([]string, []string, [][]interface{}, error) {
+	return r.readPageWithProjection(ctx, table, pkCols, offset, limit, "*")
+}
+
+func (r *PostgresReader) readPageWithProjection(ctx context.Context, table string, pkCols []string, offset, limit int64, projection string) ([]string, []string, [][]interface{}, error) {
 	var query string
 	if len(pkCols) > 0 {
 		pkList := make([]string, len(pkCols))
@@ -165,12 +169,12 @@ func (r *PostgresReader) ReadPage(ctx context.Context, table string, pkCols []st
 			pkList[i] = QuotePGIdent(col)
 		}
 		query = fmt.Sprintf(
-			`SELECT * FROM %s.%s ORDER BY %s LIMIT %d OFFSET %d`,
-			QuotePGIdent(r.schema), QuotePGIdent(table), strings.Join(pkList, ", "), limit, offset)
+			`SELECT %s FROM %s.%s ORDER BY %s LIMIT %d OFFSET %d`,
+			projection, QuotePGIdent(r.schema), QuotePGIdent(table), strings.Join(pkList, ", "), limit, offset)
 	} else {
 		query = fmt.Sprintf(
-			`SELECT * FROM %s.%s ORDER BY ctid LIMIT %d OFFSET %d`,
-			QuotePGIdent(r.schema), QuotePGIdent(table), limit, offset)
+			`SELECT %s FROM %s.%s ORDER BY ctid LIMIT %d OFFSET %d`,
+			projection, QuotePGIdent(r.schema), QuotePGIdent(table), limit, offset)
 	}
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {

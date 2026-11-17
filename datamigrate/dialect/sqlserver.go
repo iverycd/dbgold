@@ -7,6 +7,7 @@ import (
 	"dbgold/datamigrate/valueconv"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -14,13 +15,16 @@ import (
 
 type SQLServerDialect struct {
 	Tables map[string]*source.TableDDLInfo
+	source string
 }
 
 func NewSQLServer() *SQLServerDialect {
 	return &SQLServerDialect{Tables: map[string]*source.TableDDLInfo{}}
 }
-func (d *SQLServerDialect) Name() string       { return "sqlserver" }
-func (d *SQLServerDialect) Caps() Capabilities { return Capabilities{IdentityInsert: true} }
+func (d *SQLServerDialect) Name() string             { return "sqlserver" }
+func (d *SQLServerDialect) Caps() Capabilities       { return Capabilities{IdentityInsert: true} }
+func (d *SQLServerDialect) SourceType() string       { return d.source }
+func (d *SQLServerDialect) SetSourceType(src string) { d.source = src }
 func (d *SQLServerDialect) QuoteIdent(s string) string {
 	return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
 }
@@ -50,16 +54,22 @@ func SQLServerObjectName(parts ...string) string {
 	return fmt.Sprintf("%s_%x", string(r), h[:8])
 }
 func (d *SQLServerDialect) MapType(c source.ColumnInfo, src string, _ TypeOpt) string {
-	if src != "mysql" {
-		return ""
-	}
-	t, _ := typemap.SQLServerType(c)
+	t, _ := typemap.SQLServerTypeForSource(c, src)
 	return t
 }
-func (d *SQLServerDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, src string, opt TypeOpt, name NameFunc) ([]Statement, error) {
-	if src != "mysql" {
-		return nil, fmt.Errorf("SQL Server 目标仅支持 MySQL")
+
+func SQLServerHasIdentity(c source.ColumnInfo, src string) bool {
+	if src == "" || src == "mysql" {
+		return strings.Contains(strings.ToLower(c.Extra), "auto_increment")
 	}
+	return c.SQLServerIdentitySeed != "" || c.SQLServerIdentityIncrement != ""
+}
+
+func (d *SQLServerDialect) ColumnType(c source.ColumnInfo) (string, error) {
+	return typemap.SQLServerTypeForSource(c, d.source)
+}
+
+func (d *SQLServerDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, src string, opt TypeOpt, name NameFunc) ([]Statement, error) {
 	if opt.CharInLength || opt.UseNvarchar2 {
 		return nil, fmt.Errorf("SQL Server 不支持 CHAR 长度单位/NVARCHAR2 选项")
 	}
@@ -86,7 +96,7 @@ func (d *SQLServerDialect) CreateTableStatements(schema string, info *source.Tab
 			return nil, fmt.Errorf("列名冲突: %s", n)
 		}
 		seen[n] = true
-		t, e := typemap.SQLServerType(c)
+		t, e := typemap.SQLServerTypeForSource(c, src)
 		if e != nil {
 			return nil, e
 		}
@@ -95,14 +105,27 @@ func (d *SQLServerDialect) CreateTableStatements(schema string, info *source.Tab
 			return nil, fmt.Errorf("列 %s 的生成列/自动更新规则无法等价迁移", c.Name)
 		}
 		s := d.QuoteIdent(n) + " " + t
-		if strings.Contains(extra, "auto_increment") {
+		if SQLServerHasIdentity(c, src) {
 			identities++
 			if identities > 1 {
 				return nil, fmt.Errorf("SQL Server 每表只支持一个 IDENTITY")
 			}
-			s += " IDENTITY(1,1)"
+			if src == "" || src == "mysql" {
+				s += " IDENTITY(1,1)"
+			} else {
+				seed, step, err := sqlServerIdentityParameters(c, src)
+				if err != nil {
+					return nil, err
+				}
+				s += " IDENTITY(" + seed + "," + step + ")"
+			}
 		} else {
-			def, e := sqlServerDefault(c)
+			var def string
+			if src == "" || src == "mysql" {
+				def, e = sqlServerDefault(c)
+			} else {
+				def, e = sqlServerCrossDefault(c, src, t)
+			}
 			if e != nil {
 				return nil, e
 			}
@@ -117,6 +140,30 @@ func (d *SQLServerDialect) CreateTableStatements(schema string, info *source.Tab
 	}
 	q := d.QualifyTable(schema, name(info.TableName))
 	return []Statement{{SQL: "IF OBJECT_ID(" + SQLServerLiteral(q) + ", N'U') IS NOT NULL DROP TABLE " + q}, {SQL: "CREATE TABLE " + q + " (\n  " + strings.Join(out, ",\n  ") + "\n)"}}, nil
+}
+
+func sqlServerIdentityParameters(c source.ColumnInfo, src string) (seed, increment string, err error) {
+	if c.IsNullable {
+		return "", "", fmt.Errorf("列 %s 可空，无法迁移为 SQL Server IDENTITY", c.Name)
+	}
+	mapped, err := typemap.SQLServerTypeForSource(c, src)
+	if err != nil {
+		return "", "", err
+	}
+	if mapped != "SMALLINT" && mapped != "INT" && mapped != "BIGINT" && !(strings.HasPrefix(mapped, "DECIMAL(") && strings.HasSuffix(mapped, ",0)")) {
+		return "", "", fmt.Errorf("列 %s 的 %s 不能建立 IDENTITY", c.Name, mapped)
+	}
+	start, startOK := new(big.Int).SetString(c.SQLServerIdentitySeed, 10)
+	step, stepOK := new(big.Int).SetString(c.SQLServerIdentityIncrement, 10)
+	if !startOK || !stepOK || step.Sign() == 0 {
+		return "", "", fmt.Errorf("列 %s 的 IDENTITY 起点或步长无效", c.Name)
+	}
+	for _, value := range []*big.Int{start, step} {
+		if _, err := valueconv.ConvertSQLServerForSource(value.String(), c, src); err != nil {
+			return "", "", err
+		}
+	}
+	return start.String(), step.String(), nil
 }
 func sqlServerDefault(c source.ColumnInfo) (string, error) {
 	if c.Default == nil {
@@ -194,17 +241,22 @@ func (d *SQLServerDialect) validateIndex(i source.IndexInfo) error {
 		if !ok {
 			return fmt.Errorf("索引列 %s.%s 不存在", i.TableName, n)
 		}
-		t, e := typemap.SQLServerType(c)
+		t, e := d.ColumnType(c)
 		if e != nil {
 			return e
+		}
+		if d.source != "" && d.source != "mysql" && (i.IsUnique || i.IsPrimary) && strings.HasPrefix(t, "NVARCHAR(") {
+			return fmt.Errorf("唯一键列 %s 的文本比较和尾随空格规则需要人工适配", n)
 		}
 		switch {
 		case strings.Contains(t, "MAX"):
 			return fmt.Errorf("索引列 %s 的 MAX 类型不能作为索引键", n)
 		case strings.HasPrefix(t, "NVARCHAR"):
-			bytes += c.Length * 4
+			n, _ := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(t, "NVARCHAR("), ")"), 10, 64)
+			bytes += n * 2
 		case strings.HasPrefix(t, "VARBINARY"):
-			bytes += c.Length
+			n, _ := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(t, "VARBINARY("), ")"), 10, 64)
+			bytes += n
 		case strings.HasPrefix(t, "DECIMAL"):
 			bytes += 17
 		default:
@@ -212,6 +264,9 @@ func (d *SQLServerDialect) validateIndex(i source.IndexInfo) error {
 		}
 		if i.IsPrimary && c.IsNullable {
 			return fmt.Errorf("主键列 %s 可空", n)
+		}
+		if d.source == "oracle" && i.IsUnique && len(i.Columns) > 1 && c.IsNullable {
+			return fmt.Errorf("Oracle 含可空列的复合唯一索引无法等价迁移")
 		}
 	}
 	if bytes > 900 {
@@ -265,10 +320,19 @@ func (d *SQLServerDialect) ValidateForeignKey(f source.FKInfo) error {
 		if !ok {
 			return fmt.Errorf("引用列不存在: %s.%s", f.RefTable, f.RefColumns[j])
 		}
-		ct, _ := typemap.SQLServerType(c)
-		rt, _ := typemap.SQLServerType(r)
+		ct, err := d.ColumnType(c)
+		if err != nil {
+			return err
+		}
+		rt, err := d.ColumnType(r)
+		if err != nil {
+			return err
+		}
 		if ct != rt {
 			return fmt.Errorf("外键列类型不一致: %s / %s", ct, rt)
+		}
+		if d.source != "" && d.source != "mysql" && strings.HasPrefix(ct, "NVARCHAR(") {
+			return fmt.Errorf("外键列 %s 的文本比较和尾随空格规则需要人工适配", n)
 		}
 		if !c.IsNullable && (f.OnDelete == "SET NULL" || f.OnUpdate == "SET NULL") {
 			return fmt.Errorf("SET NULL 外键列必须可空")
@@ -296,6 +360,23 @@ func (d *SQLServerDialect) ForeignKeyStatements(schema string, f source.FKInfo) 
 	return []Statement{{SQL: s}}
 }
 func (d *SQLServerDialect) SequenceStatements(schema string, s source.SequenceInfo, _ string) []Statement {
+	if s.Unsupported != "" {
+		return nil
+	}
+	if s.Native != nil {
+		if s.SQLServerCalibrationOnly {
+			if _, err := ValidateSQLServerNativeSequence(s); err != nil {
+				return nil
+			}
+			name := SQLServerLiteral(d.QualifyTable(schema, s.Native.Name))
+			return []Statement{{SQL: "DECLARE @sequence int=OBJECT_ID(" + name + ",N'SO'); SELECT current_value,is_exhausted FROM sys.sequences WHERE object_id=@sequence"}}
+		}
+		statements, _ := d.sqlServerNativeSequenceStatements(schema, s)
+		return statements
+	}
+	if d.source != "" && d.source != "mysql" {
+		return d.sqlServerIdentityStatements(schema, s)
+	}
 	start := s.StartValueText
 	if start == "" {
 		start = fmt.Sprint(s.StartValue)
@@ -320,6 +401,16 @@ func (d *SQLServerDialect) SequenceStatements(schema string, s source.SequenceIn
 	}
 	sql := "DECLARE @next decimal(38,0) = " + n.String() + ", @max decimal(38,0), @seed decimal(38,0); SELECT @max = MAX(CAST(" + d.QuoteIdent(s.ColumnName) + " AS decimal(38,0))) FROM " + q + "; IF @max IS NOT NULL AND @next <= @max SET @next = @max + 1;" + limitSQL + " SET @seed = CASE WHEN @max IS NULL AND (SELECT last_value FROM sys.identity_columns WHERE object_id=OBJECT_ID(" + SQLServerLiteral(q) + ")) IS NULL THEN @next ELSE @next - 1 END; DBCC CHECKIDENT (" + SQLServerLiteral(q) + ", RESEED, @seed) WITH NO_INFOMSGS"
 	return []Statement{{SQL: sql}}
+}
+
+func (d *SQLServerDialect) SequenceName(s source.SequenceInfo) string {
+	if s.Native != nil {
+		return s.Native.Name
+	}
+	if d.source != "" && d.source != "mysql" {
+		return s.TableName + "." + s.ColumnName
+	}
+	return "seq_" + s.TableName + "_" + s.ColumnName
 }
 func (d *SQLServerDialect) ViewStatements(schema string, v source.ViewInfo) []Statement {
 	q := d.QualifyTable(schema, v.ViewName)

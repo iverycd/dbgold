@@ -7,6 +7,8 @@ import (
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/typemap"
+	"dbgold/datamigrate/valueconv"
 )
 
 func (c *compiler) pgRoot(base string, s *source.PartitionSpec) (string, error) {
@@ -179,11 +181,37 @@ func (c *compiler) sqlServer(base []dialect.Statement, create int, s *source.Par
 	if keyType == "" || strings.Contains(strings.ToLower(keyType), "max") || strings.Contains(strings.ToLower(keyType), "text") {
 		return nil, fmt.Errorf("SQL Server 分区列类型 %q 无法原生等价表达", keyType)
 	}
+	crossSource := c.opt.SourceType == "oracle" || source.IsPGFamily(c.opt.SourceType)
+	if crossSource {
+		kind, _, _ := strings.Cut(keyType, "(")
+		switch kind {
+		case "SMALLINT", "INT", "BIGINT", "DECIMAL", "DATE", "DATETIME2":
+		default:
+			return nil, fmt.Errorf("SQL Server 分区键类型 %q 的边界顺序尚未验证", keyType)
+		}
+		if typemap.IsSQLServerUnboundedDecimal(column, c.opt.SourceType) {
+			return nil, fmt.Errorf("未声明精度的数值分区键无法用依据现有数据定型的 DECIMAL 保留后续路由")
+		}
+	}
 	var bounds []string
 	for i := 0; i < len(s.Partitions)-1; i++ {
-		v, e := c.value(s.Partitions[i].Upper[0])
+		bound := s.Partitions[i].Upper[0]
+		v, e := c.value(bound)
 		if e != nil {
 			return nil, e
+		}
+		if crossSource {
+			bound, e = canonicalValue(bound)
+			if e != nil {
+				return nil, e
+			}
+			converted, err := valueconv.ConvertSQLServerForSource(bound.Text, column, c.opt.SourceType)
+			if err != nil {
+				return nil, fmt.Errorf("分区边界 %s: %w", bound.Text, err)
+			}
+			if bound.Kind == "date" || bound.Kind == "timestamp" {
+				v = dialect.SQLServerLiteral(fmt.Sprint(converted))
+			}
 		}
 		bounds = append(bounds, v)
 	}

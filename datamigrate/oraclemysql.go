@@ -292,6 +292,10 @@ func (m *Migrator) planOracleMySQLTable(ctx context.Context, table string, info 
 // never overwritten by the target plan's mapped types or normalized defaults.
 func (m *Migrator) baseCreateTableStatements(ctx context.Context, table string, info *source.TableDDLInfo, opt dialect.TypeOpt) ([]dialect.Statement, error) {
 	var err error
+	info, err = m.sqlServerTable(ctx, info)
+	if err != nil {
+		return nil, err
+	}
 	opt, err = m.gaussDBTableOptions(ctx, info, opt)
 	if err != nil {
 		return nil, err

@@ -131,6 +131,17 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		m.repairs.sinkErr = fmt.Errorf("单对象修复记录保存需要配置完整清单保存回调")
 		return
 	}
+	if m.isOraclePGSQLServer() && len(m.cfg.ViewNames) > 0 {
+		m.recordSQLServerViewManifest(ctx, m.cfg.ViewNames, nil)
+		if cancelled() {
+			return
+		}
+		m.repairs.rebuildObjectIndex()
+		m.repairs.mu.Lock()
+		defer m.repairs.mu.Unlock()
+		_ = m.flushRepairsLocked()
+		return
+	}
 	finishStage := startRepairPreparationStage(m.log, "读取迁移表列表")
 	tables, err := m.migrationTables(ctx)
 	if err != nil {
@@ -248,6 +259,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			o.DataStatus = "not_required"
 		}
 		var ss []dialect.Statement
+		if e == nil {
+			info, e = m.sqlServerTable(ctx, info)
+		}
 		if e == nil && info != nil {
 			if m.writer.DBType() == "dameng" {
 				_, _ = m.planDamengTable(ctx, t)
@@ -350,7 +364,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return kind == "views"
 		}
 		if m.cfg.Content == "data_only" {
-			return m.isOracleDameng() && kind == "sequences"
+			return (m.isOracleDameng() || m.isOraclePGSQLServer()) && kind == "sequences"
 		}
 		return !m.cfg.objectMode() || slices.Contains(m.cfg.Objects, kind)
 	}
@@ -369,6 +383,11 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		}
 		name := dialect.IndexName(m.writer.Dialect(), v)
 		var ss []dialect.Statement
+		if d, ok := m.writer.Dialect().(*dialect.SQLServerDialect); ok && m.isOraclePGSQLServer() && v.Unsupported == "" {
+			if err := d.ValidateIndex(v); err != nil {
+				v.Unsupported = err.Error()
+			}
+		}
 		if v.Unsupported == "" && !(m.isMySQLGaussDB() && !m.cfg.objectMode() && m.cfg.Content != "data_only" && (v.IsPrimary || v.IsUnique)) {
 			ss = m.writer.Dialect().IndexStatements(m.cfg.TargetSchema, v)
 		}
@@ -409,7 +428,31 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("sequences") {
+	if want("sequences") && m.isOraclePGSQLServer() {
+		values := m.sqlServerPlannedSequences(ctx, func(t string) bool { return selected[t] })
+		if err := m.checkSQLServerSequenceNames(ctx, values); err != nil {
+			m.stopMigrationTask(ctx, err)
+			for i := range values {
+				if values[i].Native != nil && values[i].Unsupported == "" {
+					values[i].Unsupported = fmt.Sprintf("核验目标序列名称: %v", err)
+				}
+			}
+		}
+		for _, v := range values {
+			name := m.sqlServerSequenceObjectName(v)
+			var statements []dialect.Statement
+			var dependencies []string
+			if v.Unsupported == "" {
+				statements = m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, "")
+			}
+			if v.Native != nil {
+				for _, b := range v.Native.Bindings {
+					dependencies = append(dependencies, repairID("table", b.TableName, b.TableName))
+				}
+			}
+			add(repair.Object{Kind: "sequence", Name: name, Table: v.TableName, TargetName: name, Sequence: &v, Error: v.Unsupported, Dependencies: dependencies}, statements)
+		}
+	} else if want("sequences") {
 		finishStage = startRepairPreparationStage(m.log, "收集序列")
 		if values, e := m.reader.GetSequences(ctx); e == nil {
 			scoped := m.selectedSequences(values, selected)
@@ -472,7 +515,11 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				if m.oracleMySQL != nil && !m.oracleMySQLForeignKeyInScope(v) {
 					continue
 				}
+				v = m.scopeSQLServerForeignKey(v)
 				src, ref, originalName := v.TableName, v.RefTable, v.ConstraintName
+				if m.isOraclePGSQLServer() && !selected[ref] && v.Unsupported == "" {
+					v.Unsupported = fmt.Sprintf("引用表 %s 未纳入迁移范围", ref)
+				}
 				v.TableName = m.objName(src)
 				v.RefTable = m.objName(ref)
 				v.ConstraintName = m.objName(v.ConstraintName)
@@ -485,7 +532,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					v.RefColumns[i] = m.targetColumn(ref, c)
 				}
 				o := repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: v.ConstraintName, ForeignKey: &v, Dependencies: []string{repairID("table", v.RefTable, v.RefTable)}}
-				if m.isOscarMySQL() && v.Unsupported != "" {
+				if (m.isOscarMySQL() || m.isOraclePGSQLServer()) && v.Unsupported != "" {
 					o.Error = v.Unsupported
 					add(o, nil)
 					continue
@@ -532,7 +579,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("views") {
+	if want("views") && m.isOraclePGSQLServer() {
+		m.recordSQLServerViewManifest(ctx, m.cfg.ViewNames, selected)
+	} else if want("views") {
 		finishStage = startRepairPreparationStage(m.log, "收集视图")
 		var values []source.ViewInfo
 		var viewErr error
@@ -849,7 +898,8 @@ func (m *Migrator) captureRepairCall(ctx context.Context, o repair.Object, ss []
 		item.Error = err.Error()
 	}
 	var indexPreflight dialect.SQLServerIndexPreflightError
-	knownPreflight := errors.As(err, &indexPreflight) || target.IsOracleDamengSequencePreflight(err) || target.IsMySQLPGTriggerPreflight(err) || target.IsMySQLDamengTriggerPreflight(err) || target.IsGaussDBIndexPreflight(err)
+	var sqlServerPreflight sqlServerDDLNotExecuted
+	knownPreflight := errors.As(err, &indexPreflight) || errors.As(err, &sqlServerPreflight) || target.IsOracleDamengSequencePreflight(err) || target.IsMySQLPGTriggerPreflight(err) || target.IsMySQLDamengTriggerPreflight(err) || target.IsGaussDBIndexPreflight(err)
 	for i := range item.Units {
 		u := &item.Units[i]
 		if u.Status == "running" {
@@ -963,6 +1013,9 @@ func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, ow
 // binding without replaying the already successful sequence/healthy triggers.
 func (m *Migrator) captureSequenceCall(ctx context.Context, v source.SequenceInfo, ss []dialect.Statement, fn func(context.Context) error) error {
 	name := dialect.SequenceName(m.writer.Dialect(), v)
+	if m.isOraclePGSQLServer() {
+		name = m.sqlServerSequenceObjectName(v)
+	}
 	o := repair.Object{Kind: "sequence", Name: name, Table: v.TableName, TargetName: name, Sequence: &v}
 	var original *source.SequenceInfo
 	var originalUnits []repair.Unit

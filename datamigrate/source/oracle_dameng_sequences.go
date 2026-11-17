@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"dbgold/datamigrate/failure"
+	"dbgold/datamigrate/sqlsyntax"
 )
 
 const oracleDMIdent = `(?:"(?:[^"]|"")+"|[\pL_][\pL\pN_$#]*)`
@@ -172,6 +173,10 @@ func parseOracleDMTrigger(body, when, owner, triggerName string) (SequenceBindin
 }
 
 func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, error) {
+	return r.oracleSequences(ctx, false, nil)
+}
+
+func (r *OracleDamengReader) oracleSequences(ctx context.Context, sqlServer bool, selected map[string]bool) ([]SequenceInfo, error) {
 	type reference struct {
 		owner, name string
 		binding     SequenceBinding
@@ -195,7 +200,10 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 			}
 			identities[table+"\x00"+column] = true
 			ref := reference{owner: r.owner, name: seq, binding: SequenceBinding{TableName: table, ColumnName: column, Kind: "identity", OnlyWhenNull: true}}
-			if oracleDamengGeneration(generation, onNull) != "BY DEFAULT ON NULL" {
+			if sqlServer {
+				ref.binding.Identity = oracleDamengGeneration(generation, onNull)
+				ref.binding.OnlyWhenNull = ref.binding.Identity == "BY DEFAULT ON NULL"
+			} else if oracleDamengGeneration(generation, onNull) != "BY DEFAULT ON NULL" {
 				ref.unsupported = fmt.Sprintf("Oracle identity 模式 %s 暂不支持等价迁移", oracleDamengGeneration(generation, onNull))
 			}
 			refs = append(refs, ref)
@@ -207,14 +215,24 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 		}
 	}
 	// DATA_DEFAULT is LONG: filter on DEFAULT_LENGTH, not the LONG expression.
-	rows, err := r.db.QueryContext(ctx, `SELECT TABLE_NAME,COLUMN_NAME,DATA_DEFAULT FROM ALL_TAB_COLUMNS WHERE OWNER=:1 AND DEFAULT_LENGTH>0 ORDER BY TABLE_NAME,COLUMN_ID`, r.owner)
+	const defaultsFrom = ` FROM ALL_TAB_COLUMNS WHERE OWNER=:1 AND DEFAULT_LENGTH>0 ORDER BY TABLE_NAME,COLUMN_ID`
+	query := `SELECT TABLE_NAME,COLUMN_NAME,DATA_DEFAULT` + defaultsFrom
+	readOnNull := sqlServer && r.version >= 12
+	if readOnNull {
+		query = `SELECT TABLE_NAME,COLUMN_NAME,DATA_DEFAULT,DEFAULT_ON_NULL` + defaultsFrom
+	}
+	rows, err := r.db.QueryContext(ctx, query, r.owner)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var table, column string
-		var def sql.NullString
-		if err = rows.Scan(&table, &column, &def); err != nil {
+		var def, onNull sql.NullString
+		args := []any{&table, &column, &def}
+		if readOnNull {
+			args = append(args, &onNull)
+		}
+		if err = rows.Scan(args...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -231,7 +249,12 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 			continue
 		}
 		ref := reference{owner: owner, name: seq, binding: SequenceBinding{TableName: table, ColumnName: column, Kind: "default"}}
-		ref.unsupported = "Oracle NEXTVAL 默认值暂不支持自动迁移，请手动适配"
+		if sqlServer {
+			ref.binding.Default = def.String
+			ref.binding.OnlyWhenNull = onNull.String == "YES"
+		} else {
+			ref.unsupported = "Oracle NEXTVAL 默认值暂不支持自动迁移，请手动适配"
+		}
 		if !direct {
 			ref.unsupported = "复杂序列默认表达式暂不支持自动迁移"
 		}
@@ -242,15 +265,25 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 	if err != nil {
 		return nil, err
 	}
-	rows, err = r.db.QueryContext(ctx, `SELECT TABLE_NAME,TRIGGER_NAME,TRIGGER_TYPE,TRIGGERING_EVENT,TRIGGER_BODY,WHEN_CLAUSE
- FROM ALL_TRIGGERS WHERE OWNER=:1 AND TABLE_OWNER=OWNER AND TABLE_NAME IS NOT NULL AND STATUS='ENABLED' ORDER BY TABLE_NAME,TRIGGER_NAME`, r.owner)
+	query = `SELECT TABLE_NAME,TRIGGER_NAME,TRIGGER_TYPE,TRIGGERING_EVENT,TRIGGER_BODY,WHEN_CLAUSE
+ FROM ALL_TRIGGERS WHERE OWNER=:1 AND TABLE_OWNER=OWNER AND TABLE_NAME IS NOT NULL AND STATUS='ENABLED' ORDER BY TABLE_NAME,TRIGGER_NAME`
+	if sqlServer {
+		query = `SELECT TABLE_NAME,TRIGGER_NAME,TRIGGER_TYPE,TRIGGERING_EVENT,TRIGGER_BODY,WHEN_CLAUSE,OWNER
+ FROM ALL_TRIGGERS WHERE TABLE_OWNER=:1 AND TABLE_NAME IS NOT NULL AND STATUS='ENABLED' ORDER BY TABLE_NAME,OWNER,TRIGGER_NAME`
+	}
+	rows, err = r.db.QueryContext(ctx, query, r.owner)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var trigger, kind, event string
+		triggerOwner := r.owner
 		var table, body, when sql.NullString
-		if err = rows.Scan(&table, &trigger, &kind, &event, &body, &when); err != nil {
+		args := []any{&table, &trigger, &kind, &event, &body, &when}
+		if sqlServer {
+			args = append(args, &triggerOwner)
+		}
+		if err = rows.Scan(args...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -261,14 +294,20 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 		if e == nil && !oracleDMNextval.MatchString(clean) {
 			continue
 		}
+		if sqlServer && e == nil && !oracleSQLServerNextvalToken(clean) {
+			continue
+		}
 		var binding SequenceBinding
-		owner, seq := r.owner, ""
+		owner, seq := triggerOwner, ""
 		if kind != "BEFORE EACH ROW" || strings.TrimSpace(event) != "INSERT" {
 			e = errors.New("仅支持 BEFORE EACH ROW 且触发事件只有 INSERT 的自增触发器")
 		} else {
-			binding, owner, seq, e = parseOracleDMTrigger(body.String, when.String, r.owner, trigger)
+			binding, owner, seq, e = parseOracleDMTrigger(body.String, when.String, triggerOwner, trigger)
 		}
 		binding.TableName, binding.TriggerName, binding.TriggerBody = table.String, trigger, body.String
+		if sqlServer {
+			binding.Kind = "trigger"
+		}
 		ref := reference{owner: owner, name: seq, binding: binding}
 		if e != nil {
 			ref.unsupported = fmt.Sprintf("源触发器 %s.%s（表 %s.%s，类型=%q，事件=%q，WHEN=%q）不支持自动迁移: %v",
@@ -289,12 +328,26 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 	}
 	metadataFailures := map[int]metadataFailure{}
 	uses := map[string]int{}
-	for _, ref := range refs {
+	referenced, relevant := map[string]bool{}, map[string]bool{}
+	for i := range refs {
+		ref := &refs[i]
 		if ref.binding.ColumnName != "" {
 			uses[ref.binding.TableName+"\x00"+ref.binding.ColumnName]++
 		}
+		if sqlServer {
+			ref.binding.Schema = r.owner
+			key := ref.owner + "\x00" + ref.name
+			referenced[key] = true
+			if selected == nil || selected[ref.binding.TableName] {
+				relevant[key] = true
+			}
+		}
 	}
 	for _, ref := range refs {
+		key := ref.owner + "\x00" + ref.name
+		if sqlServer && selected != nil && !selected[ref.binding.TableName] && (ref.name == "" || !relevant[key]) {
+			continue
+		}
 		if uses[ref.binding.TableName+"\x00"+ref.binding.ColumnName] > 1 {
 			ref.unsupported = "同一列关联多个序列生成方式，无法可靠保留触发顺序"
 		}
@@ -302,16 +355,22 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 			ref.unsupported = "跨 schema 序列引用暂不支持迁移"
 		}
 		if ref.unsupported != "" {
+			native := &NativeSequenceInfo{Name: ref.name, Bindings: []SequenceBinding{ref.binding}}
+			if sqlServer {
+				native.Schema = ref.owner
+			}
 			out = append(out, SequenceInfo{TableName: ref.binding.TableName, ColumnName: ref.binding.ColumnName, Unsupported: ref.unsupported,
-				Native: &NativeSequenceInfo{Name: ref.name, Bindings: []SequenceBinding{ref.binding}}})
+				Native: native})
 			continue
 		}
-		key := ref.owner + "\x00" + ref.name
 		if pos, ok := position[key]; ok {
 			out[pos].Native.Bindings = append(out[pos].Native.Bindings, ref.binding)
 			continue
 		}
 		s := SequenceInfo{TableName: ref.binding.TableName, ColumnName: ref.binding.ColumnName, Native: &NativeSequenceInfo{Name: ref.name, Bindings: []SequenceBinding{ref.binding}}}
+		if sqlServer {
+			s.Native.Schema = ref.owner
+		}
 		var cycle, order string
 		e := r.db.QueryRowContext(ctx, `SELECT TO_CHAR(LAST_NUMBER,'TM9','NLS_NUMERIC_CHARACTERS=''.,'''),
  TO_CHAR(INCREMENT_BY,'TM9','NLS_NUMERIC_CHARACTERS=''.,'''),TO_CHAR(MIN_VALUE,'TM9','NLS_NUMERIC_CHARACTERS=''.,'''),
@@ -334,7 +393,27 @@ func (r *OracleDamengReader) GetSequences(ctx context.Context) ([]SequenceInfo, 
 	for pos, metadata := range metadataFailures {
 		out[pos].Unsupported = oracleDMSequenceMetadataFailure(metadata.owner, out[pos], metadata.err)
 	}
+	if sqlServer {
+		independent, err := r.oracleSQLServerIndependentSequences(ctx, referenced)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, independent...)
+	}
 	return out, nil
+}
+
+func oracleSQLServerNextvalToken(sql string) bool {
+	tokens, err := sqlsyntax.Lex(sql)
+	if err != nil {
+		return true // Keep an unreadable candidate for review.
+	}
+	for _, token := range tokens {
+		if token.Is("NEXTVAL") {
+			return true
+		}
+	}
+	return false
 }
 
 func oracleDMSequenceMetadataFailure(owner string, seq SequenceInfo, err error) string {

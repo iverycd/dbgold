@@ -22,6 +22,4 @@ func TestSQLServerTypes(t *testing.T) {
 	}
 	_, ok := Get("mysql", "sqlserver")
 	require.True(t, ok)
-	_, ok = Get("oracle", "sqlserver")
-	require.False(t, ok)
 }

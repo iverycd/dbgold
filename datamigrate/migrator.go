@@ -103,6 +103,7 @@ type Migrator struct {
 	oscarMySQLViewsRead    bool
 	oscarMySQLViewsError   error
 	oscarAppendCounts      map[string]int64
+	sqlServerSource        *sqlServerSourcePlan
 	repairs                *repairRecorder
 	dmPlans                map[string]*damengTablePlan
 	dmBlocked              map[string]bool
@@ -185,9 +186,21 @@ func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Confi
 		}
 	}
 
+	if _, ok := writer.(*target.SQLServerWriter); ok && cfg.TargetDBType == "" {
+		cfg.TargetDBType = "sqlserver"
+	}
 	if cfg.TargetDBType == "sqlserver" {
+		if r, ok := reader.(*source.OracleReader); ok {
+			reader = source.WrapOracleForSQLServer(r)
+		}
+		if r, ok := reader.(*source.PostgresReader); ok {
+			reader = source.WrapPostgresForSQLServer(r)
+		}
 		if cfg.TargetSchema == "" {
 			cfg.TargetSchema = "dbo"
+			if w, ok := writer.(interface{ EffectiveSchema() string }); ok && w.EffectiveSchema() != "" {
+				cfg.TargetSchema = w.EffectiveSchema()
+			}
 		}
 		if cfg.PageSize <= 0 {
 			cfg.PageSize = 20000
@@ -256,6 +269,7 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.sqlServerSource = nil
 	m.resetOscarMySQLViews()
 	m.oscarAppendCounts = nil
 	m.gaussKeysRead, m.gaussKeys, m.gaussKeysErr = false, nil, nil
@@ -342,10 +356,18 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	if m.oracleMySQLSchemaMode() {
 		return m.runOracleMySQL(ctx)
 	}
+	if m.isOraclePGSQLServer() {
+		plan := m.prepareSQLServerSource(ctx)
+		if plan.versionError != nil || isMigrationTaskError(plan.sequenceError) {
+			return m.runSQLServer(ctx)
+		}
+	}
 	m.dmSequenceBoundsLogged = nil
-	p := m.preparePartitions(ctx)
-	if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 && !m.isOscarMySQL() {
-		return newMigrationReport()
+	if !m.isOraclePGSQLServer() || len(m.cfg.ViewNames) == 0 {
+		p := m.preparePartitions(ctx)
+		if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 && !m.isOscarMySQL() {
+			return newMigrationReport()
+		}
 	}
 	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
 	m.prepareMySQLPGTriggers(ctx)

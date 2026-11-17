@@ -17,7 +17,8 @@ function execute(source, require, globals = {}) {
 }
 const { applyTargetMigrationDefaults } = execute(readFileSync(new URL('../src/utils/migrationOptions.ts', import.meta.url), 'utf8'), () => {})
 
-test('SQL Server is selectable in all three forms and submits fixed target defaults', async () => {
+for (const sourceType of ['mysql', 'oracle', 'postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase']) {
+test(`${sourceType} → SQL Server is selectable in all three forms`, async () => {
   const scope = Vue.effectScope()
   const payloads = [], schemaRequests = []
   const submit = async payload => { payloads.push(payload); return { data: { job_id: 'sqlserver-test', results: [] } } }
@@ -40,8 +41,8 @@ test('SQL Server is selectable in all three forms and submits fixed target defau
     }
   }))
   try {
-    page.connections.value = [{ id: 1, db_type: 'mysql' }, { id: 2, db_type: 'sqlserver' }]
-    page.supportedPairs.value = [{ source: 'mysql', target: 'sqlserver' }]
+    page.connections.value = [{ id: 1, db_type: sourceType }, { id: 2, db_type: 'sqlserver' }]
+    page.supportedPairs.value = [{ source: sourceType, target: 'sqlserver' }]
     assert.equal(page.pgConnections.value.some(c => c.id === 2), true)
     for (const [state, load, start, check] of [
       [page.dataMigrate, page.loadDstSchemas, page.startDataMigration, page.checkPairSupport],
@@ -70,6 +71,7 @@ test('SQL Server is selectable in all three forms and submits fixed target defau
       assert.equal(payloads.length, before + 1)
       const payload = payloads.at(-1)
       assert.equal(payload.target_schema, 'APP')
+      assert.equal(payload.src_database, 'SourceDB')
       assert.equal(payload.lower_case_names, true)
       assert.equal(payload.change_owner, false)
       if ('distributed' in payload) assert.equal(payload.distributed, false)
@@ -79,4 +81,5 @@ test('SQL Server is selectable in all three forms and submits fixed target defau
     assert.equal(payloads[0].char_in_length, false)
   } finally { scope.stop() }
 })
+}
 

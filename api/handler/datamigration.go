@@ -36,6 +36,14 @@ var supportedPairs = []SupportedPair{
 	{Source: "oracle", Target: "dameng"},
 	{Source: "sqlserver", Target: "dameng"},
 	{Source: "mysql", Target: "sqlserver"},
+	{Source: "oracle", Target: "sqlserver"},
+	{Source: "postgres", Target: "sqlserver"},
+	{Source: "gaussdb", Target: "sqlserver"},
+	{Source: "highgo", Target: "sqlserver"},
+	{Source: "vastbase", Target: "sqlserver"},
+	{Source: "gbase", Target: "sqlserver"},
+	{Source: "seabox", Target: "sqlserver"},
+	{Source: "kingbase", Target: "sqlserver"},
 	{Source: "mysql", Target: "oracle"},
 	{Source: "postgres", Target: "oracle", SupportsCheckConstraints: true},
 	{Source: "gaussdb", Target: "oracle", SupportsCheckConstraints: true},
@@ -109,6 +117,10 @@ func GetSupportedPairs(c *gin.Context) {
 }
 
 func isDamengNativePair(src, dst string) bool { return src == "dameng" && dst == "dameng" }
+
+func isOraclePGSQLServerPair(src, dst string) bool {
+	return dst == "sqlserver" && (src == "oracle" || source.IsPGFamily(src))
+}
 
 func supportsTriggerMigration(src, dst string) bool {
 	return src == "mysql" && (source.IsPGFamily(dst) || dst == "dameng") || isDamengNativePair(src, dst)
@@ -241,6 +253,9 @@ func StartDataMigration(c *gin.Context) {
 
 	// 持久化任务记录
 	srcConnDatabase := migrationSourceDisplayDatabase(srcConn, req.SrcDatabase)
+	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
+		srcConnDatabase = srcConn.Database
+	}
 	dbJob := &store.DataMigrationJob{
 		DamengWriteStrategy: req.DamengWriteStrategy,
 		MySQLReadStrategy:   req.MySQLReadStrategy,
@@ -276,7 +291,7 @@ func StartDataMigration(c *gin.Context) {
 		DstConnDatabase:    dstConn.Database,
 		DstConnUsername:    dstConn.Username,
 	}
-	if srcConn.DBType == "oscar" {
+	if srcConn.DBType == "oscar" || isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
 		migrationSourceLocation(dbJob, srcConn, req.SrcDatabase)
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
@@ -577,6 +592,9 @@ func StartObjectMigration(c *gin.Context) {
 	job := datamigrate.Registry.Register(jobID, cancel)
 
 	srcConnDatabase := migrationSourceDisplayDatabase(srcConn, req.SrcDatabase)
+	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
+		srcConnDatabase = srcConn.Database
+	}
 	dbJob := &store.DataMigrationJob{
 		MigrateTriggers: slices.Contains(req.MigrateObjects, "triggers"),
 		ExcludedObjects: encodeExcludedObjects(req.ExcludedObjects),
@@ -603,7 +621,7 @@ func StartObjectMigration(c *gin.Context) {
 		DstConnDatabase: dstConn.Database,
 		DstConnUsername: dstConn.Username,
 	}
-	if srcConn.DBType == "oscar" {
+	if srcConn.DBType == "oscar" || isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
 		migrationSourceLocation(dbJob, srcConn, req.SrcDatabase)
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
@@ -789,6 +807,16 @@ func buildSrcReaderContext(ctx context.Context, conn *store.Connection, srcDatab
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "sqlserver" {
 		return source.NewMySQLForSQLServer(dsn, db, pool)
 	}
+	if len(targetTypes) > 0 && isOraclePGSQLServerPair(conn.DBType, targetTypes[0]) {
+		if conn.DBType == "oracle" {
+			return source.NewOracleForSQLServer(dsn, srcDatabase, pool)
+		}
+		driverName := pgCompatibleDriverName(conn.DBType)
+		if conn.DBType == "gaussdb" {
+			driverName = "opengauss"
+		}
+		return source.NewPostgresProductForSQLServer(conn.DBType, driverName, dsn, srcDatabase, pool)
+	}
 	if conn.DBType == "mysql" && len(targetTypes) > 0 && targetTypes[0] == "oracle" {
 		return source.NewMySQLForOracle(dsn, db, pool)
 	}
@@ -845,7 +873,7 @@ func migrationSourceDisplayDatabase(conn *store.Connection, override string) str
 }
 
 func resolvedMigrationSourceScope(reader source.Reader, srcType, dstType, requested string) string {
-	if srcType == "oscar" || isDamengNativePair(srcType, dstType) {
+	if srcType == "oscar" || isDamengNativePair(srcType, dstType) || isOraclePGSQLServerPair(srcType, dstType) {
 		if scoped, ok := reader.(interface{ MigrationSchema() string }); ok {
 			return scoped.MigrationSchema()
 		}
@@ -1053,6 +1081,7 @@ func MigrateViews(c *gin.Context) {
 		}
 		close(done)
 	}()
+	defer func() { close(job.LogCh); <-done }()
 
 	cfg := datamigrate.Config{
 		ExcludedObjects:  req.ExcludedObjects,
@@ -1065,31 +1094,89 @@ func MigrateViews(c *gin.Context) {
 	}
 	schema, scopeErr := target.ResolveRepairSchema(ctx, writer)
 	if scopeErr != nil {
-		close(job.LogCh)
-		<-done
 		repairError(c, scopeErr)
 		return
 	}
 	cfg.TargetSchema = schema
+	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
+		runSQLServerViewJob(c, reader, writer, job, srcConn, dstConn, cfg, req)
+		return
+	}
 	scope := migrationScope(dstConn, schema)
 	scopeOwner := uuid.NewString()
 	if scopeErr = store.AcquireMigrationScope(scope, scopeOwner); scopeErr != nil {
-		close(job.LogCh)
-		<-done
 		repairError(c, scopeErr)
 		return
 	}
 	defer store.ReleaseMigrationScope(scope, scopeOwner)
 	m := datamigrate.NewMigrator(reader, writer, job, cfg)
 	results := m.MigrateViews(ctx, req.ViewNames)
-	close(job.LogCh)
-	<-done
 
 	response := gin.H{"results": results}
 	if compatibility := m.CompatibilityFunctions(); compatibility != nil {
 		response["compatibility_functions"] = compatibility
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+func runSQLServerViewJob(c *gin.Context, reader source.Reader, writer target.Writer, job *datamigrate.Job, srcConn, dstConn *store.Connection, cfg datamigrate.Config, req migrateViewsRequest) {
+	ctx := c.Request.Context()
+	cfg.ViewNames = slices.Clone(req.ViewNames)
+	cfg.Content = "schema_only"
+	dbJob := &store.DataMigrationJob{
+		OwnerID: middleware.GetCurrentUserID(c), JobID: uuid.NewString(), Status: "running",
+		SrcConnID: srcConn.ID, DstConnID: dstConn.ID, SrcDBType: srcConn.DBType, DstDBType: dstConn.DBType,
+		MigrateMode: cfg.Mode, MigrateObjects: "views", LowerCaseNames: cfg.LowerCaseNames, DstSchema: cfg.TargetSchema,
+		SrcConnName: srcConn.Name, SrcConnHost: srcConn.Host, SrcConnPort: srcConn.Port, SrcConnDatabase: srcConn.Database, SrcConnUsername: srcConn.Username,
+		DstConnName: dstConn.Name, DstConnHost: dstConn.Host, DstConnPort: dstConn.Port, DstConnDatabase: dstConn.Database, DstConnUsername: dstConn.Username,
+	}
+	sourceSchema := resolvedMigrationSourceScope(reader, srcConn.DBType, dstConn.DBType, req.SrcDatabase)
+	migrationSourceLocation(dbJob, srcConn, sourceSchema)
+	if err := store.CreateDataMigrationJob(dbJob); err != nil {
+		repairError(c, err)
+		return
+	}
+	release, err := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, sourceSchema, &cfg, writer)
+	if err != nil {
+		updateJobStatus(dbJob, "failed", err.Error())
+		repairError(c, err)
+		return
+	}
+	defer release()
+	report := datamigrate.NewMigrator(reader, writer, job, cfg).Run(ctx)
+	payload, err := json.Marshal(report)
+	if err == nil {
+		err = store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: dbJob.JobID, ReportJSON: string(payload)})
+	}
+	if err != nil {
+		updateJobStatus(dbJob, "failed", err.Error())
+		repairError(c, err)
+		return
+	}
+	status := "done"
+	if ctx.Err() != nil {
+		status = "cancelled"
+	} else if report.HasFailures() {
+		status = "failed"
+	}
+	updateJobStatus(dbJob, status, "")
+	results := append([]datamigrate.ObjectResult{}, report.Views.Items...)
+	results = append(results, report.Tables.Items...)
+	if report.Views.Total == len(cfg.ViewNames) && report.Views.Success > 0 {
+		failed := make(map[string]bool, len(results))
+		for _, item := range results {
+			failed[item.Name] = true
+		}
+		for _, name := range cfg.ViewNames {
+			if cfg.LowerCaseNames {
+				name = strings.ToLower(name)
+			}
+			if !failed[name] {
+				results = append(results, datamigrate.ObjectResult{Name: name})
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results, "job_id": dbJob.JobID})
 }
 
 // CancelDataMigration 取消运行中的迁移任务

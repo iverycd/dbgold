@@ -254,6 +254,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if dm, ok := w.(*DaMengWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.Native != nil && !repairDefinitionEdited(obj) {
 		return dm.executeOracleDamengSequenceRepair(ctx, obj, out, onStep)
 	}
+	if sw, ok := w.(*SQLServerWriter); ok && IsSQLServerSequenceRepair(obj, w.DBType()) {
+		return sw.executeSQLServerSequenceRepair(ctx, obj, out, onStep)
+	}
 	selected := []int{}
 	for i, u := range out {
 		if u.Status == "succeeded" {

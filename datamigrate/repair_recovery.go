@@ -135,7 +135,13 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		return p, fmt.Errorf("源库缺少分区恢复核验能力")
 	}
 	p.SourceColumns = slices.Clone(info.Columns)
-	if len(obj.SourceColumns) > 0 && !recoverySourceColumnsMatch(r.DBType(), obj.SourceColumns, info.Columns) {
+	sqlServerCross := w.DBType() == "sqlserver" && isOraclePGSQLServerSource(r.DBType())
+	savedSource := obj.SourceColumns
+	currentSource := info.Columns
+	if sqlServerCross {
+		savedSource, currentSource = sqlServerRawRecoveryColumns(savedSource), sqlServerRawRecoveryColumns(currentSource)
+	}
+	if len(savedSource) > 0 && !recoverySourceColumnsMatch(r.DBType(), savedSource, currentSource) {
 		return p, fmt.Errorf("源表结构已偏离迁移快照，请重新核对并创建迁移任务")
 	}
 	p.TargetColumns, err = ops.inspect(ctx, w, p.TargetTable)
@@ -156,6 +162,29 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	}
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
+	}
+	if sqlServerCross {
+		if setter, ok := w.(sourceTypeSetter); ok {
+			setter.SetSourceType(r.DBType())
+		}
+		for i := range p.SourceColumns {
+			if i >= len(obj.SourceColumns) {
+				continue
+			}
+			src, saved := &p.SourceColumns[i], obj.SourceColumns[i]
+			src.SQLServerDeferredDefault = saved.SQLServerDeferredDefault
+			src.SQLServerIdentitySeed, src.SQLServerIdentityIncrement = saved.SQLServerIdentitySeed, saved.SQLServerIdentityIncrement
+		}
+		if _, err = planSQLServerDecimals(ctx, r, w, p.SourceTable, p.TargetTable, func(name string) string { return p.ColumnMapping[name] }, p.SourceColumns, true, obj.SourceColumns); err != nil {
+			return p, err
+		}
+		mapped := slices.Clone(p.SourceColumns)
+		for i := range mapped {
+			mapped[i].Name = p.ColumnMapping[mapped[i].Name]
+		}
+		if err = ops.prepare(ctx, w, p.TargetTable, mapped); err != nil {
+			return p, err
+		}
 	}
 	if r.DBType() == "oscar" && w.DBType() == "mysql" {
 		sequences, err := RecoverySequences(ctx, r, w, cfg, p)
@@ -284,6 +313,18 @@ func recoverySourceColumnsMatch(srcType string, saved, current []source.ColumnIn
 		}
 	}
 	return repair.Hash(saved) == repair.Hash(current)
+}
+
+func sqlServerRawRecoveryColumns(cols []source.ColumnInfo) []source.ColumnInfo {
+	cols = slices.Clone(cols)
+	for i := range cols {
+		c := &cols[i]
+		c.SQLServerPrecision, c.SQLServerScale = 0, 0
+		c.SQLServerIdentitySeed, c.SQLServerIdentityIncrement = "", ""
+		c.SQLServerDeferredDefault = false
+		c.Extra = strings.TrimSpace(strings.ReplaceAll(c.Extra, "auto_increment", ""))
+	}
+	return cols
 }
 
 func recoveryName(cfg Config, dst, src, s string) string {
@@ -606,6 +647,9 @@ func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cf
 	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
 		_, err := PGOracleRecoveryPlans(ctx, r, w, p, p.Related)
 		return nil, err // The generic AUTO_INCREMENT model cannot carry PG identity.
+	}
+	if w.DBType() == "sqlserver" && isOraclePGSQLServerSource(r.DBType()) {
+		return sqlServerRecoverySequences(ctx, r, w, cfg, p)
 	}
 	values, err := r.GetSequences(ctx)
 	if err != nil {

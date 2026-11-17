@@ -1,8 +1,8 @@
-# MySQL → SQL Server 2008 R2 验收
+# SQL Server 目标迁移验收
 
 实现基线为 MySQL 5.7 / 8.0 和 SQL Server 2008 R2（10.50.x）。源数据在迁移期间应保持稳定；这不是 CDC。
 
-## 功能边界
+## MySQL → SQL Server
 
 - 目标 Database 由连接指定，Schema 默认 `dbo`，须预先存在。
 - 完整/仅结构迁移重建选中表；仅数据模式校验目标列类型、可空及自增属性后追加，不清空。已有外键保持启用，追加按源外键依赖排序，循环依赖明确失败。
@@ -43,3 +43,17 @@
 该测试验证真实版本必须为 10.50.x；创建随机后缀测试表/视图，验证中文及补充字符、精确小数、日期精度、二进制、主键/唯一键/外键、注释、视图结果、自增续写和追加失败回滚，结束后仅清理这些测试对象。分别在 MySQL 5.7 和 8.0 上运行，保存版本和结果。
 
 未设置环境变量时实库测试会跳过；本地测试/编译通过不代表已经通过 SQL Server 2008 R2 实库认证。不要用新版服务器的兼容级别测试替代它。
+
+## Oracle 和 PostgreSQL 系列 → SQL Server
+
+Oracle 使用连接的服务名和单独指定的 OWNER。PostgreSQL、GaussDB、HighGo、Vastbase、GBase、SeaBox 和 Kingbase 使用连接的数据库和选定的 Schema。目标仍使用指定数据库内已有的 Schema，默认 `dbo`。
+
+- 未声明精度的 `NUMBER` / `NUMERIC` 按实际数据确定目标 `DECIMAL` 的小数位。仅结构模式也读取这类列，追加模式按已有目标列校验。报告保留选定的精度及后续写入范围。
+- SQL Server 2008 R2 将可映射的单列自增转换为 `IDENTITY`，显式插入原值需要 `IDENTITY_INSERT`。2012 及以上可迁移可表示的独立、共享序列和直接列默认值。追加和重试校验已有绑定并仅向前校准。
+- 视图支持经过类型检查的投影、显式 JOIN、筛选和常用分组聚合。报告保存需手工适配的源定义。分区支持可证明等价的连续单列 RANGE，报告保存源叶到目标序号的映射。目标发行版也需支持原生分区。 [SQL Server 分区支持](https://learn.microsoft.com/sql/relational-databases/partitions/partitioned-tables-and-indexes)
+
+复用上述三个 SQL Server 测试环境变量。Oracle 设置 `DBGOLD_ORACLE_SQLSERVER_TEST_DSN` 和 `DBGOLD_ORACLE_SQLSERVER_TEST_OWNER`，专用 OWNER 以 `DBGOLD_` 开头。PG 系列设置 `DBGOLD_PG_SQLSERVER_POSTGRES_DSN` 或将 `POSTGRES` 换为对应类型的大写标识，源账号需能创建专用测试 Schema。
+
+```sh
+/Users/kay/sdk/go1.25.5/bin/go test ./datamigrate -run 'Test(OracleSQLServer|PostgresFamilySQLServer)Integration' -count=1 -v
+```

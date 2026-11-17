@@ -629,7 +629,7 @@
             <a-table
               :data="viewMigrate.results"
               row-key="name"
-              :pagination="{ pageSize: 15, showTotal: true }" :scroll="{ x: 700 }"
+              :pagination="{ pageSize: 10, showTotal: true }" :scroll="{ x: 700 }"
               size="small"
               :row-class="record => record.error ? '' : 'migration-row-no-details'"
               :expandable="{ icon: (_: unknown, record: any) => record.error ? undefined : null }"
@@ -653,6 +653,10 @@
                 <div class="view-result-detail">
                   <div v-if="record.error" class="view-result-error">失败原因：{{ record.error }}</div>
                   <pre v-if="record.ddl" class="view-result-ddl">{{ record.ddl }}</pre>
+                  <template v-if="record.source_ddl">
+                    <div>源视图定义</div>
+                    <pre class="view-result-ddl">{{ record.source_ddl }}</pre>
+                  </template>
                 </div>
               </template>
             </a-table>
@@ -1434,12 +1438,13 @@ onMounted(async () => {
       // A ticket's alternate database is a draft until explicitly validated and saved.
       databaseEditors.editorFor(selectedSrc.value).setDraft(srcDbQ)
     } else if (srcDbQ && selectedSrc.value?.db_type !== 'oscar') {
-      // 精确匹配 → 忽略大小写匹配 → 兜底直接塞入并选中，确保工单库名一定带入。
       const exact = dataMigrate.srcDatabases.find((db) => db === srcDbQ)
-      const ci = exact ?? dataMigrate.srcDatabases.find((db) => db.toLowerCase() === srcDbQ.toLowerCase())
+      const dstType = connections.value.find((conn) => conn.id === dstQ)?.db_type
+      const requiresExistingSchema = dstType === 'sqlserver'
+      const ci = exact ?? (requiresExistingSchema ? undefined : dataMigrate.srcDatabases.find((db) => db.toLowerCase() === srcDbQ.toLowerCase()))
       if (ci) {
         dataMigrate.srcDatabase = ci
-      } else {
+      } else if (!requiresExistingSchema) {
         dataMigrate.srcDatabases = [srcDbQ, ...dataMigrate.srcDatabases]
         dataMigrate.srcDatabase = srcDbQ
       }

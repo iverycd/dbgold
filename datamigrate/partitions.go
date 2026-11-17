@@ -80,6 +80,7 @@ func partitionSourceReader(r source.Reader) source.Reader {
 // PreflightPartitions performs metadata and target catalog reads only. Run
 // builds its own plan; no client-supplied SQL or readiness is trusted.
 func (m *Migrator) PreflightPartitions(ctx context.Context) *PartitionPreflight {
+	m.sqlServerSource = nil
 	m.oracleMySQL = nil
 	m.mysqlPGSpatial = mysqlPGSpatialState{readOnly: true}
 	m.resetSourceTableDDLCache()
@@ -121,6 +122,15 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		p.CanStart = false
 		p.FatalError = err.Error()
 		return p
+	}
+	if m.isOraclePGSQLServer() {
+		plan := m.prepareSQLServerSource(ctx)
+		if plan.versionError != nil {
+			return fatal(plan.versionError)
+		}
+		if isMigrationTaskError(plan.sequenceError) {
+			return fatal(plan.sequenceError)
+		}
 	}
 	all, err := m.reader.ListTables(ctx)
 	if err != nil {
@@ -276,6 +286,10 @@ func (m *Migrator) blockPartitionTable(t *PartitionTableResult, err error) {
 
 func (m *Migrator) compilePartitionTable(ctx context.Context, t *PartitionTableResult, inspector target.PartitionInspector) error {
 	info, err := m.sourceTableDDLInfo(ctx, t.SourceTable)
+	if err != nil {
+		return err
+	}
+	info, err = m.sqlServerTable(ctx, info)
 	if err != nil {
 		return err
 	}
@@ -440,6 +454,11 @@ func (m *Migrator) checkPartitionConstraints(ctx context.Context) {
 	pks, pe := m.reader.GetPrimaryKeys(ctx)
 	indexes, ie := m.reader.GetIndexes(ctx)
 	fks, fe := m.reader.GetForeignKeys(ctx)
+	var checks []source.CheckConstraintInfo
+	var checkErr error
+	if m.isOraclePGSQLServer() {
+		checks, checkErr = m.sqlServerUnsupportedConstraints(ctx)
+	}
 	for _, t := range s.preflight.Tables {
 		if t.Plan == nil || s.blocked[t.SourceTable] {
 			continue
@@ -450,6 +469,14 @@ func (m *Migrator) checkPartitionConstraints(ctx context.Context) {
 		}
 		if pe != nil || ie != nil || fe != nil {
 			m.blockPartitionTable(t, fmt.Errorf("无法证明分区约束完整: 主键=%v，索引=%v，外键=%v", pe, ie, fe))
+			continue
+		}
+		if checkErr != nil {
+			m.blockPartitionTable(t, fmt.Errorf("无法核验分区表源约束: %w", checkErr))
+			continue
+		}
+		if i := slices.IndexFunc(checks, func(c source.CheckConstraintInfo) bool { return c.TableName == t.SourceTable }); i >= 0 {
+			m.blockPartitionTable(t, fmt.Errorf("源约束 %s 无法随分区表等价迁移: %s", checks[i].Name, checks[i].Unsupported))
 			continue
 		}
 		all := append(slices.Clone(pks), indexes...)
@@ -464,7 +491,7 @@ func (m *Migrator) checkPartitionConstraints(ctx context.Context) {
 			all = append(all, extra...)
 		}
 		keys, expression := partitionKeyColumns(t.Source)
-		needsKeys := source.IsPGFamily(m.writer.DBType()) || m.writer.DBType() == "mysql"
+		needsKeys := source.IsPGFamily(m.writer.DBType()) || m.writer.DBType() == "mysql" || m.isOraclePGSQLServer()
 		for _, idx := range all {
 			if idx.TableName != t.SourceTable || (!idx.IsPrimary && !idx.IsUnique) {
 				continue
@@ -573,6 +600,10 @@ func (m *Migrator) partitionStatements(table string, base []dialect.Statement) (
 				return slices.Clone(t.Plan.Statements), nil
 			}
 			info, e := m.sourceTableDDLInfo(context.Background(), table)
+			if e != nil {
+				return nil, e
+			}
+			info, e = m.sqlServerTable(context.Background(), info)
 			if e != nil {
 				return nil, e
 			}

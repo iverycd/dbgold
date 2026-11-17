@@ -15,23 +15,31 @@ type ColumnInfo struct {
 	OracleMySQLAutoType string `json:",omitempty"`
 	// PGMySQLLongText is a private migration-plan override. Readers leave it false;
 	// the original VARCHAR length remains authoritative for conversion and CHECK.
-	PGMySQLLongText   bool `json:"-"`
-	IdentityInfo      *IdentityInfo
-	Name              string
-	DataType          string // 原始数据库类型（如 "varchar"、"int"）
-	Length            int64
-	DataLength        int64  // Original byte capacity, independent of character length.
-	CharUsed          string // Oracle character length semantics: B or C.
-	Precision         int64
-	Scale             int64
-	IsNullable        bool
-	Default           *string
-	Extra             string // 如 "auto_increment"
-	Ordinal           int
-	TypeKind          string
-	TypeSchema        string
-	FormattedType     string
-	DateTimePrecision int64
+	PGMySQLLongText bool `json:"-"`
+	// SQL Server planning may resolve an unconstrained decimal from source data
+	// and arrange a generator/default after the initial table has been loaded.
+	SQLServerPrecision         int64  `json:",omitempty"`
+	SQLServerScale             int64  `json:",omitempty"`
+	SQLServerIdentitySeed      string `json:",omitempty"`
+	SQLServerIdentityIncrement string `json:",omitempty"`
+	SQLServerDeferredDefault   bool   `json:",omitempty"`
+	IdentityInfo               *IdentityInfo
+	Name                       string
+	DataType                   string // 原始数据库类型（如 "varchar"、"int"）
+	Length                     int64
+	DataLength                 int64  // Original byte capacity, independent of character length.
+	CharUsed                   string // Oracle character length semantics: B or C.
+	Precision                  int64
+	Scale                      int64
+	IsNullable                 bool
+	Default                    *string
+	DefaultOnNull              bool   `json:",omitempty"`
+	Extra                      string // 如 "auto_increment"
+	Ordinal                    int
+	TypeKind                   string
+	TypeSchema                 string
+	FormattedType              string
+	DateTimePrecision          int64
 	// SpatialSRID preserves MySQL's optional column SRID restriction. A nil
 	// value means unrestricted; an explicit zero is a distinct constraint.
 	SpatialSRID *uint32 `json:"SpatialSRID,omitempty"`
@@ -54,14 +62,15 @@ type TableDDLInfo struct {
 
 // SequenceInfo 表示一个自增序列（来自 AUTO_INCREMENT 列）
 type SequenceInfo struct {
-	OracleMySQL  *OracleMySQLAutoIncrement `json:",omitempty"`
-	Native       *NativeSequenceInfo       `json:"Native,omitempty"`
-	Unsupported  string                    // Metadata that cannot be represented by the selected target.
-	FailureStage string                    `json:"FailureStage,omitempty"` // Optional provenance for object-level failures.
-	IdentityInfo *IdentityInfo
-	TableName    string
-	ColumnName   string
-	StartValue   int64
+	SQLServerCalibrationOnly bool                      `json:",omitempty"`
+	OracleMySQL              *OracleMySQLAutoIncrement `json:",omitempty"`
+	Native                   *NativeSequenceInfo       `json:"Native,omitempty"`
+	Unsupported              string                    // Metadata that cannot be represented by the selected target.
+	FailureStage             string                    `json:"FailureStage,omitempty"` // Optional provenance for object-level failures.
+	IdentityInfo             *IdentityInfo
+	TableName                string
+	ColumnName               string
+	StartValue               int64
 	// StartValueText preserves MySQL unsigned AUTO_INCREMENT values beyond int64.
 	// Existing targets continue using StartValue; Oracle uses the exact text.
 	StartValueText string
@@ -71,6 +80,8 @@ type SequenceInfo struct {
 // Decimal text preserves sequence values before target-specific range checks.
 type NativeSequenceInfo struct {
 	Name, IncrementBy, MinValue, MaxValue, CacheSize string
+	Schema                                           string `json:",omitempty"`
+	SourceName                                       string `json:",omitempty"`
 	Cycle, Ordered                                   bool
 	Bindings                                         []SequenceBinding
 }
@@ -82,6 +93,9 @@ type SequenceBinding struct {
 	// SourceColumnName is retained by the migrator when a target column is
 	// renamed, so a shared sequence can be regenerated for any bound table.
 	SourceColumnName                         string `json:",omitempty"`
+	Schema                                   string `json:",omitempty"`
+	Identity                                 string `json:",omitempty"`
+	Default                                  string `json:",omitempty"`
 	TableName, ColumnName, Kind, TriggerName string
 	OnlyWhenNull                             bool
 }
