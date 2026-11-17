@@ -9,7 +9,9 @@
           </a-tag>
           <span :class="['endpoint-name', { deleted: !source.name }]">{{ source.name || '连接已删除' }}</span>
         </div>
-        <div class="endpoint-sub">{{ source.database || '—' }}</div>
+        <div class="endpoint-sub">
+          {{ source.database || '—' }}<span v-if="source.schema" class="schema-text"> / {{ source.schema }}</span>
+        </div>
       </div>
     </a-tooltip>
 

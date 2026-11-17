@@ -39,6 +39,7 @@ public final class BridgeMainValidationTest {
         final int[] pos={-1};
         return (ResultSet)proxy(ResultSet.class,new InvocationHandler(){public Object invoke(Object p,Method m,Object[] a){
             String n=m.getName(); if(n.equals("next"))return ++pos[0]==0; if(n.equals("close"))return null;
+            if(n.equals("wasNull"))return false;
             String key=(String)a[0];
             if(n.equals("getString")){if(key.equals("TABLE_SCHEM"))return "s";if(key.equals("TABLE_NAME"))return "T";if(key.equals("TYPE_NAME"))return "DECIMAL";return "MiXeD";}
             if(n.equals("getInt"))return key.equals("DATA_TYPE")?Types.DECIMAL:1;
@@ -81,7 +82,8 @@ public final class BridgeMainValidationTest {
         Field cursorsField=main.getDeclaredField("cursors");cursorsField.setAccessible(true);Map<Long,Object> cursors=(Map<Long,Object>)cursorsField.get(bridge);
         String value=new String(new char[100]).replace('\0','x');
         queryResult[0]=rows(new String[]{value,value});
-        method(main,"openCursor",long.class,long.class,String.class).invoke(bridge,42L,9L,"SELECT MiXeD FROM s.T");check(cursors.size()==1,"open cursor retained");frames.reset();
+        Method open=method(main,"openCursor",long.class,long.class,String.class,String[].class);
+        open.invoke(bridge,42L,9L,"SELECT MiXeD FROM s.T",null);check(cursors.size()==1,"open cursor retained");frames.reset();
         Method fetch=method(main,"fetchCursor",long.class,long.class,int.class,int.class);
         fetch.invoke(bridge,1L,1L,100,130);DataInputStream response=new DataInputStream(new ByteArrayInputStream(frames.toByteArray()));int frame=response.readInt();check(frame<150,"byte budget");response.skipBytes(11);check(!response.readBoolean(),"first fetch incomplete");check(response.readInt()==1,"byte budget must split rows");
         frames.reset();fetch.invoke(bridge,2L,1L,100,130);response=new DataInputStream(new ByteArrayInputStream(frames.toByteArray()));response.readInt();response.skipBytes(11);check(response.readBoolean(),"second fetch complete");check(response.readInt()==1,"pending row retained");check(cursors.isEmpty(),"completed cursor released");
@@ -90,7 +92,7 @@ public final class BridgeMainValidationTest {
         boolean rejected=false;try{fetch.invoke(bridge,3L,2L,100,32);}catch(InvocationTargetException e){rejected=e.getCause() instanceof SQLException;}check(rejected,"oversized row must fail");check(cursors.isEmpty(),"failed cursor released");
         idle.clear();
         Object cancelled=construct(cursorType,new Class<?>[]{long.class,long.class,sessionType,holderType,Statement.class,ResultSet.class},3L,44L,session,holder,statement,rows(new String[]{value}));cursors.put(3L,cancelled);method(main,"cancelRequest",long.class).invoke(bridge,44L);for(int i=0;i<100&&!cursors.isEmpty();i++)Thread.sleep(10);check(cursors.isEmpty(),"cancelled opening request releases cursor");
-        idle.clear();idle.push(holder);queryResult[0]=rows(new String[]{value});frames.reset();method(main,"openCursor",long.class,long.class,String.class).invoke(bridge,45L,9L,"SELECT MiXeD FROM s.T");
+        idle.clear();idle.push(holder);queryResult[0]=rows(new String[]{value});frames.reset();open.invoke(bridge,45L,9L,"SELECT MiXeD FROM s.T",null);
         // Cursor IDs are independent of manual test cursor IDs; the second open is 2.
         method(main,"closeCursor",long.class).invoke(bridge,2L);check(cursors.isEmpty(),"explicit close releases cursor");
         // Regression: Statement.cancel does nothing and fetch only exits after

@@ -37,6 +37,7 @@ type Object struct {
 	NativeTable           *damengnative.Table    `json:"native_table,omitempty"`
 	MySQLPGTrigger        *mysqltrigger.Plan     `json:"mysql_pg_trigger,omitempty"`
 	MySQLDamengTrigger    *mysqldmtrigger.Plan   `json:"mysql_dameng_trigger,omitempty"`
+	TriggerFailureStage   string                 `json:"trigger_failure_stage,omitempty"`
 	// Deprecated metadata is retained only to read old records; it does not affect execution status.
 	Verification       *Verification        `json:"verification,omitempty"`
 	ManualVerification *ManualVerification  `json:"manual_verification,omitempty"`
@@ -76,6 +77,8 @@ type Object struct {
 // automatic conversion plan remain available without becoming executable again.
 type ManualTriggerPlan struct {
 	SQL         string   `json:"sql"`
+	FunctionSQL string   `json:"function_sql,omitempty"` // PG trigger functions are saved as a separate execution unit.
+	Owner       string   `json:"owner,omitempty"`
 	Revision    int      `json:"revision"`
 	Original    *Object  `json:"original"`
 	PreviousSQL []string `json:"previous_sql,omitempty"`
@@ -87,6 +90,9 @@ func (o Object) TrustedManualTrigger() bool {
 	p := o.ManualTrigger
 	if p == nil || p.Revision < 1 || p.Original == nil || p.Original.ManualTrigger != nil || o.Kind != "trigger" || o.DiagnosticOnly || o.Schema == "" || o.TargetName == "" || o.Table == "" {
 		return false
+	}
+	if p.FunctionSQL != "" {
+		return o.trustedPGManualTrigger()
 	}
 	d, err := damengnative.ParseTableTriggerSQL(p.SQL, o.Schema)
 	if err != nil || d.Schema != o.Schema || d.Name != o.TargetName || d.TableSchema != o.Schema || d.Table != o.Table || p.Original.Kind != "trigger" || p.Original.Schema != o.Schema || p.Original.TargetName != o.TargetName {

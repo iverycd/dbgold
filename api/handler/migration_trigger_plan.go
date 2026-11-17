@@ -146,7 +146,7 @@ func migrationTriggerPlanRequest(c *gin.Context, save bool) {
 		repairError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"object": candidate, "version": row.Version + 1})
+	c.JSON(http.StatusOK, gin.H{"object": repairObjectResponse(job, candidate), "version": row.Version + 1})
 }
 
 func validateTriggerPlanOrigin(job *store.DataMigrationJob, binding *store.MigrationRepairBinding, object repair.Object) error {

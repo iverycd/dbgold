@@ -53,7 +53,8 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 		case "postgres":
 			e = calibratePG(ctx, w, a, schema, s)
 		case "mysql":
-			if s.OracleMySQL != nil {
+			mysql, _ := w.(*MySQLWriter)
+			if s.OracleMySQL != nil || mysql != nil && mysql.srcType == "oscar" {
 				e = w.CreateSequence(ctx, s, "")
 			} else {
 				e = calibrateMySQL(ctx, w, a, schema, s)

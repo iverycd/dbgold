@@ -45,6 +45,19 @@ type BridgeError struct {
 	Message  string
 }
 
+func (e *BridgeError) MigrationFailureScope() string {
+	if strings.HasPrefix(e.SQLState, "08") || strings.HasPrefix(e.SQLState, "28") {
+		return "task"
+	}
+	return "object"
+}
+
+type transportError struct{ cause error }
+
+func (e transportError) Error() string                 { return e.cause.Error() }
+func (e transportError) Unwrap() error                 { return e.cause }
+func (e transportError) MigrationFailureScope() string { return "task" }
+
 func (e *BridgeError) Error() string {
 	prefix := "oscar JDBC"
 	if e.SQLState != "" {
@@ -440,7 +453,7 @@ func (m *Manager) processDied(gen uint64, cause error) {
 		return
 	}
 	m.cmd, m.stdin, m.stdout = nil, nil, nil
-	m.failPending(fmt.Errorf("Oscar JDBC bridge unavailable: %w", cause))
+	m.failPending(transportError{fmt.Errorf("Oscar JDBC bridge unavailable: %w", cause)})
 	m.processMu.Unlock()
 }
 
@@ -467,7 +480,7 @@ func (m *Manager) writeRequest(requestID uint64, op byte, body []byte) error {
 	w := m.stdin
 	m.processMu.Unlock()
 	if w == nil {
-		return errors.New("Oscar JDBC bridge is not running")
+		return transportError{errors.New("Oscar JDBC bridge is not running")}
 	}
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
@@ -493,7 +506,7 @@ func (m *Manager) requestExisting(ctx context.Context, op byte, body []byte) ([]
 	running := m.cmd != nil && m.cmd.Process != nil
 	m.processMu.Unlock()
 	if !running {
-		return nil, errors.New("Oscar JDBC bridge is not running; open a new session to restart it")
+		return nil, transportError{errors.New("Oscar JDBC bridge is not running; open a new session to restart it")}
 	}
 	return m.requestStarted(ctx, op, body)
 }

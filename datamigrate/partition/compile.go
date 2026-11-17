@@ -42,6 +42,11 @@ func Compile(info *source.TableDDLInfo, base []dialect.Statement, profile Profil
 	if err := c.prepare(p.Target, info.Partition, 0, &p.Mapping); err != nil {
 		return nil, fmt.Errorf("表 %s 的分区迁移: %w", info.TableName, err)
 	}
+	if opt.SourceType == "oscar" && opt.TargetType == "mysql" {
+		if err := c.prepareOscarMySQLDomains(p.Target); err != nil {
+			return nil, fmt.Errorf("表 %s 的分区迁移: %w", info.TableName, err)
+		}
+	}
 	p.KeyColumns = append([]KeyColumnDomain(nil), c.keyColumns...)
 	var intervalErr error
 	p.Interval, intervalErr = c.freezeIntervalMaterialization(p.Target)
@@ -60,7 +65,7 @@ func Compile(info *source.TableDDLInfo, base []dialect.Statement, profile Profil
 	if create < 0 {
 		return nil, fmt.Errorf("分区表缺少可装饰的 CREATE TABLE")
 	}
-	if err := c.validateMySQLKeyPGDDL(p.Statements[create].SQL); err != nil {
+	if err := c.validatePartitionKeyDDL(p.Statements[create].SQL); err != nil {
 		return nil, err
 	}
 	var keyDDLErr error

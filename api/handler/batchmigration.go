@@ -474,6 +474,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		job := datamigrate.Registry.Register(jobID, cancel)
 
 		migrateTriggers := rowOpts.triggersFor(r.SrcDBType, r.DstDBType)
+		changeOwner, distributed := resolveOwnerAndDistribution(r.SrcDBType, r.DstDBType, rowOpts.changeOwnerFor(r.DstDBType), rowOpts.Distributed)
 		dbJob := &store.DataMigrationJob{
 			DamengWriteStrategy: rowOpts.DamengWriteStrategy,
 
@@ -492,7 +493,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			LowerCaseNames:     rowOpts.LowerCaseNames && r.DstDBType != "oracle",
 			CharInLength:       (rowOpts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
 			UseNvarchar2:       rowOpts.UseNvarchar2 && r.DstDBType != "sqlserver",
-			ChangeOwner:        rowOpts.changeOwnerFor(r.DstDBType),
+			ChangeOwner:        changeOwner,
 			DstSchema:          r.TargetSchema,
 			Status:             "running",
 			SrcConnName:        fmt.Sprintf("%s:%d/%s", r.SrcHost, r.SrcPort, r.SrcDatabase),
@@ -506,6 +507,9 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			DstConnDatabase:    r.DstDatabase,
 			DstConnUsername:    r.DstUsername,
 		}
+		if r.SrcDBType == "oscar" {
+			migrationSourceLocation(dbJob, srcConn, r.SrcSchema)
+		}
 		if err := store.CreateDataMigrationJob(dbJob); err != nil {
 			cancel()
 			datamigrate.Registry.Remove(jobID)
@@ -513,7 +517,7 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 		}
 
 		sourceSchema := ""
-		if source.IsPGFamily(r.SrcDBType) {
+		if source.IsPGFamily(r.SrcDBType) || r.SrcDBType == "oscar" {
 			sourceSchema = r.SrcSchema
 		}
 		p := migrationParams{
@@ -534,8 +538,8 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			LowerCaseNames:     rowOpts.LowerCaseNames && r.DstDBType != "oracle",
 			CharInLength:       (rowOpts.CharInLength || r.DstDBType == "oracle") && r.DstDBType != "sqlserver",
 			UseNvarchar2:       rowOpts.UseNvarchar2 && r.DstDBType != "sqlserver",
-			Distributed:        rowOpts.Distributed && r.DstDBType != "oracle" && r.DstDBType != "sqlserver",
-			ChangeOwner:        rowOpts.changeOwnerFor(r.DstDBType),
+			Distributed:        distributed && r.DstDBType != "oracle" && r.DstDBType != "sqlserver",
+			ChangeOwner:        changeOwner,
 		}
 
 		// 后台 drain 日志，避免 LogCh 满后阻塞迁移（无 SSE 订阅者时仍能推进）

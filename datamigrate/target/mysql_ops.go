@@ -32,6 +32,13 @@ func (w *MySQLWriter) CopyData(ctx context.Context, table string, cols []string,
 		}
 		defer restore()
 		tx, err = conn.BeginTx(ctx, nil)
+	} else if w.srcType == "oscar" {
+		conn, restore, e := w.oscarSession(ctx)
+		if e != nil {
+			return e
+		}
+		defer restore()
+		tx, err = conn.BeginTx(ctx, nil)
 	} else {
 		tx, err = w.db.BeginTx(ctx, nil)
 	}
@@ -56,6 +63,20 @@ func (w *MySQLWriter) CopyData(ctx context.Context, table string, cols []string,
 
 	for _, row := range rows {
 		conv := w.convertRow(row, colTypes)
+		if w.srcType == "oscar" && w.oscarMaxPacket > 0 {
+			for i, value := range conv {
+				var size int
+				switch v := value.(type) {
+				case []byte:
+					size = len(v)
+				case string:
+					size = len(v)
+				}
+				if int64(size) > w.oscarMaxPacket && i < len(cols) {
+					return fmt.Errorf("目标表 %s 列 %s 的单值为 %d 字节，超出 MySQL max_allowed_packet=%d", table, cols[i], size, w.oscarMaxPacket)
+				}
+			}
+		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
 			return err
 		}
@@ -82,6 +103,13 @@ func (w *MySQLWriter) convertRow(row []interface{}, colTypes []string) []interfa
 // CreateSequence 修正自增列种子(MySQL 自增已在建表声明 AUTO_INCREMENT)。
 // 修正失败必须返回调用方并计入报告，不能忽略后续插入语义。
 func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	if w.srcType == "oscar" {
+		statements, start, err := w.PrepareOscarMySQLAutoIncrement(ctx, seq)
+		if err != nil {
+			return err
+		}
+		return w.ExecuteOscarMySQLAutoIncrement(ctx, seq, statements, start)
+	}
 	if seq.OracleMySQL != nil {
 		statements, start, err := w.PrepareOracleMySQLAutoIncrement(ctx, seq)
 		if err != nil {
@@ -94,15 +122,30 @@ func (w *MySQLWriter) CreateSequence(ctx context.Context, seq source.SequenceInf
 }
 
 func (w *MySQLWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) error {
+	if err := w.validateOscarIndex(idx); err != nil {
+		return err
+	}
 	return w.execStatements(ctx, w.dia.IndexStatements(w.schema, idx))
 }
 
 func (w *MySQLWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {
+	if w.srcType == "oscar" {
+		if fk.Unsupported != "" {
+			return fmt.Errorf("%s", fk.Unsupported)
+		}
+		for _, action := range []string{fk.OnDelete, fk.OnUpdate} {
+			switch strings.ToUpper(strings.TrimSpace(action)) {
+			case "", "NO ACTION", "RESTRICT", "CASCADE", "SET NULL":
+			default:
+				return fmt.Errorf("MySQL 不支持 Oscar 外键 %s 的引用动作 %q", fk.ConstraintName, action)
+			}
+		}
+	}
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 
 func (w *MySQLWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
-	if w.srcType == "oracle" {
+	if w.srcType == "oracle" || w.srcType == "oscar" {
 		statements, err := w.PrepareComment(ctx, cm)
 		if err != nil {
 			return err

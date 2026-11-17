@@ -157,9 +157,10 @@ type FKInfo struct {
 
 // ViewInfo 表示一个视图
 type ViewInfo struct {
-	Columns    []ColumnInfo
-	ViewName   string
-	Definition string // 已转换为目标库语法的 SQL
+	Columns     []ColumnInfo
+	ViewName    string
+	Definition  string // 已转换为目标库语法的 SQL
+	Unsupported string
 }
 
 // CommentInfo 表示一条表注释或列注释

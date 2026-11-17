@@ -59,6 +59,9 @@
             <strong style="color:#f53f3f">{{ validateResult.unsupported_count }}</strong>
             行（将被排除）。
           </a-alert>
+          <a-alert v-if="validateResult.rows.some(row => row.supported && row.src_db_type === 'oscar')" type="info">
+            Oscar 源库的 source_database 填连接数据库。可用 source_schema 列指定迁移 Schema，留空时使用连接的当前 Schema。
+          </a-alert>
 
           <a-table
             :data="validateResult.rows"
@@ -73,7 +76,7 @@
                   <a-tag :color="getDbTypeColor(record.src_db_type)">
                     {{ getDbTypeLabel(record.src_db_type) }}
                   </a-tag>
-                  <span class="conn-text">{{ record.src_host }}:{{ record.src_port }}/{{ record.src_database }}</span>
+                  <span class="conn-text">{{ record.src_host }}:{{ record.src_port }}/{{ record.src_database }}<template v-if="record.src_db_type === 'oscar' && record.src_schema"> · {{ record.src_schema }}</template></span>
                 </template>
               </a-table-column>
               <a-table-column title="目标库" :width="220">
@@ -151,11 +154,11 @@
                     <a-option value="off">MySQL 触发器：全部关闭</a-option>
                   </a-select>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
-                  <a-checkbox v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
+                  <a-checkbox v-if="!onlyOscarMySQLRows" v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
                   <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
                   <a-checkbox v-model="options.char_in_length">char 长度单位（CHAR，Oracle 固定启用）</a-checkbox>
                   <a-checkbox v-model="options.use_nvarchar2">使用 nvarchar2</a-checkbox>
-                  <a-checkbox v-model="options.distributed">分布式模式（Oracle 不适用）</a-checkbox>
+                  <a-checkbox v-if="!onlyOscarMySQLRows" v-model="options.distributed">分布式模式（Oracle 不适用）</a-checkbox>
                 </a-space>
                 <a-alert v-if="options.validate_data" type="info" style="margin-top: 12px">全量读取各迁移对的源库与目标库，比对数据内容并记录差异，会增加耗时。请停止两端业务写入，直至迁移与校验结束。</a-alert>
               </a-form>
@@ -225,7 +228,7 @@
                 <a-tag :color="getDbTypeColor(record.src_db_type)">
                   {{ getDbTypeLabel(record.src_db_type) }}
                 </a-tag>
-                <span class="conn-text">{{ record.src_conn?.host }}/{{ record.src_conn?.database }}</span>
+                <span class="conn-text">{{ record.src_conn?.host }}/{{ record.src_conn?.database }}<template v-if="record.src_db_type === 'oscar' && record.source_schema"> · {{ record.source_schema }}</template></span>
               </template>
             </a-table-column>
             <a-table-column title="目标库" :width="200">
@@ -333,6 +336,10 @@ const exclusionKinds = [
   { value: 'view', label: '视图' }, { value: 'routine', label: '函数/过程' }, { value: 'trigger', label: '触发器' }, { value: 'sequence', label: '独立序列' },
 ]
 const nativeDamengRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.supported && row.src_db_type === 'dameng' && row.dst_db_type === 'dameng'))
+const onlyOscarMySQLRows = computed(() => {
+  const rows = validateResult.value?.rows.filter(row => row.supported) ?? []
+  return rows.length > 0 && rows.every(row => row.src_db_type === 'oscar' && row.dst_db_type === 'mysql')
+})
 const canSelectDamengWriteStrategy = computed(() =>
   options.migrate_content !== 'schema_only' &&
   !!validateResult.value?.rows.some(row => row.supported && row.src_db_type === 'mysql' && row.dst_db_type === 'dameng'),

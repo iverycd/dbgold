@@ -61,6 +61,9 @@ func (d *MySQLDialect) MapType(col source.ColumnInfo, srcType string, opt TypeOp
 //   - CREATE TABLE,自增列追加 AUTO_INCREMENT(种子由 Phase3 修正)
 //   - 表选项 ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 func (d *MySQLDialect) CreateTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name NameFunc) ([]Statement, error) {
+	if srcType == "oscar" {
+		return d.oscarTableStatements(schema, info, name)
+	}
 	if source.IsPGFamily(srcType) {
 		return nil, fmt.Errorf("PG → MySQL 必须使用经过版本探测和预检的 PGTableStatements")
 	}

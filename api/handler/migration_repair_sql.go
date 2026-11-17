@@ -174,8 +174,8 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 		return nil
 	}
 	if obj.ManualTrigger != nil {
-		if dbType != "dameng" || !obj.TrustedManualTrigger() || len(units) != len(obj.Units) {
-			return fmt.Errorf("手工触发器缺少完整的达梦修复计划")
+		if !manualTriggerMatchesTarget(obj, dbType) || len(units) != len(obj.Units) {
+			return fmt.Errorf("手工触发器缺少与目标类型匹配的完整修复计划")
 		}
 		for i, unit := range units {
 			if unit.ID != obj.Units[i].ID || unit.SQL != obj.Units[i].SQL || unit.OriginalSQL != obj.Units[i].OriginalSQL {

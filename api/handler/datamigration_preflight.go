@@ -76,7 +76,7 @@ func PreflightDataMigration(c *gin.Context) {
 			return
 		}
 	}
-	reader, err := buildSrcReader(src, req.SrcDatabase, source.ConnPoolConfig{}, dst.DBType)
+	reader, err := buildSrcReaderContext(c.Request.Context(), src, req.SrcDatabase, source.ConnPoolConfig{}, dst.DBType)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -89,6 +89,7 @@ func PreflightDataMigration(c *gin.Context) {
 	}
 	defer writer.Close()
 	cfg := datamigrate.Config{DamengWriteStrategy: req.DamengWriteStrategy, MySQLReadStrategy: req.MySQLReadStrategy, MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, CharInLength: req.CharInLength, UseNvarchar2: req.UseNvarchar2, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, MaxParallel: req.MaxParallel, IntraTableParallel: req.IntraTableParallel, ValidateData: req.ValidateData, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
+	cfg.ChangeOwner, cfg.Distributed = resolveOwnerAndDistribution(src.DBType, dst.DBType, cfg.ChangeOwner, cfg.Distributed)
 	m := datamigrate.NewMigrator(reader, writer, &datamigrate.Job{LogCh: make(chan string, 16)}, cfg)
 	if native {
 		c.JSON(http.StatusOK, m.PreflightDamengNative(c.Request.Context()))

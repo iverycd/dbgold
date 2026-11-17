@@ -18,21 +18,35 @@ func repairDiagnostic(item ObjectResult) bool {
 	return false
 }
 
-// EnrichRepairReferences also supports ledgers created before reference fields
-// existed. It never replaces drafts, execution states, or target identities.
+// EnrichRepairReferences restores report references on old ledgers without
+// replacing drafts or execution states.
 func EnrichRepairReferences(objects []repair.Object, report MigrationReport) {
 	byName := map[[2]string][]repair.Object{}
+	legacyTriggers := map[string]repair.Object{}
 	for _, ref := range LegacyRepairObjects(report, "") {
 		key := [2]string{ref.Kind, ref.Name}
 		byName[key] = append(byName[key], ref)
+		if ref.Kind == "trigger" && ref.Schema != "" {
+			legacyTriggers[ref.ID] = ref
+		}
 	}
+	triggerFailures := indexTriggerFailures(report)
 	for i := range objects {
 		o := &objects[i]
+		if o.Kind == "trigger" && o.ManualTrigger == nil && o.Native == nil {
+			if ref, ok := legacyTriggers[o.ID]; ok && o.Legacy && o.Status == "failed" && o.DiagnosticOnly && o.DDL == "" && len(o.Units) == 0 {
+				// Older legacy imports used the source table and job default schema.
+				// The unchanged report-derived ID ties these fields to one report row.
+				o.Schema, o.Table, o.TargetName = ref.Schema, ref.Table, ref.TargetName
+				o.SourceName, o.SourceTable = ref.SourceName, ref.SourceTable
+			}
+			applyTriggerFailureReference(o, triggerFailures[[3]string{o.Schema, o.Table, o.TargetName}])
+		}
 		var matches []repair.Object
 		seen := map[string]bool{}
 		for _, name := range []string{o.Name, o.SourceName, o.TargetName} {
 			for _, ref := range byName[[2]string{o.Kind, name}] {
-				if seen[ref.ID] || !ref.DiagnosticOnly && ref.Table != "" && ref.Table != o.Table && ref.Table != o.SourceTable {
+				if seen[ref.ID] || (o.Kind == "trigger" || !ref.DiagnosticOnly) && ref.Table != "" && ref.Table != o.Table && ref.SourceTable != o.SourceTable {
 					continue
 				}
 				seen[ref.ID] = true
@@ -47,5 +61,42 @@ func EnrichRepairReferences(objects []repair.Object, report MigrationReport) {
 				o.DiagnosticOnly = o.DiagnosticOnly || matches[0].DiagnosticOnly
 			}
 		}
+	}
+}
+
+func indexTriggerFailures(report MigrationReport) map[[3]string][]ObjectResult {
+	failures := map[[3]string][]ObjectResult{}
+	if report.TriggerMigrationEnabled {
+		for _, item := range report.Triggers.Items {
+			if item.Error == "" || item.TargetSchema == "" || item.TargetTable == "" || item.TargetName == "" {
+				continue
+			}
+			key := [3]string{item.TargetSchema, item.TargetTable, item.TargetName}
+			failures[key] = append(failures[key], item)
+		}
+	}
+	return failures
+}
+
+func applyTriggerFailureReference(object *repair.Object, matches []ObjectResult) {
+	if len(matches) > 1 {
+		object.TriggerFailureStage = "identity_conflict"
+		return
+	}
+	if len(matches) != 1 {
+		return
+	}
+	item := matches[0]
+	if item.SourceName == "" || item.SourceName != object.SourceName || item.Table == "" || item.Table != object.SourceTable {
+		object.TriggerFailureStage = "identity_conflict"
+		return
+	}
+	if object.SourceDDL == "" {
+		object.SourceDDL = item.SourceDDL
+	}
+	if object.SourceDDL == item.SourceDDL {
+		object.TriggerFailureStage = item.Stage
+	} else {
+		object.TriggerFailureStage = "identity_conflict"
 	}
 }

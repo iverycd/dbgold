@@ -85,6 +85,7 @@ var supportedPairs = []SupportedPair{
 	{Source: "mysql", Target: "mysql"},
 	{Source: "sqlserver", Target: "mysql"},
 	{Source: "dameng", Target: "mysql"},
+	{Source: "oscar", Target: "mysql"},
 	{Source: "postgres", Target: "dameng"},
 	{Source: "gaussdb", Target: "dameng"},
 	{Source: "highgo", Target: "dameng"},
@@ -218,6 +219,7 @@ func StartDataMigration(c *gin.Context) {
 		}
 	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
+	changeOwner, req.Distributed = resolveOwnerAndDistribution(srcConn.DBType, dstConn.DBType, changeOwner, req.Distributed)
 
 	// 校验迁移组合是否支持
 	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
@@ -238,10 +240,7 @@ func StartDataMigration(c *gin.Context) {
 	job := datamigrate.Registry.Register(jobID, cancel)
 
 	// 持久化任务记录
-	srcConnDatabase := srcConn.Database
-	if req.SrcDatabase != "" {
-		srcConnDatabase = req.SrcDatabase
-	}
+	srcConnDatabase := migrationSourceDisplayDatabase(srcConn, req.SrcDatabase)
 	dbJob := &store.DataMigrationJob{
 		DamengWriteStrategy: req.DamengWriteStrategy,
 		MySQLReadStrategy:   req.MySQLReadStrategy,
@@ -276,6 +275,9 @@ func StartDataMigration(c *gin.Context) {
 		DstConnPort:        dstConn.Port,
 		DstConnDatabase:    dstConn.Database,
 		DstConnUsername:    dstConn.Username,
+	}
+	if srcConn.DBType == "oscar" {
+		migrationSourceLocation(dbJob, srcConn, req.SrcDatabase)
 	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
 		cancel()
@@ -374,7 +376,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 		MaxIdleConns:    p.SrcMaxIdleConns,
 		ConnMaxLifetime: time.Duration(p.SrcConnMaxLifetime) * time.Second,
 	}
-	reader, readerErr := buildSrcReader(srcConn, p.SrcDatabase, srcPool, dstConn.DBType)
+	reader, readerErr := buildSrcReaderContext(ctx, srcConn, p.SrcDatabase, srcPool, dstConn.DBType)
 	if readerErr == nil {
 		defer reader.Close()
 	}
@@ -453,12 +455,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 	if !proceed {
 		return
 	}
-	sourceSchema := p.SrcDatabase
-	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
-		if scoped, ok := reader.(interface{ MigrationSchema() string }); ok {
-			sourceSchema = scoped.MigrationSchema()
-		}
-	}
+	sourceSchema := resolvedMigrationSourceScope(reader, srcConn.DBType, dstConn.DBType, p.SrcDatabase)
 	releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, sourceSchema, &cfg, writer)
 	if releaseRepair != nil {
 		defer releaseRepair()
@@ -558,6 +555,7 @@ func StartObjectMigration(c *gin.Context) {
 		req.Distributed = false
 	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
+	changeOwner, req.Distributed = resolveOwnerAndDistribution(srcConn.DBType, dstConn.DBType, changeOwner, req.Distributed)
 	if !isSupportedPair(srcConn.DBType, dstConn.DBType) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("不支持 %s → %s 的数据迁移", srcConn.DBType, dstConn.DBType),
@@ -578,10 +576,7 @@ func StartObjectMigration(c *gin.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	job := datamigrate.Registry.Register(jobID, cancel)
 
-	srcConnDatabase := srcConn.Database
-	if req.SrcDatabase != "" {
-		srcConnDatabase = req.SrcDatabase
-	}
+	srcConnDatabase := migrationSourceDisplayDatabase(srcConn, req.SrcDatabase)
 	dbJob := &store.DataMigrationJob{
 		MigrateTriggers: slices.Contains(req.MigrateObjects, "triggers"),
 		ExcludedObjects: encodeExcludedObjects(req.ExcludedObjects),
@@ -608,6 +603,9 @@ func StartObjectMigration(c *gin.Context) {
 		DstConnDatabase: dstConn.Database,
 		DstConnUsername: dstConn.Username,
 	}
+	if srcConn.DBType == "oscar" {
+		migrationSourceLocation(dbJob, srcConn, req.SrcDatabase)
+	}
 	if err := store.CreateDataMigrationJob(dbJob); err != nil {
 		cancel()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建任务记录失败"})
@@ -630,7 +628,7 @@ func StartObjectMigration(c *gin.Context) {
 			MaxIdleConns:    req.SrcMaxIdleConns,
 			ConnMaxLifetime: time.Duration(req.SrcConnMaxLifetime) * time.Second,
 		}
-		reader, readerErr := buildSrcReader(srcConn, req.SrcDatabase, srcPool, dstConn.DBType)
+		reader, readerErr := buildSrcReaderContext(ctx, srcConn, req.SrcDatabase, srcPool, dstConn.DBType)
 		if readerErr == nil {
 			defer reader.Close()
 		}
@@ -692,7 +690,8 @@ func StartObjectMigration(c *gin.Context) {
 		if !proceed {
 			return
 		}
-		releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, req.SrcDatabase, &cfg, writer)
+		sourceSchema := resolvedMigrationSourceScope(reader, srcConn.DBType, dstConn.DBType, req.SrcDatabase)
+		releaseRepair, repairErr := prepareMigrationRepair(ctx, dbJob, srcConn, dstConn, sourceSchema, &cfg, writer)
 		if releaseRepair != nil {
 			defer releaseRepair()
 		}
@@ -767,9 +766,13 @@ func StreamDataMigration(c *gin.Context) {
 	streamDataMigrationLogs(c, ownerJob, datamigrate.Registry.Get(jobID), dataMigrationHeartbeatInterval)
 }
 
-// buildSrcReader 根据连接与可选的 srcDatabase 构造源库 Reader。
-// srcDatabase 非空时覆盖连接默认库(mysql/sqlserver 需重建 DSN,oracle/dameng 的库即 schema 不重建)。
 func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.ConnPoolConfig, targetTypes ...string) (source.Reader, error) {
+	return buildSrcReaderContext(context.Background(), conn, srcDatabase, pool, targetTypes...)
+}
+
+// buildSrcReaderContext 根据连接与可选的 srcDatabase 构造源库 Reader。
+// srcDatabase 覆盖 MySQL/SQL Server 数据库，或选择 Oracle、达梦、Oscar、PG 兼容库的 schema。
+func buildSrcReaderContext(ctx context.Context, conn *store.Connection, srcDatabase string, pool source.ConnPoolConfig, targetTypes ...string) (source.Reader, error) {
 	db := conn.Database
 	if srcDatabase != "" {
 		db = srcDatabase
@@ -818,6 +821,10 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 			return source.NewOracleForMySQL(dsn, db, pool)
 		}
 		return source.NewOracle(dsn, db, pool)
+	case "oscar":
+		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return source.NewOscarContext(connectCtx, dsn, conn.Username, conn.Password, srcDatabase, pool)
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，
 		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
@@ -828,6 +835,22 @@ func buildSrcReader(conn *store.Connection, srcDatabase string, pool source.Conn
 	default: // mysql
 		return source.NewMySQL(dsn, db, pool)
 	}
+}
+
+func migrationSourceDisplayDatabase(conn *store.Connection, override string) string {
+	if override == "" || conn.DBType == "oscar" {
+		return conn.Database
+	}
+	return override
+}
+
+func resolvedMigrationSourceScope(reader source.Reader, srcType, dstType, requested string) string {
+	if srcType == "oscar" || isDamengNativePair(srcType, dstType) {
+		if scoped, ok := reader.(interface{ MigrationSchema() string }); ok {
+			return scoped.MigrationSchema()
+		}
+	}
+	return requested
 }
 
 // buildDstWriter 根据目标连接类型构造对应的 Writer(消除多处重复的初始化 switch)
@@ -886,7 +909,7 @@ func ListConnectionViews(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
-	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
+	reader, err := buildSrcReaderContext(c.Request.Context(), conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -918,7 +941,7 @@ func ListConnectionTables(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connection not found"})
 		return
 	}
-	reader, err := buildSrcReader(conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
+	reader, err := buildSrcReaderContext(c.Request.Context(), conn, c.Query("database"), source.ConnPoolConfig{}, c.Query("target_type"))
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -985,7 +1008,8 @@ func MigrateViews(c *gin.Context) {
 		req.LowerCaseNames = false
 	}
 	changeOwner := resolveChangeOwner(dstConn.DBType, req.ChangeOwner)
-	reader, err := buildSrcReader(srcConn, req.SrcDatabase, source.ConnPoolConfig{}, dstConn.DBType)
+	changeOwner, _ = resolveOwnerAndDistribution(srcConn.DBType, dstConn.DBType, changeOwner, false)
+	reader, err := buildSrcReaderContext(c.Request.Context(), srcConn, req.SrcDatabase, source.ConnPoolConfig{}, dstConn.DBType)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("连接源库失败: %v", err)})
 		return

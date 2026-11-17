@@ -268,6 +268,7 @@ function dataSource(record: DataMigrationJob): MigrationRouteEndpoint {
     host: record.src_conn?.host,
     port: record.src_conn?.port,
     database: record.src_conn?.database,
+    schema: record.src_db_type === 'oscar' ? record.source_schema : undefined,
     username: record.src_conn?.username,
   }
 }

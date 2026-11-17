@@ -172,7 +172,7 @@ func (m *Migrator) selectedSequences(values []source.SequenceInfo, selected map[
 	}
 	out := make([]source.SequenceInfo, 0, len(values))
 	for _, v := range values {
-		if selected[v.TableName] {
+		if selected[v.TableName] || m.isOscarMySQL() && v.TableName == "" && v.Unsupported != "" && m.cfg.Mode == "all" {
 			out = append(out, v)
 		}
 	}

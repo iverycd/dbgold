@@ -29,7 +29,7 @@ function loadBatchUtils(timers) {
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, editorVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
-const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription'
+const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -52,7 +52,7 @@ function panel(props, overrides = {}) {
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/utils/sqlFormatting') return formattingContext.exports
       if (id === '@/api/migrationRepair') return api
-      if (id === '@/api/migration') return { getDataMigrationJob: async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } }) }
+      if (id === '@/api/migration') return { getDataMigrationJob: overrides.getDataMigrationJob || (async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } })) }
       if (id === '@/api/connections') return { listConnections: overrides.listConnections || (async () => ({ data: [] })) }
       if (id === '@arco-design/web-vue') return { Message: { success: text => messages.push(text), warning: text => messages.push(text), error: text => messages.push(text), info: text => messages.push(text) } }
       throw new Error(`Unexpected import ${id}`)
@@ -1687,6 +1687,143 @@ test('MySQL Dameng trigger retry is one immutable read-only unit and reconciles 
 
 const triggerSQL = 'CREATE OR REPLACE TRIGGER "Target"."trg" BEFORE DELETE ON "Target"."Orders" FOR EACH ROW BEGIN DELETE FROM "Target"."Audit" WHERE id = :OLD.id; END;'
 const manualTriggerRecord = (extra = {}) => record({ kind: 'trigger', table: 'Orders', schema: 'Target', target_name: 'trg', ddl: triggerSQL, source_ddl: 'SOURCE TRIGGER REFERENCE', diagnostic_only: true, requires_review: true, manual_trigger_editable: true, units: [unit('create-trigger', 'failed', { sql: triggerSQL, original_sql: triggerSQL })], ...extra })
+
+const pgFunctionSQL = `CREATE FUNCTION "Target".helper() RETURNS trigger AS $body$
+DECLARE n integer := 1;
+BEGIN
+  NEW.id := NEW.id + n; RETURN NEW;
+END;
+$body$ LANGUAGE plpgsql;`
+const pgTriggerSQL = 'CREATE TRIGGER trg BEFORE INSERT ON "Target"."Orders" FOR EACH ROW EXECUTE PROCEDURE "Target".helper();'
+const pgTriggerRecord = (extra = {}) => manualTriggerRecord({ ddl: '', error: '语句 declare 需要人工适配', original_error: '语句 declare 需要人工适配', source_name: 'trg', source_table: 'Orders', units: [], ...extra })
+const pgJob = async id => ({ data: { job_id: id, status: 'failed', src_db_type: 'mysql', dst_db_type: 'vastbase' } })
+const pgTriggerUnits = [unit('function', 'rolled_back', { sql: pgFunctionSQL, original_sql: pgFunctionSQL }), unit('trigger', 'failed', { sql: pgTriggerSQL, original_sql: pgTriggerSQL })]
+
+test('PG-family conversion failures open two empty SQL editors and require the complete pair', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const original = pgTriggerRecord()
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      getDataMigrationJob: pgJob,
+      saveRepairDraft: async () => assert.fail('incomplete pair must never be saved'),
+      executeRepair: async () => assert.fail('incomplete pair must never be executed'),
+    })); await tick()
+    for (const target of ['postgres', 'gaussdb', 'highgo', 'gbase', 'seabox', 'kingbase', 'vastbase']) {
+      p.job.value.dst_db_type = target
+      p.openEditor(original)
+      assert.deepEqual([...p.draftUnits.value.map(item => item.sql)], ['', ''], target)
+      assert.equal(p.canExecute.value, false)
+    }
+    const editors = []
+    const html = await renderPanel(p, undefined, editor => editors.push(editor.modelValue))
+    assert.deepEqual(editors, ['', ''])
+    assert.match(html, /触发器函数 SQL/)
+    assert.match(html, /创建触发器 SQL/)
+    assert.match(html, /SOURCE TRIGGER REFERENCE/)
+    assert.match(html, /语句 declare 需要人工适配/)
+    assert.match(html, /重新生成触发器方案/)
+    p.draftUnits.value[0].sql = pgFunctionSQL
+    assert.equal(p.canExecute.value, false)
+    assert.equal(await p.saveDraft(), false)
+    await p.prepareExecute()
+    p.draftUnits.value[1].sql = pgTriggerSQL
+    assert.equal(p.canExecute.value, true)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('PG generated statements are prefilled verbatim and can still be retried without saving', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const requests = []
+    const saved = pgTriggerRecord({ mysql_pg_trigger: {}, diagnostic_only: false, ddl: pgFunctionSQL + '\n' + pgTriggerSQL, units: pgTriggerUnits })
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      getDataMigrationJob: pgJob,
+      saveRepairDraft: async () => assert.fail('original retry must not switch to a manual plan'),
+      executeRepair: async (_job, _id, request) => { requests.push(request); throw new Error('connection lost') },
+    })); await tick(); p.openEditor(saved)
+    assert.deepEqual([...p.draftUnits.value.map(item => item.sql)], [pgFunctionSQL, pgTriggerSQL])
+    assert.equal(p.canRetryOriginalPGTrigger.value, true)
+    p.draftUnits.value[0].sql += '\n-- edited'
+    assert.equal(p.canRetryOriginalPGTrigger.value, false)
+    await p.prepareExecute(true)
+    assert.equal(requests.length, 0)
+    p.restoreOriginal()
+    await p.prepareExecute(true); await p.prepareExecute(true)
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0].version, saved.version)
+    assert.equal(requests[0].request_id, requests[1].request_id)
+    assert.deepEqual([...p.executionSnapshot.value.map(item => item.sql)], [pgFunctionSQL, pgTriggerSQL])
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('PG manual pair can be reopened, edited after a step error, and submitted again', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const calls = []
+    const failure = 'column missing does not exist'
+    let saved = pgTriggerRecord(), submissions = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      getDataMigrationJob: pgJob,
+      listRepairs: async () => repairList([saved]),
+      saveRepairDraft: async (_job, _id, draft) => {
+        calls.push(['save', draft.version, draft.mode, ...draft.units.map(item => item.sql)])
+        saved = { version: saved.version + 1, object: { ...saved.object, status: 'draft', diagnostic_only: false, manual_trigger: { function_sql: draft.units[0].sql, sql: draft.units[1].sql, revision: saved.version }, units: draft.units.map(item => ({ ...item, status: 'pending', error: '' })) } }
+        return { data: saved }
+      },
+      executeRepair: async (_job, _id, request) => {
+        calls.push(['execute', request.version, request.confirmed])
+        const status = ++submissions === 1 ? 'failed' : 'succeeded'
+        saved = { version: saved.version + 1, object: { ...saved.object, status, error: status === 'failed' ? failure : '', manual_trigger_editable: status === 'failed', units: saved.object.units.map((item, index) => ({ ...item, status: status === 'failed' && index === 0 ? 'rolled_back' : status, error: status === 'failed' && index === 1 ? failure : '' })) } }
+        return { data: { id: `attempt-${submissions}`, object_id: 'obj', kind: 'ddl', status, units: saved.object.units } }
+      },
+      getRepairAttempt: async () => ({ data: { id: `attempt-${submissions}`, object_id: 'obj', kind: 'ddl', status: saved.object.status, units: saved.object.units } }),
+    })); await tick(); p.openEditor(saved)
+    p.draftUnits.value[0].sql = pgFunctionSQL
+    const broken = pgTriggerSQL.replace('BEFORE INSERT', 'BEFORE UPDATE OF missing')
+    p.draftUnits.value[1].sql = broken
+    assert.equal(await p.saveDraft(), true)
+    p.closeEditor(); p.openEditor(saved)
+    assert.deepEqual([...p.draftUnits.value.map(item => item.sql)], [pgFunctionSQL, broken])
+    await p.prepareExecute()
+    assert.equal(p.editorVisible.value, true)
+    assert.equal(p.draftUnits.value[0].status, 'rolled_back')
+    assert.equal(p.draftUnits.value[1].error, failure)
+    assert.match(await renderPanel(p), /column missing does not exist/)
+    p.draftUnits.value[1].sql = pgTriggerSQL
+    await p.prepareExecute()
+    assert.equal(p.editorVisible.value, false)
+    assert.deepEqual(calls.map(call => [...call]), [
+      ['save', 1, 'manual_trigger', pgFunctionSQL, broken],
+      ['save', 2, 'manual_trigger', pgFunctionSQL, broken],
+      ['execute', 3, true],
+      ['save', 4, 'manual_trigger', pgFunctionSQL, pgTriggerSQL],
+      ['execute', 5, true],
+    ])
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('PG manual pair stays out of batch and table recovery, and unknown results stay read-only', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const p = scope.run(() => panel({ jobID: 'job' }, { getDataMigrationJob: pgJob })); await tick()
+    const pair = pgTriggerRecord({ diagnostic_only: false, status: 'draft', manual_trigger: { function_sql: pgFunctionSQL, sql: pgTriggerSQL, revision: 1 }, units: pgTriggerUnits })
+    p.records.value = [pair]
+    p.recoveryObject.value = record({ id: 'orders' })
+    assert.deepEqual([...p.relatedCandidates.value], [])
+    assert.match(p.batchIneligibleReason(pair.object), /对象修复弹窗/)
+    p.openEditor({ ...pair, object: { ...pair.object, status: 'unknown', manual_trigger_editable: false } })
+    assert.equal(p.canExecute.value, false)
+    const editors = []
+    const html = await renderPanel(p, undefined, editor => editors.push(editor))
+    assert.equal(editors.length, 0)
+    assert.match(html, /请在目标数据库检查实际执行结果/)
+    assert.doesNotMatch(html, /核对并重试|保存并执行/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
 
 test('server capability enables one formatted target CREATE draft for every failed Dameng trigger variant', async () => {
   const scope = Vue.effectScope()

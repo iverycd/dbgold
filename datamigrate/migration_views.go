@@ -237,7 +237,8 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 	byTarget := map[string]string{}
 	for _, view := range views {
 		target := m.objName(view.ViewName)
-		if previous, exists := byTarget[target]; exists {
+		key := m.migrationTargetNameKey(target)
+		if previous, exists := byTarget[key]; exists {
 			err := fmt.Errorf("目标视图名冲突: %q 与 %q 均映射为 %q", previous, view.ViewName, target)
 			for _, name := range []string{previous, view.ViewName} {
 				ref := ObjectRef{Kind: "view", Name: name}
@@ -246,7 +247,7 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 				}
 			}
 		}
-		byTarget[target] = view.ViewName
+		byTarget[key] = view.ViewName
 	}
 	dependencies := map[string][]string{}
 	pending := map[string]source.ViewInfo{}
@@ -282,7 +283,19 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 					blocked = fmt.Errorf("依赖表 %s 迁移失败: %w", dep, err)
 					break
 				}
-				if name, found := byTarget[m.objName(dep)]; found {
+				name, found := byTarget[m.migrationTargetNameKey(m.objName(dep))]
+				if m.isOscarMySQL() && !found {
+					for _, candidate := range byTarget {
+						if strings.EqualFold(candidate, dep) {
+							if found {
+								found = false
+								break
+							}
+							name, found = candidate, true
+						}
+					}
+				}
+				if found {
 					if err := m.migrationObjectError(ObjectRef{Kind: "view", Name: name}); err != nil {
 						blocked = fmt.Errorf("依赖视图 %s 迁移失败: %w", dep, err)
 						break
@@ -303,6 +316,9 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 					m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, err)
 					category.Failed++
 					result := ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "execute", DDL: ddl, Error: err.Error()}
+					if m.isOscarMySQL() {
+						result.SourceDDL = view.Definition
+					}
 					m.attachSQLServerViewIssue(&result, view, err)
 					category.Items = append(category.Items, result)
 					if m.stopMigrationTask(ctx, err) {
@@ -333,11 +349,12 @@ func (m *Migrator) preflightMigrationNames(tables []string) {
 	names := map[string]string{}
 	for _, table := range tables {
 		name := m.objName(table)
-		if previous, exists := names[name]; exists && previous != table {
+		key := m.migrationTargetNameKey(name)
+		if previous, exists := names[key]; exists && previous != table {
 			err := fmt.Errorf("目标表名冲突: %q 与 %q 均映射为 %q", previous, table, name)
 			m.blockMigrationTable(previous, "preflight", err)
 			m.blockMigrationTable(table, "preflight", err)
 		}
-		names[name] = table
+		names[key] = table
 	}
 }

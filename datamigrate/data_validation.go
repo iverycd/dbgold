@@ -79,6 +79,9 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 		if frozen.err == nil {
 			m.freezePartitionAppendContent(ctx, &frozen)
 		}
+		if frozen.err == nil && m.isOscarMySQL() {
+			m.freezeOscarAppendContent(ctx, &frozen)
+		}
 		m.validationTables = append(m.validationTables, frozen)
 	}
 }

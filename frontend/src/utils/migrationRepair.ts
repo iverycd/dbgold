@@ -87,6 +87,7 @@ export const hasRepairDDL = (object: RepairObject) => !!(object.ddl || object.un
 export const isMySQLPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_pg_trigger
 export const isMySQLDamengTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.mysql_dameng_trigger
 export const isGeneratedMySQLTrigger = (object: RepairObject) => isMySQLPGTrigger(object) || isMySQLDamengTrigger(object)
+export const isManualPGTrigger = (object: RepairObject) => object.kind === 'trigger' && !!object.manual_trigger?.function_sql
 export const canRegenerateTriggerPlan = (object: RepairObject): boolean => object.kind === 'trigger' && !object.mysql_dameng_trigger && !object.native && !!object.diagnostic_only && !object.mysql_pg_trigger && !!object.source_name && !!object.source_table && !!object.source_ddl?.trim() && !object.ddl?.trim() && !object.suggested_ddl?.trim() && !object.units?.length && ['failed', 'pending', 'blocked', 'cancelled'].includes(object.status)
 export function canRetryMySQLPGTrigger(object: RepairObject): boolean {
   if (!isMySQLPGTrigger(object) || object.diagnostic_only || !object.schema || !object.target_name || !['failed', 'pending', 'blocked', 'cancelled', 'rolled_back'].includes(object.status)) return false
@@ -100,7 +101,7 @@ export function canRetryNative(object: RepairObject): boolean {
   return !!object.native && !!object.native_fingerprint && !object.native.managed && !object.diagnostic_only && object.native.schema === object.schema && object.native.name === object.target_name && object.units?.length > 0 && object.units.length === object.native.units.length && !['running', 'succeeded'].includes(object.status) && object.units.every((unit, index) => !!unit.original_sql && unit.sql === unit.original_sql && unit.sql === object.native!.units[index]?.sql)
 }
 export function canRetryManualTrigger(object: RepairObject): boolean {
-  return object.kind === 'trigger' && !!object.manual_trigger && object.manual_trigger.revision > 0 && !object.diagnostic_only && object.status === 'unknown' && !!object.schema?.trim() && !!object.table?.trim() && !!object.target_name?.trim() && !!object.units?.length && object.units.some(unit => unit.sql === object.manual_trigger!.sql) && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive)
+  return object.kind === 'trigger' && !!object.manual_trigger && !isManualPGTrigger(object) && object.manual_trigger.revision > 0 && !object.diagnostic_only && object.status === 'unknown' && !!object.schema?.trim() && !!object.table?.trim() && !!object.target_name?.trim() && !!object.units?.length && object.units.some(unit => unit.sql === object.manual_trigger!.sql) && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive)
 }
 export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object) || canRetryManualTrigger(object)
 

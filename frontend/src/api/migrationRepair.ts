@@ -22,7 +22,7 @@ export interface RepairColumn {
 export interface RepairVerification { status: string; message: string }
 export interface ManualVerification { confirmed_by: number; confirmed_at: string; evidence: string; fingerprint: string }
 export interface RepairObject {
-  manual_trigger?: { sql: string; revision: number; [key: string]: unknown }
+  manual_trigger?: { sql: string; function_sql?: string; revision: number; [key: string]: unknown }
   manual_trigger_editable?: boolean
   native?: { id: string; kind: string; name: string; schema: string; managed?: boolean; units: { sql: string; phase: string }[] }
   native_fingerprint?: string

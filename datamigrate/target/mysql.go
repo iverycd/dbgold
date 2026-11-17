@@ -15,11 +15,14 @@ import (
 
 // MySQLWriter 实现 Writer 接口,写入到 MySQL 数据库。
 type MySQLWriter struct {
-	db        *sql.DB
-	schema    string // 目标 database(MySQL 的 schema 即 database)
-	srcType   string
-	valueConv valueconv.ValueConverter
-	dia       dialect.Dialect
+	db                  *sql.DB
+	schema              string // 目标 database(MySQL 的 schema 即 database)
+	srcType             string
+	valueConv           valueconv.ValueConverter
+	dia                 dialect.Dialect
+	oscarFoldTableNames bool
+	oscarMySQLVersion   string
+	oscarMaxPacket      int64
 }
 
 // NewMySQL 创建并连接 MySQL Writer。
@@ -72,21 +75,27 @@ func (w *MySQLWriter) CreateTable(ctx context.Context, stmts []dialect.Statement
 }
 
 func (w *MySQLWriter) execStatements(ctx context.Context, stmts []dialect.Statement) error {
-	if source.IsPGFamily(w.srcType) {
-		conn, restore, err := w.pgSession(ctx)
+	if len(stmts) == 0 {
+		return nil
+	}
+	var session func(context.Context) (*sql.Conn, func(), error)
+	switch {
+	case w.srcType == "oscar":
+		session = w.oscarSession
+	case source.IsPGFamily(w.srcType):
+		session = w.pgSession
+	}
+	var executor sqlExecutor = w.db
+	if session != nil {
+		conn, restore, err := session(ctx)
 		if err != nil {
 			return err
 		}
 		defer restore()
-		for _, s := range stmts {
-			if _, err = execObserved(ctx, conn, s.SQL); err != nil {
-				return fmt.Errorf("执行 MySQL DDL [%s]: %w", s.SQL, err)
-			}
-		}
-		return nil
+		executor = conn
 	}
 	for _, s := range stmts {
-		if _, err := execObserved(ctx, w.db, s.SQL); err != nil {
+		if _, err := execObserved(ctx, executor, s.SQL); err != nil {
 			return fmt.Errorf("执行 MySQL DDL [%s]: %w", s.SQL, err)
 		}
 	}

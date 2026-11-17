@@ -6,7 +6,7 @@
         <a-tag v-if="srcDbType" :color="getDbTypeColor(srcDbType)" size="small">{{ getDbTypeLabel(srcDbType) }}</a-tag>
         <strong :title="srcConn?.name || '连接已删除'">{{ srcConn?.name || '连接已删除' }}</strong>
       </div>
-      <ConnectionLines :connection="srcConn" :database="srcDatabase" />
+      <ConnectionLines :connection="srcConn" :database="srcDatabase" :schema="srcSchema" />
     </div>
 
     <div class="route-direction" aria-hidden="true">
@@ -48,6 +48,7 @@ defineProps<{
   srcConn?: MigrationConnectionSnapshot | null
   dstConn?: MigrationConnectionSnapshot | null
   srcDatabase?: string
+  srcSchema?: string
   dstDatabase?: string
   dstSchema?: string
   modeLabel: string

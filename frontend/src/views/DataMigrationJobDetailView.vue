@@ -43,6 +43,7 @@
         :src-conn="job.src_conn"
         :dst-conn="job.dst_conn"
         :src-database="job.src_conn?.database"
+        :src-schema="job.src_db_type === 'oscar' ? job.source_schema : undefined"
         :dst-database="job.dst_conn?.database"
         :dst-schema="job.dst_schema"
         :mode-label="migrationModeText"

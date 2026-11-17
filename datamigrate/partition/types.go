@@ -22,6 +22,9 @@ type Options struct {
 	TargetSchema string
 	Name         func(string) string
 	ColumnName   func(string) string
+	// OscarTemporalDomains is observed source evidence, keyed by exact column
+	// name, of a complete temporal domain equivalent to a MySQL type.
+	OscarTemporalDomains map[string]string
 }
 
 type Mapping struct {

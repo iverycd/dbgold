@@ -93,6 +93,8 @@ func migrationSourceLocation(j *store.DataMigrationJob, c *store.Connection, ove
 		if j.SourceSchema == "" {
 			j.SourceSchema = "public"
 		}
+	} else if c.DBType == "oscar" {
+		j.SourceSchema = override
 	} else if c.DBType == "oracle" || c.DBType == "dameng" {
 		j.SourceSchema = c.Database
 		if override != "" {
@@ -110,7 +112,7 @@ func migrationSourceLocation(j *store.DataMigrationJob, c *store.Connection, ove
 	}
 }
 func sourceOverride(b *store.MigrationRepairBinding, typ string) string {
-	if source.IsPGFamily(typ) || typ == "oracle" || typ == "dameng" {
+	if source.IsPGFamily(typ) || typ == "oracle" || typ == "dameng" || typ == "oscar" {
 		return b.SourceSchema
 	}
 	return b.SourceDatabase
@@ -409,7 +411,7 @@ func UpdateMigrationRepairBinding(c *gin.Context) {
 		}
 		b.SourceSchema = req.SourceSchema
 	}
-	if src != nil && b.SourceSchema == "" && (source.IsPGFamily(src.DBType) || src.DBType == "oracle" || src.DBType == "dameng") {
+	if src != nil && b.SourceSchema == "" && (source.IsPGFamily(src.DBType) || src.DBType == "oracle" || src.DBType == "dameng" || src.DBType == "oscar") {
 		repairError(c, fmt.Errorf("历史任务缺少源Schema，请显式补齐原迁移范围"))
 		return
 	}
@@ -946,6 +948,9 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 	}
 	if a.Kind == "ddl" {
 		o.Status = a.Status
+		if o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
+			o.Error = a.Error
+		}
 		o.Verification = nil
 		o.ManualVerification = nil
 		a.VerificationJSON = ""
@@ -989,8 +994,12 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		return
 	}
 	if o.ManualTrigger != nil {
-		if j.DstDBType != "dameng" || !o.TrustedManualTrigger() {
+		if !manualTriggerMatchesTarget(o, j.DstDBType) {
 			repairError(c, fmt.Errorf("手工触发器计划与原目标不一致"))
+			return
+		}
+		if o.ManualTrigger.FunctionSQL != "" && !canEditManualTrigger(j, o) {
+			repairError(c, fmt.Errorf("请核对目标触发器状态，仅确认未提交的修订可再次执行"))
 			return
 		}
 		if o.RequiresReview {
@@ -1093,7 +1102,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		}
 		defer w.Close()
 		if needsLinkSource || needsNativeFinalState {
-			r, err := buildSrcReader(src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
+			r, err := buildSrcReaderContext(ctx, src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
 			if err != nil {
 				finishRepair(a, o, fmt.Errorf("原生重试无法连接原始源库"))
 				return
@@ -1137,7 +1146,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		}
 		var functionNames []string
 		if viewCompatibility && src != nil {
-			r, err := buildSrcReader(src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
+			r, err := buildSrcReaderContext(ctx, src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
 			if err == nil {
 				functionNames = repairCompatibilityFunctionNames(ctx, r, j.JobID)
 				r.Close()

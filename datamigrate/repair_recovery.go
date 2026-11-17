@@ -39,6 +39,11 @@ func PreviewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 }
 func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, obj repair.Object, related []repair.Object, mapping map[string]string, ops recoveryOps) (repair.RecoveryPreview, error) {
 	p := repair.RecoveryPreview{ObjectID: obj.ID, SourceTable: obj.SourceTable, TargetTable: obj.Table, Warnings: []string{"补迁使用当前源数据；执行期间源表和目标表必须停止写入。"}, Related: []repair.Object{}}
+	if r.DBType() == "oscar" && w.DBType() == "mysql" {
+		if _, err := configureOscarMySQL(ctx, w); err != nil {
+			return p, err
+		}
+	}
 	if obj.Kind != "table" && obj.Kind != "data" {
 		return p, fmt.Errorf("仅表和数据对象可以接续数据")
 	}
@@ -152,6 +157,24 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
 	}
+	if r.DBType() == "oscar" && w.DBType() == "mysql" {
+		sequences, err := RecoverySequences(ctx, r, w, cfg, p)
+		if err != nil {
+			return p, err
+		}
+		for _, seq := range sequences {
+			var typ string
+			for _, col := range p.SourceColumns {
+				if p.ColumnMapping[col.Name] == seq.ColumnName {
+					typ = w.Dialect().MapType(col, "oscar", dialect.TypeOpt{})
+					break
+				}
+			}
+			if err = w.(oscarMySQLWriter).ValidateOscarMySQLAutoIncrement(ctx, seq, typ, true); err != nil {
+				return p, err
+			}
+		}
+	}
 	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
 		if err = preparePGOracleRecovery(ctx, r, w, &p, related); err != nil {
 			return p, err
@@ -227,12 +250,16 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			continue
 		}
 		candidate := regenerateRepairCandidate(w, cfg, obj, o, p.ColumnMapping)
-		if r.DBType() == "oracle" && w.DBType() == "mysql" && candidate.Comment != nil && candidate.Comment.ColumnName != "" {
+		if (r.DBType() == "oracle" || r.DBType() == "oscar") && w.DBType() == "mysql" && candidate.Comment != nil && candidate.Comment.ColumnName != "" {
 			planner, ok := w.(preparedCommentWriter)
 			if !ok {
 				return p, fmt.Errorf("目标 Writer 缺少 MySQL 注释准备和执行能力")
 			}
-			candidate, err = prepareOracleMySQLRecoveryComment(ctx, planner, o, candidate)
+			if r.DBType() == "oscar" {
+				candidate, err = prepareMySQLRecoveryComment(ctx, planner, o, candidate)
+			} else {
+				candidate, err = prepareOracleMySQLRecoveryComment(ctx, planner, o, candidate)
+			}
 			if err != nil {
 				return p, err
 			}
@@ -427,6 +454,10 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if p.PartitionPlan != nil {
 		if e = recoverPartitionRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
+			return finish(e)
+		}
+	} else if r.DBType() == "oscar" && w.DBType() == "mysql" {
+		if e = recoverOscarMySQLRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
 			return finish(e)
 		}
 	} else {

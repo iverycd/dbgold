@@ -21,7 +21,7 @@ func VerifyPartitionKeyColumns(ctx context.Context, w Writer, table string, plan
 		return nil
 	}
 	if len(plan.KeyColumns) == 0 {
-		if strings.Contains(plan.Rule, "mysql-innodb-key-bytes-to-native-list") || partitionConvertedKeyNeedsColumns(plan.Source, plan.Target) {
+		if strings.Contains(plan.Rule, "oscar-mysql-exact-key-domain") || strings.Contains(plan.Rule, "mysql-innodb-key-bytes-to-native-list") || partitionConvertedKeyNeedsColumns(plan.Source, plan.Target) {
 			return fmt.Errorf("跨库 KEY 冻结计划缺少完整目标列域快照，请重新创建迁移任务")
 		}
 		return nil
@@ -31,6 +31,56 @@ func VerifyPartitionKeyColumns(ctx context.Context, w Writer, table string, plan
 		return fmt.Errorf("目标缺少 KEY 表达式输入列域的原生核验能力，禁止写入")
 	}
 	return verifier.VerifyPartitionKeyColumns(ctx, table, plan)
+}
+
+func (w *MySQLWriter) VerifyPartitionKeyColumns(ctx context.Context, table string, plan *partition.Plan) error {
+	if plan == nil || len(plan.KeyColumns) == 0 {
+		return nil
+	}
+	if !strings.Contains(plan.Rule, "oscar-mysql-exact-key-domain") || plan.Target == nil || w.db == nil {
+		return fmt.Errorf("缺少可核验的神通到 MySQL 分区列域计划")
+	}
+	schema := w.schema
+	if schema == "" && len(plan.Target.Partitions) > 0 {
+		schema = plan.Target.Partitions[0].Schema
+	}
+	if schema == "" || table == "" {
+		return fmt.Errorf("MySQL 分区列域核验缺少数据库或表名")
+	}
+	for _, key := range plan.KeyColumns {
+		rows, err := w.db.QueryContext(ctx, `SELECT DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,DATETIME_PRECISION,EXTRA
+FROM INFORMATION_SCHEMA.COLUMNS WHERE
+(CASE WHEN @@lower_case_table_names=0 THEN BINARY TABLE_SCHEMA=BINARY ? AND BINARY TABLE_NAME=BINARY ?
+ ELSE BINARY LOWER(TABLE_SCHEMA)=BINARY LOWER(?) AND BINARY LOWER(TABLE_NAME)=BINARY LOWER(?) END)
+AND BINARY COLUMN_NAME=BINARY ?`, schema, table, schema, table, key.Column)
+		if err != nil {
+			return err
+		}
+		var dataType, columnType, nullable, extra string
+		var precision sql.NullInt64
+		if rows.Next() {
+			err = rows.Scan(&dataType, &columnType, &nullable, &precision, &extra)
+			if err == nil && rows.Next() {
+				err = fmt.Errorf("目标分区键 %s 的列身份不唯一", key.Column)
+			}
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+		typ := strings.ToLower(dataType)
+		if typ == "datetime" && precision.Valid && precision.Int64 > 0 {
+			typ = fmt.Sprintf("datetime(%d)", precision.Int64)
+		}
+		columnType, extra = strings.ToLower(columnType), strings.ToLower(extra)
+		if typ != strings.TrimSuffix(key.DataType, "(0)") || nullable != "NO" || key.Nullable || strings.Contains(columnType, "unsigned") || strings.Contains(extra, "virtual generated") || strings.Contains(extra, "stored generated") {
+			return fmt.Errorf("目标表 %s 分区键 %s 的实际类型 %s 或可空性偏离冻结值域 %s", table, key.Column, columnType, key.DataType)
+		}
+	}
+	return nil
 }
 
 func partitionConvertedKeyNeedsColumns(src, dst *source.PartitionSpec) bool {

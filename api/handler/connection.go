@@ -266,6 +266,10 @@ func ListConnectionDatabases(c *gin.Context) {
 		listDaMengSourceSchemas(c, conn)
 		return
 	}
+	if conn.DBType == "oscar" {
+		listOscarSchemas(c, conn)
+		return
+	}
 	var reader source.Reader
 	switch conn.DBType {
 	case "mysql":
@@ -328,33 +332,7 @@ func ListConnectionSchemas(c *gin.Context) {
 	}
 
 	if conn.DBType == "oscar" {
-		d, err := driver.NewDriver("oscar")
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		defer d.Close()
-		if err := d.Connect(c.Request.Context(), driver.ConnectOptions{
-			DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
-		}); err != nil {
-			c.Error(err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		lister, ok := d.(interface {
-			ListSchemas(context.Context) ([]string, error)
-		})
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Oscar 驱动不支持列出 schema"})
-			return
-		}
-		schemas, err := lister.ListSchemas(c.Request.Context())
-		if err != nil {
-			c.Error(err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, schemas)
+		listOscarSchemas(c, conn)
 		return
 	}
 
@@ -406,6 +384,37 @@ func ListConnectionSchemas(c *gin.Context) {
 			continue
 		}
 		schemas = append(schemas, s)
+	}
+	c.JSON(http.StatusOK, schemas)
+}
+
+func listOscarSchemas(c *gin.Context, conn *store.Connection) {
+	d, err := driver.NewDriver("oscar")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer d.Close()
+	ctx := c.Request.Context()
+	if err := d.Connect(ctx, driver.ConnectOptions{
+		DSN: buildDSN(conn), Username: conn.Username, Password: conn.Password,
+	}); err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	lister, ok := d.(interface {
+		ListSchemas(context.Context) ([]string, error)
+	})
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Oscar 驱动不支持列出 schema"})
+		return
+	}
+	schemas, err := lister.ListSchemas(ctx)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
 	}
 	c.JSON(http.StatusOK, schemas)
 }

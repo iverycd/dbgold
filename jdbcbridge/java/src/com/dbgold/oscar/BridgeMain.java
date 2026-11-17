@@ -54,7 +54,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * framed protocol messages; diagnostics go to standard error.
  */
 public final class BridgeMain {
-    private static final int VERSION = 2;
+    private static final int VERSION = 3;
     private static final int RESPONSE = 0x80;
     private static final int MAX_FRAME = 64 * 1024 * 1024;
 
@@ -78,6 +78,9 @@ public final class BridgeMain {
     private static final int LOB_BEGIN = 18;
     private static final int LOB_CHUNK = 19;
     private static final int LOB_END = 20;
+    private static final int BOUND_CURSOR_OPEN = 21;
+    private static final int MIGRATION_COLUMNS = 22;
+    private static final int MIGRATION_CURSOR_FETCH = 23;
 
     private static final int NULL = 0;
     private static final int BOOL = 1;
@@ -219,10 +222,19 @@ public final class BridgeMain {
                     describeTable(requestId, body.readLong(), readString(body), readString(body));
                     return;
                 case CURSOR_OPEN:
-                    openCursor(requestId, body.readLong(), readString(body));
+                    openCursor(requestId, body.readLong(), readString(body), null);
+                    return;
+                case BOUND_CURSOR_OPEN:
+                    openBoundCursor(requestId, body);
+                    return;
+                case MIGRATION_COLUMNS:
+                    migrationColumns(requestId, body.readLong(), readString(body), readString(body));
                     return;
                 case CURSOR_FETCH:
                     fetchCursor(requestId, body.readLong(), body.readInt(), body.readInt());
+                    return;
+                case MIGRATION_CURSOR_FETCH:
+                    fetchMigrationCursor(requestId, body.readLong(), body.readInt(), body.readInt());
                     return;
                 case CURSOR_CLOSE:
                     closeCursor(body.readLong());
@@ -381,17 +393,79 @@ public final class BridgeMain {
         }});
     }
 
-    private void openCursor(final long requestId, long sessionId, String sql) throws Exception {
+    private void migrationColumns(long requestId, long sessionId, String schema, String table) throws Exception {
+        Session s = session(sessionId);
+        PooledConnection holder = s.pool.acquire();
+        final ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(payload);
+        int count = 0;
+        try {
+            DatabaseMetaData metadata = holder.connection.getMetaData();
+            try (ResultSet rows = metadata.getColumns(null, metadataPattern(metadata, schema), metadataPattern(metadata, table), null)) {
+                while (rows.next()) {
+                    if (!schema.equals(rows.getString("TABLE_SCHEM")) || !table.equals(rows.getString("TABLE_NAME"))) continue;
+                    if (++count > 65536) throw new SQLException("Oscar migration column count exceeds bridge limit");
+                    for (String field : new String[]{"COLUMN_NAME", "TYPE_NAME", "IS_AUTOINCREMENT", "IS_GENERATEDCOLUMN", "REMARKS"}) {
+                        String value = rows.getString(field);
+                        writeValidationText(out, value == null ? "" : value);
+                    }
+                    out.writeLong(rows.getLong("COLUMN_SIZE"));
+                    long scale = rows.getLong("DECIMAL_DIGITS");
+                    out.writeLong(rows.wasNull() ? -1 : scale);
+                    out.writeLong(rows.getLong("CHAR_OCTET_LENGTH"));
+                    out.writeLong(rows.getLong("ORDINAL_POSITION"));
+                    out.writeInt(rows.getInt("DATA_TYPE"));
+                    int nullable = rows.getInt("NULLABLE");
+                    if (rows.wasNull() || nullable == DatabaseMetaData.columnNullableUnknown) {
+                        throw new SQLException("Oscar migration column nullability is unknown");
+                    }
+                    out.writeBoolean(nullable == DatabaseMetaData.columnNullable);
+                    String defaultValue = rows.getString("COLUMN_DEF");
+                    out.writeBoolean(defaultValue != null);
+                    if (defaultValue != null) writeValidationText(out, defaultValue);
+                    if (payload.size() > MAX_FRAME - 1024) throw new SQLException("Oscar migration metadata exceeds bridge limit");
+                }
+            }
+        } finally {
+            s.pool.release(holder);
+        }
+        if (count == 0) throw new SQLException("Oscar table has no visible migration columns");
+        final int columns = count;
+        writeSuccess(requestId, new BodyWriter() {
+            public void write(DataOutputStream response) throws IOException {
+                response.writeInt(columns);
+                payload.writeTo(response);
+            }
+        });
+    }
+
+    private void openBoundCursor(long requestId, DataInputStream body) throws Exception {
+        long sessionId = body.readLong();
+        String sql = readString(body);
+        int count = body.readInt();
+        if (count < 0 || count > 256) throw new SQLException("too many Oscar cursor parameters");
+        String[] args = new String[count];
+        for (int i = 0; i < count; i++) args[i] = readString(body);
+        openCursor(requestId, sessionId, sql, args);
+    }
+
+    private void openCursor(final long requestId, long sessionId, String sql, String[] args) throws Exception {
         Session s = session(sessionId);
         PooledConnection holder = s.pool.acquire();
         Statement statement = null;
         ResultSet rows = null;
         Cursor owned = null;
         try {
-            statement = holder.connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+            if (args == null) {
+                statement = holder.connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+            } else {
+                PreparedStatement prepared = holder.connection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+                statement = prepared;
+                for (int i = 0; i < args.length; i++) prepared.setString(i + 1, args[i]);
+            }
             statement.setFetchSize(128);
             activeStatements.put(requestId, statement);
-            rows = statement.executeQuery(sql);
+            rows = args == null ? statement.executeQuery(sql) : ((PreparedStatement) statement).executeQuery();
             if (Thread.currentThread().isInterrupted()) throw new SQLException("validation cursor cancelled");
             final long id = nextCursor.getAndIncrement();
             Cursor cursor = new Cursor(id, requestId, s, holder, statement, rows);
@@ -410,7 +484,7 @@ public final class BridgeMain {
         if (input == null) return null;
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream(); byte[] b = new byte[8192]; int n;
-            while ((n=input.read(b)) >= 0) { if (out.size() + n > limit) throw new SQLException("validation binary value exceeds cursor byte limit"); out.write(b,0,n); }
+            while ((n=input.read(b)) >= 0) { if (out.size() + n > limit) throw new SQLException("Oscar JDBC binary value exceeds the " + limit + " byte cursor row budget"); out.write(b,0,n); }
             return out.toByteArray();
         } finally { input.close(); }
     }
@@ -425,11 +499,27 @@ public final class BridgeMain {
         if (input == null) return null;
         try {
             StringBuilder out = new StringBuilder(); char[] b = new char[4096]; int n;
-            while ((n=input.read(b)) >= 0) { if (out.length() + n > limit) throw new SQLException("validation text value exceeds cursor byte limit"); out.append(b,0,n); }
-            String value=out.toString(); if(validationUTF8(value).length > limit) throw new SQLException("validation text value exceeds cursor byte limit"); return value;
+            while ((n=input.read(b)) >= 0) { if (out.length() + n > limit) throw new SQLException("Oscar JDBC text value exceeds the " + limit + " byte cursor row budget"); out.append(b,0,n); }
+            String value=out.toString(); if(validationUTF8(value).length > limit) throw new SQLException("Oscar JDBC text value exceeds the " + limit + " byte cursor row budget"); return value;
         } finally { input.close(); }
     }
     private static void writeCursorValue(DataOutputStream out, ResultSet rows, int column, int type, int limit) throws Exception {
+        if (type == Types.BINARY || type == Types.VARBINARY || type == Types.LONGVARBINARY || type == Types.BLOB) {
+            byte[] value = readBoundedBytes(rows.getBinaryStream(column), limit);
+            if (value == null) { out.writeByte(NULL); return; }
+            out.writeByte(BYTES);
+            out.writeInt(value.length);
+            out.write(value);
+            return;
+        }
+        if (type == Types.CHAR || type == Types.NCHAR || type == Types.VARCHAR || type == Types.NVARCHAR
+                || type == Types.LONGVARCHAR || type == Types.LONGNVARCHAR || type == Types.CLOB || type == Types.NCLOB) {
+            String value = readBoundedText(rows.getCharacterStream(column), limit);
+            if (value == null) { out.writeByte(NULL); return; }
+            out.writeByte(STRING);
+            writeValidationText(out, value);
+            return;
+        }
         Object probe = rows.getObject(column);
         if (probe == null) { out.writeByte(NULL); return; }
         switch(type) {
@@ -438,19 +528,23 @@ public final class BridgeMain {
             case Types.NUMERIC: case Types.DECIMAL: out.writeByte(DECIMAL); writeString(out,rows.getBigDecimal(column).toPlainString()); return;
             case Types.REAL: out.writeByte(FLOAT64); out.writeDouble((double)rows.getFloat(column)); return;
             case Types.FLOAT: case Types.DOUBLE: out.writeByte(FLOAT64); out.writeDouble(rows.getDouble(column)); return;
-            case Types.BINARY: case Types.VARBINARY: case Types.LONGVARBINARY: case Types.BLOB: {
-                byte[] value = readBoundedBytes(rows.getBinaryStream(column),limit); out.writeByte(BYTES); out.writeInt(value.length); out.write(value); return;
-            }
-            case Types.CHAR: case Types.NCHAR: case Types.VARCHAR: case Types.NVARCHAR: case Types.LONGVARCHAR: case Types.LONGNVARCHAR: case Types.CLOB: case Types.NCLOB: {
-                out.writeByte(STRING); writeValidationText(out,readBoundedText(rows.getCharacterStream(column),limit)); return;
-            }
             case Types.DATE: case Types.TIME: case Types.TIMESTAMP: case 2013: case 2014:
                 out.writeByte(STRING); writeValidationText(out,rows.getString(column)); return;
             default: throw new SQLException("JDBC type " + type + " has no lossless validation serializer");
         }
     }
     private void fetchCursor(final long requestId, long id, int maxRows, int maxBytes) throws Exception {
-        if (maxRows <= 0 || maxRows > 10000 || maxBytes <= 0 || maxBytes > MAX_FRAME-1024) throw new IOException("invalid cursor fetch limit");
+        fetchCursorWithRowLimit(requestId, id, maxRows, maxBytes, maxBytes);
+    }
+
+    private void fetchMigrationCursor(long requestId, long id, int maxRows, int maxBytes) throws Exception {
+        int heapBudget = (int)Math.min(MAX_FRAME - 1024, Runtime.getRuntime().maxMemory() / 8);
+        int batchBudget = Math.min(maxBytes, heapBudget);
+        fetchCursorWithRowLimit(requestId, id, maxRows, batchBudget, heapBudget);
+    }
+
+    private void fetchCursorWithRowLimit(long requestId, long id, int maxRows, int maxBytes, int rowBudget) throws Exception {
+        if (maxRows <= 0 || maxRows > 10000 || maxBytes <= 0 || maxBytes > rowBudget || rowBudget > MAX_FRAME-1024) throw new IOException("invalid cursor fetch limit");
         Cursor c = cursors.get(id);
         if (c == null) throw new SQLException("validation cursor is closed");
         synchronized(c) {
@@ -464,17 +558,36 @@ public final class BridgeMain {
                         if (!c.rows.next()) { c.done=true; break; }
                         ByteArrayOutputStream bytes=new ByteArrayOutputStream(); DataOutputStream out=new DataOutputStream(bytes);
                         int count=c.metadata.getColumnCount(); out.writeInt(count);
-                        for(int i=1;i<=count;i++) { writeCursorValue(out,c.rows,i,c.metadata.getColumnType(i),maxBytes); if(bytes.size()+5>maxBytes) throw new SQLException("validation row exceeds cursor byte limit"); }
+                        for (int i = 1; i <= count; i++) {
+                            writeCursorValue(out, c.rows, i, c.metadata.getColumnType(i), rowBudget);
+                            if (bytes.size() + 5 > rowBudget) throw new SQLException("Oscar JDBC row exceeds the " + rowBudget + " byte cursor row budget");
+                        }
                         row=bytes.toByteArray();
                     }
-                    if(size+row.length>maxBytes) { c.pending=row; break; }
-                    result.add(row); size+=row.length;
+                    if (size + row.length > maxBytes && !result.isEmpty()) { c.pending = row; break; }
+                    result.add(row);
+                    size += row.length;
+                    if (size >= maxBytes) break;
                 }
                 final boolean done=c.done;
                 if(done) closeCursor(id);
-                writeSuccess(requestId,new BodyWriter(){public void write(DataOutputStream out)throws IOException{out.writeBoolean(done);out.writeInt(result.size());for(byte[] row:result)out.write(row);}});
+                writeCursorResponse(requestId, done, result, size);
             } catch(Throwable error) { closeCursor(id); throw error; }
             finally { activeStatements.remove(requestId); activeCursors.remove(requestId); }
+        }
+    }
+
+    private void writeCursorResponse(long requestId, boolean done, List<byte[]> rows, int size) throws IOException {
+        synchronized (outputLock) {
+            output.writeInt(11 + size);
+            output.writeByte(VERSION);
+            output.writeByte(RESPONSE);
+            output.writeLong(requestId);
+            output.writeByte(0);
+            output.writeBoolean(done);
+            output.writeInt(rows.size());
+            for (byte[] row : rows) output.write(row);
+            output.flush();
         }
     }
     private void closeCursor(long id) {

@@ -35,6 +35,13 @@ func resolveChangeOwner(targetType string, requested *bool) bool {
 	}
 }
 
+func resolveOwnerAndDistribution(src, dst string, changeOwner, distributed bool) (bool, bool) {
+	if src == "oscar" && dst == "mysql" {
+		return false, false
+	}
+	return changeOwner, distributed
+}
+
 // Native DM8 migration preserves the complete schema rather than table subsets.
 func normalizeDamengNativeRequest(req *startDataMigrationRequest) error {
 	if req.MigrateMode != "all" || strings.TrimSpace(req.TableFilter) != "" || len(req.ExcludedObjects) != 0 || (req.MigrateContent != "" && req.MigrateContent != "both") {

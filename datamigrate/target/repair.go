@@ -188,6 +188,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 	}
 	if obj.ManualTrigger != nil {
+		if obj.ManualTrigger.FunctionSQL != "" {
+			return executePGManualTriggerRepair(ctx, w, obj, units, onStep)
+		}
 		return executeManualTriggerRepair(ctx, w, obj, units, onStep)
 	}
 	if native, ok := w.(*DaMengNativeWriter); ok {
@@ -223,8 +226,23 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			return out, err
 		}
 	}
-	if mysql, ok := w.(*MySQLWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil && obj.Sequence.OracleMySQL != nil {
-		return mysql.executeOracleMySQLAutoRepair(ctx, obj, out, onStep)
+	if mysql, ok := w.(*MySQLWriter); ok && obj.Index != nil && !repairDefinitionEdited(obj) {
+		if mysql.srcType == "oscar" && mysql.oscarMySQLVersion == "" {
+			if err := mysql.ConfigureOscarMigration(ctx); err != nil {
+				return out, err
+			}
+		}
+		if err := mysql.validateOscarIndex(*obj.Index); err != nil {
+			return out, err
+		}
+	}
+	if mysql, ok := w.(*MySQLWriter); ok && repairKind(obj.Kind) == "sequence" && obj.Sequence != nil {
+		if mysql.srcType == "oscar" {
+			return mysql.ExecuteOscarMySQLAutoRepair(ctx, obj, out, onStep)
+		}
+		if obj.Sequence.OracleMySQL != nil {
+			return mysql.executeOracleMySQLAutoRepair(ctx, obj, out, onStep)
+		}
 	}
 	if obj.PartitionPlan != nil && len(obj.PartitionPlan.KeyColumns) == 0 {
 		// Legacy cross-product KEY plans lack the domain proof needed to make
@@ -286,8 +304,20 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	} else {
 		var conn *sql.Conn
 		var close func()
+		mysqlOscar := false
 		if sw, ok := w.(*SQLServerWriter); ok {
 			conn, close, err = sw.session(ctx)
+		} else if mw, ok := w.(*MySQLWriter); ok && mw.srcType == "oscar" {
+			mysqlOscar = true
+			var restore func()
+			conn, restore, err = mw.oscarSession(ctx)
+			if err != nil {
+				return out, err
+			}
+			close = func() {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				restore()
+			}
 		} else if mw, ok := w.(*MySQLWriter); ok && source.IsPGFamily(mw.srcType) {
 			conn, close, err = mw.pgSession(ctx)
 		} else {
@@ -326,7 +356,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		case "mysql":
 			// pgSession restores sql_mode/time_zone and closes its connection. Mark
 			// it non-reusable first so USE cannot leak its database to another job.
-			defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }()
+			if !mysqlOscar {
+				defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }()
+			}
 			sessionSQL = "USE " + w.Dialect().QuoteIdent(schema)
 		}
 		if sessionSQL != "" {
@@ -336,7 +368,7 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 		// Generated MySQL comment candidates use standard doubled quotes while
 		// preserving literal backslashes from the complete SHOW CREATE definition.
-		if a.family == "mysql" && repairKind(obj.Kind) == "comment" {
+		if a.family == "mysql" && repairKind(obj.Kind) == "comment" && !mysqlOscar {
 			if _, err = conn.ExecContext(ctx, "SET SESSION sql_mode=CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')"); err != nil {
 				return out, err
 			}

@@ -47,7 +47,7 @@ type submitTicketRequest struct {
 	CaptchaID   string `json:"captcha_id" binding:"required"`
 	CaptchaCode string `json:"captcha_code" binding:"required"`
 
-	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	SrcHost     string `json:"src_host"`
 	SrcPort     int    `json:"src_port" binding:"omitempty,min=1,max=65535"`
 	SrcDatabase string `json:"src_database"`
@@ -78,7 +78,7 @@ type updateTicketInfoRequest struct {
 	Applicant string `json:"applicant"`
 	Remark    string `json:"remark"`
 
-	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase"`
+	SrcDBType   string `json:"src_db_type" binding:"required,oneof=mysql postgres oracle sqlserver gaussdb dameng seabox highgo vastbase gbase kingbase oscar"`
 	SrcHost     string `json:"src_host"`
 	SrcPort     int    `json:"src_port" binding:"omitempty,min=1,max=65535"`
 	SrcDatabase string `json:"src_database"`

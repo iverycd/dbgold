@@ -21,7 +21,7 @@ function loadSource(source, require, filename) {
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
-  const context = { exports: {}, require, AbortController, FormData, Blob }
+  const context = { exports: {}, require, AbortController, FormData, Blob, window: { addEventListener() {} } }
   vm.runInNewContext(outputText, context, { filename })
   return context.exports
 }
@@ -44,19 +44,20 @@ test('only PG-compatible targets default owner on without changing other options
 
 // Run the real form initializers, watchers, schema loaders and submit handlers.
 // Stub only external services and lifecycle hooks; no browser or database needed.
-function loadMigrationView(payloads) {
+function loadMigrationView(payloads, setup = {}) {
   const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vue', import.meta.url), 'utf8'))
   const submit = async payload => {
     payloads.push(payload)
     return { data: { job_id: 'test-job', results: [] } }
   }
   return loadSource(`${descriptor.scriptSetup.content}
-    export { connections, dataMigrate, viewMigrate, objMigrate,
+    export { connections, srcConnections, dataMigrate, viewMigrate, objMigrate,
       startDataMigration, handleMigrateViews, startObjectMigration,
+      loadSrcDatabases, vmLoadSrcDatabases, omLoadSrcDatabases,
       loadDstSchemas, vmLoadDstSchemas, omLoadDstSchemas };`, id => {
     switch (id) {
-      case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
-      case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
+      case 'vue': return { ...Vue, provide() {}, onMounted(callback) { setup.onMounted?.(callback) }, onUnmounted() {} }
+      case 'vue-router': return { useRoute: () => ({ query: setup.query ?? {} }), onBeforeRouteLeave() {} }
       case '@arco-design/web-vue': return {
         Message: { error: message => assert.fail(message), success() {}, warning() {} }, Modal: {},
       }
@@ -66,15 +67,75 @@ function loadMigrationView(payloads) {
       case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/clipboard': return { copyText: () => assert.fail('Unexpected clipboard call') }
       case '@/api/schema': return { downloadRoutines: () => assert.fail('Unexpected routine export') }
-      case '@/api/connections': return { listConnectionSchemas: async () => ({ data: ['schema_a', 'schema_b'] }) }
+      case '@/api/connections': return {
+        listConnections: async () => ({ data: setup.connections ?? [] }),
+        listConnectionSchemas: async () => ({ data: ['schema_a', 'schema_b'] }),
+        listConnectionDatabases: async id => {
+          setup.schemaRequests?.push(id)
+          return { data: ['MixedSchema', 'MIXEDSCHEMA'] }
+        },
+      }
       case '@/api/migration': return {
-        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit, preflightDataMigration: async () => partitionPreflightResponse(),
+        getSupportedPairs: async () => ({ data: [{ source: 'oscar', target: 'mysql' }] }),
+        startDataMigration: submit, migrateViews: submit, startObjectMigration: submit,
+        preflightDataMigration: async payload => {
+          setup.preflightRequests?.push(payload)
+          return partitionPreflightResponse()
+        },
         createDataMigrateEventSource: () => ({ addEventListener() {}, close() {} }),
       }
       default: throw new Error(`Unexpected import: ${id}`)
     }
   }, 'MigrationView.vue')
 }
+
+test('Oscar uses an explicit source schema for MySQL data, view and object migrations', async () => {
+  const scope = effectScope()
+  try {
+    const payloads = [], schemaRequests = [], preflightRequests = []
+    const connections = [
+      { id: 1, db_type: 'oscar', database: 'OSRDB' },
+      { id: 2, db_type: 'mysql', database: 'target_app' },
+    ]
+    let mount
+    const page = scope.run(() => loadMigrationView(payloads, {
+      connections, schemaRequests, preflightRequests, query: { src: '1', dst: '2', srcdb: 'OSRDB' },
+      onMounted: callback => { mount = callback },
+    }))
+    await mount()
+    assert.equal(page.srcConnections.value.some(conn => conn.db_type === 'oscar'), true)
+    assert.equal(page.dataMigrate.srcDatabase, '')
+    assert.equal(page.dataMigrate.srcDatabases.includes('OSRDB'), false)
+    assert.equal(page.dataMigrate.unsupportedMsg, '')
+    for (const [state, loadSource, loadTarget, submit] of [
+      [page.dataMigrate, page.loadSrcDatabases, page.loadDstSchemas, page.startDataMigration],
+      [page.viewMigrate, page.vmLoadSrcDatabases, page.vmLoadDstSchemas, page.handleMigrateViews],
+      [page.objMigrate, page.omLoadSrcDatabases, page.omLoadDstSchemas, page.startObjectMigration],
+    ]) {
+      state.srcConnId = 1
+      state.dstConnId = 2
+      await loadSource(1)
+      await loadTarget(2)
+      assert.deepEqual(Array.from(state.srcDatabases), ['MixedSchema', 'MIXEDSCHEMA'])
+      state.srcDatabase = 'MixedSchema'
+      state.changeOwner = true
+      if ('distributed' in state) state.distributed = true
+      if ('selected' in state) state.selected = ['sample']
+      if ('objects' in state) state.objects = ['primary_keys']
+      await submit()
+      assert.equal(payloads.at(-1).src_database, 'MixedSchema')
+      assert.equal(payloads.at(-1).target_schema, 'target_app')
+      assert.equal(payloads.at(-1).change_owner, false)
+      if ('distributed' in state) assert.equal(payloads.at(-1).distributed, false)
+    }
+    assert.equal(payloads.length, 3)
+    assert.deepEqual(schemaRequests, [1, 1, 1, 1])
+    assert.equal(preflightRequests.length, 1)
+    assert.equal(preflightRequests[0].src_database, 'MixedSchema')
+  } finally {
+    scope.stop()
+  }
+})
 
 test('all three forms apply target defaults and preserve manual choices through schema selection and submission', async () => {
   const scope = effectScope()

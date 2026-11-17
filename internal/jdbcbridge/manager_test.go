@@ -240,7 +240,7 @@ func TestOscarProtocolMismatchExplainsJarUpgrade(t *testing.T) {
 	_, _ = frame.Write(e.Bytes())
 	m.readLoop(1, bytes.NewReader(frame.Bytes()))
 	err := (<-ch).err
-	require.ErrorContains(t, err, "Go v2, JAR v1")
+	require.ErrorContains(t, err, "Go v"+strconv.Itoa(int(protocolVersion))+", JAR v1")
 	require.ErrorContains(t, err, "dbgold-oscar-bridge.jar")
 	require.ErrorContains(t, err, "同时更新")
 }

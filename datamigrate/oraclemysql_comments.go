@@ -43,7 +43,7 @@ func (m *Migrator) targetComment(cm source.CommentInfo) source.CommentInfo {
 }
 
 func (m *Migrator) prepareComment(ctx context.Context, cm source.CommentInfo) ([]dialect.Statement, error) {
-	if m.isOracleMySQLComments() {
+	if m.isOracleMySQLComments() || m.isOscarMySQL() {
 		w, ok := m.writer.(preparedCommentWriter)
 		if !ok {
 			return nil, fmt.Errorf("目标 Writer 缺少 MySQL 注释准备和执行能力")
@@ -69,7 +69,7 @@ func (m *Migrator) repairPreparedComment(ctx context.Context, cm source.CommentI
 		if preparationErr != nil {
 			return preparationErr
 		}
-		if m.isOracleMySQLComments() {
+		if m.isOracleMySQLComments() || m.isOscarMySQL() {
 			return m.writer.(preparedCommentWriter).ExecuteCommentStatements(ctx, ss)
 		}
 		return m.writer.CreateComment(ctx, cm)
@@ -93,6 +93,11 @@ func (m *Migrator) recordOracleMySQLCommentTruncation(report *MigrationReport, o
 func prepareOracleMySQLRecoveryComment(ctx context.Context, w preparedCommentWriter, original, candidate repair.Object) (repair.Object, error) {
 	cm := limitMySQLColumnComment(*candidate.Comment)
 	candidate.Comment = &cm
+	return prepareMySQLRecoveryComment(ctx, w, original, candidate)
+}
+
+func prepareMySQLRecoveryComment(ctx context.Context, w preparedCommentWriter, original, candidate repair.Object) (repair.Object, error) {
+	cm := *candidate.Comment
 	custom := false
 	for _, unit := range original.Units {
 		custom = custom || strings.TrimSpace(unit.SQL) != strings.TrimSpace(unit.OriginalSQL)

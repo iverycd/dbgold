@@ -1,5 +1,5 @@
 import type { RepairAttempt, RepairBinding, RepairList, RepairObject, RepairRecord } from '@/api/migrationRepair'
-import { attemptRunning, canExecuteRepairDDL, cloneRepairExecutionUnits, unitCommitted } from '@/utils/migrationRepair'
+import { attemptRunning, canExecuteRepairDDL, cloneRepairExecutionUnits, isManualPGTrigger, unitCommitted } from '@/utils/migrationRepair'
 
 export type RepairBatchStatus = 'pending' | 'saving' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'stopped' | 'unknown'
 export interface RepairBatchItem {
@@ -31,6 +31,7 @@ export function batchIneligibleReason(object: RepairObject): string {
   if (object.diagnostic_only) return '仅供诊断的记录不可执行'
   if (unitCommitted(object.status)) return ['table', 'tables'].includes(object.kind) ? '表结构已执行成功，无需重复执行 DDL' : '对象已执行成功，无需再次执行'
   if (attemptRunning(object.status) || (object.units || []).some(unit => attemptRunning(unit.status))) return '对象正在执行'
+  if (isManualPGTrigger(object)) return '请在对象修复弹窗中提交手工触发器 SQL'
   if (!canExecuteRepairDDL(object)) return '缺少可执行的目标对象信息'
   const selected = cloneRepairExecutionUnits(object).filter(unit => unit.selected)
   if (!selected.length) return '没有已勾选的有效执行单元，请先编辑并保存草稿'

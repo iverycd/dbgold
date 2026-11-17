@@ -232,11 +232,11 @@
           </MigrationRepairPanel>
         </a-tab-pane>
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
-          <a-alert type="warning" style="margin-bottom: 12px">以下转换已记录；数据转换数量仅统计已提交的分页。</a-alert>
-          <a-table :data="report.warnings" :pagination="{ pageSize: 20 }" size="small">
+          <a-alert type="warning" style="margin-bottom: 12px">报告记录迁移告警及需要人工处理的对象。数据转换数量仅统计已提交的分页。</a-alert>
+          <a-table :data="report.warnings" :pagination="{ pageSize: 10 }" size="small">
             <template #columns>
-              <a-table-column title="表" data-index="table" />
-              <a-table-column title="列" data-index="column" />
+              <a-table-column title="表或 Schema" data-index="table" />
+              <a-table-column title="列或对象" data-index="column" />
               <a-table-column title="原因" data-index="reason" />
               <a-table-column title="数量" data-index="count" :width="100" />
             </template>

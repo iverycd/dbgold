@@ -16,6 +16,13 @@ func (m *Migrator) isOscar() bool {
 }
 
 func (m *Migrator) readViews(ctx context.Context) ([]source.ViewInfo, error) {
+	if m.isOscarMySQL() {
+		if !m.oscarMySQLViewsRead {
+			m.oscarMySQLViews, m.oscarMySQLViewsError = m.reader.GetViews(ctx)
+			m.oscarMySQLViewsRead = true
+		}
+		return m.oscarMySQLViews, m.oscarMySQLViewsError
+	}
 	if m.isOscar() || m.isOracleDameng() || m.isSQLServerPG() {
 		if reader, ok := m.reader.(interface {
 			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)

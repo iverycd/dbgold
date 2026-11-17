@@ -101,6 +101,13 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 	p := &PartitionPreflight{Ready: true, SourceType: partitionSourceProduct(m.reader), TargetType: targetType, Issues: []CompatibilityIssue{}, Tables: []*PartitionTableResult{}}
 	s := &partitionRunState{preflight: p, roots: map[string]string{}, tables: map[string]*PartitionTableResult{}, blocked: map[string]bool{}}
 	m.partitionState = s
+	if m.isOscarMySQL() {
+		if _, err := configureOscarMySQL(ctx, m.writer); err != nil {
+			p.Ready, p.FatalError = false, err.Error()
+			m.stopMigrationTask(ctx, err)
+			return p
+		}
+	}
 	if !enabled {
 		p.CanStart = true
 		return p
@@ -154,6 +161,9 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 			m.blockPartitionTable(entry, fmt.Errorf("%s 是物理分区，请选择逻辑根表 %s", name, root))
 		}
 	}
+	if m.isOscarMySQL() {
+		m.preflightMigrationNames(selected)
+	}
 	for _, table := range selected {
 		if err := ctx.Err(); err != nil {
 			return fatal(err)
@@ -164,8 +174,18 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		entry := &PartitionTableResult{SourceTable: table, TargetTable: m.objName(table), Status: "ordinary"}
 		s.tables[table] = entry
 		p.Tables = append(p.Tables, entry)
+		if m.isOscarMySQL() {
+			if e := m.migrationTableError(table); e != nil {
+				m.blockPartitionTable(entry, e)
+				continue
+			}
+		}
 		spec, e := r.PartitionMetadata(ctx, table)
 		if e != nil {
+			if m.isOscarMySQL() && isMigrationTaskError(e) {
+				m.stopMigrationTask(ctx, e)
+				return fatal(e)
+			}
 			m.blockPartitionTable(entry, fmt.Errorf("分区元数据读取失败: %w", e))
 			continue
 		}
@@ -276,7 +296,16 @@ func (m *Migrator) compilePartitionTable(ctx context.Context, t *PartitionTableR
 	if err != nil {
 		return err
 	}
-	t.Plan, err = partition.Compile(info, base, m.partitionState.profile, partition.Options{SourceType: partitionSourceProduct(m.reader), TargetType: m.writer.DBType(), TargetSchema: m.cfg.TargetSchema, Name: m.objName, ColumnName: func(c string) string { return m.targetColumn(t.SourceTable, c) }})
+	opt := partition.Options{SourceType: partitionSourceProduct(m.reader), TargetType: m.writer.DBType(), TargetSchema: m.cfg.TargetSchema, Name: m.objName, ColumnName: func(c string) string { return m.targetColumn(t.SourceTable, c) }}
+	if r, ok := m.reader.(interface {
+		OscarPartitionTemporalDomains(context.Context, string) (map[string]string, error)
+	}); m.isOscarMySQL() && ok {
+		opt.OscarTemporalDomains, err = r.OscarPartitionTemporalDomains(ctx, t.SourceTable)
+		if err != nil {
+			return err
+		}
+	}
+	t.Plan, err = partition.Compile(info, base, m.partitionState.profile, opt)
 	if err != nil {
 		return err
 	}
@@ -540,6 +569,9 @@ func (m *Migrator) partitionStatements(table string, base []dialect.Statement) (
 			if s.blocked[table] {
 				return nil, fmt.Errorf("%s", t.Error)
 			}
+			if m.isOscarMySQL() {
+				return slices.Clone(t.Plan.Statements), nil
+			}
 			info, e := m.sourceTableDDLInfo(context.Background(), table)
 			if e != nil {
 				return nil, e
@@ -572,7 +604,7 @@ func (m *Migrator) recheckPartitionSource(ctx context.Context, table string) err
 			if err := verifyPartitionKeySourceChecks(ctx, m.reader, table, t.Plan); err != nil {
 				return err
 			}
-			if partitionNeedsColumnProof(t.Source) {
+			if partitionNeedsColumnProof(t.Source) || m.isOscarMySQL() {
 				// Interval and exact KEY expression proofs depend on the full
 				// key domain and nullability, beyond the partition catalog.
 				m.sourceDDLCache.mu.Lock()
@@ -613,18 +645,34 @@ func verifyPartitionKeySourceChecks(ctx context.Context, r source.Reader, table 
 	if plan == nil || len(plan.KeyColumns) == 0 {
 		return nil
 	}
+	oscar := strings.Contains(plan.Rule, "oscar-mysql-exact-key-domain")
+	if oscar {
+		reader, ok := r.(interface {
+			OscarPartitionHasForeignKeys(context.Context, string) (bool, error)
+		})
+		if !ok {
+			return fmt.Errorf("无法核验神通分区表的完整入站和出站外键")
+		}
+		hasFK, err := reader.OscarPartitionHasForeignKeys(ctx, table)
+		if err != nil {
+			return err
+		}
+		if hasFK {
+			return fmt.Errorf("MySQL 分区 InnoDB 无法保留该表的入站或出站外键")
+		}
+	}
 	reader, ok := partitionSourceReader(r).(interface {
 		PartitionHasChecks(context.Context, string) (bool, error)
 	})
 	if !ok {
-		return fmt.Errorf("跨库 KEY 缺少源 CHECK 约束完整性核验能力")
+		return fmt.Errorf("分区迁移缺少源 CHECK 约束完整性核验能力")
 	}
 	hasChecks, err := reader.PartitionHasChecks(ctx, table)
 	if err != nil {
-		return fmt.Errorf("读取跨库 KEY 源 CHECK 约束: %w", err)
+		return fmt.Errorf("读取源分区表 CHECK 约束: %w", err)
 	}
 	if hasChecks {
-		return fmt.Errorf("跨库 KEY 表含尚未完整等价迁移的 CHECK 约束，不能删除约束或扩大原值域")
+		return fmt.Errorf("源分区表含尚未完整等价迁移的 CHECK 约束")
 	}
 	return nil
 }
@@ -636,6 +684,7 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 		return false, err.Error()
 	}
 	if e := m.recheckPartitionSource(ctx, table); e != nil {
+		m.stopMigrationTask(ctx, e)
 		return false, e.Error()
 	}
 	inspector := m.writer.(target.PartitionInspector)
@@ -647,6 +696,7 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 		e = target.VerifyPartitionKeyColumns(ctx, m.writer, t.TargetTable, t.Plan)
 	}
 	if e != nil {
+		m.stopMigrationTask(ctx, e)
 		return false, fmt.Sprintf("写入前分区核对失败: %v", e)
 	}
 	batch := m.cfg.PageSize
@@ -665,6 +715,7 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 		return m.writer.CopyData(ctx, t.TargetTable, mapped, types, rows)
 	})
 	if e != nil {
+		m.stopMigrationTask(ctx, e)
 		return false, e.Error()
 	}
 	t.dataExecuted = true

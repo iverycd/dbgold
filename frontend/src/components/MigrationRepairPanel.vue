@@ -171,14 +171,16 @@
     >
       <template v-if="editing">
         <p>目标数据库：{{ getDbTypeLabel(job?.dst_db_type || '') }} · Schema：{{ editing.object.schema || '—' }} · 对象：{{ editing.object.target_name }}<span v-if="editing.object.table"> · 所属表：{{ editing.object.table }}</span></p>
-        <a-alert v-if="canEditRepairDDL(editing.object) && editing.object.kind === 'trigger'" type="info">使用达梦语法编辑此触发器的完整 CREATE 语句；点击“保存并执行”后直接提交。目标存在同名触发器时会先核对定义。</a-alert>
+        <a-alert v-if="pgTriggerEditor" type="info">请使用目标数据库语法填写完整的 CREATE FUNCTION 和 CREATE TRIGGER。保存并执行时，两条语句将在同一个事务中提交。</a-alert>
+        <a-alert v-else-if="canEditRepairDDL(editing.object) && editing.object.kind === 'trigger'" type="info">使用达梦语法编辑此触发器的完整 CREATE 语句；点击“保存并执行”后直接提交。目标存在同名触发器时会先核对定义。</a-alert>
         <a-alert v-else-if="canEditRepairDDL(editing.object)" type="info">请使用目标数据库语法编写 DDL，每个执行单元填写一条完整语句。点击“保存并执行”后直接提交；表数据及关联对象按需单独接续。</a-alert>
-        <a-alert v-else-if="editing.object.manual_trigger" type="info">当前已保存的触发器 SQL 为只读；执行结果未知时可核对目标状态后重试同一份 SQL。</a-alert>
+        <a-alert v-else-if="isManualPGTrigger(editing.object) && editing.object.status !== 'unknown'" type="info">以下为已保存的触发器函数和触发器 SQL。</a-alert>
+        <a-alert v-else-if="editing.object.manual_trigger && !isManualPGTrigger(editing.object)" type="info">当前已保存的触发器 SQL 为只读；执行结果未知时可核对目标状态后重试同一份 SQL。</a-alert>
         <a-alert v-else-if="editing.object.native" type="info">达梦原生 SQL 为只读，仅重试原任务冻结的完整执行单元；已成功步骤不会再次执行。</a-alert>
         <a-alert v-else-if="isMySQLDamengTrigger(editing.object)" type="info">触发器 SQL 为只读，按原生成的单个完整语句执行。达梦 DDL 可能自动提交；重试前会核对目标定义、编译状态和依赖，不会覆盖同名冲突对象。</a-alert>
         <a-alert v-else-if="isMySQLPGTrigger(editing.object)" type="info">触发器 SQL 为只读。重试会在一个事务中一起执行原生成函数和触发器；不支持编辑 SQL 或单独勾选步骤。</a-alert>
-        <a-alert v-else type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
-        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ editing.object.manual_trigger ? '上次执行结果不确定，当前 SQL 为只读。点击“核对并重试”先核对目标定义、编译和启用状态；定义一致则复用，确认不存在才重试原 SQL，冲突或无法核实时保留未知状态。' : isMySQLDamengTrigger(editing.object) ? '上次执行结果不确定。重试先核对目标目录；原定义一致、编译有效且已启用时复用，确认不存在才执行冻结的 CREATE；冲突或无法核实时保留未知状态。' : editing.object.native ? '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。' : '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。' }}</a-alert>
+        <a-alert v-else-if="!isManualPGTrigger(editing.object)" type="info">此记录仅供诊断；请先处理连接、元数据或预检问题。数据失败可使用“接续迁移”。</a-alert>
+        <a-alert v-if="editing.object.status === 'unknown'" type="warning">{{ unknownExecutionMessage(editing.object) }}</a-alert>
         <a-alert v-if="editing.object.original_error ?? editing.object.error" type="error">原始错误：{{ editing.object.original_error ?? editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.original_error !== undefined && editing.object.error && editing.object.original_error !== editing.object.error" type="warning">当前错误：{{ editing.object.error }}</a-alert>
         <a-alert v-if="editing.object.requires_review && !canEditRepairDDL(editing.object) && !editing.object.native && !isGeneratedMySQLTrigger(editing.object)" type="warning">请按数据库驱动可一次执行的完整语句整理执行步骤。历史脚本不会按分号自动拆分，过去提交结果不能确定时禁止自动重放。</a-alert>
@@ -195,7 +197,7 @@
           <a-alert type="info">{{ triggerPlanCandidate.message }}</a-alert>
           <a-collapse><a-collapse-item key="trigger-source" header="本次核对的源定义（只读）"><pre class="sql-preview">{{ triggerPlanCandidate.object.source_ddl }}</pre></a-collapse-item></a-collapse>
           <div v-for="(unit, index) in triggerPlanCandidate.object.units" :key="`candidate:${unit.id}`" class="unit-editor">
-            <div class="unit-heading"><strong>新方案步骤 {{ index + 1 }} · 与另一单元一起执行</strong></div>
+            <div class="unit-heading"><strong>新方案 · {{ pgTriggerUnitLabel(index) }}</strong></div>
             <pre class="sql-preview">{{ unit.sql }}</pre>
           </div>
         </template>
@@ -207,25 +209,31 @@
           <a-alert v-if="mappingError(mappingForm.values)" type="error">{{ mappingError(mappingForm.values) }}</a-alert>
         </a-form>
         <div v-if="canEditRepairDDL(editing.object)" class="editor-toolbar">
-          <a-space wrap><a-button v-if="gaussIndexPlanAvailable" size="small" :loading="refreshingIndexPlan" :disabled="!canRefreshIndexPlan" @click="refreshIndexPlan">重新生成索引计划</a-button><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="draftUnits.some(unit => unit.original_sql)" size="small" :disabled="busy || saving" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl" size="small" :disabled="busy || saving" @click="useSuggested">采用建议 DDL</a-button><a-button v-if="editing.object.kind !== 'trigger'" size="small" :disabled="busy || saving || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
+          <a-space wrap><a-button v-if="gaussIndexPlanAvailable" size="small" :loading="refreshingIndexPlan" :disabled="!canRefreshIndexPlan" @click="refreshIndexPlan">重新生成索引计划</a-button><a-button v-if="nativeOracleDamengSequence" size="small" :loading="refreshingSequencePlan" :disabled="!canRefreshSequencePlan" @click="refreshSequencePlan">重新生成序列计划</a-button><a-button v-if="draftUnits.some(unit => unit.original_sql)" size="small" :disabled="busy || saving" @click="restoreOriginal">恢复原文</a-button><a-button v-if="editing.object.suggested_ddl && !pgTriggerEditor" size="small" :disabled="busy || saving" @click="useSuggested">采用建议 DDL</a-button><a-button v-if="editing.object.kind !== 'trigger'" size="small" :disabled="busy || saving || editing.object.status === 'unknown'" @click="addUnit">添加执行单元</a-button></a-space>
           <span class="muted">草稿版本 {{ editing.version }} · Ctrl / ⌘ + Enter 保存并执行</span>
         </div>
         <div v-for="(unit, index) in !canEditRepairDDL(editing.object) && (isGeneratedMySQLTrigger(editing.object) || editing.object.native || editing.object.manual_trigger) ? editing.object.units : []" :key="`trigger:${unit.id}`" class="unit-editor">
-          <div class="unit-heading"><strong>执行步骤 {{ index + 1 }}{{ isMySQLPGTrigger(editing.object) ? ' · 与另一单元一起执行' : '' }}</strong><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag></div>
+          <div class="unit-heading"><strong>{{ isMySQLPGTrigger(editing.object) || isManualPGTrigger(editing.object) ? pgTriggerUnitLabel(index) : `执行步骤 ${index + 1}` }}</strong><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p><pre class="sql-preview">{{ unit.sql }}</pre>
         </div>
         <div v-for="(unit, index) in canEditRepairDDL(editing.object) ? draftUnits : []" :key="unit.id" class="unit-editor">
-          <div class="unit-heading"><strong v-if="editing.object.kind === 'trigger'">触发器 SQL</strong><a-checkbox v-else v-model="unit.selected" :disabled="busy || saving || unitCommitted(unit.status) || unit.destructive">执行步骤 {{ index + 1 }}</a-checkbox><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag><span v-if="unit.destructive" class="error-text">破坏性步骤禁止重放</span><a-button v-if="editing.object.kind !== 'trigger' && !unitCommitted(unit.status) && !unit.destructive" type="text" size="mini" :disabled="busy || saving" @click="draftUnits.splice(index, 1)">移除此单元</a-button></div>
+          <div class="unit-heading"><strong v-if="editing.object.kind === 'trigger'">{{ pgTriggerEditor ? pgTriggerUnitLabel(index) : '触发器 SQL' }}</strong><a-checkbox v-else v-model="unit.selected" :disabled="busy || saving || unitCommitted(unit.status) || unit.destructive">执行步骤 {{ index + 1 }}</a-checkbox><a-tag :color="statusColor(unit.status)">{{ repairStatus(unit.status) }}</a-tag><span v-if="unit.destructive" class="error-text">破坏性步骤禁止重放</span><a-button v-if="editing.object.kind !== 'trigger' && !unitCommitted(unit.status) && !unit.destructive" type="text" size="mini" :disabled="busy || saving" @click="draftUnits.splice(index, 1)">移除此单元</a-button></div>
           <p v-if="unit.error" class="error-text">{{ unit.error }}</p>
           <pre v-if="unitCommitted(unit.status) || unit.destructive" class="sql-preview">{{ unit.sql }}</pre>
-          <SqlEditor v-else v-model="unit.sql" class="repair-sql-editor" auto-height :read-only="busy || saving" :dialect="editorDialect" :format-db-type="job?.dst_db_type" :format-disabled="busy || saving || editing.object.status === 'unknown'" execution-mode="document" @execute="prepareExecute" />
+          <SqlEditor v-else v-model="unit.sql" class="repair-sql-editor" auto-height :read-only="busy || saving || !!triggerPlanCandidate" :dialect="editorDialect" :format-db-type="job?.dst_db_type" :format-disabled="busy || saving || !!triggerPlanCandidate || editing.object.status === 'unknown'" execution-mode="document" @execute="prepareExecute()" />
         </div>
       </template>
       <template #footer>
         <div v-if="editing" class="repair-editor-footer">
           <a-checkbox v-if="triggerPlanCandidate" v-model="triggerPlanReviewed" :disabled="saving || refreshingTriggerPlan">我已核对当前源定义和完整触发器方案</a-checkbox>
           <a-button v-if="triggerPlanCandidate" type="primary" :loading="saving" :disabled="busy || saving || !triggerPlanReviewed || !binding?.configured" @click="saveTriggerPlan">核对并保存触发器方案</a-button>
-          <div class="modal-actions"><a-button @click="editorVisible = false">关闭</a-button><a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft()">保存草稿</a-button><a-button v-if="canExecuteRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="submitting" :disabled="!canExecute" @click="prepareExecute">{{ canEditRepairDDL(editing.object) ? '保存并执行' : editing.object.manual_trigger && editing.object.status === 'unknown' ? '核对并重试' : '重试原 SQL' }}</a-button></div>
+          <div class="modal-actions">
+            <a-button @click="editorVisible = false">关闭</a-button>
+            <a-button v-if="triggerPlanCandidate" :disabled="saving" @click="clearTriggerPlan">取消预览</a-button>
+            <a-button v-if="pgTriggerEditor && canRetryMySQLPGTrigger(editing.object)" :disabled="!canRetryOriginalPGTrigger" @click="prepareExecute(true)">重试原 SQL</a-button>
+            <a-button v-if="canEditRepairDDL(editing.object) && (draftUnits.length || Object.keys(mappingForm.values).length)" :loading="saving" :disabled="busy || !!triggerPlanCandidate || !pgTriggerDraftComplete || editing.object.status === 'unknown' || !!mappingError(mappingForm.values)" @click="saveDraft()">保存草稿</a-button>
+            <a-button v-if="canExecuteRepairDDL(editing.object) && draftUnits.length" type="primary" :loading="submitting" :disabled="!canExecute" @click="prepareExecute()">{{ canEditRepairDDL(editing.object) ? '保存并执行' : editing.object.manual_trigger && editing.object.status === 'unknown' ? '核对并重试' : '重试原 SQL' }}</a-button>
+          </div>
         </div>
       </template>
     </a-modal>
@@ -297,7 +305,7 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, refreshIndexRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, canRetryManualTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, isManualPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { formatSQLText } from '@/utils/sqlFormatting'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
@@ -373,11 +381,14 @@ let historySerial = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 let pollSerial = 0
 let disposed = false
-let pendingExecution: { jobID: string; objectID: string; version: number; signature: string; key: string } | null = null
+let pendingExecution: { jobID: string; objectID: string; version: number; signature: string; key: string; retryOriginal: boolean } | null = null
 
 const busy = computed(() => job.value?.status === 'running' || !!activeAttempt.value && attemptRunning(activeAttempt.value.status) || submitting.value || batchRunning.value || batchPreparing.value || refreshingSequencePlan.value || refreshingTriggerPlan.value || refreshingIndexPlan.value)
-const triggerPlanAvailable = computed(() => job.value?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(job.value?.dst_db_type || '') && !!editing.value && canRegenerateTriggerPlan(editing.value.object))
-const canRefreshTriggerPlan = computed(() => triggerPlanAvailable.value && !busy.value && !saving.value && !!binding.value?.configured)
+const pgTriggerJob = computed(() => job.value?.src_db_type === 'mysql' && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(job.value.dst_db_type))
+const pgTriggerEditor = computed(() => !!editing.value && canEditPGTrigger(editing.value.object))
+const pgTriggerDraftComplete = computed(() => !pgTriggerEditor.value || draftUnits.value.length === 2 && draftUnits.value.every(unit => !!unit.sql.trim()))
+const triggerPlanAvailable = computed(() => pgTriggerJob.value && !!editing.value && canRegenerateTriggerPlan(editing.value.object))
+const canRefreshTriggerPlan = computed(() => triggerPlanAvailable.value && !busy.value && !saving.value && !!binding.value?.configured && (!pgTriggerEditor.value || draftUnits.value.every(unit => !unit.sql.trim())))
 const nativeOracleDamengSequence = computed(() => job.value?.src_db_type === 'oracle' && job.value?.dst_db_type === 'dameng' && editing.value?.object.kind === 'sequence' && !!editing.value.object.sequence?.Native?.Name)
 const canRefreshSequencePlan = computed(() => {
   const object = editing.value?.object
@@ -396,7 +407,13 @@ const canRefreshIndexPlan = computed(() => {
   return units.length === object.units.length && units.every((unit, index) => unit.id === object.units[index].id && (unit.sql === object.units[index].sql || unit.sql === formattedDraftSQL(object.units[index].sql)))
 })
 const editorDialect = computed(() => job.value?.dst_db_type === 'mysql' ? 'mysql' as const : 'postgres' as const)
-const canExecute = computed(() => !busy.value && !saving.value && !triggerPlanCandidate.value && !!editing.value && canExecuteRepairDDL(editing.value.object) && (editing.value.object.status !== 'unknown' || !!editing.value.object.manual_trigger || !!editing.value.object.native || isMySQLDamengTrigger(editing.value.object)) && !mappingError(mappingForm.values) && !!binding.value?.configured && draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive))
+const canExecute = computed(() => {
+  const object = editing.value?.object
+  if (!object || busy.value || saving.value || triggerPlanCandidate.value || !binding.value?.configured || !canExecuteRepairDDL(object) || !pgTriggerDraftComplete.value || mappingError(mappingForm.values)) return false
+  if (object.status === 'unknown' && !canRetryManualTrigger(object) && !object.native && !isMySQLDamengTrigger(object)) return false
+  return draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive)
+})
+const canRetryOriginalPGTrigger = computed(() => pgTriggerEditor.value && canExecute.value && !!editing.value && canRetryMySQLPGTrigger(editing.value.object) && editing.value.object.units.every((unit, index) => unit.sql === draftUnits.value[index]?.sql))
 const displayRecords = computed(() => groupRepairRecords(records.value))
 const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
 const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
@@ -416,7 +433,7 @@ const sourceConnections = computed(() => connections.value.filter(conn => !job.v
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
 const relatedCandidates = computed(() => {
   const object = recoveryObject.value?.object
-  return object ? records.value.filter(record => record.object.id !== object.id && !isTableRepair(record.object) && !unitCommitted(record.object.status) && (record.object.table === (object.table || object.name) || record.object.dependencies?.includes(object.id))) : []
+  return object ? records.value.filter(record => record.object.id !== object.id && !isTableRepair(record.object) && !isManualPGTrigger(record.object) && !unitCommitted(record.object.status) && (record.object.table === (object.table || object.name) || record.object.dependencies?.includes(object.id))) : []
 })
 const historyObjectIDs = computed(() => {
   if (!historyObjectID.value) return null
@@ -633,8 +650,25 @@ function openEditor(record: RepairRecord) {
   mappingForm.source = ''; mappingForm.target = ''
   editorVisible.value = true
 }
+function canEditPGTrigger(object: RepairObject): boolean {
+  return pgTriggerJob.value && object.kind === 'trigger' && canEditRepairDDL(object)
+}
+function pgTriggerUnitLabel(index: number): string {
+  return index === 0 ? '触发器函数 SQL' : '创建触发器 SQL'
+}
+function unknownExecutionMessage(object: RepairObject): string {
+  if (object.manual_trigger && !isManualPGTrigger(object)) return '上次执行结果不确定，当前 SQL 为只读。点击“核对并重试”先核对目标定义、编译和启用状态；定义一致则复用，确认不存在才重试原 SQL，冲突或无法核实时保留未知状态。'
+  if (isMySQLDamengTrigger(object)) return '上次执行结果不确定。重试先核对目标目录；原定义一致、编译有效且已启用时复用，确认不存在才执行冻结的 CREATE；冲突或无法核实时保留未知状态。'
+  if (object.native) return '上次执行结果不确定。重试时服务端先核对冻结计划与目标目录；只有能证明安全重试的步骤才会执行，已成功步骤不会重放。'
+  if (isMySQLPGTrigger(object) || isManualPGTrigger(object)) return '上次提交结果不确定，请在目标数据库检查实际执行结果。'
+  return '上次提交结果不确定，禁止再次提交这些执行单元；请在目标数据库检查实际执行结果。'
+}
 function editableDraftUnits(object: RepairObject): RepairUnit[] {
   let units = cloneRepairExecutionUnits(object)
+  if (canEditPGTrigger(object)) {
+    if ((isMySQLPGTrigger(object) || isManualPGTrigger(object)) && units.length === 2) return units.map(unit => ({ ...unit, selected: true }))
+    return ['trigger-function', 'create-trigger'].map(id => ({ id, sql: '', original_sql: '', status: 'pending', selected: true, destructive: false }))
+  }
   if (object.kind === 'trigger' && canEditRepairDDL(object)) {
     const create = units.find(unit => /^\s*(?:(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\b/i.test(unit.sql))
     const sql = object.manual_trigger?.sql ?? create?.sql ?? object.ddl ?? ''
@@ -670,7 +704,7 @@ function restoreOriginal() {
   const originals = new Map((editing.value.object.units || []).map(unit => [unit.id, unit.original_sql]))
   draftUnits.value = draftUnits.value.map(unit => {
     const original = originals.get(unit.id) || unit.original_sql
-    return !unitCommitted(unit.status) && !unit.destructive && original ? { ...unit, sql: formattedDraftSQL(original) } : unit
+    return !unitCommitted(unit.status) && !unit.destructive && original ? { ...unit, sql: pgTriggerEditor.value ? original : formattedDraftSQL(original) } : unit
   })
 }
 function useSuggested() {
@@ -682,7 +716,7 @@ function useSuggested() {
   else draftUnits.value.push({ id: newKey(), sql, original_sql: '', status: 'pending', selected: true, destructive: false })
 }
 async function saveDraft(options: { silent?: boolean } = {}): Promise<boolean> {
-  if (batchRunning.value || batchPreparing.value || !editing.value || !canEditRepairDDL(editing.value.object) || saving.value || mappingError(mappingForm.values)) return false
+  if (batchRunning.value || batchPreparing.value || !editing.value || !canEditRepairDDL(editing.value.object) || saving.value || triggerPlanCandidate.value || !pgTriggerDraftComplete.value || mappingError(mappingForm.values)) return false
   const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
   saving.value = true
   try {
@@ -736,11 +770,12 @@ function clearTriggerPlan() {
 }
 async function refreshTriggerPlan() {
   if (!canRefreshTriggerPlan.value || !editing.value) return
-  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial
+  const scope = epoch, id = props.jobID, objectID = editing.value.object.id, serial = editorSerial, revision = draftRevision
   refreshingTriggerPlan.value = true; triggerPlanReviewed.value = false
   try {
     const candidate = (await previewTriggerRepairPlan(id, objectID, { version: editing.value.version })).data
     if (!current(scope, id) || serial !== editorSerial || !editorVisible.value) return
+    if (revision !== draftRevision) { Message.info('草稿已变化，未覆盖当前修改'); return }
     triggerPlanCandidate.value = candidate
   } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e) }
   finally { if (current(scope, id) && serial === editorSerial) refreshingTriggerPlan.value = false }
@@ -754,21 +789,23 @@ async function saveTriggerPlan(): Promise<boolean> {
     const saved = (await saveTriggerRepairPlan(id, objectID, { version: candidate.version, binding_version: candidate.binding_version, plan_hash: candidate.plan_hash, reviewed: true })).data
     if (!current(scope, id) || serial !== editorSerial) return false
     replaceRecord(saved); editing.value = saved
-    draftUnits.value = cloneRepairExecutionUnits(saved.object)
+    draftUnits.value = editableDraftUnits(saved.object)
     clearTriggerPlan()
     Message.success('触发器方案已保存，请核对执行步骤后确认执行'); return true
   } catch (e) { if (current(scope, id) && serial === editorSerial) showError(e); return false }
   finally { if (current(scope, id)) saving.value = false }
 }
-async function prepareExecute() {
-  if (!canExecute.value || !editing.value) return
+async function prepareExecute(retryOriginal = false) {
+  if (!canExecute.value || !editing.value || retryOriginal && !canRetryOriginalPGTrigger.value) return
   if (draftUnits.value.some(unit => unit.selected && !unit.sql.trim())) { Message.error('选中的执行单元不能为空'); return }
   const scope = epoch, id = props.jobID, serial = editorSerial, objectID = editing.value.object.id
   const signature = () => JSON.stringify([draftUnits.value.map(unit => [unit.id, unit.sql, unit.selected]), mappingForm.values])
-  const samePending = pendingExecution?.jobID === id && pendingExecution.objectID === objectID && pendingExecution.version === editing.value.version && pendingExecution.signature === signature()
+  const samePending = pendingExecution?.jobID === id && pendingExecution.objectID === objectID && pendingExecution.version === editing.value.version && pendingExecution.signature === signature() && pendingExecution.retryOriginal === retryOriginal
   submitting.value = true
   try {
-    if (canEditRepairDDL(editing.value.object)) {
+    if (retryOriginal) {
+      draftUnits.value = cloneRepairExecutionUnits(editing.value.object)
+    } else if (canEditRepairDDL(editing.value.object)) {
       if (!samePending && !await saveDraft({ silent: true })) return
     } else if (editing.value.object.manual_trigger) {
       draftUnits.value = cloneRepairExecutionUnits(editing.value.object)
@@ -785,7 +822,7 @@ async function prepareExecute() {
     if (!current(scope, id) || serial !== editorSerial || !editing.value || editing.value.object.id !== objectID) return
     executionSnapshot.value = draftUnits.value.filter(unit => unit.selected && !unitCommitted(unit.status) && !unit.destructive).map(unit => ({ ...unit }))
     executeVersion.value = editing.value.version
-    if (!samePending) pendingExecution = { jobID: id, objectID, version: executeVersion.value, signature: signature(), key: newKey() }
+    if (!samePending) pendingExecution = { jobID: id, objectID, version: executeVersion.value, signature: signature(), key: newKey(), retryOriginal }
     executionKey.value = pendingExecution!.key
     await confirmExecute()
   } finally { if (current(scope, id)) submitting.value = false }

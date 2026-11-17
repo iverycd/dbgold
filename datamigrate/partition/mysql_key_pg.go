@@ -182,7 +182,7 @@ func (c *compiler) mysqlKeyAsPGList(dst, src *source.PartitionSpec, depth int, m
 // The expression uses bigint casts, which could otherwise hide an unsafe base
 // mapping (numeric rounds on cast, while smallint narrows the domain). Validate
 // the exact generated column type and NULL domain before any DDL is executed.
-func (c *compiler) validateMySQLKeyPGDDL(base string) error {
+func (c *compiler) validatePartitionKeyDDL(base string) error {
 	if len(c.keyColumns) == 0 {
 		return nil
 	}
@@ -246,7 +246,16 @@ func (c *compiler) validateMySQLKeyPGDDL(base string) error {
 		}
 		seen[name] = true
 		position := 1
-		if !group[position].Is("int") && !group[position].Is("integer") && !group[position].Is("int4") {
+		if c.opt.SourceType == "oscar" && c.opt.TargetType == "mysql" {
+			typ := strings.ToLower(group[position].Value)
+			if len(group) > position+3 && group[position+1].Is("(") && group[position+3].Is(")") {
+				typ += "(" + group[position+2].Text + ")"
+				position += 3
+			}
+			if typ != domain.DataType {
+				return fmt.Errorf("分区键 %s 的 MySQL DDL 类型 %s 偏离冻结类型 %s", name, typ, domain.DataType)
+			}
+		} else if !group[position].Is("int") && !group[position].Is("integer") && !group[position].Is("int4") {
 			return fmt.Errorf("KEY 基础DDL列 %s 必须保持 PostgreSQL integer 类型", name)
 		}
 		position++

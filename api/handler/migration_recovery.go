@@ -34,8 +34,8 @@ func recoveryConfig(b *store.MigrationRepairBinding) (datamigrate.Config, error)
 	cfg.IntraTableParallel = 1
 	return cfg, nil
 }
-func openRecovery(src, dst *store.Connection, b *store.MigrationRepairBinding) (source.Reader, target.Writer, error) {
-	r, e := buildSrcReader(src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
+func openRecovery(ctx context.Context, src, dst *store.Connection, b *store.MigrationRepairBinding) (source.Reader, target.Writer, error) {
+	r, e := buildSrcReaderContext(ctx, src, sourceOverride(b, src.DBType), source.ConnPoolConfig{}, dst.DBType)
 	if e != nil {
 		return nil, nil, e
 	}
@@ -86,6 +86,12 @@ func recoveryRelated(jobID string, o repair.Object, ids []string) ([]repair.Obje
 			continue
 		}
 		if item.Status == "succeeded" {
+			continue
+		}
+		if item.ManualTrigger != nil && item.ManualTrigger.FunctionSQL != "" {
+			if want[item.ID] {
+				return nil, nil, fmt.Errorf("请在对象修复弹窗单独提交手工触发器 %s", item.TargetName)
+			}
 			continue
 		}
 		if err := recoveryRelatedReady(item); err != nil {
@@ -184,7 +190,7 @@ func PreviewMigrationRecovery(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
-	r, w, e := openRecovery(src, dst, b)
+	r, w, e := openRecovery(c.Request.Context(), src, dst, b)
 	if e != nil {
 		repairError(c, e)
 		return
@@ -348,7 +354,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 	}
 	response := attemptResponse(a)
 	startRepairWorker(a, func(ctx context.Context) {
-		r, w, e := openRecovery(src, dst, b)
+		r, w, e := openRecovery(ctx, src, dst, b)
 		if e != nil {
 			finishRepair(a, o, e)
 			return

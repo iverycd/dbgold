@@ -99,6 +99,10 @@ type Migrator struct {
 	mysqlDMTriggers        []preparedMySQLDamengTrigger
 	mysqlDMTriggerError    error
 	sourceDDLCache         sourceTableDDLCache
+	oscarMySQLViews        []source.ViewInfo
+	oscarMySQLViewsRead    bool
+	oscarMySQLViewsError   error
+	oscarAppendCounts      map[string]int64
 	repairs                *repairRecorder
 	dmPlans                map[string]*damengTablePlan
 	dmBlocked              map[string]bool
@@ -119,6 +123,18 @@ type sourceTypeSetter interface {
 
 // NewMigrator 创建 Migrator
 func NewMigrator(reader source.Reader, writer target.Writer, job *Job, cfg Config) *Migrator {
+	if reader.DBType() == "oscar" && writer.DBType() == "mysql" {
+		cfg.TargetDBType, cfg.ChangeOwner, cfg.Distributed = "mysql", false, false
+		if cfg.Mode == "" {
+			cfg.Mode = "all"
+		}
+		if cfg.PageSize <= 0 {
+			cfg.PageSize = 2000
+		}
+		if cfg.MaxParallel <= 0 {
+			cfg.MaxParallel = 10
+		}
+	}
 	if r, ok := reader.(*source.OracleReader); ok && writer.DBType() == "mysql" {
 		reader = source.WrapOracleForMySQL(r)
 	}
@@ -240,6 +256,8 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
+	m.resetOscarMySQLViews()
+	m.oscarAppendCounts = nil
 	m.gaussKeysRead, m.gaussKeys, m.gaussKeysErr = false, nil, nil
 	m.gaussTableKeys = nil
 	m.mainMigrationFinished = false
@@ -326,7 +344,7 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 	}
 	m.dmSequenceBoundsLogged = nil
 	p := m.preparePartitions(ctx)
-	if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 {
+	if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 && !m.isOscarMySQL() {
 		return newMigrationReport()
 	}
 	m.mysqlPGTriggers, m.mysqlPGTriggerError = nil, nil
@@ -393,6 +411,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	} else {
 		report.Triggers.Total = count
 	}
+	if m.isOscarMySQL() {
+		m.recordOscarManualObjects(ctx, &report)
+	}
 
 	if err := ctx.Err(); err != nil {
 		m.log.Warn("任务已取消")
@@ -435,6 +456,12 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	}
 	m.initializeOracleMySQLAuto(ctx, tables)
 	m.preflightMigrationNames(tables)
+	if m.isOscarMySQL() {
+		m.preflightOscarMySQLTables(ctx, tables)
+		if ctx.Err() != nil {
+			return report
+		}
+	}
 	if m.isOscar() {
 		if err := m.preflightOscarNames(ctx, tables, allTables); err != nil {
 			m.log.Errorf("Oscar 对象命名预检失败，未执行目标 DDL: %v", err)
@@ -453,7 +480,11 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		if err := m.migrationTableError(table); err != nil && !tablesFailed[table] {
 			tablesFailed[table] = true
 			report.Tables.Failed++
-			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: table, Stage: "preflight", Error: err.Error()})
+			result := ObjectResult{Name: table, Stage: "preflight", Error: err.Error()}
+			if m.isOscarMySQL() {
+				result.SourceDDL = m.oscarSourceTableDDL(ctx, table)
+			}
+			report.Tables.Items = append(report.Tables.Items, result)
 		}
 	}
 	if len(tables) > 0 && m.cfg.Content == "data_only" && m.isMySQLDameng() {
@@ -554,6 +585,9 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				report.Tables.Failed++
 				result := objectResultForError(table, ddl, err)
 				result.Stage = "preflight"
+				if m.isOscarMySQL() {
+					result.SourceDDL = m.oscarSourceTableDDL(ctx, table)
+				}
 				report.Tables.Items = append(report.Tables.Items, result)
 				m.log.Errorf("生成建表 DDL 失败 [%s]: %v", table, err)
 				continue
@@ -688,7 +722,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	// Phase 3: Post-DDL（串行）
 	if skipSchema {
 		m.log.Info("=== Phase 3: 跳过创建序列、索引、外键、视图（仅迁移数据行模式）===")
-		if m.isSQLServerDameng() {
+		if m.isSQLServerDameng() || m.isOscarMySQL() {
 			originalObjects := m.cfg.Objects
 			m.cfg.Objects = []string{"sequences"}
 			m.createPostDDL(ctx, &report, tables, allTables)
@@ -748,7 +782,14 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				if srcErr == nil && dstErr == nil {
 					rc.Src = srcCount
 					rc.Dst = dstCount
-					rc.Match = srcCount == dstCount
+					if m.isOscarMySQL() && skipSchema && m.hasPartitionPlan(tbl) {
+						for _, count := range m.partitionState.tables[tbl].Baseline {
+							rc.Dst -= count
+						}
+					} else if m.isOscarMySQL() && skipSchema {
+						rc.Dst -= m.oscarAppendCounts[tbl]
+					}
+					rc.Match = rc.Src == rc.Dst
 					if !rc.Match {
 						m.log.Warnf("行数不一致 [%s]: 源=%d 目标=%d", tbl, srcCount, dstCount)
 					} else {
@@ -828,6 +869,9 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
 	if m.hasPartitionPlan(table) {
 		return m.migratePartitionData(ctx, table)
+	}
+	if m.isOscarMySQL() {
+		return m.migrateOscarMySQLTable(ctx, table)
 	}
 	if m.reader.DBType() == "mysql" && m.cfg.MigrationPurpose != "cdc" && m.cfg.MySQLReadStrategy != "" && m.cfg.MySQLReadStrategy != "offset" {
 		return m.migrateMySQLScan(ctx, table)
@@ -1197,6 +1241,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				} else {
 					m.log.Indexf("创建序列 %s ... OK", seqObj)
 					report.Sequences.Success++
+					if m.isOscarMySQL() {
+						m.warnOscarMySQLSequenceRestart(report, seqCopy)
+					}
 					if m.cfg.ChangeOwner && m.cfg.TargetSchema != "" {
 						if err := m.repairOwner(ctx, "SEQUENCE", seqObj, m.cfg.TargetSchema); err != nil {
 							m.log.Warnf("修改序列 owner 失败 [%s]: %v", seqObj, err)
@@ -1328,7 +1375,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	// 外键:
 	// - 非对象模式:沿用原逻辑,include 模式跳过(引用表可能不在迁移范围内)
 	// - 对象模式:用户明确要求迁外键(want),引用表视为已存在,不受 include 限制
-	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng() || m.isOracleDameng() || m.oracleMySQL != nil)
+	migrateFK := want("foreign_keys") && (m.cfg.objectMode() || m.cfg.Mode != "include" || m.isSQLServerDameng() || m.isOracleDameng() || m.oracleMySQL != nil || m.isOscarMySQL())
 	if migrateFK {
 		fks, err := m.sourceForeignKeys(ctx)
 		if err != nil {
@@ -1372,7 +1419,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					blocked(&report.Constraints, fk.ConstraintName, fk.TableName, "外键依赖表 "+failedTable+" 迁移失败")
 					continue
 				}
-				if m.isOracleDameng() && fk.Unsupported != "" {
+				if (m.isOracleDameng() || m.isOscarMySQL()) && fk.Unsupported != "" {
 					report.Constraints.Failed++
 					report.Constraints.Items = append(report.Constraints.Items, objectResultForError(fk.ConstraintName, "", fmt.Errorf("%s", fk.Unsupported)))
 					continue
@@ -1542,6 +1589,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 // prepareView shares the final view definition between execution and Oscar's
 // initial repair inventory, even if migration stops before reaching the view.
 func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.ViewInfo, error) {
+	if m.isOscarMySQL() {
+		return m.prepareOscarMySQLView(ctx, v)
+	}
 	if m.isSQLServerPG() {
 		return m.prepareSQLServerPGView(ctx, v)
 	}
@@ -1588,7 +1638,7 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	}
 	vCopy, err := m.prepareView(ctx, v)
 	if err != nil {
-		if m.isSQLServerPG() {
+		if m.isSQLServerPG() || m.isOscarMySQL() {
 			return "", err
 		}
 		return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
@@ -1598,7 +1648,7 @@ func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string
 	if m.cfg.TargetSchema != "" {
 		viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
 	}
-	if m.isOscar() || m.isSQLServerPG() {
+	if m.isOscar() || m.isSQLServerPG() || m.isOscarMySQL() {
 		viewDDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
 	}
 	if err := m.repairView(ctx, vCopy); err != nil {
@@ -1620,6 +1670,9 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	m.compatibilityFunctions = nil
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
+	}
+	if m.isOscarMySQL() {
+		return m.migrateOscarMySQLViews(ctx, viewNames)
 	}
 	if m.isOracleDameng() {
 		taskCtx, cancel := context.WithCancelCause(ctx)

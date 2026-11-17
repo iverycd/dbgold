@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	protocolVersion byte = 2
+	protocolVersion byte = 3
 	responseMarker  byte = 0x80
 	maxFrameSize         = 64 << 20
 )
@@ -36,6 +36,9 @@ const (
 	opLOBBegin
 	opLOBChunk
 	opLOBEnd
+	opBoundCursorOpen
+	opMigrationColumns
+	opMigrationCursorFetch
 )
 
 const (

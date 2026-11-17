@@ -588,6 +588,7 @@ export interface BatchRow {
   src_host: string
   src_port: number
   src_database: string
+  src_schema?: string
   src_username: string
   dst_db_type: string
   dst_host: string

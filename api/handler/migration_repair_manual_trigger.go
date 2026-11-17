@@ -3,24 +3,33 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
 	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/repair"
+	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/target"
 	"dbgold/store"
 )
 
 // Eligibility is derived from the owned job and persisted identity. A response
 // capability is never accepted as execution authority from a draft request.
 func canEditManualTrigger(j *store.DataMigrationJob, o repair.Object) bool {
-	if j.DstDBType != "dameng" || o.Kind != "trigger" || o.Schema == "" || o.TargetName == "" {
+	if o.Kind != "trigger" || o.Schema == "" || o.TargetName == "" {
 		return false
 	}
 	if !slices.Contains([]string{"failed", "pending", "draft", "blocked", "cancelled", "rolled_back"}, o.Status) {
 		return false
 	}
 	if slicesContainUncertainManualUnits(o.Units) {
+		return false
+	}
+	if source.IsPGFamily(j.DstDBType) {
+		return j.SrcDBType == "mysql" && canEditPGManualTrigger(o)
+	}
+	if j.DstDBType != "dameng" || o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
 		return false
 	}
 	if o.Native != nil && (o.Native.Managed || o.Native.Generated || o.Native.EventTrigger || o.Native.Kind != "trigger") {
@@ -44,6 +53,32 @@ func canEditManualTrigger(j *store.DataMigrationJob, o repair.Object) bool {
 		}
 	}
 	return true
+}
+
+func canEditPGManualTrigger(o repair.Object) bool {
+	for _, unit := range o.Units {
+		if unit.Destructive || !slices.Contains([]string{"pending", "failed", "rolled_back", "blocked", "cancelled"}, unit.Status) {
+			return false
+		}
+	}
+	if o.ManualTrigger != nil {
+		return o.ManualTrigger.FunctionSQL != "" && o.TrustedManualTrigger()
+	}
+	if !o.HasPGManualTriggerOrigin() {
+		return false
+	}
+	if o.MySQLPGTrigger == nil {
+		return o.DiagnosticOnly && len(o.Units) == 0 && o.DDL == "" && o.SuggestedDDL == ""
+	}
+	units := slices.Clone(o.Units)
+	for i := range units {
+		units[i].Selected = true
+	}
+	return !o.DiagnosticOnly && target.ValidateMySQLPGTriggerRepair(o, units) == nil
+}
+
+func manualTriggerMatchesTarget(o repair.Object, dbType string) bool {
+	return o.ManualTrigger != nil && o.TrustedManualTrigger() && (o.ManualTrigger.FunctionSQL != "" && source.IsPGFamily(dbType) || o.ManualTrigger.FunctionSQL == "" && dbType == "dameng")
 }
 
 func manualTriggerOriginalSQL(o repair.Object) []string {
@@ -101,7 +136,10 @@ func slicesContainUncertainManualUnits(units []repair.Unit) bool {
 
 func prepareManualTriggerDraft(j *store.DataMigrationJob, o repair.Object, units []repair.Unit, reviewed bool) (repair.Object, error) {
 	if !canEditManualTrigger(j, o) {
-		return o, fmt.Errorf("仅结果确定且尚未成功的达梦表触发器支持手工编辑")
+		return o, fmt.Errorf("仅身份明确、尚未提交的触发器支持手工编辑")
+	}
+	if source.IsPGFamily(j.DstDBType) {
+		return preparePGManualTriggerDraft(j, o, units, reviewed)
 	}
 	if len(units) != 1 || strings.TrimSpace(units[0].SQL) == "" || len(units[0].SQL) > 1<<20 {
 		return o, fmt.Errorf("表触发器须填写一个完整且不超过 1 MiB 的 SQL 执行单元")
@@ -114,19 +152,9 @@ func prepareManualTriggerDraft(j *store.DataMigrationJob, o repair.Object, units
 	if def.Schema != o.Schema || def.Name != o.TargetName || def.TableSchema != o.Schema || def.Table != table {
 		return o, fmt.Errorf("触发器必须保持原目标 %s.%s 及所属表 %s.%s", o.Schema, o.TargetName, o.Schema, table)
 	}
-	// Deep-copy before revising: the first snapshot and all frozen source plans
-	// remain immutable across successive saves and asynchronous attempts.
-	var current repair.Object
-	if err = json.Unmarshal([]byte(repairJSON(o)), &current); err != nil {
+	current, err := cloneManualTriggerRevision(o)
+	if err != nil {
 		return o, err
-	}
-	if current.ManualTrigger == nil {
-		var original repair.Object
-		if err = json.Unmarshal([]byte(repairJSON(o)), &original); err != nil {
-			return o, err
-		}
-		original.ManualTriggerEditable = false
-		current.ManualTrigger = &repair.ManualTriggerPlan{Original: &original}
 	}
 	plan := current.ManualTrigger
 	changed := plan.SQL != def.SQL
@@ -164,6 +192,64 @@ func prepareManualTriggerDraft(j *store.DataMigrationJob, o repair.Object, units
 	current.MySQLDamengTrigger = nil
 	current.MySQLPGTrigger = nil
 	current.Table = table
+	return finalizeManualTriggerDraft(o, current, reviewed)
+}
+
+func preparePGManualTriggerDraft(j *store.DataMigrationJob, o repair.Object, units []repair.Unit, reviewed bool) (repair.Object, error) {
+	if len(units) != 2 {
+		return o, fmt.Errorf("请按顺序填写触发器函数和创建触发器两条完整 SQL")
+	}
+	functionSQL, triggerSQL := units[0].SQL, units[1].SQL
+	definition, err := repair.ParsePGManualTrigger(functionSQL, triggerSQL)
+	if err != nil {
+		return o, err
+	}
+	if definition.Schema != o.Schema || definition.Table != o.Table || definition.TriggerName != o.TargetName {
+		return o, fmt.Errorf("触发器必须保持原目标 %s.%s 及所属表 %s.%s", o.Schema, o.TargetName, o.Schema, o.Table)
+	}
+	current, err := cloneManualTriggerRevision(o)
+	if err != nil {
+		return o, err
+	}
+	plan := current.ManualTrigger
+	if plan.Revision == 0 {
+		if o.MySQLPGTrigger != nil {
+			plan.Owner = o.MySQLPGTrigger.Owner
+		} else if j.ChangeOwner {
+			plan.Owner = o.Schema
+		}
+	}
+	if plan.FunctionSQL != functionSQL || plan.SQL != triggerSQL {
+		plan.Revision++
+		plan.FunctionSQL, plan.SQL = functionSQL, triggerSQL
+		current.Units = []repair.Unit{
+			{ID: fmt.Sprintf("manual-%d-function", plan.Revision), SQL: functionSQL, OriginalSQL: functionSQL, Status: "pending", Selected: true},
+			{ID: fmt.Sprintf("manual-%d-trigger", plan.Revision), SQL: triggerSQL, OriginalSQL: triggerSQL, Status: "pending", Selected: true},
+		}
+	}
+	current.MySQLPGTrigger = nil
+	return finalizeManualTriggerDraft(o, current, reviewed)
+}
+
+// Deep-copy before revising; frozen metadata and the first revision's snapshot
+// have independent lifetimes from the active draft.
+func cloneManualTriggerRevision(o repair.Object) (repair.Object, error) {
+	var current repair.Object
+	if err := json.Unmarshal([]byte(repairJSON(o)), &current); err != nil {
+		return o, err
+	}
+	if current.ManualTrigger == nil {
+		var original repair.Object
+		if err := json.Unmarshal([]byte(repairJSON(o)), &original); err != nil {
+			return o, err
+		}
+		original.ManualTriggerEditable = false
+		current.ManualTrigger = &repair.ManualTriggerPlan{Original: &original}
+	}
+	return current, nil
+}
+
+func finalizeManualTriggerDraft(o, current repair.Object, reviewed bool) (repair.Object, error) {
 	current.DiagnosticOnly = false
 	current.ManualTriggerEditable = false
 	current.RequiresReview = !reviewed
@@ -204,12 +290,24 @@ func validateManualTriggerDependencies(jobID string, object repair.Object) error
 			return fmt.Errorf("触发器依赖 %s 数据尚未完成", dependency.TargetName)
 		}
 	}
+	pgTrigger := object.ManualTrigger != nil && object.ManualTrigger.FunctionSQL != ""
 	for _, dependency := range objects {
-		if dependency.Schema != object.Schema || dependency.Kind != "table" && dependency.Kind != "data" || dependency.Table != object.Table && dependency.TargetName != object.Table {
+		if dependency.Kind != "table" && dependency.Kind != "data" {
+			continue
+		}
+		sameTarget := dependency.Schema == object.Schema && (dependency.Table == object.Table || dependency.TargetName == object.Table)
+		// Reports predating the structured ledger used source names for table
+		// and data failures, even when the target table name was case-folded.
+		sameLegacySource := pgTrigger && dependency.Legacy && object.SourceTable != "" && dependency.SourceTable == object.SourceTable &&
+			(dependency.Schema == "" || dependency.Schema == object.Schema)
+		if !sameTarget && !sameLegacySource {
 			continue
 		}
 		if dependency.Kind == "table" && dependency.Status != "succeeded" && !(len(dependency.Units) == 0 && dependency.DataStatus == "not_required" && dependency.Error == "") {
 			return fmt.Errorf("触发器所属表 %s 结构尚未成功", object.Table)
+		}
+		if dependency.Kind == "table" && pgTrigger && !maps.Equal(object.ColumnMapping, dependency.ColumnMapping) {
+			return fmt.Errorf("触发器所属表 %s 的列映射已变化，请核对并重新保存 SQL", object.Table)
 		}
 		status := dependency.DataStatus
 		if dependency.Kind == "data" && status == "" {

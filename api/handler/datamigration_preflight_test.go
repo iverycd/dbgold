@@ -68,25 +68,34 @@ func TestGenericPartitionPreflightAcceptsSupportedPairWithoutCreatingJob(t *test
 	require.Zero(t, jobs)
 }
 
-func TestBatchOptionalPGSchemaDoesNotReadFirstColumn(t *testing.T) {
-	f := excelize.NewFile()
-	defer f.Close()
-	headers := append([]string{}, batchHeaders...)
-	values := []string{"postgres", "127.0.0.1", "5432", "app", "reader", "pw", "mysql", "127.0.0.1", "3306", "target", "writer", "pw", "target"}
-	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		require.NoError(t, f.SetCellValue("Sheet1", cell, h))
-		cell, _ = excelize.CoordinatesToCellName(i+1, 2)
-		require.NoError(t, f.SetCellValue("Sheet1", cell, values[i]))
+func TestBatchOptionalSourceSchemaDoesNotReadFirstColumn(t *testing.T) {
+	for _, input := range []struct{ label, dbType, port, database string }{
+		{"postgres", "postgres", "5432", "app"},
+		{"ShenTong", "oscar", "2003", "OSRDB"},
+	} {
+		t.Run(input.dbType, func(t *testing.T) {
+			f := excelize.NewFile()
+			defer f.Close()
+			values := []string{input.label, "127.0.0.1", input.port, input.database, "reader", "pw", "mysql", "127.0.0.1", "3306", "target", "writer", "pw", "target"}
+			for i, h := range batchHeaders {
+				cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+				require.NoError(t, f.SetCellValue("Sheet1", cell, h))
+				cell, _ = excelize.CoordinatesToCellName(i+1, 2)
+				require.NoError(t, f.SetCellValue("Sheet1", cell, values[i]))
+			}
+			rows, err := parseBatchExcel(f)
+			require.NoError(t, err)
+			require.True(t, rows[0].Supported, rows[0].Reason)
+			require.Equal(t, input.dbType, rows[0].SrcDBType)
+			require.Empty(t, rows[0].SrcSchema)
+			cell, _ := excelize.CoordinatesToCellName(len(batchHeaders)+1, 1)
+			require.NoError(t, f.SetCellValue("Sheet1", cell, "source_schema"))
+			cell, _ = excelize.CoordinatesToCellName(len(batchHeaders)+1, 2)
+			require.NoError(t, f.SetCellValue("Sheet1", cell, "MixedSchema"))
+			rows, err = parseBatchExcel(f)
+			require.NoError(t, err)
+			require.Equal(t, input.database, rows[0].SrcDatabase)
+			require.Equal(t, "MixedSchema", rows[0].SrcSchema)
+		})
 	}
-	rows, e := parseBatchExcel(f)
-	require.NoError(t, e)
-	require.Empty(t, rows[0].SrcSchema)
-	cell, _ := excelize.CoordinatesToCellName(len(headers)+1, 1)
-	require.NoError(t, f.SetCellValue("Sheet1", cell, "source_schema"))
-	cell, _ = excelize.CoordinatesToCellName(len(headers)+1, 2)
-	require.NoError(t, f.SetCellValue("Sheet1", cell, "MixedSchema"))
-	rows, e = parseBatchExcel(f)
-	require.NoError(t, e)
-	require.Equal(t, "MixedSchema", rows[0].SrcSchema)
 }
