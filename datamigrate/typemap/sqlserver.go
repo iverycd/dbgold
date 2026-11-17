@@ -16,6 +16,10 @@ func init() {
 }
 
 func IsSQLServerUnboundedDecimal(c source.ColumnInfo, src string) bool {
+	if src == "dameng" {
+		t := strings.ToLower(c.DataType)
+		return c.DamengFloatStorage == "decimal" || c.Precision <= 0 && (t == "number" || t == "numeric" || t == "decimal")
+	}
 	if source.IsPGFamily(src) {
 		return c.Precision <= 0 && PGOracleBaseType(c.DataType) == "numeric"
 	}
@@ -37,6 +41,8 @@ func SQLServerTypeForSource(c source.ColumnInfo, src string) (string, error) {
 		return SQLServerType(c)
 	case src == "oracle":
 		return oracleSQLServerType(c)
+	case src == "dameng":
+		return damengSQLServerType(c)
 	case source.IsPGFamily(src):
 		return pgSQLServerType(c)
 	default:

@@ -311,6 +311,9 @@ func (w *OracleWriter) ExecutePGOracleStatements(ctx context.Context, kind, name
 var pgOracleTypeParameters = regexp.MustCompile(`\([^)]*\)`)
 
 func (w *OracleWriter) pgOracleCompatibleColumn(c source.ColumnInfo, dst valueconv.OracleColumn) error {
+	if w.crossSource != "" {
+		return w.crossOracleCompatibleColumn(c, dst)
+	}
 	dt := strings.Join(strings.Fields(pgOracleTypeParameters.ReplaceAllString(strings.ToUpper(dst.DataType), "")), " ")
 	national := dt == "NCHAR" || dt == "NVARCHAR2" || dt == "NCLOB"
 	mapped, err := typemap.PGToOracleChecked(c, national, w.dia.CharBytes, w.dia.NCharBytes)

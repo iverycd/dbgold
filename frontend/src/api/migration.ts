@@ -261,6 +261,7 @@ export interface MigrationReport {
 	 warnings?: { table: string; column: string; reason: string; count: number }[]
   preflight?: PGMySQLPreflight
   pg_oracle_preflight?: PGOraclePreflight
+  cross_preflight?: CrossPreflight
   tables: CategoryReport
   data: CategoryReport
   primaryKeys: CategoryReport
@@ -719,7 +720,8 @@ export interface PGOraclePreflight extends Omit<PGMySQLPreflight, 'kind' | 'targ
   kind: 'pg_oracle'
   target: { product: string; version: string; schema: string; charset: string; ncharset: string; verification: string }
 }
-export type PGPreflight = PGMySQLPreflight | PGOraclePreflight
+export interface CrossPreflight extends Omit<PGOraclePreflight, 'kind'> { kind: 'cross' }
+export type PGPreflight = PGMySQLPreflight | PGOraclePreflight | CrossPreflight
 export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
   migrate_objects?: MigrateObjectType[]
   table_names?: string[]

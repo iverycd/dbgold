@@ -131,6 +131,17 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		m.repairs.sinkErr = fmt.Errorf("单对象修复记录保存需要配置完整清单保存回调")
 		return
 	}
+	if m.isCrossOracle() && len(m.cfg.ViewNames) > 0 {
+		m.recordCrossOracleViewManifest(ctx)
+		if cancelled() {
+			return
+		}
+		m.repairs.rebuildObjectIndex()
+		m.repairs.mu.Lock()
+		defer m.repairs.mu.Unlock()
+		_ = m.flushRepairsLocked()
+		return
+	}
 	if m.isOraclePGSQLServer() && len(m.cfg.ViewNames) > 0 {
 		m.recordSQLServerViewManifest(ctx, m.cfg.ViewNames, nil)
 		if cancelled() {
@@ -428,7 +439,35 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("sequences") && m.isOraclePGSQLServer() {
+	if want("sequences") && m.isCrossOracle() {
+		values, e := m.reader.GetSequences(ctx)
+		if e != nil {
+			if m.stopMigrationTask(ctx, e) {
+				return
+			}
+			add(repair.Object{Kind: "sequence", Name: "序列元数据", TargetName: "序列元数据", Error: e.Error()}, nil)
+		}
+		for _, raw := range values {
+			if raw.Native == nil {
+				continue
+			}
+			relevant := len(raw.Native.Bindings) == 0 && m.cfg.Mode != "include" && len(m.cfg.TableNames) == 0
+			for _, b := range raw.Native.Bindings {
+				relevant = relevant || selected[b.TableName] && b.Schema == raw.Native.Schema
+			}
+			if !relevant || m.crossExcluded("sequence", raw.TableName, raw.Native.Name) {
+				continue
+			}
+			v := bindCrossOracleEvidence(ctx, m.crossOracleSequence(raw, selected))
+			name := v.Native.Name
+			var deps []string
+			for _, b := range v.Native.Bindings {
+				deps = append(deps, repairID("table", b.TableName, b.TableName))
+			}
+			ss := m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, "")
+			add(repair.Object{Kind: "sequence", Name: name, SourceName: raw.Native.Name, SourceTable: raw.TableName, TargetName: name, Table: v.TableName, Sequence: &v, Dependencies: deps, Error: v.Unsupported}, ss)
+		}
+	} else if want("sequences") && m.isOraclePGSQLServer() {
 		values := m.sqlServerPlannedSequences(ctx, func(t string) bool { return selected[t] })
 		if err := m.checkSQLServerSequenceNames(ctx, values); err != nil {
 			m.stopMigrationTask(ctx, err)

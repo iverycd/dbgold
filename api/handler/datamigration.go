@@ -32,6 +32,9 @@ type SupportedPair struct {
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
 var supportedPairs = []SupportedPair{
+	{Source: "dameng", Target: "oracle"},
+	{Source: "dameng", Target: "sqlserver"},
+	{Source: "sqlserver", Target: "oracle"},
 	{Source: "dameng", Target: "dameng", SupportsFullSchema: true},
 	{Source: "oracle", Target: "dameng"},
 	{Source: "sqlserver", Target: "dameng"},
@@ -119,7 +122,7 @@ func GetSupportedPairs(c *gin.Context) {
 func isDamengNativePair(src, dst string) bool { return src == "dameng" && dst == "dameng" }
 
 func isOraclePGSQLServerPair(src, dst string) bool {
-	return dst == "sqlserver" && (src == "oracle" || source.IsPGFamily(src))
+	return dst == "sqlserver" && (src == "oracle" || src == "dameng" || source.IsPGFamily(src))
 }
 
 func supportsTriggerMigration(src, dst string) bool {
@@ -478,7 +481,7 @@ func runDataMigration(ctx context.Context, job *datamigrate.Job, dbJob *store.Da
 	if !startup.finish("初始化迁移准备信息", started, repairErr) {
 		return
 	}
-	if source.IsPGFamily(srcConn.DBType) && dstConn.DBType == "oracle" {
+	if (source.IsPGFamily(srcConn.DBType) || srcConn.DBType == "dameng" || srcConn.DBType == "sqlserver") && dstConn.DBType == "oracle" {
 		started, proceed = startup.begin("读取历史序列身份")
 		if !proceed {
 			return
@@ -716,7 +719,7 @@ func StartObjectMigration(c *gin.Context) {
 		if !startup.finish("初始化迁移准备信息", started, repairErr) {
 			return
 		}
-		if source.IsPGFamily(srcConn.DBType) && dstConn.DBType == "oracle" {
+		if (source.IsPGFamily(srcConn.DBType) || srcConn.DBType == "dameng" || srcConn.DBType == "sqlserver") && dstConn.DBType == "oracle" {
 			started, proceed = startup.begin("读取历史序列身份")
 			if !proceed {
 				return
@@ -808,6 +811,9 @@ func buildSrcReaderContext(ctx context.Context, conn *store.Connection, srcDatab
 		return source.NewMySQLForSQLServer(dsn, db, pool)
 	}
 	if len(targetTypes) > 0 && isOraclePGSQLServerPair(conn.DBType, targetTypes[0]) {
+		if conn.DBType == "dameng" {
+			return source.NewDaMengCross(dsn, db, pool)
+		}
 		if conn.DBType == "oracle" {
 			return source.NewOracleForSQLServer(dsn, srcDatabase, pool)
 		}
@@ -832,11 +838,17 @@ func buildSrcReaderContext(ctx context.Context, conn *store.Connection, srcDatab
 	}
 	switch conn.DBType {
 	case "sqlserver":
+		if len(targetTypes) > 0 && targetTypes[0] == "oracle" {
+			return source.NewSQLServerForOracle(dsn, db, pool)
+		}
 		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
 			return source.NewSQLServerForDameng(dsn, db, pool)
 		}
 		return source.NewSQLServer(dsn, db, pool)
 	case "dameng":
+		if len(targetTypes) > 0 && (targetTypes[0] == "oracle" || targetTypes[0] == "sqlserver") {
+			return source.NewDaMengCross(dsn, db, pool)
+		}
 		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
 			return source.NewDaMengNative(dsn, db, pool)
 		}
@@ -873,7 +885,7 @@ func migrationSourceDisplayDatabase(conn *store.Connection, override string) str
 }
 
 func resolvedMigrationSourceScope(reader source.Reader, srcType, dstType, requested string) string {
-	if srcType == "oscar" || isDamengNativePair(srcType, dstType) || isOraclePGSQLServerPair(srcType, dstType) {
+	if dstType == "oracle" && (srcType == "dameng" || srcType == "sqlserver") || srcType == "oscar" || isDamengNativePair(srcType, dstType) || isOraclePGSQLServerPair(srcType, dstType) {
 		if scoped, ok := reader.(interface{ MigrationSchema() string }); ok {
 			return scoped.MigrationSchema()
 		}
@@ -1098,7 +1110,7 @@ func MigrateViews(c *gin.Context) {
 		return
 	}
 	cfg.TargetSchema = schema
-	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) {
+	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) || isCrossOraclePair(srcConn.DBType, dstConn.DBType) {
 		runSQLServerViewJob(c, reader, writer, job, srcConn, dstConn, cfg, req)
 		return
 	}
@@ -1162,12 +1174,22 @@ func runSQLServerViewJob(c *gin.Context, reader source.Reader, writer target.Wri
 	updateJobStatus(dbJob, status, "")
 	results := append([]datamigrate.ObjectResult{}, report.Views.Items...)
 	results = append(results, report.Tables.Items...)
+	if len(results) == 0 && report.CrossPreflight != nil && !report.CrossPreflight.CanStart {
+		for _, i := range report.CrossPreflight.Issues {
+			if i.Severity == "error" {
+				results = append(results, datamigrate.ObjectResult{Name: i.Object.Name, SourceName: i.Object.Name, Error: i.Reason, SourceDDL: i.Definition, Stage: "preflight"})
+			}
+		}
+	}
 	if report.Views.Total == len(cfg.ViewNames) && report.Views.Success > 0 {
 		failed := make(map[string]bool, len(results))
 		for _, item := range results {
 			failed[item.Name] = true
 		}
 		for _, name := range cfg.ViewNames {
+			if dstConn.DBType == "oracle" {
+				name = strings.ToUpper(name)
+			}
 			if cfg.LowerCaseNames {
 				name = strings.ToLower(name)
 			}
@@ -1272,4 +1294,8 @@ func GetDataMigrationReport(c *gin.Context) {
 		}
 	}
 	c.Data(http.StatusOK, "application/json", body)
+}
+
+func isCrossOraclePair(src, dst string) bool {
+	return dst == "oracle" && (src == "dameng" || src == "sqlserver")
 }

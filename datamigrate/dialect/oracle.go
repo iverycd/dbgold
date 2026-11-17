@@ -15,6 +15,7 @@ import (
 
 type OracleDialect struct {
 	CharBytes, NCharBytes int
+	sourceType            string
 	// Filled by observational target inspection before any DROP. Never infer
 	// ownership from a generated name alone.
 	OwnedSequences map[string]bool
@@ -35,11 +36,7 @@ func (d *OracleDialect) QualifyTable(schema, table string) string {
 	return d.QuoteIdent(schema) + "." + d.QuoteIdent(table)
 }
 func (d *OracleDialect) MapType(c source.ColumnInfo, src string, opt TypeOpt) string {
-	if source.IsPGFamily(src) {
-		t, _ := typemap.PGToOracleChecked(c, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
-		return t
-	}
-	t, _ := typemap.OracleType(c, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
+	t, _ := typemap.OracleTypeForSource(c, src, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
 	return t
 }
 
@@ -83,7 +80,7 @@ func (d *OracleDialect) CreateTableStatements(schema string, info *source.TableD
 	if source.IsPGFamily(src) {
 		return d.pgCreateTableStatements(schema, info, opt, name)
 	}
-	if src != "mysql" {
+	if src != "mysql" && src != "dameng" && src != "sqlserver" {
 		return nil, fmt.Errorf("Oracle 目标仅支持 MySQL 源库")
 	}
 	if err := ValidateOracleName(name(info.TableName)); err != nil {
@@ -100,7 +97,7 @@ func (d *OracleDialect) CreateTableStatements(schema string, info *source.TableD
 			return nil, fmt.Errorf("表 %s 的列名转大写后冲突: %s", info.TableName, n)
 		}
 		seen[n] = true
-		t, err := typemap.OracleType(c, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
+		t, err := typemap.OracleTypeForSource(c, src, opt.UseNvarchar2, d.CharBytes, d.NCharBytes)
 		if err != nil {
 			return nil, fmt.Errorf("表 %s: %w", info.TableName, err)
 		}
@@ -108,7 +105,7 @@ func (d *OracleDialect) CreateTableStatements(schema string, info *source.TableD
 		if c.Generated != "" || strings.Contains(extra, "virtual generated") || strings.Contains(extra, "stored generated") || strings.Contains(extra, "on update") {
 			return nil, fmt.Errorf("表 %s 列 %s 的生成列/自动更新时间规则无法等价迁移", info.TableName, c.Name)
 		}
-		def, err := oracleDefault(c, t)
+		def, err := OracleDefaultForSource(c, src, t)
 		if err != nil {
 			return nil, fmt.Errorf("表 %s 列 %s: %w", info.TableName, c.Name, err)
 		}
@@ -196,3 +193,5 @@ func oracleDefault(c source.ColumnInfo, target string) (string, error) {
 	}
 	return " DEFAULT " + oracleLiteral(v), nil
 }
+
+func (d *OracleDialect) SetSourceType(src string) { d.sourceType = src }

@@ -18,6 +18,9 @@ func (d *OracleDialect) ForeignKeyName(f source.FKInfo) string {
 	return OracleObjectName("FK", f.TableName, f.ConstraintName)
 }
 func (d *OracleDialect) SequenceName(s source.SequenceInfo) string {
+	if s.Native != nil {
+		return s.Native.Name
+	}
 	return OracleObjectName("SEQ", s.TableName, s.ColumnName)
 }
 func (d *OracleDialect) TriggerName(s source.SequenceInfo) string {
@@ -73,6 +76,9 @@ func (d *OracleDialect) ForeignKeyStatements(schema string, f source.FKInfo) []S
 }
 
 func OracleSequenceStart(s source.SequenceInfo) (string, error) {
+	if s.Native != nil {
+		return s.StartValueText, ValidateCrossOracleSequence(s)
+	}
 	text := s.StartValueText
 	if text == "" {
 		text = fmt.Sprint(s.StartValue)
@@ -88,6 +94,9 @@ func OracleSequenceStart(s source.SequenceInfo) (string, error) {
 }
 
 func (d *OracleDialect) SequenceStatements(schema string, s source.SequenceInfo, _ string) []Statement {
+	if s.Native != nil {
+		return d.crossSequenceStatements(schema, s)
+	}
 	start, err := OracleSequenceStart(s)
 	if err != nil {
 		return nil

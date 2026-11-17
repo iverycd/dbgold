@@ -102,6 +102,7 @@ type MigrationReport struct {
 	AutoRepairs             []AutoRepair                         `json:"auto_repairs,omitempty"`
 	Warnings                []valueconv.MigrationWarning         `json:"warnings,omitempty"`
 	Preflight               *PGMySQLPreflight                    `json:"preflight,omitempty"`
+	CrossPreflight          *CrossPreflight                      `json:"cross_preflight,omitempty"`
 	PGOraclePreflight       *PGOraclePreflight                   `json:"pg_oracle_preflight,omitempty"`
 	Tables                  CategoryReport                       `json:"tables"`
 	Data                    CategoryReport                       `json:"data"`
@@ -205,6 +206,9 @@ func (r MigrationReport) HasFailures() bool {
 		return true
 	}
 	if r.Preflight != nil && !r.Preflight.Ready {
+		return true
+	}
+	if r.CrossPreflight != nil && !r.CrossPreflight.Ready {
 		return true
 	}
 	if r.PGOraclePreflight != nil && !r.PGOraclePreflight.Ready {

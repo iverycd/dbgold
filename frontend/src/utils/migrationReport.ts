@@ -1,8 +1,8 @@
 import type { DataValidationValue, DataValidationReport, CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
 
 // Historical PG/MySQL reports keep their original field and wire shape.
-export function migrationPGPreflight(report?: Pick<MigrationReport, 'preflight' | 'pg_oracle_preflight'> | null) {
-  return report?.pg_oracle_preflight ?? report?.preflight ?? null
+export function migrationPGPreflight(report?: Pick<MigrationReport, 'preflight' | 'pg_oracle_preflight' | 'cross_preflight'> | null) {
+  return report?.cross_preflight ?? report?.pg_oracle_preflight ?? report?.preflight ?? null
 }
 
 // ready means every object passed. can_start also allows a healthy subset, and

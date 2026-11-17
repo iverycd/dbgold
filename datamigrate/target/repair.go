@@ -175,6 +175,9 @@ func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, db
 // The caller validates statement scope and supplies an immutable object identity.
 // Source function names, when available, are used to prepare PG-family views.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error, sourceFunctionNames ...string) ([]repair.Unit, error) {
+	if ow, ok := w.(*OracleWriter); ok && obj.Sequence != nil && obj.Sequence.Native != nil && obj.Sequence.Native.OracleCross {
+		return ow.executeCrossOracleSequenceRepair(ctx, obj, units, onStep)
+	}
 	if obj.PGOracleSequence != nil {
 		return executePGOracleSequenceRepair(ctx, w, obj, units, onStep)
 	}

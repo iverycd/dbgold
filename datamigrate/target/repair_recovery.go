@@ -205,6 +205,9 @@ func TruncateRecovery(ctx context.Context, w Writer, table string) error {
 // Actual target types are loaded independently; SQL Server binds using these
 // actual types instead of regenerating the pre-repair CAST from source types.
 func PrepareRecovery(ctx context.Context, w Writer, table string, columns []source.ColumnInfo) error {
+	if ow, ok := w.(*OracleWriter); ok && ow.crossSource != "" {
+		ow.ConfigureCrossOracle(map[string]*source.TableDDLInfo{table: {TableName: table, Columns: columns}})
+	}
 	if dw, ok := w.(*DaMengWriter); ok && dw.srcType == "mysql" {
 		if err := dw.CheckMySQLDamengLoadTriggers(ctx, table); err != nil {
 			return err

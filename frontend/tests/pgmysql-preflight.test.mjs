@@ -29,8 +29,9 @@ function page(preflight, starts, errors, options = {}) {
       case '@/utils/migrationReport': return migrationReportUtils
       case '@/utils/clipboard': return {}
       case '@/api/schema': return {}
-      case '@/api/connections': return {}
+      case '@/api/connections': return { listConnectionViews: async () => ({ data: ['MixedObject'] }) }
       case '@/api/migration': return {
+        listConnectionTables: async () => ({ data: ['MixedObject'] }),
         preflightDataMigration: preflight,
         startDataMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
         startObjectMigration: options.start ?? (async request => { starts.push(request); return { data: { job_id: 'job' } } }),
@@ -507,3 +508,34 @@ test('view migration shows procedure failures separately while preserving view r
     assert.doesNotMatch(warnings[0], /兼容函数初始化失败/)
   } finally { scope.stop() }
 })
+
+for (const [source, target] of [['dameng', 'oracle'], ['dameng', 'sqlserver'], ['sqlserver', 'oracle']]) {
+  test(`${source} → ${target}: shared preflight applies to data, object and view entry points`, async () => {
+    const scope = Vue.effectScope()
+    try {
+      const checks = [], starts = []
+      const preview = { kind: 'cross', ready: false, can_start: true, check_scope: 'structure', issues: [], objects: [], source: { product: source }, target: { product: target } }
+      const p = scope.run(() => page(async request => { checks.push(request); return { data: preview } }, starts))
+      p.connections.value = [{ id: 1, db_type: source }, { id: 2, db_type: target }]
+      p.supportedPairs.value = [{ source, target }]
+      for (const [kind, stateKey, launchKey] of [['data', 'dataMigrate', 'startDataMigration'], ['views', 'viewMigrate', 'handleMigrateViews'], ['objects', 'objMigrate', 'startObjectMigration']]) {
+        Object.assign(p[stateKey], { srcConnId: 1, dstConnId: 2, srcDatabase: 'MixedDB', dstSchema: target === 'oracle' ? 'APP' : 'dbo' })
+        // SQL Server reloads its scoped inventory when the target changes.
+        await Vue.nextTick()
+        if (kind !== 'data') p[stateKey].selected = ['MixedObject']
+        if (kind === 'objects') p[stateKey].objects = ['indexes', 'sequences']
+        await Vue.nextTick()
+        const before = starts.length
+        await p[launchKey]()
+        assert.equal(starts.length, before + 1)
+        assert.equal(checks.length, before + 1)
+        assert.equal(starts.at(-1).src_database, 'MixedDB')
+        if (target === 'oracle') assert.equal(starts.at(-1).lower_case_names, false)
+        if (kind !== 'views') {
+          p.onPGReportLoaded(kind, 'job', { cross_preflight: preview })
+          assert.equal(p.pgTaskSummaries.value[kind].preflight.kind, 'cross')
+        }
+      }
+    } finally { scope.stop() }
+  })
+}

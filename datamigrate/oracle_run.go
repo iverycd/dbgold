@@ -59,18 +59,26 @@ func (m *Migrator) readOracleViews(ctx context.Context) ([]source.ViewInfo, erro
 }
 
 func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
-	if m.reader.DBType() != "mysql" {
+	if m.reader.DBType() != "mysql" && !m.isCrossOracle() {
 		return nil, fmt.Errorf("Oracle 目标仅支持 MySQL 源库")
 	}
 	d, ok := m.writer.Dialect().(*dialect.OracleDialect)
 	if !ok {
 		return nil, fmt.Errorf("Oracle 目标缺少 Oracle 方言")
 	}
+	var crossSequences []source.SequenceInfo
+	if m.isCrossOracle() {
+		var e error
+		crossSequences, e = m.reader.GetSequences(ctx)
+		if e != nil {
+			return nil, e
+		}
+	}
 	all, err := m.migrationTables(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tables := slices.Clone(FilterTables(all, m.cfg.Mode, m.cfg.Filter))
+	tables := m.crossTables(slices.Clone(FilterTables(all, m.cfg.Mode, m.cfg.Filter)))
 	if m.cfg.objectMode() && len(m.cfg.TableNames) > 0 {
 		tables = nil
 		for _, t := range m.cfg.TableNames {
@@ -79,6 +87,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			}
 		}
 	}
+	tables = m.crossTables(tables)
 	sort.Strings(tables)
 	m.freezeDataValidation(ctx, tables)
 	p := &oraclePlan{tableErrors: map[string]error{}, tables: tables, info: map[string]*source.TableDDLInfo{}, ddl: map[string][]dialect.Statement{}}
@@ -117,8 +126,10 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		key := ns + "\x00" + name
 		if old, exists := names[key]; exists {
 			e := fmt.Errorf("Oracle 名称冲突: %s 与 %s 映射为 %s", old, origin, name)
-			rejectTarget(nameTables[key], e)
-			rejectTarget(table, e)
+			if !m.isCrossOracle() || kind == "TABLE" || nameKinds[key] == "TABLE" {
+				rejectTarget(nameTables[key], e)
+				rejectTarget(table, e)
+			}
 			if nameKinds[key] == "VIEW" || kind == "VIEW" {
 				rejectView(name, e)
 			}
@@ -152,6 +163,9 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			if info == nil || len(info.Columns) == 0 {
 				return fmt.Errorf("表 %s 无列元数据", table)
 			}
+			if m.isCrossOracle() {
+				info = crossOracleTable(info, crossSequences)
+			}
 			p.info[m.objName(table)] = info
 			colNames := map[string]bool{}
 			for _, c := range info.Columns {
@@ -164,7 +178,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 				}
 				colNames[name] = true
 				if !m.cfg.objectMode() {
-					mapped, e := typemap.OracleType(c, m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
+					mapped, e := typemap.OracleTypeForSource(c, m.reader.DBType(), m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
 					if e != nil {
 						return fmt.Errorf("表 %s: %w", table, e)
 					}
@@ -188,7 +202,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 				}
 			}
 			if rebuild {
-				stmts, e := d.CreateTableStatements(m.cfg.TargetSchema, info, "mysql", dialect.TypeOpt{CharInLength: true, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
+				stmts, e := d.CreateTableStatements(m.cfg.TargetSchema, info, m.reader.DBType(), dialect.TypeOpt{CharInLength: true, UseNvarchar2: m.cfg.UseNvarchar2}, m.objName)
 				if e != nil {
 					return e
 				}
@@ -221,16 +235,24 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, e
 		}
 		for _, i := range pks {
-			if !selected[i.TableName] {
+			if !selected[i.TableName] || m.isCrossOracle() && m.crossExcluded("primary_key", i.TableName, i.IndexName) {
 				continue
 			}
 			i = oracleIndexNames(i, m.objName)
 			p.pks = append(p.pks, i)
 			if e = add("CONSTRAINT", d.IndexName(i), i.TableName, "主键 "+i.TableName); e != nil {
-				rejectTarget(i.TableName, e)
+				if m.isCrossOracle() {
+					p.pks[len(p.pks)-1].Unsupported = e.Error()
+				} else {
+					rejectTarget(i.TableName, e)
+				}
 			}
 			if e = add("INDEX", d.IndexName(i), i.TableName, "主键索引 "+i.TableName); e != nil {
-				rejectTarget(i.TableName, e)
+				if m.isCrossOracle() {
+					p.pks[len(p.pks)-1].Unsupported = e.Error()
+				} else {
+					rejectTarget(i.TableName, e)
+				}
 			}
 		}
 	}
@@ -240,22 +262,57 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, e
 		}
 		for _, i := range idxs {
-			if !selected[i.TableName] {
+			if !selected[i.TableName] || m.isCrossOracle() && m.crossExcluded("index", i.TableName, i.IndexName) {
 				continue
 			}
 			i = oracleIndexNames(i, m.objName)
 			p.indexes = append(p.indexes, i)
 			if e = add("INDEX", d.IndexName(i), i.TableName, "索引 "+i.TableName+"."+i.IndexName); e != nil {
-				rejectTarget(i.TableName, e)
+				if m.isCrossOracle() {
+					p.indexes[len(p.indexes)-1].Unsupported = e.Error()
+				} else {
+					rejectTarget(i.TableName, e)
+				}
 			}
 		}
 	}
-	if want("sequences") {
-		seqs, e := m.reader.GetSequences(ctx)
+	if want("sequences") || m.isCrossOracle() && m.cfg.Content == "data_only" {
+		seqs := crossSequences
+		var e error
+		if !m.isCrossOracle() {
+			seqs, e = m.reader.GetSequences(ctx)
+		}
 		if e != nil {
 			return nil, e
 		}
 		for _, s := range seqs {
+			if s.Native != nil && m.isCrossOracle() {
+				relevant := len(s.Native.Bindings) == 0 && m.cfg.Mode != "include" && len(m.cfg.TableNames) == 0
+				for _, b := range s.Native.Bindings {
+					relevant = relevant || selected[b.TableName] && b.Schema == s.Native.Schema
+				}
+				if !relevant || m.crossExcluded("sequence", s.TableName, s.Native.Name) {
+					continue
+				}
+				s = bindCrossOracleEvidence(ctx, m.crossOracleSequence(s, selected))
+				p.sequences = append(p.sequences, s)
+				if s.Unsupported != "" && m.cfg.Content == "data_only" {
+					for _, b := range s.Native.Bindings {
+						rejectTarget(b.TableName, fmt.Errorf("自动编号不可安全续写: %s", s.Unsupported))
+					}
+				}
+				if s.Unsupported == "" {
+					if e = add("SEQUENCE", d.SequenceName(s), s.TableName, "序列 "+s.Native.Name); e != nil {
+						p.sequences[len(p.sequences)-1].Unsupported = e.Error()
+					}
+					for _, b := range s.Native.Bindings {
+						if e = add("TRIGGER", dialect.CrossOracleTriggerName(s, b), b.TableName, "自动编号 "+b.TableName+"."+b.ColumnName); e != nil {
+							p.sequences[len(p.sequences)-1].Unsupported = e.Error()
+						}
+					}
+				}
+				continue
+			}
 			if !selected[s.TableName] {
 				continue
 			}
@@ -279,7 +336,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, e
 		}
 		for _, f := range fks {
-			if !selected[f.TableName] {
+			if !selected[f.TableName] || m.isCrossOracle() && m.crossExcluded("foreign_key", f.TableName, f.ConstraintName) {
 				continue
 			}
 			if !m.cfg.objectMode() && !selected[f.RefTable] {
@@ -290,7 +347,11 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			f.RefColumns = oracleNames(f.RefColumns, m.objName)
 			p.fks = append(p.fks, f)
 			if e = add("CONSTRAINT", d.ForeignKeyName(f), f.TableName, "外键 "+f.TableName+"."+f.ConstraintName); e != nil {
-				rejectTarget(f.TableName, e)
+				if m.isCrossOracle() {
+					p.fks[len(p.fks)-1].Unsupported = e.Error()
+				} else {
+					rejectTarget(f.TableName, e)
+				}
 			}
 		}
 	}
@@ -300,7 +361,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			return nil, e
 		}
 		for _, c := range comments {
-			if selected[c.TableName] {
+			if selected[c.TableName] && (!m.isCrossOracle() || !m.crossExcluded("comment", c.TableName, c.ColumnName)) {
 				c.TableName = m.objName(c.TableName)
 				if c.ColumnName != "" {
 					c.ColumnName = m.objName(c.ColumnName)
@@ -309,7 +370,17 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			}
 		}
 	}
-	if rebuild {
+	if m.isCrossOracle() {
+		for _, list := range [][]source.IndexInfo{p.pks, p.indexes} {
+			for i := range list {
+				idx := &list[i]
+				if e := m.validateCrossOracleIndex(*idx, p.info[idx.TableName]); e != nil {
+					idx.Unsupported = e.Error()
+				}
+			}
+		}
+	}
+	if rebuild && !m.isCrossOracle() {
 		for _, index := range append(slices.Clone(p.pks), p.indexes...) {
 			if m.migrationTargetTableError(index.TableName) != nil {
 				continue
@@ -332,7 +403,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 				if !slices.Contains(index.Columns, m.objName(column.Name)) {
 					continue
 				}
-				mapped, e := typemap.OracleType(column, m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
+				mapped, e := typemap.OracleTypeForSource(column, m.reader.DBType(), m.cfg.UseNvarchar2, d.CharBytes, d.NCharBytes)
 				if e != nil {
 					rejectTarget(index.TableName, e)
 					continue
@@ -352,6 +423,9 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		views, e := m.readOracleViews(ctx)
 		if e != nil {
 			return nil, e
+		}
+		if m.isCrossOracle() {
+			views = slices.DeleteFunc(views, func(v source.ViewInfo) bool { return m.crossExcluded("view", "", v.ViewName) })
 		}
 		for _, v := range views {
 			viewSources[m.objName(v.ViewName)] = append(viewSources[m.objName(v.ViewName)], v.ViewName)
@@ -377,7 +451,7 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 				p.views[i].err = e
 			}
 		}
-		if m.cfg.Mode == "exclude" {
+		if m.cfg.Mode == "exclude" || m.isCrossOracle() {
 			excluded := map[string]bool{}
 			for _, t := range all {
 				if !selected[t] {
@@ -407,7 +481,9 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 		healthyObjects := slices.DeleteFunc(slices.Clone(objects), func(o target.OracleObject) bool {
 			return o.Table != "" && m.migrationTargetTableError(o.Table) != nil || o.Kind == "VIEW" && len(viewSources[o.Name]) > 0 && viewErrors[viewSources[o.Name][0]] != nil
 		})
-		healthySequences := slices.DeleteFunc(slices.Clone(p.sequences), func(seq source.SequenceInfo) bool { return m.migrationTargetTableError(seq.TableName) != nil })
+		healthySequences := slices.DeleteFunc(slices.Clone(p.sequences), func(seq source.SequenceInfo) bool {
+			return seq.Unsupported != "" || m.migrationTargetTableError(seq.TableName) != nil
+		})
 		if len(healthyInfo) == 0 && len(healthyObjects) == 0 {
 			break
 		}
@@ -427,6 +503,43 @@ func (m *Migrator) prepareOracle(ctx context.Context) (*oraclePlan, error) {
 			continue
 		}
 		var object *target.OracleObjectPreflightError
+		if errors.As(err, &object) && object.Kind == "SEQUENCE" && m.isCrossOracle() {
+			for i := range p.sequences {
+				if d.SequenceName(p.sequences[i]) == object.Name {
+					p.sequences[i].Unsupported = err.Error()
+					if m.cfg.Content == "data_only" {
+						for _, b := range p.sequences[i].Native.Bindings {
+							rejectTarget(b.TableName, err)
+						}
+					}
+				}
+			}
+			objects = slices.DeleteFunc(objects, func(o target.OracleObject) bool { return o.Kind == "SEQUENCE" && o.Name == object.Name })
+			continue
+		}
+		if errors.As(err, &object) && m.isCrossOracle() && (object.Kind == "INDEX" || object.Kind == "CONSTRAINT") {
+			found := false
+			for _, list := range [][]source.IndexInfo{p.pks, p.indexes} {
+				for i := range list {
+					if d.IndexName(list[i]) == object.Name {
+						list[i].Unsupported = err.Error()
+						found = true
+					}
+				}
+			}
+			for i := range p.fks {
+				if d.ForeignKeyName(p.fks[i]) == object.Name {
+					p.fks[i].Unsupported = err.Error()
+					found = true
+				}
+			}
+			if found {
+				objects = slices.DeleteFunc(objects, func(o target.OracleObject) bool {
+					return o.Name == object.Name && (o.Kind == "INDEX" || o.Kind == "CONSTRAINT")
+				})
+				continue
+			}
+		}
 		if !errors.As(err, &object) || object.Kind != "VIEW" || !rejectView(object.Name, err) {
 			return nil, err
 		}
@@ -454,6 +567,18 @@ func oracleIndexNames(i source.IndexInfo, name func(string) string) source.Index
 
 func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	report = newMigrationReport()
+	if m.isCrossOracle() && len(m.cfg.ViewNames) > 0 {
+		for _, r := range m.migrateOracleViews(ctx, m.cfg.ViewNames) {
+			report.Views.Total++
+			if r.Error != "" {
+				report.Views.Failed++
+				report.Views.Items = append(report.Views.Items, r)
+			} else {
+				report.Views.Success++
+			}
+		}
+		return report
+	}
 	start := time.Now()
 	defer func() {
 		if w, ok := m.writer.(interface {
@@ -485,7 +610,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 	if ctx.Err() != nil {
 		return report
 	}
-	m.log.Infof("开始 MySQL → Oracle 迁移，共 %d 张表", len(p.tables))
+	m.log.Infof("开始 %s → Oracle 迁移，共 %d 张表", m.reader.DBType(), len(p.tables))
 	failed := map[string]bool{}
 	for _, table := range p.tables {
 		e := p.tableErrors[table]
@@ -497,6 +622,11 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		item := &report.Tables.Items[len(report.Tables.Items)-1]
 		item.Stage, item.Table, item.SourceName = "preflight", table, table
 		item.TargetName, item.TargetTable, item.TargetSchema = m.objName(table), m.objName(table), m.cfg.TargetSchema
+	}
+	if w, ok := m.writer.(interface {
+		ConfigureCrossOracle(map[string]*source.TableDDLInfo)
+	}); ok && m.isCrossOracle() {
+		w.ConfigureCrossOracle(p.info)
 	}
 	m.logPreparationComplete(ctx)
 	completed := map[string]bool{}
@@ -538,6 +668,25 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 						report.Warnings = append(report.Warnings, warning)
 					}
 				}
+			}
+		}
+	}
+	baseline := map[string]int64{}
+	if m.isCrossOracle() && m.cfg.Content == "data_only" {
+		for _, t := range p.tables {
+			if failed[m.objName(t)] {
+				continue
+			}
+			n, e := m.writer.CountRows(ctx, m.objName(t))
+			if e != nil {
+				if m.stopMigrationTask(ctx, e) {
+					return report
+				}
+				failed[m.objName(t)] = true
+				m.blockMigrationTable(t, "preflight", e)
+				m.recordOracleResult(&report.Data, m.objName(t), "", e)
+			} else {
+				baseline[t] = n
 			}
 		}
 	}
@@ -632,7 +781,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if ctx.Err() != nil {
 				return report
 			}
-			if failed[s.TableName] {
+			if failed[s.TableName] || crossOracleSequenceBlocked(s, failed) {
 				report.Sequences.Total++
 				m.recordBlockedObject(&report.Sequences, d.SequenceName(s), sourceTables[s.TableName], "依赖表 "+s.TableName+" 迁移失败")
 				continue
@@ -715,6 +864,17 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			}
 		}
 	}
+	if m.isCrossOracle() && m.cfg.Content == "data_only" {
+		for _, seq := range p.sequences {
+			if seq.Native != nil && seq.Native.OracleObjectID > 0 && seq.Unsupported == "" && ctx.Err() == nil {
+				e := m.captureSequenceCall(ctx, seq, nil, func(c context.Context) error {
+					return target.CalibrateRecovery(c, m.writer, seq.TableName, []source.SequenceInfo{seq})
+				})
+				m.recordOracleResult(&report.Sequences, m.writer.Dialect().(*dialect.OracleDialect).SequenceName(seq), "", e)
+				m.stopMigrationTask(ctx, e)
+			}
+		}
+	}
 	for _, t := range p.tables {
 		if !dataOK[t] || ctx.Err() != nil {
 			continue
@@ -736,9 +896,10 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			m.log.Errorf("[%s] %v", t, err)
 			continue
 		}
+		dst -= baseline[t]
 		report.RowCounts = append(report.RowCounts, TableRowCount{Table: m.objName(t), Src: src, Dst: dst, Match: src == dst})
 	}
-	m.logMigrationCompletion("MySQL → Oracle 迁移结束，耗时 %s", time.Since(start).Round(time.Second))
+	m.logMigrationCompletion(m.reader.DBType()+" → Oracle 迁移结束，耗时 %s", time.Since(start).Round(time.Second))
 	return report
 }
 func (m *Migrator) recordOracleResult(c *CategoryReport, name, ddl string, err error) {
@@ -764,6 +925,12 @@ func (m *Migrator) planOracleViews(views []source.ViewInfo) []oracleViewPlan {
 		sourceName := v.ViewName
 		names[m.objName(v.ViewName)] = true
 		sql, deps, e := oracleview.Convert(v.Definition, m.oracleSourceSchema(), m.cfg.TargetSchema, m.cfg.StripViewSchemas)
+		if m.isCrossOracle() {
+			sql, deps, e = oracleview.ConvertCross(v.Definition, m.reader.DBType(), m.oracleSourceSchema(), m.cfg.TargetSchema)
+		}
+		if v.Unsupported != "" {
+			e = fmt.Errorf("%s", v.Unsupported)
+		}
 		if err := validateOracleViewColumns(v, m.objName); err != nil {
 			e = err
 		}
@@ -864,7 +1031,7 @@ func (m *Migrator) migrateOracleViews(ctx context.Context, names []string) []Obj
 	selected := []source.ViewInfo{}
 	found := map[string]bool{}
 	for _, v := range views {
-		if !slices.Contains(names, v.ViewName) {
+		if !slices.Contains(names, v.ViewName) || m.isCrossOracle() && m.crossExcluded("view", "", v.ViewName) {
 			continue
 		}
 		found[v.ViewName] = true

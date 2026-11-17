@@ -91,7 +91,7 @@ func (r *DaMengReader) GetTableDDLInfo(ctx context.Context, table string) (*Tabl
 		        c.DATA_DEFAULT,
 		        CASE WHEN sc.INFO2 & 0x01 = 0x01 THEN 1 ELSE 0 END AS IS_IDENTITY
 		 FROM ALL_TAB_COLUMNS c
-		 JOIN ALL_OBJECTS o ON o.object_name = c.TABLE_NAME AND o.owner = c.OWNER
+		 JOIN ALL_OBJECTS o ON o.object_name = c.TABLE_NAME AND o.owner = c.OWNER AND o.OBJECT_TYPE = 'TABLE'
 		 JOIN SYS.SYSCOLUMNS sc ON sc.id = o.object_id AND sc.name = c.COLUMN_NAME
 		 WHERE c.OWNER = ? AND c.TABLE_NAME = ?
 		 ORDER BY c.COLUMN_ID`,

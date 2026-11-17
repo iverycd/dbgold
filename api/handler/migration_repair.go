@@ -1009,11 +1009,11 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			return
 		}
 	}
-	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil {
+	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
 		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
 		return
 	}
-	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil || o.ManualTrigger != nil || o.PGOracleSequence != nil {
+	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil || o.ManualTrigger != nil || o.PGOracleSequence != nil || o.TrustedCrossOracleSequence() {
 		// The read-only retry action always requests the whole frozen transaction;
 		// it does not expose or depend on persisted per-unit selection controls.
 		for i := range o.Units {
@@ -1022,17 +1022,17 @@ func ExecuteMigrationRepair(c *gin.Context) {
 			}
 		}
 	}
-	if o.RequiresReview && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil && o.Native == nil && o.PGOracleSequence == nil {
+	if o.RequiresReview && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil && o.Native == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
 		repairError(c, fmt.Errorf("请先审阅并保存执行单元"))
 		return
 	}
 	for _, u := range o.Units {
-		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil {
+		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
 			repairError(c, fmt.Errorf("存在未知执行结果，不允许自动重放"))
 			return
 		}
 	}
-	if o.Native == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil {
+	if o.Native == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
 		if e := validateRepairUnits(o.Units); e != nil {
 			repairError(c, e)
 			return

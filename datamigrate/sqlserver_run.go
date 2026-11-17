@@ -93,7 +93,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 	if e != nil {
 		return failGlobal(e)
 	}
-	tables := FilterTables(all, m.cfg.Mode, m.cfg.Filter)
+	tables := m.crossTables(FilterTables(all, m.cfg.Mode, m.cfg.Filter))
 	if m.cfg.objectMode() && len(m.cfg.TableNames) > 0 {
 		tables = nil
 		for _, t := range m.cfg.TableNames {
@@ -102,6 +102,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			}
 		}
 	}
+	tables = m.crossTables(tables)
 	sort.Strings(tables)
 	m.freezeDataValidation(ctx, tables)
 	failed := map[string]bool{}

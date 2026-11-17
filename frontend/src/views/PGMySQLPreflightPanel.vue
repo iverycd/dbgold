@@ -33,6 +33,7 @@
       Oracle 对象名统一大写，按 11g 的 30 字节限制检查重名和超长名称。空字符串、自增列及默认值的兼容差异会列入预检或迁移告警；无法转换的类型、对象和依赖会说明原因，不会静默忽略。
       函数、存储过程和业务触发器通过原样导出后人工适配。
     </a-alert>
+    <a-alert v-if="result?.kind === 'cross' && result.source.product === 'sqlserver'" type="info">SQL Server 源仅迁移所选数据库的 dbo Schema。</a-alert>
     <div v-if="excluded.length" class="preflight-excluded">
       <span>已明确排除 {{ excluded.length }} 项</span>
       <a-tag v-for="item in excluded" :key="objectKey(item)" :closable="!readonly && !busy && !disabled" color="orange" @close="$emit('restore', item)">
@@ -113,12 +114,13 @@ import { Message } from '@arco-design/web-vue'
 import { copyText } from '@/utils/clipboard'
 import { preflightCanStart, preflightStatusLabel } from '@/utils/migrationReport'
 import type { MigrationObjectRef, PGPreflight } from '@/api/migration'
-const props = withDefaults(defineProps<{ result?: PGPreflight | null; targetType?: 'mysql' | 'oracle'; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
-const isOracle = computed(() => props.result?.kind === 'pg_oracle' || (!props.result && props.targetType === 'oracle'))
-const targetLabel = computed(() => isOracle.value ? 'Oracle' : 'MySQL')
+const props = withDefaults(defineProps<{ result?: PGPreflight | null; targetType?: 'mysql' | 'oracle' | 'sqlserver'; excluded?: MigrationObjectRef[]; busy?: boolean; disabled?: boolean; readonly?: boolean; compact?: boolean; summarySource?: 'page' | 'report' }>(), { excluded: () => [], summarySource: 'page' })
+const isOracle = computed(() => props.result?.kind === 'pg_oracle' || (props.result?.kind === 'cross' && props.result.target.product === 'oracle') || (!props.result && props.targetType === 'oracle'))
+const targetLabel = computed(() => isOracle.value ? 'Oracle' : props.result?.kind === 'cross' || props.targetType === 'sqlserver' ? 'SQL Server' : 'MySQL')
 const targetDescription = computed(() => {
   const result = props.result
   if (!result) return ''
+  if (result.kind === 'cross') return `${result.target.product} ${result.target.version} / ${result.target.schema} · ${result.target.charset || ''}`
   if (result.kind === 'pg_oracle') return `Oracle ${result.target.version} / ${result.target.schema} · ${result.target.charset} / ${result.target.ncharset}`
   return `MySQL ${result.target.version} / ${result.target.database} · ${result.target.target_charset || ''} / ${result.target.target_collation}`
 })

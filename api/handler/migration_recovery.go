@@ -110,6 +110,19 @@ func recoveryRelated(jobID string, o repair.Object, ids []string) ([]repair.Obje
 // Successful generated sequences are evidence, not selected repair work. Read
 // them independently from recoveryRelated, which intentionally excludes success.
 func pgOracleRecoveryEvidence(ctx context.Context, jobID string, table repair.Object, srcType, dstType string) (context.Context, error) {
+	if dstType == "oracle" && (srcType == "dameng" || srcType == "sqlserver") {
+		objects, _, err := repairObjects(jobID)
+		if err != nil {
+			return ctx, err
+		}
+		var seqs []source.SequenceInfo
+		for _, o := range objects {
+			if o.TrustedCrossOracleSequence() && o.Sequence.Native.OracleObjectID > 0 {
+				seqs = append(seqs, *o.Sequence)
+			}
+		}
+		return datamigrate.WithCrossOracleEvidence(ctx, seqs), nil
+	}
 	if !source.IsPGFamily(srcType) || dstType != "oracle" {
 		return ctx, nil
 	}

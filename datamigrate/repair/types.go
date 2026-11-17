@@ -149,6 +149,9 @@ func (o *Object) NormalizeLegacyExecution() bool {
 
 // CanEditDDL requires an object identity, not just a report category label.
 func (o Object) CanEditDDL() bool {
+	if o.Sequence != nil && o.Sequence.Native != nil && o.Sequence.Native.OracleCross {
+		return false
+	}
 	if o.PGOracleSequence != nil {
 		return false
 	}
@@ -174,6 +177,9 @@ func (o Object) CanEditDDL() bool {
 // Generated MySQL trigger programs can be retried as a complete immutable
 // transaction, while remaining unavailable to the general SQL draft editor.
 func (o Object) CanExecuteDDL() bool {
+	if o.Sequence != nil && o.Sequence.Native != nil && o.Sequence.Native.OracleCross {
+		return o.TrustedCrossOracleSequence()
+	}
 	if o.PGOracleSequence != nil {
 		return o.TrustedPGOracleSequence()
 	}
@@ -232,28 +238,29 @@ func (o Object) TrustedNative() bool {
 }
 
 type RecoveryPreview struct {
-	PGOracleSequences   []pgoracle.SequencePlan `json:"pg_oracle_sequences,omitempty"`
-	PartitionPlan       *partition.Plan         `json:"partition_plan,omitempty"`
-	PartitionSourceRows map[string]int64        `json:"partition_source_rows,omitempty"`
-	PartitionTargetRows map[string]int64        `json:"partition_target_rows,omitempty"`
-	NativeTable         *damengnative.Table     `json:"native_table,omitempty"`
-	NativeObject        *damengnative.Object    `json:"native_object,omitempty"`
-	NativeUnits         []Unit                  `json:"native_units,omitempty"`
-	NativeDisable       []damengnative.Unit     `json:"native_disable,omitempty"`
-	NativeRestore       []damengnative.Unit     `json:"native_restore,omitempty"`
-	ObjectID            string                  `json:"object_id"`
-	SourceTable         string                  `json:"source_table"`
-	TargetTable         string                  `json:"target_table"`
-	QualifiedTarget     string                  `json:"qualified_target"`
-	SourceRows          int64                   `json:"source_rows"`
-	TargetRows          int64                   `json:"target_rows"`
-	ColumnMapping       map[string]string       `json:"column_mapping"`
-	SourceColumns       []source.ColumnInfo     `json:"source_columns"`
-	TargetColumns       []source.ColumnInfo     `json:"target_columns"`
-	Related             []Object                `json:"related"`
-	DataRequired        bool                    `json:"data_required"`
-	Fingerprint         string                  `json:"fingerprint"`
-	Warnings            []string                `json:"warnings"`
+	CrossOracleSequences []source.SequenceInfo   `json:"cross_oracle_sequences,omitempty"`
+	PGOracleSequences    []pgoracle.SequencePlan `json:"pg_oracle_sequences,omitempty"`
+	PartitionPlan        *partition.Plan         `json:"partition_plan,omitempty"`
+	PartitionSourceRows  map[string]int64        `json:"partition_source_rows,omitempty"`
+	PartitionTargetRows  map[string]int64        `json:"partition_target_rows,omitempty"`
+	NativeTable          *damengnative.Table     `json:"native_table,omitempty"`
+	NativeObject         *damengnative.Object    `json:"native_object,omitempty"`
+	NativeUnits          []Unit                  `json:"native_units,omitempty"`
+	NativeDisable        []damengnative.Unit     `json:"native_disable,omitempty"`
+	NativeRestore        []damengnative.Unit     `json:"native_restore,omitempty"`
+	ObjectID             string                  `json:"object_id"`
+	SourceTable          string                  `json:"source_table"`
+	TargetTable          string                  `json:"target_table"`
+	QualifiedTarget      string                  `json:"qualified_target"`
+	SourceRows           int64                   `json:"source_rows"`
+	TargetRows           int64                   `json:"target_rows"`
+	ColumnMapping        map[string]string       `json:"column_mapping"`
+	SourceColumns        []source.ColumnInfo     `json:"source_columns"`
+	TargetColumns        []source.ColumnInfo     `json:"target_columns"`
+	Related              []Object                `json:"related"`
+	DataRequired         bool                    `json:"data_required"`
+	Fingerprint          string                  `json:"fingerprint"`
+	Warnings             []string                `json:"warnings"`
 }
 
 type RecoveryResult struct {

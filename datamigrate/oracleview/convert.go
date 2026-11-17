@@ -15,6 +15,7 @@ import (
 )
 
 type renderer struct {
+	cross          bool
 	source, target string
 	strip          map[string]bool
 	deps           map[string]bool
@@ -75,6 +76,9 @@ func (r *renderer) selectNode(n ast.Node) string {
 		for _, f := range n.Fields.Fields {
 			s := ""
 			if f.WildCard != nil {
+				if r.cross {
+					return r.fail("跨库视图须使用显式列")
+				}
 				if f.WildCard.Schema.O != "" {
 					r.schema(f.WildCard.Schema.O)
 				}

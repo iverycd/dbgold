@@ -135,6 +135,17 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
 func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType string) error {
+	if obj.Sequence != nil && obj.Sequence.Native != nil && obj.Sequence.Native.OracleCross {
+		if dbType != "oracle" || !obj.TrustedCrossOracleSequence() || len(units) != len(obj.Units) {
+			return fmt.Errorf("跨库 Oracle 序列修复缺少完整冻结计划")
+		}
+		for i, u := range units {
+			if u.SQL != obj.Units[i].SQL || u.OriginalSQL != obj.Units[i].OriginalSQL || u.ID != obj.Units[i].ID {
+				return fmt.Errorf("跨库 Oracle 序列修复不能修改执行单元")
+			}
+		}
+		return nil
+	}
 	if obj.PGOracleSequence != nil {
 		return target.ValidatePGOracleSequenceRepair(obj, units, dbType)
 	}

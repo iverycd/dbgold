@@ -123,6 +123,15 @@ func verification(status, message string) (repair.Verification, error) {
 // InspectRepair never equates a same-name object with a verified repair. Where
 // the dialect cannot prove the saved definition, an explicit unknown is returned.
 func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Verification, error) {
+	if ow, ok := w.(*OracleWriter); ok && obj.Sequence != nil && obj.Sequence.Native != nil && obj.Sequence.Native.OracleCross {
+		if !obj.TrustedCrossOracleSequence() || obj.Sequence.Native.OracleObjectID <= 0 {
+			return verification("unknown", "缺少持久化序列身份")
+		}
+		if e := ow.InspectCrossOracleSequence(ctx, *obj.Sequence, true); e != nil {
+			return verification("failed", e.Error())
+		}
+		return verification("succeeded", "序列身份及冻结定义一致")
+	}
 	a, err := repairAccess(w)
 	if err != nil {
 		return repair.Verification{}, err

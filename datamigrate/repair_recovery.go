@@ -141,6 +141,16 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if sqlServerCross {
 		savedSource, currentSource = sqlServerRawRecoveryColumns(savedSource), sqlServerRawRecoveryColumns(currentSource)
 	}
+	if w.DBType() == "oracle" && (r.DBType() == "dameng" || r.DBType() == "sqlserver") {
+		savedSource = slices.Clone(savedSource)
+		currentSource = slices.Clone(currentSource)
+		for i := range savedSource {
+			savedSource[i].SQLServerDeferredDefault = false
+		}
+		for i := range currentSource {
+			currentSource[i].SQLServerDeferredDefault = false
+		}
+	}
 	if len(savedSource) > 0 && !recoverySourceColumnsMatch(r.DBType(), savedSource, currentSource) {
 		return p, fmt.Errorf("源表结构已偏离迁移快照，请重新核对并创建迁移任务")
 	}
@@ -202,6 +212,11 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			if err = w.(oscarMySQLWriter).ValidateOscarMySQLAutoIncrement(ctx, seq, typ, true); err != nil {
 				return p, err
 			}
+		}
+	}
+	if w.DBType() == "oracle" && (r.DBType() == "dameng" || r.DBType() == "sqlserver") {
+		if err = prepareCrossOracleRecovery(ctx, r, w, cfg, &p, related); err != nil {
+			return p, err
 		}
 	}
 	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
@@ -455,7 +470,7 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 			obj.DataStatus = "not_required"
 		}
 	}
-	previewContext := WithPGOracleRecoveryEvidence(ctx, p.PGOracleSequences)
+	previewContext := WithCrossOracleEvidence(WithPGOracleRecoveryEvidence(ctx, p.PGOracleSequences), p.CrossOracleSequences)
 	fresh, e := previewRecovery(previewContext, r, w, cfg, obj, p.Related, p.ColumnMapping, ops)
 	if e != nil {
 		return finish(e)
@@ -468,6 +483,9 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if repair.Hash(fresh.PGOracleSequences) != repair.Hash(p.PGOracleSequences) {
 		return finish(fmt.Errorf("PG 序列状态或工具身份已变化，请重新预览并确认"))
+	}
+	if repair.Hash(fresh.CrossOracleSequences) != repair.Hash(p.CrossOracleSequences) {
+		return finish(fmt.Errorf("跨库序列状态、绑定或身份已变化，请重新预览"))
 	}
 	// Runtime source metadata (such as DM's actual floating storage family) is
 	// deliberately not serialized in the preview. Use the freshly read copy.
@@ -495,6 +513,10 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	}
 	if p.PartitionPlan != nil {
 		if e = recoverPartitionRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
+			return finish(e)
+		}
+	} else if _, ok := r.(crossStreamReader); ok && ((w.DBType() == "oracle" && (r.DBType() == "dameng" || r.DBType() == "sqlserver")) || (w.DBType() == "sqlserver" && r.DBType() == "dameng")) {
+		if e = recoverCrossRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
 			return finish(e)
 		}
 	} else if r.DBType() == "oscar" && w.DBType() == "mysql" {
@@ -644,6 +666,9 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	return finish(nil)
 }
 func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview) ([]source.SequenceInfo, error) {
+	if w.DBType() == "oracle" && (r.DBType() == "dameng" || r.DBType() == "sqlserver") {
+		return p.CrossOracleSequences, nil
+	}
 	if source.IsPGFamily(r.DBType()) && w.DBType() == "oracle" {
 		_, err := PGOracleRecoveryPlans(ctx, r, w, p, p.Related)
 		return nil, err // The generic AUTO_INCREMENT model cannot carry PG identity.

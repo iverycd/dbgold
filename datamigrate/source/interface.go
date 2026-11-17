@@ -79,6 +79,9 @@ type SequenceInfo struct {
 // NativeSequenceInfo retains a named Oracle sequence and its table-scoped uses.
 // Decimal text preserves sequence values before target-specific range checks.
 type NativeSequenceInfo struct {
+	SeedValue                                        string `json:"seed_value,omitempty"`
+	OracleCross                                      bool   `json:"oracle_cross,omitempty"`
+	OracleObjectID                                   int64  `json:"oracle_object_id,omitempty"`
 	Name, IncrementBy, MinValue, MaxValue, CacheSize string
 	Schema                                           string `json:",omitempty"`
 	SourceName                                       string `json:",omitempty"`

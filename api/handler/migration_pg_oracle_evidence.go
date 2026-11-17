@@ -18,6 +18,9 @@ import (
 // ownership. The migrator still compares the current source definition and the
 // writer rechecks the target object ID and fingerprint before any data write.
 func withPGOracleMigrationEvidence(ctx context.Context, owner uint, src, dst *store.Connection, sourceSchema, targetSchema string) (context.Context, error) {
+	if dst.DBType == "oracle" && (src.DBType == "dameng" || src.DBType == "sqlserver") {
+		return withCrossOracleMigrationEvidence(ctx, owner, src, dst, sourceSchema, targetSchema)
+	}
 	if !source.IsPGFamily(src.DBType) || dst.DBType != "oracle" {
 		return ctx, nil
 	}

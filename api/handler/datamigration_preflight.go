@@ -91,6 +91,20 @@ func PreflightDataMigration(c *gin.Context) {
 	cfg := datamigrate.Config{DamengWriteStrategy: req.DamengWriteStrategy, MySQLReadStrategy: req.MySQLReadStrategy, MigrateTriggers: resolveTriggerMigration(src.DBType, dst.DBType, req.MigrateContent, req.MigrateTriggers), OverwriteExisting: req.OverwriteExisting, Mode: req.MigrateMode, Filter: req.TableFilter, Content: req.MigrateContent, TargetSchema: req.TargetSchema, TargetDBType: dst.DBType, LowerCaseNames: req.LowerCaseNames, CharInLength: req.CharInLength, UseNvarchar2: req.UseNvarchar2, ChangeOwner: resolveChangeOwner(dst.DBType, req.ChangeOwner), Distributed: req.Distributed, PageSize: req.PageSize, MaxParallel: req.MaxParallel, IntraTableParallel: req.IntraTableParallel, ValidateData: req.ValidateData, ExcludedObjects: req.ExcludedObjects, Objects: req.MigrateObjects, TableNames: req.TableNames, ViewNames: req.ViewNames}
 	cfg.ChangeOwner, cfg.Distributed = resolveOwnerAndDistribution(src.DBType, dst.DBType, cfg.ChangeOwner, cfg.Distributed)
 	m := datamigrate.NewMigrator(reader, writer, &datamigrate.Job{LogCh: make(chan string, 16)}, cfg)
+	if (src.DBType == "dameng" && (dst.DBType == "oracle" || dst.DBType == "sqlserver")) || src.DBType == "sqlserver" && dst.DBType == "oracle" {
+		schema, e := target.ResolveRepairSchema(c.Request.Context(), writer)
+		if e != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": e.Error()})
+			return
+		}
+		ctx, e := withCrossOracleMigrationEvidence(c.Request.Context(), middleware.GetCurrentUserID(c), src, dst, resolvedMigrationSourceScope(reader, src.DBType, dst.DBType, req.SrcDatabase), schema)
+		if e != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": e.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, m.PreflightCrossMigration(ctx))
+		return
+	}
 	if native {
 		c.JSON(http.StatusOK, m.PreflightDamengNative(c.Request.Context()))
 		return

@@ -79,7 +79,7 @@ func sqlServerDefaultLiteral(c source.ColumnInfo, src string) (string, bool, err
 		return failed()
 	}
 	tokens = pgOracleUnwrap(tokens)
-	if src == "oracle" && len(tokens) == 2 && (tokens[0].Is("n") || tokens[0].Is("date") || tokens[0].Is("timestamp")) && tokens[1].Kind == 's' {
+	if (src == "oracle" || src == "dameng") && len(tokens) == 2 && (tokens[0].Is("n") || tokens[0].Is("date") || tokens[0].Is("timestamp")) && tokens[1].Kind == 's' {
 		tokens = tokens[1:]
 	}
 	parser := sqlsyntax.Expr{Tokens: tokens, TypedLiteral: true}
@@ -118,10 +118,10 @@ func sqlServerCurrentDefault(raw, src, mapped string) string {
 	switch {
 	case len(tokens) == 1 && tokens[0].Is("current_date") && mapped == "DATE":
 		return "CONVERT(DATE,SYSDATETIME())"
-	case src == "oracle" && len(tokens) == 1 && tokens[0].Is("sysdate") && strings.HasPrefix(mapped, "DATETIME2("):
+	case (src == "oracle" || src == "dameng") && len(tokens) == 1 && tokens[0].Is("sysdate") && strings.HasPrefix(mapped, "DATETIME2("):
 		return "CONVERT(DATETIME2(0),CONVERT(CHAR(19),SYSDATETIME(),126),126)"
 	case len(tokens) == 1 && tokens[0].Is("current_timestamp"),
-		src == "oracle" && len(tokens) == 1 && tokens[0].Is("systimestamp"),
+		(src == "oracle" || src == "dameng") && len(tokens) == 1 && tokens[0].Is("systimestamp"),
 		source.IsPGFamily(src) && len(tokens) == 3 && tokens[0].Is("now") && tokens[1].Is("(") && tokens[2].Is(")"):
 		if strings.HasPrefix(mapped, "DATETIMEOFFSET(") {
 			return "SYSDATETIMEOFFSET()"

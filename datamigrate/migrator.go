@@ -292,6 +292,7 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	defer cancel(nil)
 	ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
 	m.oracleMySQL = nil
+	m.sqlServerSource = nil
 	m.oracleMySQLIndexes = nil
 	m.resetSourceTableDDLCache()
 	defer m.clearSourceTableDDLCache()
@@ -318,7 +319,17 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	if m.isOracleDameng() {
 		m.dmPlans = nil
 	}
-	report := m.runWithRepair(ctx)
+	var cross *CrossPreflight
+	if m.isCrossMigration() {
+		cross = m.PreflightCrossMigration(ctx)
+	}
+	var report MigrationReport
+	if cross != nil && !cross.CanStart {
+		report = newMigrationReport()
+	} else {
+		report = m.runWithRepair(ctx)
+	}
+	report.CrossPreflight = cross
 	report.SpatialCapabilities = m.mysqlPGSpatial.capabilities
 	m.finishPartitions(ctx, &report)
 	if dataValidation != nil {
@@ -363,7 +374,7 @@ func (m *Migrator) runWithRepair(ctx context.Context) MigrationReport {
 		}
 	}
 	m.dmSequenceBoundsLogged = nil
-	if !m.isOraclePGSQLServer() || len(m.cfg.ViewNames) == 0 {
+	if !(m.isOraclePGSQLServer() || m.isCrossOracle()) || len(m.cfg.ViewNames) == 0 {
 		p := m.preparePartitions(ctx)
 		if p.FatalError != "" || !p.CanStart && len(p.Tables) > 0 && !m.isOscarMySQL() {
 			return newMigrationReport()
@@ -894,6 +905,30 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 	}
 	if m.isOscarMySQL() {
 		return m.migrateOscarMySQLTable(ctx, table)
+	}
+	if m.isCrossMigration() {
+		if reader, ok := m.reader.(interface {
+			StreamCrossRows(context.Context, string, int, func([]string, []string, [][]any) error) error
+		}); ok {
+			page := 0
+			err := reader.StreamCrossRows(ctx, table, max(1, m.cfg.PageSize), func(cols, types []string, rows [][]any) error {
+				page++
+				mapped := make([]string, len(cols))
+				for i, c := range cols {
+					mapped[i] = m.targetColumn(table, c)
+				}
+				if err := m.copyTableBatch(ctx, m.objName(table), mapped, types, rows); err != nil {
+					return fmt.Errorf("表 %s 第 %d 页写入失败: %w", table, page, err)
+				}
+				m.log.Dataf("迁移 %s: 第 %d 页 (%d 行) ... OK", table, page, len(rows))
+				return nil
+			})
+			if err != nil {
+				m.stopMigrationTask(ctx, err)
+				return false, err.Error()
+			}
+			return true, ""
+		}
 	}
 	if m.reader.DBType() == "mysql" && m.cfg.MigrationPurpose != "cdc" && m.cfg.MySQLReadStrategy != "" && m.cfg.MySQLReadStrategy != "offset" {
 		return m.migrateMySQLScan(ctx, table)

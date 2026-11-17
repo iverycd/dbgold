@@ -14,7 +14,7 @@ import (
 // names retain their source spelling. Cross-schema relations require manual
 // adaptation because replacing their schema can bind to an unrelated object.
 func ConvertOraclePostgres(body, sourceType, sourceSchema, targetSchema string, _ []string, name dialect.NameFunc, tables map[string]*source.TableDDLInfo) (string, []string, error) {
-	if sourceType != "oracle" && !source.IsPGFamily(sourceType) {
+	if sourceType != "oracle" && sourceType != "dameng" && !source.IsPGFamily(sourceType) {
 		return "", nil, fmt.Errorf("不支持的 SQL Server 视图源库 %s", sourceType)
 	}
 	tokens, err := sqlsyntax.Lex(body)
@@ -115,7 +115,7 @@ func (q *foreignView) identifier(p *viewTokens) (string, error) {
 	}
 	p.pos++
 	if t.Kind == 'i' {
-		if q.sourceType == "oracle" {
+		if q.sourceType == "oracle" || q.sourceType == "dameng" {
 			return strings.ToUpper(t.Text), nil
 		}
 		// PG folds ASCII letters in unquoted identifiers in UTF-8 databases.

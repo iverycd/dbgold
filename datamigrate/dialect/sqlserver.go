@@ -265,7 +265,7 @@ func (d *SQLServerDialect) validateIndex(i source.IndexInfo) error {
 		if i.IsPrimary && c.IsNullable {
 			return fmt.Errorf("主键列 %s 可空", n)
 		}
-		if d.source == "oracle" && i.IsUnique && len(i.Columns) > 1 && c.IsNullable {
+		if (d.source == "oracle" || d.source == "dameng") && i.IsUnique && len(i.Columns) > 1 && c.IsNullable {
 			return fmt.Errorf("Oracle 含可空列的复合唯一索引无法等价迁移")
 		}
 	}

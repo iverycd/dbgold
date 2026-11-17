@@ -2063,11 +2063,12 @@ function isPGPreflightSelection(kind: PGCheckKind) {
   const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
   const src = connections.value.find(c => c.id === state.srcConnId)
   const dst = connections.value.find(c => c.id === state.dstConnId)
-  return !!src && ['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && (dst?.db_type === 'mysql' || dst?.db_type === 'oracle')
+  return !!src && ((src.db_type === 'dameng' && (dst?.db_type === 'oracle' || dst?.db_type === 'sqlserver')) || (src.db_type === 'sqlserver' && dst?.db_type === 'oracle') || (['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && (dst?.db_type === 'mysql' || dst?.db_type === 'oracle')))
 }
-function pgTargetType(kind: PGCheckKind): 'mysql' | 'oracle' {
+function pgTargetType(kind: PGCheckKind): 'mysql' | 'oracle' | 'sqlserver' {
   const state = migrationState(kind)
-  return connections.value.find(c => c.id === state.dstConnId)?.db_type === 'oracle' ? 'oracle' : 'mysql'
+  const type = connections.value.find(c => c.id === state.dstConnId)?.db_type
+  return type === 'oracle' || type === 'sqlserver' ? type : 'mysql'
 }
 function dataMigrationRequest(): PGPreflightRequest {
 return {

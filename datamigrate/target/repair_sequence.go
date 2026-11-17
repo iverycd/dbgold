@@ -25,6 +25,22 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 	}
 	seen := map[string]bool{}
 	for _, s := range sequences {
+		if s.Native != nil && a.family == "oracle" {
+			if !s.Native.OracleCross {
+				return fmt.Errorf("缺少 Oracle 序列来源策略")
+			}
+			bound := table == ""
+			for _, b := range s.Native.Bindings {
+				bound = bound || b.TableName == table
+			}
+			if !bound {
+				continue
+			}
+			if e = w.(*OracleWriter).CalibrateCrossOracle(ctx, s); e != nil {
+				return e
+			}
+			continue
+		}
 		if s.Native != nil && a.family == "sqlserver" {
 			if table != "" {
 				bound := false

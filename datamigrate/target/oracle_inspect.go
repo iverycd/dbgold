@@ -51,6 +51,17 @@ func oracleTablePreflightError(table string, err error) error {
 // PreflightOracle only observes target state. A same-name sequence is reusable
 // only when the corresponding trigger proves its table/column provenance.
 func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*source.TableDDLInfo, objects []OracleObject, sequences []source.SequenceInfo, rebuild, dataOnly bool) error {
+	if w.crossSource != "" && dataOnly {
+		if err := w.preflightCrossOracleData(ctx, tables, sequences); err != nil {
+			return err
+		}
+	}
+	objectError := func(o OracleObject, e error) error {
+		if w.crossSource != "" && o.Kind != "TABLE" {
+			return &OracleObjectPreflightError{Kind: o.Kind, Name: o.Name, Err: e}
+		}
+		return oracleObjectPreflightError(o, e)
+	}
 	validateName := func(name string) error {
 		if w.codec != nil {
 			c := w.codec.Clone()
@@ -91,11 +102,11 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 	}
 	for _, o := range objects {
 		if err := validateName(o.Name); err != nil {
-			return oracleObjectPreflightError(o, err)
+			return objectError(o, err)
 		}
 		for _, column := range o.Columns {
 			if err := validateName(column); err != nil {
-				return oracleObjectPreflightError(o, fmt.Errorf("对象 %s: %w", o.Name, err))
+				return objectError(o, fmt.Errorf("对象 %s: %w", o.Name, err))
 			}
 		}
 	}
@@ -139,6 +150,12 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 		}
 	}
 	for _, s := range sequences {
+		if s.Native != nil {
+			if err = w.inspectCrossOracleSequence(ctx, s); err != nil {
+				return &OracleObjectPreflightError{Kind: "SEQUENCE", Name: s.Native.Name, Err: err}
+			}
+			continue
+		}
 		if err = w.inspectSequence(ctx, s); err != nil {
 			return oracleTablePreflightError(s.TableName, err)
 		}
@@ -151,7 +168,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			var table string
 			err = w.db.QueryRowContext(ctx, `SELECT TABLE_NAME FROM ALL_CONSTRAINTS WHERE OWNER=:1 AND CONSTRAINT_NAME=:2`, w.schema, o.Name).Scan(&table)
 			if err == nil && !(rebuild && table == o.Table) {
-				return oracleTablePreflightError(o.Table, fmt.Errorf("Oracle 约束名 %s 已存在于表 %s", o.Name, table))
+				return objectError(o, fmt.Errorf("Oracle 约束名 %s 已存在于表 %s", o.Name, table))
 			}
 			if err != nil && err != sql.ErrNoRows {
 				return err
@@ -162,7 +179,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			var owner, table string
 			err = w.db.QueryRowContext(ctx, `SELECT TABLE_OWNER,TABLE_NAME FROM ALL_INDEXES WHERE OWNER=:1 AND INDEX_NAME=:2`, w.schema, o.Name).Scan(&owner, &table)
 			if err == nil && !(rebuild && owner == w.schema && table == o.Table) {
-				return oracleTablePreflightError(o.Table, fmt.Errorf("Oracle 索引名 %s 已存在于 %s.%s", o.Name, owner, table))
+				return objectError(o, fmt.Errorf("Oracle 索引名 %s 已存在于 %s.%s", o.Name, owner, table))
 			}
 			if err != nil && err != sql.ErrNoRows {
 				return err
@@ -175,7 +192,7 @@ func (w *OracleWriter) PreflightOracle(ctx context.Context, tables map[string]*s
 			return err
 		}
 		if err == nil && (kind != o.Kind || o.Kind == "TABLE" && !rebuild) {
-			return oracleObjectPreflightError(o, fmt.Errorf("Oracle 名称 %s 已被 %s 占用", o.Name, kind))
+			return objectError(o, fmt.Errorf("Oracle 名称 %s 已被 %s 占用", o.Name, kind))
 		}
 		if o.Kind == "TABLE" && err == nil && rebuild {
 			rows, e := w.db.QueryContext(ctx, `SELECT c.OWNER,c.TABLE_NAME,c.CONSTRAINT_NAME FROM ALL_CONSTRAINTS c JOIN ALL_CONSTRAINTS p ON c.R_OWNER=p.OWNER AND c.R_CONSTRAINT_NAME=p.CONSTRAINT_NAME WHERE p.OWNER=:1 AND p.TABLE_NAME=:2 AND c.CONSTRAINT_TYPE='R'`, w.schema, o.Name)

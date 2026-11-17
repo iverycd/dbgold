@@ -20,12 +20,12 @@ func TestOracleSQLServerKeepsServiceAndExactOwnerSeparate(t *testing.T) {
 
 func TestMySQLSQLServerRegistration(t *testing.T) {
 	require.True(t, isSupportedPair("mysql", "sqlserver"))
-	for _, src := range []string{"oracle", "postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
+	for _, src := range []string{"dameng", "oracle", "postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {
 		require.True(t, isSupportedPair(src, "sqlserver"), src)
 		_, ok := typemap.Get(src, "sqlserver")
 		require.True(t, ok, src)
 	}
-	for _, src := range []string{"sqlserver", "oscar", "dameng"} {
+	for _, src := range []string{"sqlserver", "oscar"} {
 		require.False(t, isSupportedPair(src, "sqlserver"))
 	}
 	_, ok := typemap.Get("mysql", "sqlserver")

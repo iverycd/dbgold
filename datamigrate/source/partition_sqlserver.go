@@ -123,7 +123,14 @@ func (r *SQLServerReader) PartitionRoots(context.Context) (map[string]string, er
 }
 
 func (r *SQLServerReader) PartitionIndexes(ctx context.Context, table string) ([]IndexInfo, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT i.name,i.is_unique,i.is_primary_key,i.type_desc,ic.key_ordinal,c.name,ic.is_descending_key,CASE WHEN ip.function_id IS NULL THEN 'global' WHEN ip.function_id=bp.function_id THEN 'local' ELSE 'unaligned' END FROM sys.tables t JOIN sys.indexes i ON i.object_id=t.object_id JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id AND ic.key_ordinal>0 JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id LEFT JOIN sys.partition_schemes ip ON ip.data_space_id=i.data_space_id LEFT JOIN sys.indexes b ON b.object_id=t.object_id AND b.index_id IN (0,1) LEFT JOIN sys.partition_schemes bp ON bp.data_space_id=b.data_space_id WHERE t.name=@p1 AND i.is_hypothetical=0 ORDER BY i.name,ic.key_ordinal`, table)
+	return sqlServerPartitionIndexes(ctx, r.db, table, false)
+}
+func sqlServerPartitionIndexes(ctx context.Context, db *sql.DB, table string, dbo bool) ([]IndexInfo, error) {
+	query := `SELECT i.name,i.is_unique,i.is_primary_key,i.type_desc,ic.key_ordinal,c.name,ic.is_descending_key,CASE WHEN ip.function_id IS NULL THEN 'global' WHEN ip.function_id=bp.function_id THEN 'local' ELSE 'unaligned' END FROM sys.tables t JOIN sys.indexes i ON i.object_id=t.object_id JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id AND ic.key_ordinal>0 JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id LEFT JOIN sys.partition_schemes ip ON ip.data_space_id=i.data_space_id LEFT JOIN sys.indexes b ON b.object_id=t.object_id AND b.index_id IN (0,1) LEFT JOIN sys.partition_schemes bp ON bp.data_space_id=b.data_space_id WHERE t.name=@p1 AND i.is_hypothetical=0 ORDER BY i.name,ic.key_ordinal`
+	if dbo {
+		query = strings.Replace(query, "WHERE t.name=@p1", "WHERE t.schema_id=SCHEMA_ID('dbo') AND t.name=@p1", 1)
+	}
+	rows, err := db.QueryContext(ctx, query, table)
 	if err != nil {
 		return nil, err
 	}

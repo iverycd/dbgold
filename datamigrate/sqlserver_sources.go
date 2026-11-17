@@ -36,7 +36,7 @@ type sqlServerTablePlan struct {
 }
 
 func isOraclePGSQLServerSource(src string) bool {
-	return src == "oracle" || source.IsPGFamily(src)
+	return src == "oracle" || src == "dameng" || source.IsPGFamily(src)
 }
 
 func (m *Migrator) isOraclePGSQLServer() bool {
@@ -134,7 +134,7 @@ func sqlServerSequenceIssue(entry sqlServerSequenceEntry, schema string, major i
 		}
 	}
 	if entry.identity {
-		if s.IncrementBy != "1" {
+		if s.IncrementBy != "1" && s.Bindings[0].Identity != "dameng_identity" {
 			return "当前 IDENTITY 转换只支持步长为 1 的生成器"
 		}
 		return ""

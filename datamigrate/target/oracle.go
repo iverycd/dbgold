@@ -27,6 +27,8 @@ type OracleWriter struct {
 	columns          map[string]map[string]valueconv.OracleColumn
 	warnings         map[string]valueconv.MigrationWarning
 	pgColumns        map[string]map[string]source.ColumnInfo
+	crossSource      string
+	crossColumns     map[string]map[string]source.ColumnInfo
 }
 
 var _ Writer = (*OracleWriter)(nil)
@@ -180,6 +182,9 @@ func (w *OracleWriter) validateSQLText(text string) error {
 	return nil
 }
 func (w *OracleWriter) CreateSequence(ctx context.Context, s source.SequenceInfo, owner string) error {
+	if s.Native != nil {
+		return w.createCrossOracleSequence(ctx, s)
+	}
 	if _, err := dialect.OracleSequenceStart(s); err != nil {
 		return err
 	}
@@ -329,7 +334,15 @@ func (w *OracleWriter) CopyData(ctx context.Context, table string, cols, srcType
 	}
 	w.mu.Lock()
 	pgMode, pgColumns := w.pgColumns != nil, w.pgColumns[table]
+	crossSource, crossColumns := w.crossSource, w.crossColumns[table]
 	w.mu.Unlock()
+	if crossSource == "dameng" || crossSource == "sqlserver" {
+		for _, name := range cols {
+			if _, ok := crossColumns[name]; !ok {
+				return fmt.Errorf("跨库 Oracle 写入缺少冻结源列 %s.%s", table, name)
+			}
+		}
+	}
 	if pgMode {
 		for _, name := range cols {
 			if _, ok := pgColumns[name]; !ok {
@@ -410,7 +423,9 @@ func (w *OracleWriter) CopyData(ctx context.Context, table string, cols, srcType
 				var v any
 				var warning string
 				var e error
-				if pgMode {
+				if crossSource == "dameng" || crossSource == "sqlserver" {
+					v, warning, e = valueconv.ConvertCrossOracle(raw, crossColumns[cols[ci]], crossSource, metadata[cols[ci]], codecs[ci])
+				} else if pgMode {
 					v, warning, e = valueconv.ConvertPGOracle(raw, pgColumns[cols[ci]], metadata[cols[ci]], codecs[ci])
 				} else {
 					v, warning, e = valueconv.ConvertOracle(raw, src, metadata[cols[ci]], codecs[ci])
@@ -421,7 +436,7 @@ func (w *OracleWriter) CopyData(ctx context.Context, table string, cols, srcType
 				bound := v
 				if bound == nil {
 					bound = oracleNullBinding(metadata[cols[ci]].DataType)
-					if pgMode && strings.HasPrefix(metadata[cols[ci]].DataType, "TIMESTAMP") && strings.Contains(metadata[cols[ci]].DataType, "WITH TIME ZONE") {
+					if (pgMode || crossSource != "") && strings.HasPrefix(metadata[cols[ci]].DataType, "TIMESTAMP") && strings.Contains(metadata[cols[ci]].DataType, "WITH TIME ZONE") {
 						bound = (*goora.TimeStampTZ)(nil)
 					}
 				}
@@ -477,11 +492,36 @@ func oracleNullBinding(dataType string) interface{} {
 		return (*goora.Clob)(nil)
 	case dataType == "NCLOB":
 		return (*goora.NClob)(nil)
+	case dataType == "RAW":
+		return ([]byte)(nil)
 	case dataType == "BLOB":
 		return (*goora.Blob)(nil)
 	case dataType == "NVARCHAR2" || dataType == "NCHAR":
 		return (*goora.NVarChar)(nil)
 	default:
 		return (*string)(nil)
+	}
+}
+
+func (w *OracleWriter) SetSourceType(src string) {
+	w.dia.SetSourceType(src)
+	w.crossSource = ""
+	if src == "dameng" || src == "sqlserver" {
+		w.crossSource = src
+	}
+}
+func (w *OracleWriter) ConfigureCrossOracle(tables map[string]*source.TableDDLInfo) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.crossColumns = map[string]map[string]source.ColumnInfo{}
+	for table, info := range tables {
+		if info == nil {
+			continue
+		}
+		cols := map[string]source.ColumnInfo{}
+		for _, c := range info.Columns {
+			cols[strings.ToUpper(c.Name)] = c
+		}
+		w.crossColumns[table] = cols
 	}
 }
