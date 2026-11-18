@@ -1273,6 +1273,10 @@ async function confirmDataMigration() {
   }
 }
 
+function elapsedLogTime(startedAt: number): string {
+  return `耗时 ${Math.round(performance.now() - startedAt)}ms`
+}
+
 async function startDataMigration() {
   if (databaseSelectionBlocked('data')) return
   if (!validateTableFilter()) return
@@ -1287,29 +1291,31 @@ async function startDataMigration() {
   dataMigrate.currentJobId = ''
   dataMigrateResultTab.value = 'logs'
   pgSubmissions.data = null
+  let phaseStartedAt: number | undefined = performance.now()
   try {
     if (isPGPreflightSelection('data')) {
       dataMigrate.logs.push('[INFO] 正在执行迁移预检…')
       if (!preflightCanStart(await ensurePGCheck('data'))) {
-        dataMigrate.logs.push('[WARN] 迁移预检未通过，尚未启动任务')
+        dataMigrate.logs.push(`[WARN] 迁移预检未通过，尚未启动任务，${elapsedLogTime(phaseStartedAt)}`)
         dataMigrate.running = false
         return
       }
     }
     if (!isDamengNative.value && !isPGPreflightSelection('data')) {
       if (!preflightCanStart(await ensurePartitionCheck())) {
-        dataMigrate.logs.push(partitionCheckError.value
-          ? `[ERROR] ${partitionCheckError.value}，尚未启动任务。处理后再次点击开始迁移。`
-          : '[WARN] 分区兼容性检查未通过，尚未启动任务。处理后再次点击开始迁移。')
+        const reason = partitionCheckError.value ? `[ERROR] ${partitionCheckError.value}` : '[WARN] 分区兼容性检查未通过'
+        dataMigrate.logs.push(`${reason}，尚未启动任务。处理后再次点击开始迁移。此次检查${elapsedLogTime(phaseStartedAt)}`)
         dataMigrate.running = false
         return
       }
     }
     if (isDamengNative.value && !preflightCanStart(await runNativeCheck())) {
-      dataMigrate.logs.push('[WARN] 达梦全对象预检未通过，尚未启动任务')
+      dataMigrate.logs.push(`[WARN] 达梦全对象预检未通过，尚未启动任务，${elapsedLogTime(phaseStartedAt)}`)
       dataMigrate.running = false
       return
     }
+    dataMigrate.logs.push(`[INFO] 迁移条件检查完成，${elapsedLogTime(phaseStartedAt)}`)
+    phaseStartedAt = undefined
     const blockedTables = dataPartitionCheck.value?.tables.filter(table => table.status === 'blocked') ?? []
     if (blockedTables.length) {
       dataMigrate.logs.push(`[WARN] 分区兼容性检查阻止 ${blockedTables.length} 张表：${blockedTables.map(table => table.source_table).join('、')}；将跳过这些表及其依赖对象，其余表继续迁移。`)
@@ -1324,14 +1330,18 @@ async function startDataMigration() {
         dstSchema: dataMigrate.dstSchema,
       }
     }
+    const request = dataMigrationRequest()
     dataMigrate.logs.push('[INFO] 正在提交迁移任务…')
-    const res = await apiStartMigration(dataMigrationRequest())
+    phaseStartedAt = performance.now()
+    const res = await apiStartMigration(request)
     dataMigrate.currentJobId = res.data.job_id
-    dataMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
+    dataMigrate.logs.push(`[INFO] 迁移任务已创建，${elapsedLogTime(phaseStartedAt)}，正在连接日志流…`)
+    phaseStartedAt = undefined
     savePGSubmission('data', res.data.job_id, submitted)
     connectSSE(res.data.job_id)
   } catch (e: any) {
-    dataMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}`)
+    const duration = phaseStartedAt === undefined ? '' : `，${elapsedLogTime(phaseStartedAt)}`
+    dataMigrate.logs.push(`[ERROR] 启动失败: ${e?.response?.data?.error ?? e?.message ?? e}${duration}`)
     dataMigrate.running = false
     dataMigrate.finished = true
   } finally {

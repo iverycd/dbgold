@@ -10,7 +10,7 @@ import { parse } from '@vue/compiler-sfc'
 
 function load(source, require) {
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, AbortController, FormData, Blob }
+  const context = { exports: {}, require, AbortController, FormData, Blob, performance }
   vm.runInNewContext(compiled.outputText, context)
   return context.exports
 }

@@ -10,7 +10,7 @@ import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/co
 import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 function execute(source, require = () => ({})) {
-  const context = { exports: {}, require, FormData, Blob, AbortController }
+  const context = { exports: {}, require, FormData, Blob, AbortController, performance }
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context)
   return context.exports
 }
@@ -83,6 +83,7 @@ test('native start accepts a partial preflight and refuses a task-level blocker'
       await Vue.nextTick()
       await page.startDataMigration()
       assert.equal(starts.length, allowed ? 1 : 0)
+      if (!allowed) assert.match(page.dataMigrate.logs.at(-1), /达梦全对象预检未通过，尚未启动任务，耗时 \d+ms$/)
     } finally { scope.stop() }
   }
 })

@@ -13,7 +13,7 @@ import { renderToString } from '@vue/server-renderer'
 
 function load(source, require, globals = {}) {
   const result = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, AbortController, Blob, FormData, ...globals }
+  const context = { exports: {}, require, AbortController, Blob, FormData, performance, ...globals }
   vm.runInNewContext(result.outputText, context)
   return context.exports
 }
@@ -184,7 +184,7 @@ test('all-blocked generic preflight prevents launch and configuration changes in
     assert.equal(starts.length, 0)
     assert.equal(p.dataMigrate.running, false)
     assert.equal(p.dataMigrationChecking.value, false)
-    assert.match(p.dataMigrate.logs.at(-1), /分区兼容性检查未通过/)
+    assert.match(p.dataMigrate.logs.at(-1), /分区兼容性检查未通过.*耗时 \d+ms$/)
     assert.match(await renderPage(p), /处理后再次点击开始迁移/)
     p.dataMigrate.filter = 'Healthy'; ready = true
     await Vue.nextTick()
@@ -226,7 +226,7 @@ test('a failed check request preserves the concrete error and retries through st
     assert.match(errors[0], /catalog permission denied/)
     assert.match(p.partitionCheckError.value, /catalog permission denied/)
     assert.match(await renderPage(p), /catalog permission denied/)
-    assert.match(p.dataMigrate.logs.at(-1), /catalog permission denied/)
+    assert.match(p.dataMigrate.logs.at(-1), /catalog permission denied.*耗时 \d+ms$/)
     failed = false
     await p.startDataMigration()
     assert.equal(checks, 2)

@@ -21,7 +21,7 @@ function loadSource(source, require, filename) {
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
-  const context = { exports: {}, require, AbortController, FormData, Blob, window: { addEventListener() {} } }
+  const context = { exports: {}, require, AbortController, FormData, Blob, performance, window: { addEventListener() {} } }
   vm.runInNewContext(outputText, context, { filename })
   return context.exports
 }

@@ -36,7 +36,7 @@ function page(overrides = {}) {
   }
   const submit = async req => { calls.starts.push(JSON.parse(JSON.stringify(req))); return { data: { job_id: 'job', results: [] } } }
   const context = {
-    exports: {}, AbortController,
+    exports: {}, AbortController, performance,
     require(id) {
       switch (id) {
         case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }

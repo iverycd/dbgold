@@ -15,22 +15,23 @@ const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationView.vu
 const modalTemplate = descriptor.template.content.match(/<a-modal[\s\S]*?<\/a-modal>/)[0]
 const renderModal = new Function('Vue', compile(modalTemplate, { mode: 'function' }).code)(Vue)
 
-function page({ start, preflight, objectStart } = {}) {
+function page({ start, preflight, objectStart, clock = performance, copyText } = {}) {
   const starts = [], checks = [], errors = []
   const compiled = ts.transpileModule(`${descriptor.scriptSetup.content}
     export { connections, dataMigrate, canStartMigration, requestDataMigration, confirmDataMigration,
       dataMigrationConfirmVisible, dataMigrationStarting, dataMigrationContentLabel,
       dataMigrationScopeLabel, selectedDst, targetDatabaseName, objMigrate, startObjectMigration, isDamengNative,
-      canSelectMySQLReadStrategy, canSelectDamengWriteStrategy, dataMigrationRequest };`, {
+      canSelectMySQLReadStrategy, canSelectDamengWriteStrategy, dataMigrationRequest, copyLogs };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   })
   const context = {
-    exports: {}, AbortController,
+    exports: {}, AbortController, performance: clock,
     require: id => {
       switch (id) {
         case 'vue': return { ...Vue, provide() {}, onMounted() {}, onUnmounted() {} }
         case 'vue-router': return { useRoute: () => ({ query: {} }), onBeforeRouteLeave() {} }
         case '@arco-design/web-vue': return { Message: { error: msg => errors.push(msg) }, Modal: {} }
+        case '@/utils/clipboard': return { copyText }
         case '@/utils/connectionDatabase': return connectionDatabaseUtils
       case '@/composables/connectionDatabaseEditors': return connectionDatabaseEditors
       case '@/utils/migrationReport': return migrationReportUtils
@@ -283,25 +284,34 @@ test('opening and dismissing confirmation preserves existing configuration, logs
 test('confirmation submits once and blocks repeated clicks while the request or job is running', async () => {
   const scope = Vue.effectScope()
   try {
-    let resolveStart, notifyStart
+    let resolveStart, notifyStart, copied
+    let now = 1000
     const reachedStart = new Promise(resolve => { notifyStart = resolve })
-    const { p, starts } = scope.run(() => page({ start: () => { notifyStart(); return new Promise(resolve => { resolveStart = resolve }) } }))
+    const { p, starts } = scope.run(() => page({
+      clock: { now: () => now },
+      preflight: async () => { now += 127.6; return partitionPreflightResponse() },
+      start: () => { notifyStart(); return new Promise(resolve => { resolveStart = resolve }) },
+      copyText: async text => { copied = text },
+    }))
     p.requestDataMigration()
     const pending = p.confirmDataMigration()
     assert.equal(p.dataMigrationConfirmVisible.value, false)
     assert.equal(p.dataMigrationStarting.value, true)
-    assert.match(p.dataMigrate.logs[0], /正在检查迁移条件/)
+    assert.deepEqual([...p.dataMigrate.logs], ['[INFO] 正在检查迁移条件…'])
     assert.equal(p.dataMigrate.currentJobId, '', 'submission feedback precedes the task ID and log stream')
     await reachedStart
-    assert.match(p.dataMigrate.logs.at(-1), /正在提交迁移任务/)
+    assert.deepEqual([...p.dataMigrate.logs].slice(1), ['[INFO] 迁移条件检查完成，耗时 128ms', '[INFO] 正在提交迁移任务…'])
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)
+    now += 35.6
     resolveStart({ data: { job_id: 'new-job' } })
     await pending
     assert.equal(p.dataMigrationStarting.value, false)
     assert.equal(p.dataMigrate.currentJobId, 'new-job')
-    assert.match(p.dataMigrate.logs.at(-1), /迁移任务已创建/)
+    assert.equal(p.dataMigrate.logs.at(-1), '[INFO] 迁移任务已创建，耗时 36ms，正在连接日志流…')
+    p.copyLogs()
+    assert.equal(copied, p.dataMigrate.logs.join('\n'))
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 1)
@@ -329,8 +339,11 @@ test('object migration shows submission feedback while awaiting the task ID', as
 test('PG/MySQL preflight runs only after confirmation and a blocked check allows another attempt', async () => {
   const scope = Vue.effectScope()
   try {
-    let ready = false
-    const { p, starts, checks } = scope.run(() => page({ preflight: async () => ({ data: { ready } }) }))
+    let ready = false, now = 0
+    const { p, starts, checks } = scope.run(() => page({
+      clock: { now: () => now },
+      preflight: async () => { now += 65; return { data: { ready } } },
+    }))
     p.connections.value[0].db_type = 'postgres'
     p.connections.value[1].db_type = 'mysql'
     await Vue.nextTick()
@@ -340,7 +353,8 @@ test('PG/MySQL preflight runs only after confirmation and a blocked check allows
     assert.equal(checks.length, 1)
     assert.equal(starts.length, 0)
     assert.equal(p.canStartMigration.value, true)
-    assert.match(p.dataMigrate.logs.at(-1), /迁移预检未通过，尚未启动任务/)
+    assert.equal(p.dataMigrate.logs.at(-1), '[WARN] 迁移预检未通过，尚未启动任务，耗时 65ms')
+    assert.ok(!p.dataMigrate.logs.some(line => line.includes('正在提交迁移任务')))
     ready = true
     p.requestDataMigration()
     await p.confirmDataMigration()
@@ -352,20 +366,28 @@ test('PG/MySQL preflight runs only after confirmation and a blocked check allows
 test('a failed start releases the submission guard and can be retried with confirmation', async () => {
   const scope = Vue.effectScope()
   try {
-    let fail = true
-    const { p, starts } = scope.run(() => page({ start: async () => {
-      if (fail) throw new Error('connection unavailable')
-      return { data: { job_id: 'retried-job' } }
-    } }))
+    let fail = true, now = 0
+    const { p, starts } = scope.run(() => page({
+      clock: { now: () => now },
+      preflight: async () => { now += 80; return partitionPreflightResponse() },
+      start: async () => {
+        now += fail ? 41 : 12
+        if (fail) throw new Error('connection unavailable')
+        return { data: { job_id: 'retried-job' } }
+      },
+    }))
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(p.dataMigrate.finished, true)
-    assert.match(p.dataMigrate.logs.at(-1), /connection unavailable/)
+    assert.equal(p.dataMigrate.logs.at(-1), '[ERROR] 启动失败: connection unavailable，耗时 41ms')
     assert.equal(p.canStartMigration.value, true)
     fail = false
+    now += 1000
     p.requestDataMigration()
     await p.confirmDataMigration()
     assert.equal(starts.length, 2)
     assert.equal(p.dataMigrate.currentJobId, 'retried-job')
+    assert.equal(p.dataMigrate.logs[1], '[INFO] 迁移条件检查完成，耗时 0ms')
+    assert.equal(p.dataMigrate.logs.at(-1), '[INFO] 迁移任务已创建，耗时 12ms，正在连接日志流…')
   } finally { scope.stop() }
 })

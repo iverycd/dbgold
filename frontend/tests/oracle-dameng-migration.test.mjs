@@ -11,7 +11,7 @@ import { migrationReportUtils } from './helpers/migration-report.mjs'
 
 function load(source, require) {
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, AbortController, FormData, Blob }
+  const context = { exports: {}, require, AbortController, FormData, Blob, performance }
   vm.runInNewContext(outputText, context)
   return context.exports
 }

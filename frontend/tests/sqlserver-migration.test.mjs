@@ -11,7 +11,7 @@ import { parse } from '@vue/compiler-sfc'
 
 function execute(source, require, globals = {}) {
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } })
-  const context = { exports: {}, require, AbortController, Blob, FormData, ...globals }
+  const context = { exports: {}, require, AbortController, Blob, FormData, performance, ...globals }
   vm.runInNewContext(outputText, context)
   return context.exports
 }
