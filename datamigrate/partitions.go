@@ -175,9 +175,25 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 	if m.isOscarMySQL() {
 		m.preflightMigrationNames(selected)
 	}
-	for _, table := range selected {
+	batchReader, canBatch := r.(interface {
+		NonPartitionedTables(context.Context, []string) (map[string]bool, error)
+	})
+	batchMySQL := canBatch && p.SourceType == "mysql" && source.IsPGFamily(targetType) && len(selected) > 1
+	const batchSize = 200
+	var ordinary map[string]bool
+	for i, table := range selected {
 		if err := ctx.Err(); err != nil {
 			return fatal(err)
+		}
+		if batchMySQL && i%batchSize == 0 {
+			batch := selected[i:min(i+batchSize, len(selected))]
+			ordinary, err = batchReader.NonPartitionedTables(ctx, batch)
+			if err != nil {
+				ordinary = nil // Inspect each table in this batch through the existing path.
+			}
+			if err := ctx.Err(); err != nil {
+				return fatal(err)
+			}
 		}
 		if s.tables[table] != nil {
 			continue
@@ -185,6 +201,9 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		entry := &PartitionTableResult{SourceTable: table, TargetTable: m.objName(table), Status: "ordinary"}
 		s.tables[table] = entry
 		p.Tables = append(p.Tables, entry)
+		if ordinary[table] {
+			continue
+		}
 		if m.isOscarMySQL() {
 			if e := m.migrationTableError(table); e != nil {
 				m.blockPartitionTable(entry, e)
@@ -193,6 +212,9 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		}
 		spec, e := r.PartitionMetadata(ctx, table)
 		if e != nil {
+			if batchMySQL && ctx.Err() != nil {
+				return fatal(ctx.Err())
+			}
 			if m.isOscarMySQL() && isMigrationTaskError(e) {
 				m.stopMigrationTask(ctx, e)
 				return fatal(e)

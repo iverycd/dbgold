@@ -51,6 +51,10 @@ func TestMySQLPostgresPartitionIntegration(t *testing.T) {
 			_, err = src.ExecContext(ctx, "CREATE TABLE `"+name+"` (`k` INT NOT NULL,`payload` VARCHAR(100)) "+clause)
 			require.NoError(t, err)
 			defer src.ExecContext(context.Background(), "DROP TABLE IF EXISTS `"+name+"`")
+			ordinary := name + "_plain"
+			_, err = src.ExecContext(ctx, "CREATE TABLE `"+ordinary+"` (id INT PRIMARY KEY)")
+			require.NoError(t, err)
+			defer src.ExecContext(context.Background(), "DROP TABLE IF EXISTS `"+ordinary+"`")
 			_, err = src.ExecContext(ctx, "INSERT INTO `"+name+"` VALUES (-1,'负数'),(0,'边界'),(9,'nine'),(10,'ten'),(11,NULL)")
 			require.NoError(t, err)
 			r, err := source.NewMySQL(srcDSN, database, source.ConnPoolConfig{})
@@ -60,10 +64,13 @@ func TestMySQLPostgresPartitionIntegration(t *testing.T) {
 			require.NoError(t, err)
 			defer w.Close()
 			job := &Job{LogCh: make(chan string, 8192)}
-			cfg := Config{Mode: "include", Filter: name, Content: "both", TargetDBType: "postgres", TargetSchema: schema, PageSize: 2, MaxParallel: 2, IntraTableParallel: 4, ValidateData: true, CaptureRepair: true}
+			cfg := Config{Mode: "include", Filter: name + "," + ordinary, Content: "both", TargetDBType: "postgres", TargetSchema: schema, PageSize: 2, MaxParallel: 2, IntraTableParallel: 4, ValidateData: true, CaptureRepair: true}
 			m := NewMigrator(r, w, job, cfg)
 			preview := m.PreflightPartitions(ctx)
 			require.True(t, preview.Ready, "%+v", preview)
+			require.Len(t, preview.Tables, 2)
+			require.NotNil(t, preview.Tables[0].Plan)
+			require.Equal(t, "ordinary", preview.Tables[1].Status)
 			report := m.Run(ctx)
 			if report.HasFailures() {
 				if entry := report.PartitionMigration.Tables[0]; entry.Plan != nil {
@@ -86,7 +93,7 @@ func TestMySQLPostgresPartitionIntegration(t *testing.T) {
 				}
 			}
 			require.NotNil(t, saved.PartitionPlan)
-			require.Len(t, report.DataValidation.Tables, 5, "one root plus four independent leaf content checks")
+			require.Len(t, report.DataValidation.Tables, 6, "one ordinary table, one root and four independent leaf content checks")
 			for _, p := range parts {
 				var n int
 				require.NoError(t, dst.QueryRowContext(ctx, `SELECT count(*) FROM `+q(schema)+`.`+q(p)).Scan(&n))

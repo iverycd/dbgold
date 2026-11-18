@@ -3,6 +3,8 @@ package datamigrate
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -188,6 +190,111 @@ func newPartitionFlow(t *testing.T, names ...string) (*Migrator, *partitionFlowR
 		return m.partitionState.tables[table].Plan.Target
 	}
 	return m, r, w
+}
+
+type batchPartitionReader struct {
+	*partitionFlowReader
+	readBatch func([]string) (map[string]bool, error)
+}
+
+func (r *batchPartitionReader) NonPartitionedTables(_ context.Context, tables []string) (map[string]bool, error) {
+	return r.readBatch(tables)
+}
+
+func TestMySQLPartitionPreflightBatchesSelectedTables(t *testing.T) {
+	var selected []string
+	for i := range 1000 {
+		selected = append(selected, fmt.Sprintf("Order%04d", i))
+	}
+	for _, failBatch := range []bool{false, true} {
+		m, r, _ := newPartitionFlow(t, append(slices.Clone(selected), "Unselected")...)
+		m.cfg.Mode, m.cfg.Filter = "include", "Order*"
+		want := m.PreflightPartitions(t.Context())
+		clear(r.metadataCalls)
+		var calls int
+		m.reader = &batchPartitionReader{r, func(tables []string) (map[string]bool, error) {
+			require.Equal(t, selected[calls*200:(calls+1)*200], tables)
+			calls++
+			ordinary := make(map[string]bool, len(tables))
+			for _, table := range tables {
+				ordinary[table] = true
+			}
+			if failBatch && calls == 2 {
+				return ordinary, errors.New("incomplete catalog read")
+			}
+			return ordinary, nil
+		}}
+		require.Equal(t, want, m.PreflightPartitions(t.Context()))
+		require.Equal(t, 5, calls)
+		if failBatch {
+			require.Len(t, r.metadataCalls, 200)
+			for _, name := range selected[200:400] {
+				require.Equal(t, 1, r.metadataCalls[name])
+			}
+		} else {
+			require.Empty(t, r.metadataCalls)
+		}
+	}
+}
+
+func TestMySQLPartitionBatchRecheckedAtRun(t *testing.T) {
+	m, r, w := newPartitionFlow(t, "Orders", "orders", "Dropped")
+	ordinary := map[string]bool{"Orders": true, "orders": true, "Dropped": true}
+	batches := 0
+	m.reader = &batchPartitionReader{r, func([]string) (map[string]bool, error) {
+		batches++
+		return ordinary, nil
+	}}
+	require.True(t, m.PreflightPartitions(t.Context()).Ready)
+	delete(ordinary, "orders")
+	delete(ordinary, "Dropped")
+	r.specs["orders"] = &source.PartitionSpec{Unsupported: "unsupported partition method"}
+	r.metadataErrors["Dropped"] = errors.New("table no longer exists")
+	report := m.Run(t.Context())
+	require.Equal(t, 2, batches)
+	require.True(t, report.HasFailures())
+	require.Contains(t, report.PartitionMigration.Tables[1].Error, "unsupported partition method")
+	require.Contains(t, report.PartitionMigration.Tables[2].Error, "table no longer exists")
+	require.Contains(t, w.copied, "Orders")
+	require.NotContains(t, w.copied, "orders")
+	require.NotContains(t, w.copied, "Dropped")
+}
+
+func TestMySQLPartitionBatchScopeAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tables      []string
+		otherTarget bool
+	}{
+		{"single table", []string{"A"}, false},
+		{"SQL Server target", []string{"A", "B"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, r, w := newPartitionFlow(t, tc.tables...)
+			if tc.otherTarget {
+				m.writer = &sqlServerPartitionRouteWriter{partitionFlowWriter: w}
+			}
+			m.reader = &batchPartitionReader{r, func([]string) (map[string]bool, error) {
+				t.Fatal("unexpected batch lookup")
+				return nil, nil
+			}}
+			require.True(t, m.PreflightPartitions(t.Context()).Ready)
+			require.Len(t, r.metadataCalls, len(tc.tables))
+		})
+	}
+	t.Run("cancel during batch", func(t *testing.T) {
+		m, r, _ := newPartitionFlow(t, "A", "B")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		m.reader = &batchPartitionReader{r, func([]string) (map[string]bool, error) {
+			cancel()
+			return nil, ctx.Err()
+		}}
+		p := m.PreflightPartitions(ctx)
+		require.False(t, p.CanStart)
+		require.Equal(t, context.Canceled.Error(), p.FatalError)
+		require.Empty(t, r.metadataCalls)
+	})
 }
 
 func TestPartitionsPartialPreflightContinuesIndependentTable(t *testing.T) {

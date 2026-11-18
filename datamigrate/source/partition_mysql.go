@@ -12,6 +12,46 @@ import (
 	"dbgold/datamigrate/sqlsyntax"
 )
 
+// NonPartitionedTables returns only tables with one unambiguous ordinary-table
+// catalog row. Missing or inconsistent metadata is left for PartitionMetadata.
+func (r *MySQLReader) NonPartitionedTables(ctx context.Context, tables []string) (map[string]bool, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 1, len(tables)+1)
+	args[0] = r.dbName
+	for _, table := range tables {
+		args = append(args, table)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(tables)), ",")
+	rows, err := r.queryContext(ctx, `SELECT BINARY TABLE_SCHEMA, BINARY TABLE_NAME
+		FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (`+placeholders+`)
+		GROUP BY BINARY TABLE_SCHEMA, BINARY TABLE_NAME
+		HAVING COUNT(*) = 1 AND COUNT(PARTITION_NAME) = 0 AND COUNT(PARTITION_METHOD) = 0
+		AND COUNT(PARTITION_EXPRESSION) = 0 AND COUNT(PARTITION_DESCRIPTION) = 0 AND COUNT(PARTITION_ORDINAL_POSITION) = 0
+		AND COUNT(SUBPARTITION_NAME) = 0 AND COUNT(SUBPARTITION_METHOD) = 0
+		AND COUNT(SUBPARTITION_EXPRESSION) = 0 AND COUNT(SUBPARTITION_ORDINAL_POSITION) = 0`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ordinary := make(map[string]bool, len(tables))
+	for rows.Next() {
+		var schema, table string
+		if err := rows.Scan(&schema, &table); err != nil {
+			return nil, err
+		}
+		if schema == r.dbName {
+			ordinary[table] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ordinary, nil
+}
+
 // PartitionMetadata deliberately reads native catalog values without changing
 // identifier case. Neither expressions nor SourceDDL are executed as SQL.
 func (r *MySQLReader) PartitionMetadata(ctx context.Context, table string) (*PartitionSpec, error) {

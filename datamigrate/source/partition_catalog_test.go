@@ -28,6 +28,28 @@ func mysqlPartitionCatalogRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_METHOD", "PARTITION_EXPRESSION", "PARTITION_DESCRIPTION", "PARTITION_ORDINAL_POSITION", "SUBPARTITION_NAME", "SUBPARTITION_METHOD", "SUBPARTITION_EXPRESSION", "SUBPARTITION_ORDINAL_POSITION"})
 }
 
+func TestMySQLNonPartitionedTables(t *testing.T) {
+	db, mock := partitionCatalogMock(t)
+	r := &MySQLReader{db: db, dbName: "MiXeD"}
+	tables := []string{"Order's", "orders", "Gone"}
+	query := `FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = \? AND TABLE_NAME IN \(\?,\?,\?\)`
+	rows := sqlmock.NewRows([]string{"schema", "table"}).
+		AddRow("MiXeD", "Order's").
+		AddRow("mixed", "orders")
+	mock.ExpectQuery(query).WithArgs("MiXeD", "Order's", "orders", "Gone").WillReturnRows(rows).RowsWillBeClosed()
+	ordinary, err := r.NonPartitionedTables(t.Context(), tables)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"Order's": true}, ordinary)
+
+	rows = sqlmock.NewRows([]string{"schema", "table"}).
+		AddRow("MiXeD", "Order's").
+		AddRow("MiXeD", "orders").RowError(1, errors.New("read interrupted"))
+	mock.ExpectQuery(query).WithArgs("MiXeD", "Order's", "orders", "Gone").WillReturnRows(rows).RowsWillBeClosed()
+	ordinary, err = r.NonPartitionedTables(t.Context(), tables)
+	require.ErrorContains(t, err, "read interrupted")
+	require.Empty(t, ordinary)
+}
+
 func TestMySQLPartitionCatalogPreservesNamesAndBounds(t *testing.T) {
 	db, mock := partitionCatalogMock(t)
 	mock.ExpectQuery(`SELECT PARTITION_NAME,PARTITION_METHOD`).WithArgs("MiXeD", "Events").WillReturnRows(mysqlPartitionCatalogRows().
