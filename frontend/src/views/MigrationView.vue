@@ -999,7 +999,7 @@ import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import IncrementalMigrationPanel from './IncrementalMigrationPanel.vue'
 import DatabaseNameEditor from '@/components/DatabaseNameEditor.vue'
 import { createConnectionDatabaseEditors, CONNECTION_DATABASE_EDITORS_KEY } from '@/composables/connectionDatabaseEditors'
-import { supportsDatabaseEditing } from '@/utils/connectionDatabase'
+import { isPostgresDatabase, supportsDatabaseEditing } from '@/utils/connectionDatabase'
 import { listConnections, listConnectionDatabases, listConnectionSchemas, listConnectionViews, type Connection } from '@/api/connections'
 import { downloadRoutines } from '@/api/schema'
 import {
@@ -1011,6 +1011,7 @@ import {
   type PGPreflightRequest,
   type PartitionPreflight,
   type PartitionPreflightResponse,
+  type PartitionCheckProgress,
   type MigrationObjectRef,
   type MigrationReport,
   type CompatibilityFunctionsReport,
@@ -2073,7 +2074,7 @@ function isPGPreflightSelection(kind: PGCheckKind) {
   const state = kind === 'data' ? dataMigrate : kind === 'views' ? viewMigrate : objMigrate
   const src = connections.value.find(c => c.id === state.srcConnId)
   const dst = connections.value.find(c => c.id === state.dstConnId)
-  return !!src && ((src.db_type === 'dameng' && (dst?.db_type === 'oracle' || dst?.db_type === 'sqlserver')) || (src.db_type === 'sqlserver' && dst?.db_type === 'oracle') || (['postgres', 'gaussdb', 'highgo', 'vastbase', 'gbase', 'seabox', 'kingbase'].includes(src.db_type) && (dst?.db_type === 'mysql' || dst?.db_type === 'oracle')))
+  return !!src && ((src.db_type === 'dameng' && (dst?.db_type === 'oracle' || dst?.db_type === 'sqlserver')) || (src.db_type === 'sqlserver' && dst?.db_type === 'oracle') || (isPostgresDatabase(src.db_type) && (dst?.db_type === 'mysql' || dst?.db_type === 'oracle')))
 }
 function pgTargetType(kind: PGCheckKind): 'mysql' | 'oracle' | 'sqlserver' {
   const state = migrationState(kind)
@@ -2148,9 +2149,31 @@ async function runPartitionCheck() {
   const request = dataMigrationRequest()
   const key = JSON.stringify(request)
   const context = databaseContextKey('data')
+  const current = () => !controller.signal.aborted && !databaseSelectionBlocked('data') &&
+    context === databaseContextKey('data') && key === JSON.stringify(dataMigrationRequest())
+  let currentBatch = -1
+  let batchLine = -1
+  function showProgress(p: PartitionCheckProgress) {
+    if (!current()) return
+    if (p.stage === 'listing') dataMigrate.logs.push('[INFO] 正在读取源表清单…')
+    else if (p.stage === 'target') dataMigrate.logs.push('[INFO] 正在校验目标分区兼容性和约束…')
+    else if (p.stage === 'source') {
+      if (currentBatch !== p.batch) {
+        currentBatch = p.batch
+        batchLine = dataMigrate.logs.length
+      }
+      dataMigrate.logs[batchLine] = p.total === 0 ? '[INFO] 源表分区检查：所选范围内共 0 张表'
+        : `[INFO] 源表分区检查：第 ${p.batch}/${p.batches} 批，已检查 ${p.checked}/${p.total} 张表`
+    }
+    nextTick(() => {
+      if (current() && logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight
+    })
+  }
   try {
-    const result = await preflightDataMigration<PartitionPreflightResponse>(request, controller.signal)
-    if (controller.signal.aborted || databaseSelectionBlocked('data') || context !== databaseContextKey('data') || key !== JSON.stringify(dataMigrationRequest())) return
+    const result = selectedSrc.value?.db_type === 'mysql' && isPostgresDatabase(selectedDst.value?.db_type ?? '')
+      ? await preflightDataMigration(request, controller.signal, showProgress)
+      : await preflightDataMigration<PartitionPreflightResponse>(request, controller.signal)
+    if (!current()) return
     if (!result.data.partition_preflight) throw new Error('服务端未返回分区兼容性检查结果')
     partitionCheck.value = result.data.partition_preflight
     partitionCheckRequest = key

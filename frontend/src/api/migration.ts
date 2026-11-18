@@ -1,3 +1,4 @@
+import { isAxiosError, type AxiosResponse } from 'axios'
 import api from './index'
 
 // ===== 数据迁移 =====
@@ -736,8 +737,69 @@ export type PGMySQLPreflightRequest = StartDataMigrationRequest & {
   view_names?: string[]
 }
 export type PGPreflightRequest = PGMySQLPreflightRequest
-export const preflightDataMigration = <T = PGPreflight>(data: PGPreflightRequest, signal?: AbortSignal) =>
-  api.post<T>('/migration/data/preflight', data, { timeout: 0, signal })
+export interface PartitionCheckProgress {
+  stage: 'listing' | 'source' | 'target'
+  batch: number
+  batches: number
+  checked: number
+  total: number
+}
+
+async function readPartitionProgress(body: ReadableStream<Uint8Array>, onProgress: (p: PartitionCheckProgress) => void) {
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let fragments: string[] = []
+  let result: PartitionPreflightResponse | undefined
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      const lines = decoder.decode(value, { stream: !done }).split('\n')
+      for (const line of lines.slice(0, -1)) {
+        fragments.push(line)
+        const frame = JSON.parse(fragments.join(''))
+        fragments = []
+        if (result) throw new Error('预检结果后收到多余消息')
+        if (frame.type === 'progress') onProgress(frame.progress)
+        else if (frame.type === 'result' && typeof frame.partition_preflight?.can_start === 'boolean' &&
+          typeof frame.partition_preflight.ready === 'boolean' && Array.isArray(frame.partition_preflight.tables)) {
+          result = { ready: frame.ready, partition_preflight: frame.partition_preflight }
+        } else throw new Error('服务端返回了无效的预检消息')
+      }
+      const tail = lines[lines.length - 1]
+      if (tail) fragments.push(tail)
+      if (done) break
+    }
+    if (!result || fragments.length) throw new Error('预检连接中断，未收到完整结果')
+    return result
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw error
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export function preflightDataMigration<T = PGPreflight>(data: PGPreflightRequest, signal?: AbortSignal): Promise<AxiosResponse<T>>
+export function preflightDataMigration(data: PGPreflightRequest, signal: AbortSignal, onProgress: (p: PartitionCheckProgress) => void): Promise<{ data: PartitionPreflightResponse }>
+export async function preflightDataMigration<T>(data: PGPreflightRequest, signal?: AbortSignal, onProgress?: (p: PartitionCheckProgress) => void) {
+  const url = '/migration/data/preflight'
+  if (!onProgress) return api.post<T>(url, data, { timeout: 0, signal })
+  try {
+    const response = await api.post<ReadableStream<Uint8Array>>(url, data, {
+      adapter: 'fetch', responseType: 'stream', headers: { Accept: 'application/x-ndjson' }, timeout: 0, signal,
+    })
+    if (String(response.headers['content-type']).includes('application/json')) {
+      return { data: await new Response(response.data).json() as PartitionPreflightResponse }
+    }
+    return { data: await readPartitionProgress(response.data, onProgress) }
+  } catch (error) {
+    if (isAxiosError(error) && error.response?.data instanceof ReadableStream) {
+      const detail = await new Response(error.response.data).json().catch(() => null)
+      if (detail?.error) throw new Error(detail.error)
+    }
+    throw error
+  }
+}
 
 export interface PartitionValue { kind: 'number' | 'string' | 'date' | 'timestamp' | 'null' | 'minvalue' | 'maxvalue'; text?: string }
 export interface PartitionKey { column?: string; expression?: string; data_type?: string; collation?: string }

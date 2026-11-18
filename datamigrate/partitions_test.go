@@ -224,7 +224,13 @@ func TestMySQLPartitionPreflightBatchesSelectedTables(t *testing.T) {
 			}
 			return ordinary, nil
 		}}
-		require.Equal(t, want, m.PreflightPartitions(t.Context()))
+		var last PartitionCheckProgress
+		got := m.PreflightPartitionsWithProgress(t.Context(), func(p PartitionCheckProgress) {
+			require.GreaterOrEqual(t, p.Checked, last.Checked)
+			last = p
+		})
+		require.Equal(t, want, got)
+		require.Equal(t, PartitionCheckProgress{"source", 5, 5, 1000, 1000}, last)
 		require.Equal(t, 5, calls)
 		if failBatch {
 			require.Len(t, r.metadataCalls, 200)
@@ -234,6 +240,55 @@ func TestMySQLPartitionPreflightBatchesSelectedTables(t *testing.T) {
 		} else {
 			require.Empty(t, r.metadataCalls)
 		}
+	}
+}
+
+func TestPartitionProgressCountsSelectedTablesAndTargetPhase(t *testing.T) {
+	for _, count := range []int{0, 1, 450} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			names := []string{"Excluded"}
+			for i := range count {
+				names = append(names, fmt.Sprintf("Selected%03d", i))
+			}
+			m, r, _ := newPartitionFlow(t, names...)
+			m.cfg.Mode, m.cfg.Filter = "include", "Selected*"
+			if count > 1 {
+				r.specs["Selected448"] = partitionFlowSpec()
+				r.metadataErrors["Selected449"] = errors.New("missing catalog row")
+			}
+			var events []PartitionCheckProgress
+			m.reader = &batchPartitionReader{r, func(batch []string) (map[string]bool, error) {
+				last := events[len(events)-1]
+				require.Equal(t, "source", last.Stage)
+				require.Equal(t, fmt.Sprintf("Selected%03d", last.Checked), batch[0], "batch start precedes its query")
+				return nil, errors.New("fall back to per-table reads")
+			}}
+			p := m.PreflightPartitionsWithProgress(t.Context(), func(event PartitionCheckProgress) {
+				if event.Stage == "source" {
+					require.Equal(t, len(r.metadataCalls), event.Checked)
+					if event.Checked%200 != 0 && event.Checked < count {
+						return // Optional intra-batch updates depend on elapsed time.
+					}
+				}
+				events = append(events, event)
+			})
+			require.Len(t, p.Tables, count)
+			want := []PartitionCheckProgress{{Stage: "listing"}}
+			batches := (count + 199) / 200
+			for b := 1; b <= batches; b++ {
+				want = append(want, PartitionCheckProgress{"source", b, batches, (b - 1) * 200, count},
+					PartitionCheckProgress{"source", b, batches, min(b*200, count), count})
+			}
+			if count == 0 {
+				want = append(want, PartitionCheckProgress{Stage: "source"})
+			}
+			if count > 1 {
+				want = append(want, PartitionCheckProgress{Stage: "target", Checked: count, Total: count})
+				require.True(t, p.CanStart)
+				require.False(t, p.Ready)
+			}
+			require.Equal(t, want, events)
+		})
 	}
 }
 
@@ -290,10 +345,14 @@ func TestMySQLPartitionBatchScopeAndCancellation(t *testing.T) {
 			cancel()
 			return nil, ctx.Err()
 		}}
-		p := m.PreflightPartitions(ctx)
+		var events []PartitionCheckProgress
+		p := m.PreflightPartitionsWithProgress(ctx, func(event PartitionCheckProgress) {
+			events = append(events, event)
+		})
 		require.False(t, p.CanStart)
 		require.Equal(t, context.Canceled.Error(), p.FatalError)
 		require.Empty(t, r.metadataCalls)
+		require.Equal(t, []PartitionCheckProgress{{Stage: "listing"}, {"source", 1, 1, 0, 2}}, events)
 	})
 }
 

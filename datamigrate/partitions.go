@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/partition"
@@ -78,9 +79,23 @@ func partitionSourceReader(r source.Reader) source.Reader {
 	}
 }
 
+const partitionBatchSize = 200
+
+type PartitionCheckProgress struct {
+	Stage   string `json:"stage"`
+	Batch   int    `json:"batch"`
+	Batches int    `json:"batches"`
+	Checked int    `json:"checked"`
+	Total   int    `json:"total"`
+}
+
 // PreflightPartitions performs metadata and target catalog reads only. Run
 // builds its own plan; no client-supplied SQL or readiness is trusted.
 func (m *Migrator) PreflightPartitions(ctx context.Context) *PartitionPreflight {
+	return m.PreflightPartitionsWithProgress(ctx, nil)
+}
+
+func (m *Migrator) PreflightPartitionsWithProgress(ctx context.Context, progress func(PartitionCheckProgress)) *PartitionPreflight {
 	m.sqlServerSource = nil
 	m.oracleMySQL = nil
 	m.mysqlPGSpatial = mysqlPGSpatialState{readOnly: true}
@@ -88,10 +103,14 @@ func (m *Migrator) PreflightPartitions(ctx context.Context) *PartitionPreflight 
 	defer m.clearSourceTableDDLCache()
 	m.partitionState = nil
 	m.dmPlans, m.dmUsable, m.dmBlocked = nil, nil, nil
-	return m.preparePartitions(ctx)
+	return m.preparePartitionsWithProgress(ctx, progress)
 }
 
 func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
+	return m.preparePartitionsWithProgress(ctx, nil)
+}
+
+func (m *Migrator) preparePartitionsWithProgress(ctx context.Context, progress func(PartitionCheckProgress)) *PartitionPreflight {
 	if m.partitionState != nil {
 		return m.partitionState.preflight
 	}
@@ -132,6 +151,9 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		if isMigrationTaskError(plan.sequenceError) {
 			return fatal(plan.sequenceError)
 		}
+	}
+	if progress != nil {
+		progress(PartitionCheckProgress{Stage: "listing"})
 	}
 	all, err := m.reader.ListTables(ctx)
 	if err != nil {
@@ -179,14 +201,30 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		NonPartitionedTables(context.Context, []string) (map[string]bool, error)
 	})
 	batchMySQL := canBatch && p.SourceType == "mysql" && source.IsPGFamily(targetType) && len(selected) > 1
-	const batchSize = 200
+	total := len(selected)
+	batches := (total + partitionBatchSize - 1) / partitionBatchSize
+	var lastUpdate time.Time
+	reportSource := func(checked, batch int) {
+		progress(PartitionCheckProgress{Stage: "source", Batch: batch, Batches: batches, Checked: checked, Total: total})
+		lastUpdate = time.Now()
+	}
 	var ordinary map[string]bool
 	for i, table := range selected {
 		if err := ctx.Err(); err != nil {
 			return fatal(err)
 		}
-		if batchMySQL && i%batchSize == 0 {
-			batch := selected[i:min(i+batchSize, len(selected))]
+		// At entry, all preceding tables have completed source inspection, including
+		// table-local failures. Publish the previous batch end before starting the next query.
+		if progress != nil {
+			if i > 0 && (i%partitionBatchSize == 0 || time.Since(lastUpdate) >= time.Second) {
+				reportSource(i, (i-1)/partitionBatchSize+1)
+			}
+			if i%partitionBatchSize == 0 {
+				reportSource(i, i/partitionBatchSize+1)
+			}
+		}
+		if batchMySQL && i%partitionBatchSize == 0 {
+			batch := selected[i:min(i+partitionBatchSize, len(selected))]
 			ordinary, err = batchReader.NonPartitionedTables(ctx, batch)
 			if err != nil {
 				ordinary = nil // Inspect each table in this batch through the existing path.
@@ -251,6 +289,15 @@ func (m *Migrator) preparePartitions(ctx context.Context) *PartitionPreflight {
 		}
 		m.sourceDDLCache.tables[table] = cloneSourceTableDDLInfo(info)
 		m.sourceDDLCache.mu.Unlock()
+	}
+	if progress != nil {
+		if err := ctx.Err(); err != nil {
+			return fatal(err)
+		}
+		reportSource(total, batches)
+		if s.hasPartitions {
+			progress(PartitionCheckProgress{Stage: "target", Checked: total, Total: total})
+		}
 	}
 	if s.hasPartitions {
 		inspector, available := m.writer.(target.PartitionInspector)

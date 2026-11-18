@@ -174,6 +174,75 @@ test('automatic checking shows its own progress and cannot submit until the chec
   } finally { scope.stop() }
 })
 
+function streamedCheck(body) {
+  const api = { post: async (url, _, config) => {
+    assert.equal(url, '/migration/data/preflight')
+    assert.equal(config.headers.Accept, 'application/x-ndjson')
+    assert.ok(config.signal)
+    return { data: body, headers: { 'content-type': 'application/x-ndjson' } }
+  } }
+  const source = readFileSync(new URL('../src/api/migration.ts', import.meta.url), 'utf8')
+  return load(source, id => id === './index' ? { default: api } : { isAxiosError: () => false },
+    { TextDecoder, ReadableStream, Response }).preflightDataMigration
+}
+
+test('render live batch counts before the delayed second batch returns', async () => {
+  const scope = Vue.effectScope()
+  try {
+    let stream
+    const check = streamedCheck(new ReadableStream({ start(c) { stream = c } }))
+    const encoder = new TextEncoder()
+    const send = frame => stream.enqueue(encoder.encode(JSON.stringify(frame) + '\n'))
+    const progress = (stage, batch, checked) => send({ type: 'progress', progress: { stage, batch, checked, total: 450, batches: 3 } })
+    const { p, starts } = scope.run(() => page(check))
+    await Vue.nextTick()
+    const pending = p.startDataMigration()
+    progress('listing', 0, 0)
+    progress('source', 1, 0)
+    progress('source', 1, 120)
+    progress('source', 1, 200)
+    progress('source', 2, 200)
+    await new Promise(resolve => setImmediate(resolve))
+    const html = await renderPage(p)
+    assert.match(html, /正在读取源表清单/)
+    assert.match(html, /第 1\/3 批，已检查 200\/450 张表/)
+    assert.match(html, /第 2\/3 批，已检查 200\/450 张表/)
+    assert.doesNotMatch(html, /120\/450/)
+    assert.equal(starts.length, 0)
+
+    progress('source', 2, 400)
+    progress('source', 3, 400)
+    progress('source', 3, 450)
+    progress('target', 0, 450)
+    const result = partitionPreflightResponse({ tables: [{ source_table: '订单', status: 'ordinary' }] }).data
+    const bytes = encoder.encode(JSON.stringify({ type: 'result', ...result }) + '\n')
+    const split = bytes.indexOf(encoder.encode('订')[0]) + 1
+    stream.enqueue(bytes.slice(0, split))
+    stream.enqueue(bytes.slice(split))
+    stream.close()
+    await pending
+    assert.equal(starts.length, 1)
+    assert.equal(p.partitionCheck.value.tables[0].source_table, '订单')
+    assert.equal(p.dataMigrate.logs.filter(s => s.includes('张表')).length, 3)
+    assert.match(p.dataMigrate.logs.join('\n'), /450\/450 张表\n\[INFO\] 正在校验目标分区兼容性和约束/)
+  } finally { scope.stop() }
+})
+
+test('a disconnected preflight cannot launch with progress alone', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const body = new ReadableStream({ start(c) {
+      c.enqueue(new TextEncoder().encode('{"type":"progress","progress":{"stage":"listing"}}\n{"type":"result"'))
+      c.close()
+    } })
+    const { p, starts } = scope.run(() => page(streamedCheck(body)))
+    await Vue.nextTick()
+    await p.startDataMigration()
+    assert.equal(starts.length, 0)
+    assert.match(p.dataMigrate.logs.at(-1), /连接中断，未收到完整结果/)
+  } finally { scope.stop() }
+})
+
 test('all-blocked generic preflight prevents launch and configuration changes invalidate it', async () => {
   const scope = Vue.effectScope()
   try {
@@ -238,9 +307,10 @@ test('a failed check request preserves the concrete error and retries through st
 test('generic preflight aborts outdated requests and ignores late readiness', async () => {
   const scope = Vue.effectScope()
   try {
-    let resolve, signal, entered
+    let resolve, signal, entered, notify
     const checking = new Promise(done => { entered = done })
-    const { p, starts } = scope.run(() => page((_, s) => {
+    const { p, starts } = scope.run(() => page((_, s, progress) => {
+      notify = progress
       signal = s
       entered()
       return new Promise(done => { resolve = done })
@@ -251,6 +321,8 @@ test('generic preflight aborts outdated requests and ignores late readiness', as
     p.dataMigrate.lowerCaseNames = !p.dataMigrate.lowerCaseNames
     await Vue.nextTick()
     assert.equal(signal.aborted, true)
+    notify({ stage: 'source', batch: 2, batches: 3, checked: 200, total: 450 })
+    assert.ok(!p.dataMigrate.logs.some(line => line.includes('200/450')))
     resolve(partitionPreflightResponse())
     await pending
     assert.equal(p.partitionCheck.value, null)

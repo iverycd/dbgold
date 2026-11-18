@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -127,6 +128,33 @@ func PreflightDataMigration(c *gin.Context) {
 		c.JSON(http.StatusOK, m.PreflightPGOracle(ctx))
 		return
 	}
+	if src.DBType == "mysql" && source.IsPGFamily(dst.DBType) && c.NegotiateFormat("application/json", "application/x-ndjson") == "application/x-ndjson" {
+		streamPartitionPreflight(c, m.PreflightPartitionsWithProgress)
+		return
+	}
 	p := m.PreflightPartitions(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"ready": p.Ready, "partition_preflight": p})
+}
+
+func streamPartitionPreflight(c *gin.Context, check func(context.Context, func(datamigrate.PartitionCheckProgress)) *datamigrate.PartitionPreflight) {
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Accel-Buffering", "no")
+	encoder := json.NewEncoder(c.Writer)
+	send := func(frame gin.H) {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := encoder.Encode(frame); err != nil {
+			cancel()
+			return
+		}
+		c.Writer.Flush()
+	}
+	p := check(ctx, func(progress datamigrate.PartitionCheckProgress) {
+		send(gin.H{"type": "progress", "progress": progress})
+	})
+	send(gin.H{"type": "result", "ready": p.Ready, "partition_preflight": p})
 }

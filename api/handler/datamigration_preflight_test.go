@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dbgold/config"
 	"dbgold/datamigrate"
@@ -14,6 +16,44 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xuri/excelize/v2"
 )
+
+func TestPartitionPreflightFlushesBeforeResult(t *testing.T) {
+	router := gin.New()
+	release := make(chan struct{})
+	router.POST("/preflight", func(c *gin.Context) {
+		streamPartitionPreflight(c, func(ctx context.Context, progress func(datamigrate.PartitionCheckProgress)) *datamigrate.PartitionPreflight {
+			progress(datamigrate.PartitionCheckProgress{Stage: "source", Batch: 2, Batches: 3, Checked: 200, Total: 450})
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return &datamigrate.PartitionPreflight{Ready: true, CanStart: true}
+		})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 5 * time.Second
+	resp, err := client.Post(server.URL+"/preflight", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, "application/x-ndjson", resp.Header.Get("Content-Type"))
+	require.Equal(t, "no", resp.Header.Get("X-Accel-Buffering"))
+	decoder := json.NewDecoder(resp.Body)
+	var frame struct {
+		Type     string
+		Progress datamigrate.PartitionCheckProgress
+		Result   *datamigrate.PartitionPreflight `json:"partition_preflight"`
+	}
+	require.NoError(t, decoder.Decode(&frame))
+	require.Equal(t, "progress", frame.Type)
+	require.Equal(t, 200, frame.Progress.Checked)
+	require.Nil(t, frame.Result)
+	close(release)
+	require.NoError(t, decoder.Decode(&frame))
+	require.Equal(t, "result", frame.Type)
+	require.True(t, frame.Result.CanStart)
+}
 
 func TestPGMySQLPairsAndExclusionsPersist(t *testing.T) {
 	for _, src := range []string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "seabox", "kingbase"} {

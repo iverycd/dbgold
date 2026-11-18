@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { isAxiosError } from 'axios'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
 
@@ -187,6 +188,7 @@ test('mixed batch defaults and multipart payload keep Oscar override independent
   const posts = []
   const api = { post: (url, form) => posts.push({ url, form }) }
   const { startBatch } = loadTS('../src/api/migration.ts', id => {
+    if (id === 'axios') return { isAxiosError }
     assert.equal(id, './index')
     return { default: api }
   })
