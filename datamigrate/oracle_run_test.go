@@ -517,9 +517,8 @@ func TestOracleConversionErrorsIncludePageAndColumn(t *testing.T) {
 		r, w, m := oracleMigrationFixture()
 		m.reader, m.writer = &oraclePagingReader{r}, &oraclePagingWriter{w}
 		m.cfg.PageSize, m.cfg.IntraTableParallel = 1, parallel
-		ok, err := m.migrateTableData(context.Background(), "Orders")
-		require.False(t, ok)
-		require.Contains(t, err, "表 Orders 第 2 页")
-		require.Contains(t, err, "列 ID 页内第 1 行")
+		err := m.migrateTableData(context.Background(), "Orders")
+		require.ErrorContains(t, err, "表 Orders 第 2 页")
+		require.ErrorContains(t, err, "列 ID 页内第 1 行")
 	}
 }

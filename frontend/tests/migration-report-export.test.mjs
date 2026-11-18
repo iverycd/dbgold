@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 
 const views = ['MigrationReportPanel', 'DataMigrationJobDetailView']
@@ -13,7 +13,7 @@ const largeLineCount = 200000
 const jobID = '12345678-report-export'
 const scripts = new Map(views.map(view => {
   const { descriptor } = parse(readFileSync(new URL(`../src/views/${view}.vue`, import.meta.url), 'utf8'))
-  const fields = `report, repairPanel, exportReport${view === 'DataMigrationJobDetailView' ? ', job' : ', loadReport, timingJob, timingLoading, timingUnavailable, exporting'}`
+  const fields = `report, repairPanel, exportReport, rowSummary, rowPanel, showRowDifference, activeTab${view === 'DataMigrationJobDetailView' ? ', job' : ', loadReport, timingJob, timingLoading, timingUnavailable, exporting'}`
   return [view, ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { ${fields} };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText]
@@ -62,6 +62,7 @@ function harness(view, overrides = {}) {
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === 'vue-router') return { useRoute: () => route, useRouter: () => ({}) }
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return { ...migrationReportUtils, ...overrides.reportUtils }
       if (id === '@/utils/autoRepairs') return { ...autoRepairUtils, ...overrides.autoRepairUtils }
       if (id === '@/api/migration') return {
@@ -97,6 +98,54 @@ async function exportedText(h) {
 }
 
 for (const view of views) {
+  test(`${view} reports eight count differences, links the named table and preserves original counts in exports`, async () => {
+    const h = harness(view)
+    try {
+      const report = failureReport({ name: 'unrelated_structure_error' })
+      report.rowCounts = Array.from({ length: 353 }, (_, i) => ({ table: `matched_${i}`, src: 0, dst: 0, match: true }))
+      for (const [table, src, dst] of [
+        ['frame_visitlog', 398748, 398746], ['messages_center', 165, 164], ['workflow_activity_instance', 388, 386],
+        ['workflow_context_value', 183, 182], ['workflow_pvi', 178, 177], ['workflow_pvi_material', 171, 170],
+        ['workflow_transition_instance', 218, 217], ['workflow_workitem', 213, 212],
+      ]) report.rowCounts.push({ table, src, dst, match: false })
+      h.page.report.value = report
+      const expected = '已核对 361 张表，其中 8 张行数不一致，校验时目标端合计少 10 行。'
+      assert.equal(h.page.rowSummary.value.text, expected)
+      const focused = []
+      h.page.rowPanel.value = { focusTable: table => focused.push(table) }
+      await h.page.showRowDifference('frame_visitlog')
+      assert.equal(h.page.activeTab.value, view === 'MigrationReportPanel' ? 'rowcount' : 'rowcounts')
+      assert.deepEqual(focused, ['frame_visitlog'])
+      h.page.repairPanel.value = { exportHistory: async () => ['接续迁移成功'] }
+      const text = await exportedText(h)
+      assert.ok(text.includes(expected))
+      assert.match(text, /原始报告记录失败 1 项/)
+      assert.match(text, /frame_visitlog：行数不一致 · 源 398,748 行，目标 398,746 行，少 2 行/)
+      assert.match(text, /接续迁移成功/)
+    } finally { h.stop() }
+  })
+
+  test(`${view} exports a failed count without inventing a difference and retains concurrent copy errors`, async () => {
+    const h = harness(view)
+    try {
+      const report = emptyReport()
+      report.data_issues = [
+        { table: 'orders', kind: 'copy_error', message: '第 3 页写入失败' },
+        { table: 'orders', kind: 'row_count_mismatch' },
+        { table: 'events', kind: 'row_count_error', message: '读取目标行数超时' },
+      ]
+      report.data = { total: 1, success: 0, failed: 1, items: [{ name: 'orders', stage: 'execute', error: '第 3 页写入失败' }] }
+      report.rowCounts = [{ table: 'orders', src: 4, dst: 2, match: false }, { table: 'returns', src: 1, dst: 3, match: false }]
+      h.page.report.value = report
+      const text = await exportedText(h)
+      assert.match(text, /已核对 2 张表，其中 2 张行数不一致，校验时目标端合计少 2 行，另有表合计多 2 行，1 张表行数统计失败/)
+      assert.match(text, /orders · 数据复制失败 · 第 3 页写入失败/)
+      assert.match(text, /失败阶段：数据复制失败/)
+      assert.match(text, /events：行数统计失败 · 读取目标行数超时/)
+      assert.doesNotMatch(text, /events[^\n]*源 [\d,]+ 行/)
+    } finally { h.stop() }
+  })
+
   test(`${view} exports the saved Oracle structural plan without substituting a historical MySQL plan`, async () => {
     const h = harness(view)
     try {

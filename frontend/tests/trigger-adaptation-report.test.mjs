@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 
 const { reportCategories, formatReportCategories } = migrationReportUtils
@@ -101,6 +101,7 @@ function viewHarness(view) {
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'trigger-report' } }), useRouter: () => ({}) }
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@/api/migration' || id === '@/utils/clipboard') return {}

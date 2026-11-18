@@ -637,7 +637,7 @@ func (m *Migrator) copyOracleMySQLTables(ctx context.Context, tables []string, r
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	failed := map[string]string{}
+	failed := map[string]error{}
 	for _, table := range tables {
 		if !s.postEligible[table] {
 			continue
@@ -647,7 +647,7 @@ func (m *Migrator) copyOracleMySQLTables(ctx context.Context, tables []string, r
 		case sem <- struct{}{}:
 		case <-ctx.Done():
 			mu.Lock()
-			failed[table] = ctx.Err().Error()
+			failed[table] = ctx.Err()
 			mu.Unlock()
 			continue
 		}
@@ -655,11 +655,11 @@ func (m *Migrator) copyOracleMySQLTables(ctx context.Context, tables []string, r
 		go func(table string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ok, message := m.migrateTableData(ctx, table)
+			err := m.migrateTableData(ctx, table)
 			mu.Lock()
 			defer mu.Unlock()
-			if !ok {
-				failed[table] = message
+			if err != nil {
+				failed[table] = err
 			}
 		}(table)
 	}
@@ -668,24 +668,28 @@ func (m *Migrator) copyOracleMySQLTables(ctx context.Context, tables []string, r
 		if !s.postEligible[table] {
 			continue
 		}
-		if message, bad := failed[table]; bad {
+		if err := failed[table]; err != nil {
+			message := err.Error()
 			s.postEligible[table] = false
 			report.Data.Failed++
 			report.Data.Items = append(report.Data.Items, ObjectResult{Name: table, Stage: "execute", Error: message})
+			report.addDataIssue(table, m.objName(table), copyIssueKind(err), message)
 			continue
 		}
 		report.Data.Success++
 		m.markDataValidationCopied(table)
 		src, se := m.reader.CountRows(ctx, table)
 		if m.stopMigrationTask(ctx, se) {
+			report.addDataIssue(table, m.objName(table), rowCountError, countReadError(se, nil).Error())
 			return
 		}
 		dst, de := m.writer.CountRows(ctx, m.objName(table))
 		if m.stopMigrationTask(ctx, de) {
+			report.addDataIssue(table, m.objName(table), rowCountError, countReadError(se, de).Error())
 			return
 		}
 		rc := TableRowCount{Table: m.objName(table), Src: src, Dst: dst, Match: se == nil && de == nil && src == dst}
-		report.RowCounts = append(report.RowCounts, rc)
+		report.addRowCount(table, m.objName(table), rc, countReadError(se, de), "")
 		if !rc.Match {
 			s.postEligible[table] = false
 			report.Data.Success--

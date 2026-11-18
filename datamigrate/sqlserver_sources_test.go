@@ -92,6 +92,20 @@ func TestOraclePGSQLServerCreateFailureContinuesIndependentTables(t *testing.T) 
 	}
 }
 
+func TestOraclePGSQLServerCountMismatchRetainsComparedCounts(t *testing.T) {
+	r, w := sqlServerCrossFixture("postgres")
+	// This fixture records one destination row per batch. Two source rows
+	// written in the same batch therefore exercise the count mismatch path.
+	r.rows["Orders"] = append(r.rows["Orders"], r.rows["Orders"][0])
+	m := NewMigrator(r, w, &Job{LogCh: make(chan string, 512)}, Config{TargetDBType: "sqlserver", Mode: "all", MaxParallel: 1})
+	report := m.Run(context.Background())
+	require.Equal(t, 1, report.Data.Failed)
+	require.True(t, report.HasFailures())
+	require.Contains(t, report.RowCounts, TableRowCount{Table: "Orders", Src: 2, Dst: 1})
+	require.Len(t, report.DataIssues, 1)
+	require.Equal(t, rowCountMismatch, report.DataIssues[0].Kind)
+}
+
 func TestSQLServerOraclePGExactDecimalPlanning(t *testing.T) {
 	for _, test := range []struct{ src, number, def string }{
 		{"oracle", "NUMBER", "-12.00012500"},

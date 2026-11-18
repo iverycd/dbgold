@@ -95,6 +95,7 @@ func (m *Migrator) validatePartitionContent(ctx context.Context, report *Migrati
 				}
 			}
 			report.DataValidation.Tables = append(report.DataValidation.Tables, result)
+			report.addContentIssue(t.SourceTable, t.TargetTable, result)
 		}
 	}
 	report.DataValidation.Finalize()

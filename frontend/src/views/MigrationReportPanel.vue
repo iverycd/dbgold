@@ -19,18 +19,18 @@
       <div class="report-stats">
         <div><span>迁移表数</span><strong>{{ tableRows[0]?.totalLabel }}</strong></div>
         <div>
-          <span>原始失败项</span>
+          <span>原始报告记录失败</span>
           <div class="report-failure-stat">
             <strong :class="{ 'report-danger': failedCount > 0 }">{{ failedCount }}</strong>
             <a-button v-if="failedCount > 0" type="text" size="mini" @click="showOriginalFailures">查看失败原因</a-button>
           </div>
         </div>
-        <div><span>行数不一致</span><strong :class="{ 'report-danger': mismatchedRows.length > 0 }">{{ hasRowCounts ? mismatchedRows.length : '—' }}</strong></div>
+        <div><span>行数不一致</span><strong :class="{ 'row-count-mismatch': rowSummary.mismatched > 0 }">{{ rowSummary.checked ? rowSummary.mismatched : '—' }}</strong></div>
         <div><span>数据内容校验</span><strong :class="{ 'report-danger': dataValidationNeedsAttention(report.dataValidation) }">{{ dataValidationLabel(report.dataValidation) }}</strong></div>
         <div><span>迁移告警</span><strong>{{ report.warnings?.length || 0 }}</strong></div>
       </div>
       <div class="report-repair-summary" aria-live="polite">
-        <span>原始失败 {{ failedCount }} 项，</span>
+        <span>原始报告记录失败 {{ failedCount }} 项，</span>
         <span v-if="repairSummary.state === 'loading'">修复状态加载中</span>
         <span v-else-if="repairSummary.state === 'unknown'">修复状态未知，请在对象修复中刷新重试</span>
         <template v-else>
@@ -47,6 +47,10 @@
       <a-tabs v-model:active-key="activeTab" :lazy-load="false" :destroy-on-hide="false">
         <!-- ===== 迁移概览 ===== -->
         <a-tab-pane key="overview" title="迁移概览">
+          <a-alert v-if="rowIssueCount" type="warning" class="row-notice">
+            {{ rowSummary.text }}
+            <a-button type="text" size="mini" @click="showRowDifference()">{{ rowSummary.mismatched ? '查看行数差异' : '查看行数校验' }}</a-button>
+          </a-alert>
           <a-table
             :data="overviewRows"
             row-key="key"
@@ -176,46 +180,9 @@
         </a-tab-pane>
 
         <!-- ===== 行数对比 ===== -->
-        <a-tab-pane v-if="hasRowCounts" key="rowcount">
-          <template #title>
-            行数对比
-            <a-badge
-              v-if="mismatchedRows.length > 0"
-              :count="mismatchedRows.length"
-              style="margin-left: 6px"
-            />
-          </template>
-
-          <div class="row-count-summary">
-            <span>共 {{ allRowCounts.length }} 张表</span>
-            <span :class="{ 'row-count-mismatch': mismatchedRows.length > 0 }">{{ mismatchedRows.length }} 张表行数不一致</span>
-            <span>不一致项优先展示</span>
-          </div>
-          <a-table
-            :data="sortedRowCounts"
-            :pagination="{ pageSize: 20 }"
-            :scroll="{ x: 760, maxHeight: '420px' }"
-            size="small"
-            row-key="table"
-          >
-            <template #columns>
-              <a-table-column title="表名" data-index="table" />
-              <a-table-column title="源行数" data-index="src" :width="120" />
-              <a-table-column title="目标行数" data-index="dst" :width="120" />
-              <a-table-column title="差异" :width="100">
-                <template #cell="{ record }">
-                  <span :class="{ 'row-count-mismatch': !record.match }">{{ record.dst - record.src }}</span>
-                </template>
-              </a-table-column>
-              <a-table-column title="状态" :width="100">
-                <template #cell="{ record }">
-                  <a-tag v-if="record.match" color="green">✓ 一致</a-tag>
-                  <a-tag v-else color="orange">⚠ 不一致</a-tag>
-                </template>
-              </a-table-column>
-            </template>
-          </a-table>
-
+        <a-tab-pane v-if="rowEntries.length" key="rowcount">
+          <template #title>行数对比 <a-badge v-if="rowIssueCount" :count="rowIssueCount" :dot-style="{ backgroundColor: 'rgb(var(--orange-6))' }" /></template>
+          <MigrationRowCountPanel :key="jobID" ref="rowPanel" :entries="rowEntries" :summary="rowSummary.text" />
         </a-tab-pane>
         <a-tab-pane key="validation" title="数据内容校验">
           <DataValidationPanel :report="report.dataValidation" />
@@ -223,9 +190,9 @@
         <a-tab-pane key="repair">
           <template #title>
             对象修复
-            <a-badge v-if="repairSummary.state === 'ready' && repairSummary.attention > 0" :count="repairSummary.attention" style="margin-left: 6px" />
+            <a-badge v-if="repairSummary.state === 'ready' && repairSummary.attention > 0" :count="repairSummary.attention" :dot-style="repairSummary.review === repairSummary.attention ? { backgroundColor: 'rgb(var(--orange-6))' } : undefined" style="margin-left: 6px" />
           </template>
-          <MigrationRepairPanel ref="repairPanel" :jobID="jobID" @summary-change="updateRepairSummary">
+          <MigrationRepairPanel ref="repairPanel" :jobID="jobID" :report="report" @summary-change="updateRepairSummary" @show-row-difference="showRowDifference">
             <template v-if="failedCount > 0" #empty-action>
               <a-button type="text" size="small" @click="showOriginalFailures">查看原始失败原因</a-button>
             </template>
@@ -275,6 +242,8 @@
 </template>
 
 <script setup lang="ts">
+import MigrationRowCountPanel from '@/components/MigrationRowCountPanel.vue'
+import { indexMigrationDataIssues, rowCountEntries, summarizeRowCounts } from '@/utils/migrationDataIssues'
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
@@ -282,7 +251,7 @@ import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrement
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel, migrationPGPreflight } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, formatReportRowCounts, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel, migrationPGPreflight } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -295,7 +264,6 @@ import {
   type DataMigrationJob,
   type MigrationReport,
   type ObjectResult,
-  type TableRowCount,
 } from '@/api/migration'
 import { copyText } from '@/utils/clipboard'
 
@@ -357,15 +325,17 @@ const tableRows = computed(() => report.value ? reportCategories(report.value) :
 const overviewRows = computed(() => migrationOverviewRows(tableRows.value))
 const autoRepairTableCount = computed(() => groupAutoRepairs(report.value?.auto_repairs).length)
 
-const hasRowCounts = computed(() => (report.value?.rowCounts?.length ?? 0) > 0)
-const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts ?? [])
-const mismatchedRows = computed<TableRowCount[]>(() =>
-  report.value?.rowCounts?.filter((r) => !r.match) ?? []
-)
-const sortedRowCounts = computed<TableRowCount[]>(() => [
-  ...mismatchedRows.value,
-  ...allRowCounts.value.filter(row => row.match),
-])
+const dataIssueIndex = computed(() => indexMigrationDataIssues(report.value))
+const rowSummary = computed(() => summarizeRowCounts(report.value, dataIssueIndex.value))
+const rowEntries = computed(() => rowCountEntries(report.value, dataIssueIndex.value))
+const rowIssueCount = computed(() => rowEntries.value.filter(entry => entry.color !== 'green').length)
+const rowPanel = ref<InstanceType<typeof MigrationRowCountPanel> | null>(null)
+async function showRowDifference(table?: string) {
+  const id = props.jobID
+  activeTab.value = 'rowcount'
+  await nextTick()
+  if (id === props.jobID) await rowPanel.value?.focusTable(table)
+}
 const failedCount = computed(() => tableRows.value.reduce((total, row) => total + (row.isInformational ? 0 : row.failed), 0))
 const originalFailuresVisible = ref(false)
 const originalFailurePage = ref(1)
@@ -459,21 +429,7 @@ async function exportReport() {
     for (const line of formatReportCategories(r)) lines.push(line)
     if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
 
-    if (r.rowCounts && r.rowCounts.length > 0) {
-      lines.push('=== 行数对比 ===')
-      const mismatched = r.rowCounts.filter((rc) => !rc.match)
-      if (mismatched.length > 0) {
-        lines.push(`\n不一致的表（${mismatched.length} 张）：`)
-        for (const rc of mismatched) {
-          lines.push(`  ${rc.table}：源 ${rc.src} 行 → 目标 ${rc.dst} 行（差 ${rc.dst - rc.src}）`)
-        }
-      }
-      lines.push(`\n全部表（${r.rowCounts.length} 张）：`)
-      for (const rc of r.rowCounts) {
-        lines.push(`  ${rc.table}：${rc.src} / ${rc.dst}  ${rc.match ? '✓' : '✗'}`)
-      }
-    }
-
+    for (const line of formatReportRowCounts(r)) lines.push(line)
     for (const line of formatDataValidation(r.dataValidation)) lines.push(line)
     if (repairPanel.value) {
       try {
@@ -581,7 +537,7 @@ onUnmounted(() => { reportRequest++ })
 .report-failure-stat { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .report-stats strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .report-danger { color: #dc2626; }
-.row-count-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; color: var(--color-text-2); font-size: 13px; }
+.row-notice { margin-bottom: 12px; }
 .row-count-mismatch { color: #ff7d00; }
 .failure-error, .failure-name { overflow-wrap: anywhere; }
 .migration-report-panel :deep(.arco-table-cell) { overflow-wrap: anywhere; }

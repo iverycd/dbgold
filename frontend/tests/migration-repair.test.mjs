@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
@@ -15,7 +16,7 @@ function transpile(source) { return ts.transpileModule(source, { compilerOptions
 const require = createRequire(import.meta.url)
 const formattingContext = { exports: {}, require }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/sqlFormatting.ts', import.meta.url), 'utf8')), formattingContext)
-const utilsContext = { exports: {} }
+const utilsContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const utils = utilsContext.exports
 const batchSource = transpile(readFileSync(new URL('../src/utils/migrationRepairBatch.ts', import.meta.url), 'utf8'))
@@ -29,7 +30,7 @@ function loadBatchUtils(timers) {
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, editorVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
-const renderFields = 'loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
+const renderFields = 'emit, loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -68,7 +69,7 @@ const record = (extra = {}) => ({ version: 1, object: { id: 'obj', kind: 'table'
 test('data status text distinguishes import outcomes and preserves unfamiliar statuses', () => {
   const cases = [
     [['succeeded', 'success', 'repaired'], '导入成功'],
-    [['failed'], '导入失败，待接续'],
+    [['failed'], '数据待核对'],
     [['pending', 'not_started', 'skipped', 'needs_data', 'draft', ''], '待导入'],
     [['running'], '导入中'], [['queued'], '等待导入'], [['cancelling'], '取消中'],
     [['cancelled'], '已取消'], [['unknown', 'unverified', 'needs_verification'], '导入结果未知'],
@@ -84,13 +85,13 @@ test('object status presentation separates table structure and data without dupl
   for (const kind of ['table', 'tables']) {
     assert.deepEqual(statuses({ kind, status: 'succeeded', data_status: 'failed' }), [
       { label: '表结构', status: 'succeeded', text: '执行成功' },
-      { label: '数据', status: 'failed', text: '导入失败，待接续' },
+      { label: '数据', status: 'needs_verification', text: '数据待核对' },
     ])
     assert.deepEqual(statuses({ kind, status: 'succeeded' }), [{ label: '表结构', status: 'succeeded', text: '执行成功' }])
   }
   assert.deepEqual(statuses({ kind: 'data', status: 'failed', data_status: 'succeeded' }), [{ label: '数据', status: 'succeeded', text: '导入成功' }])
   for (const data_status of [undefined, '']) {
-    assert.deepEqual(statuses({ kind: 'data', status: 'failed', data_status }), [{ label: '数据', status: 'failed', text: '导入失败，待接续' }])
+    assert.deepEqual(statuses({ kind: 'data', status: 'failed', data_status }), [{ label: '数据', status: 'needs_verification', text: '数据待核对' }])
   }
   assert.deepEqual(statuses({ kind: 'index', status: 'unknown', data_status: 'not_required' }), [
     { label: '', status: 'unknown', text: '执行结果未知' },
@@ -101,13 +102,94 @@ test('object status presentation separates table structure and data without dupl
 test('repair history labels table structure and data separately and exports each data result once', () => {
   const tableHistory = utils.formatRepairHistory([record({ status: 'succeeded', data_status: 'failed', original_error: 'numeric field overflow' })], []).join('\n')
   assert.match(tableHistory, /表结构：执行成功/)
-  assert.match(tableHistory, /数据：导入失败，待接续/)
+  assert.match(tableHistory, /数据：数据待核对/)
   assert.match(tableHistory, /原始错误：numeric field overflow/)
-  for (const [data_status, expected] of [['succeeded', '导入成功'], [undefined, '导入失败，待接续']]) {
+  for (const [data_status, expected] of [['succeeded', '导入成功'], [undefined, '数据待核对']]) {
     const history = utils.formatRepairHistory([record({ kind: 'data', status: 'failed', data_status, units: [] })], []).join('\n')
     assert.equal(history.match(new RegExp(`数据：${expected}`, 'g'))?.length, 1)
     assert.doesNotMatch(history, /表结构：|数据状态：|：待修复/)
   }
+})
+
+test('pure row-count differences are actionable review items and the original numbers survive recovery', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const names = ['frame_visitlog', 'messages_center', 'workflow_activity_instance', 'workflow_context_value', 'workflow_pvi', 'workflow_pvi_material', 'workflow_transition_instance', 'workflow_workitem']
+    const differences = [2, 1, 2, 1, 1, 1, 1, 1]
+    const rows = names.map((table, i) => ({ table, src: i ? 165 : 398748, dst: (i ? 165 : 398748) - differences[i], match: false }))
+    const report = { rowCounts: rows, data: { failed: 0, items: [] } }
+    const objects = names.map(name => record({ id: name, name, table: name, target_name: name, status: 'succeeded', original_status: 'succeeded', data_status: 'failed', units: [unit(name, 'succeeded', { sql: 'CREATE TABLE ' + name + '(id int)' })] }))
+    const attempts = []
+    const p = scope.run(() => panel({ jobID: 'job', report }, {
+      listRepairs: async () => repairList(objects), listRepairAttempts: async () => ({ data: { items: attempts } }),
+    })); await tick()
+    assert.equal(p.summary.value.review, 8)
+    assert.equal(p.summary.value.attention, 8)
+    assert.equal(p.stats.value.data, 0)
+    p.selectRepairFilter('review')
+    let showDifference
+    let html = await renderPanel(p, tree => {
+      const table = findNodes(tree, node => !!node.children?.columns)[0]
+      const column = table.children.columns().find(node => node.props?.title === '操作')
+      const controls = column.children.cell({ record: p.visibleRecords.value[1] })[0].children
+      showDifference = controls.find(control => control.children?.default && nodeText(control.children.default()) === '查看行数差异')
+    })
+    showDifference.props.onClick()
+    assert.deepEqual(Array.from(p.emitted.at(-1)), ['show-row-difference', 'messages_center'])
+    assert.ok(statusCells(html).every(cell => cell.text.startsWith('表结构：已创建数据：行数不一致，待核对源') && cell.colors[1] === 'orange'))
+    assert.match(html, /源 398,748 行，目标 398,746 行，少 2 行/)
+    assert.match(html, /查看行数差异/)
+    const text = (await p.exportHistory()).join('\n')
+    assert.match(text, /数据：行数不一致，待核对/)
+    assert.match(text, /源 398,748 行，目标 398,746 行，少 2 行/)
+    objects[0].object.data_status = 'succeeded'
+    attempts.push({ id: 'resume', kind: 'recovery', status: 'succeeded', object_id: names[0], units: [] })
+    await p.refresh()
+    assert.equal(p.stats.value.review, 7)
+    assert.equal(p.stats.value.repaired, 1)
+    p.showAllObjects()
+    html = await renderPanel(p)
+    assert.equal(statusCells(html)[0].text, '表结构：执行成功数据：导入成功')
+    assert.match((await p.exportHistory()).join('\n'), /数据：导入成功/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('explicit data errors and recent recovery outcomes take priority over the original mismatch', () => {
+  const object = record({ name: 'Invoices', table: 'Invoices', target_name: 'Invoices', status: 'succeeded', original_status: 'succeeded', data_status: 'failed' })
+  const count = { table: 'Invoices', src: 8, dst: 7, match: false }
+  const current = (report, attempts = []) => {
+    const [row] = utils.presentRepairRecords([object], attempts, report)
+    return { status: utils.repairDisplayStatuses(row)[1].text, review: utils.matchesRepairDisplayFilter(row, 'review'), data: utils.matchesRepairDisplayFilter(row, 'data') }
+  }
+  for (const [kind, expected, data] of [
+    ['copy_error', '数据复制失败', true], ['row_count_error', '行数统计失败', false],
+    ['content_validation', '数据内容有差异', false], ['verification_error', '数据校验未通过', false],
+  ]) {
+    assert.deepEqual(current({ rowCounts: [count], data_issues: [{ table: 'Invoices', kind, message: 'details' }] }), { status: expected, review: false, data })
+  }
+  assert.deepEqual(current({ rowCounts: [] }), { status: '数据待核对', review: false, data: false })
+  const attempt = { object_id: 'obj', kind: 'recovery', status: 'failed' }
+  assert.deepEqual(current({ rowCounts: [count] }, [attempt]), { status: '接续迁移失败', review: false, data: true })
+})
+
+test('an unresolved structure or diagnostic error excludes the table from count-only review', () => {
+  const count = { table: 'Orders', src: 165, dst: 164, match: false }
+  const report = { rowCounts: [count], data_issues: [{ table: 'Orders', kind: 'row_count_mismatch', message: '源目标相差一行' }] }
+  for (const extra of [{ status: 'failed' }, { status: 'blocked' }, { kind: 'data', status: 'failed', diagnostic_only: true, original_error: '旧诊断' }]) {
+    const [row] = utils.presentRepairRecords([record({ data_status: 'failed', ...extra })], [], report)
+    assert.equal(utils.matchesRepairDisplayFilter(row, 'review'), false)
+    assert.equal(utils.matchesRepairDisplayFilter(row, 'attention'), true)
+  }
+  const records = [record({ id: 'table', status: 'succeeded', data_status: 'failed' }), record({ id: 'data', kind: 'data', status: 'failed', data_status: 'failed', original_error: '既有写入错误', dependencies: ['table'] })]
+  const [row] = utils.presentRepairRecords(records, [], report)
+  assert.equal(utils.matchesRepairDisplayFilter(row, 'review'), false)
+  assert.ok(utils.repairDisplayErrors(row).some(detail => detail.text === '既有写入错误'))
+  records[1].object.original_error = '已提交 164 行，行数核验未通过'
+  const reported = { ...report, data: { failed: 1, items: [{ name: 'Orders', error: records[1].object.original_error }] } }
+  const [deduplicated] = utils.presentRepairRecords(records, [], reported)
+  assert.equal(utils.matchesRepairDisplayFilter(deduplicated, 'review'), true)
+  assert.equal(utils.matchesRepairDisplayFilter(deduplicated, 'pending'), false)
 })
 
 test('summary counts attention objects once and updates after DDL and data completion', async () => {
@@ -292,12 +374,12 @@ test('rendered repair statuses label each phase, color failures and show data re
     p.showAllObjects(); await tick()
     const html = await renderPanel(p)
     assert.deepEqual(statusCells(html), [
-      { text: '表结构：执行成功数据：导入失败，待接续', colors: ['green', 'red'] },
+      { text: '表结构：执行成功数据：数据待核对', colors: ['green', 'orange'] },
       { text: '表结构：执行成功数据：导入成功', colors: ['green', 'green'] },
       { text: '表结构：执行成功数据：无需导入', colors: ['green', 'gray'] },
       { text: '表结构：执行结果未知数据：导入结果未知', colors: ['orange', 'orange'] },
       { text: '数据：导入成功', colors: ['green'] },
-      { text: '数据：导入失败，待接续', colors: ['red'] },
+      { text: '数据：数据待核对', colors: ['orange'] },
     ])
     assert.match(html, /修复对象后，可按需接续数据与关联对象迁移。原始报告保持不变。/)
     assert.match(html, /表结构已执行成功，无需重复执行 DDL/)
@@ -380,8 +462,8 @@ test('error summaries show one phase and expose every original grouped error in 
     assert.equal(row.errors.length, 3)
     assert.deepEqual(Array.from(row.errors, detail => detail.text), errors)
     let modal
-    const html = await renderPanel(p, tree => { modal = findNodes(tree, node => node.props?.title === '原始错误详情')[0] })
-    const summary = tableCells(html).find(cell => cell.title === '原始错误').text
+    const html = await renderPanel(p, tree => { modal = findNodes(tree, node => node.props?.title === '原始错误与校验信息')[0] })
+    const summary = tableCells(html).find(cell => cell.title === '原始错误与校验信息').text
     assert.ok(summary.includes('结构：'))
     assert.ok(summary.includes('invalid structure identifier'))
     assert.ok(summary.includes('共 3 条'))
@@ -449,7 +531,8 @@ test('compact row actions keep DDL, recovery and history in order and retain dia
 test('table and data failure render once, share counts and remain searchable by the data error', async () => {
   const scope = Vue.effectScope()
   try {
-    const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => repairList(tableDataFailure()) })); await tick()
+    const report = { data_issues: [{ table: 'Orders', target_table: 'orders', kind: 'copy_error', message: 'numeric field overflow: updatetime' }] }
+    const p = scope.run(() => panel({ jobID: 'job', report }, { listRepairs: async () => repairList(tableDataFailure()) })); await tick()
     p.selectRepairFilter('data'); await tick()
     assert.equal(p.visibleRecords.value.length, 1)
     assert.equal(p.stats.value.data, 1)
@@ -460,7 +543,7 @@ test('table and data failure render once, share counts and remain searchable by 
     assert.equal(row.members.length, 2)
     assert.equal(row.object.original_error, '', 'data error must not be written onto the table object')
     const html = await renderPanel(p)
-    assert.deepEqual(statusCells(html), [{ text: '表结构：执行成功数据：导入失败，待接续', colors: ['green', 'red'] }])
+    assert.deepEqual(statusCells(html), [{ text: '表结构：执行成功数据：数据复制失败', colors: ['green', 'red'] }])
     assert.equal(html.match(/接续迁移/g)?.length, 1)
     assert.equal(html.match(/numeric field overflow: updatetime/g)?.length, 1)
     assert.match(html, /数据：/)
@@ -551,9 +634,9 @@ test('group data conflict stays visible until all records converge after refresh
     objects[0].object.data_status = 'succeeded'
     objects[1].object.data_status = 'unknown'
     const p = scope.run(() => panel({ jobID: 'job' }, { listRepairs: async () => repairList(objects) })); await tick()
-    p.selectRepairFilter('data'); await tick()
+    p.selectRepairFilter('attention'); await tick()
     assert.equal(p.visibleRecords.value.length, 1)
-    assert.equal(p.stats.value.data, 1)
+    assert.equal(p.stats.value.data, 0)
     assert.equal(p.summary.value.attention, 1)
     assert.deepEqual(statusCells(await renderPanel(p)), [{ text: '表结构：执行成功数据：数据状态待核对', colors: ['green', 'orange'] }])
     objects[1].object.status = 'succeeded'
@@ -876,7 +959,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
     ]
     const expected = {
       repaired: ['fixed'], pending: ['pending', 'failed', 'draft', 'unknown', 'diagnostic', 'index'],
-      blocked: ['blocked'], data: ['fixed', 'blocked'],
+      blocked: ['blocked'], data: ['fixed', 'blocked'], review: [],
     }
     assert.equal(utils.repairCategories.find(category => category.key === 'repaired').label, '修复执行成功')
     let buttons, dropdown
@@ -884,7 +967,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
       buttons = findNodes(tree, node => node.type === 'button' && node.props?.class?.includes('repair-stat'))
       dropdown = findNodes(tree, node => node.props?.style?.width === '150px' && node.props?.['onUpdate:modelValue'])[0]
     })
-    assert.equal(buttons.length, 4)
+    assert.equal(buttons.length, 5)
     assert.ok(dropdown)
     for (const [index, category] of utils.repairCategories.entries()) {
       p.keyword.value = 'unrelated'; p.page.value = 5
@@ -904,7 +987,7 @@ test('category buttons and dropdown filter the same objects and keep counts inde
       })
       assert.equal(renderedDropdown.props.modelValue, category.key)
       const renderedButtons = html.match(/<button\b[^>]*class="[^"]*\brepair-stat\b[^"]*"[^>]*>.*?<\/button>/gs)
-      assert.equal(renderedButtons.length, 4)
+      assert.equal(renderedButtons.length, 5)
       assert.match(renderedButtons[index], /type="button"/)
       assert.match(renderedButtons[index], /aria-pressed="true"/)
       assert.match(renderedButtons[index], /repair-stat-active/)
@@ -1203,9 +1286,11 @@ test('switching job drops old list, history and editor responses', async () => {
     }))
     const history = p.refreshHistory()
     props.jobID = 'new'; await tick()
+    histories[2].resolve({ data: { items: [] } })
+    histories[0].resolve({ data: { items: [] } })
     lists[1].resolve({ data: { objects: [record({ name: 'new' })], binding: { configured: true } } }); await tick()
     lists[0].resolve({ data: { objects: [record({ name: 'old' })], binding: { configured: true } } })
-    histories[0].resolve({ data: { items: [{ id: 'old-attempt' }] } }); await history; await tick()
+    histories[1].resolve({ data: { items: [{ id: 'old-attempt' }] } }); await history; await tick()
     assert.equal(p.records.value[0].object.name, 'new')
     assert.equal(p.attempts.value.length, 0)
     p.lifecycle.unmount()

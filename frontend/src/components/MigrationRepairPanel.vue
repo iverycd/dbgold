@@ -93,12 +93,12 @@
             </div>
           </template>
         </a-table-column>
-        <a-table-column title="原始错误"><template #cell="{ record }">
+        <a-table-column title="原始错误与校验信息"><template #cell="{ record }">
           <div v-if="record.errors.length" class="repair-error-cell">
             <div class="repair-error-summary"><span v-if="record.errors[0].label" class="repair-error-phase">{{ record.errors[0].label }}：</span>{{ record.errors[0].text.replace(/\s+/g, ' ') }}</div>
             <div class="repair-error-actions">
               <span v-if="record.errors.length > 1" class="muted">共 {{ record.errors.length }} 条</span>
-              <a-button type="text" size="mini" :aria-label="`查看 ${qualified(record.object)} 的全部原始错误`" @click="openErrorDetails(record)">详情</a-button>
+              <a-button type="text" size="mini" :aria-label="`查看 ${qualified(record.object)} 的原始错误与校验信息`" @click="openErrorDetails(record)">详情</a-button>
             </div>
           </div>
           <span v-else class="muted">—</span>
@@ -111,9 +111,11 @@
                 <a-tag :color="statusColor(state.status)">{{ state.text }}</a-tag>
               </div>
             </div>
+            <div v-if="record.difference?.current" class="repair-count-detail">{{ record.difference.detail }}</div>
           </template>
         </a-table-column>
-        <a-table-column title="操作" :width="220"><template #cell="{ record }"><div class="repair-row-actions">
+        <a-table-column title="操作" :width="290"><template #cell="{ record }"><div class="repair-row-actions">
+          <a-button v-if="record.difference" type="text" size="mini" @click="emit('show-row-difference', record.difference.table)">查看行数差异</a-button>
           <a-button v-if="canEditRepairDDL(record.object)" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">{{ record.object.kind === 'trigger' ? '编辑 SQL' : hasRepairDDL(record.object) ? '编辑 DDL' : '编写 DDL' }}</a-button>
           <a-button v-else-if="isGeneratedMySQLTrigger(record.object) || record.object.native || record.object.manual_trigger" type="text" size="mini" :disabled="busy" @click="openEditor(primaryRecord(record))">查看 / 重试</a-button>
           <a-button v-else type="text" size="mini" @click="openEditor(primaryRecord(record))">查看诊断</a-button>
@@ -128,13 +130,13 @@
       <slot name="empty-action" />
     </div>
 
-    <a-modal v-model:visible="errorDetailsVisible" :mask-closable="false" width="min(800px, calc(100vw - 48px))" title="原始错误详情" :body-style="{ maxHeight: '60vh', overflow: 'auto' }" @close="closeErrorDetails">
+    <a-modal v-model:visible="errorDetailsVisible" :mask-closable="false" width="min(800px, calc(100vw - 48px))" title="原始错误与校验信息" :body-style="{ maxHeight: '60vh', overflow: 'auto' }" @close="closeErrorDetails">
       <template v-if="errorDetailRecord">
         <p class="repair-error-object">{{ qualified(errorDetailRecord.object) }}</p>
-        <p class="muted">原始迁移错误保留供排查，当前结果以修复状态为准。</p>
+        <p class="muted">以下是原始迁移时的记录。当前结果见修复状态。</p>
         <div class="repair-error-details">
           <article v-for="(detail, index) in repairDisplayErrors(errorDetailRecord)" :key="`${detail.label}:${detail.text}`" class="repair-error-detail">
-            <h4>{{ index + 1 }}. {{ detail.label ? `${detail.label}错误` : '原始错误' }}</h4>
+            <h4>{{ index + 1 }}. {{ detail.label || '原始错误' }}</h4>
             <pre>{{ detail.text }}</pre>
           </article>
         </div>
@@ -302,17 +304,17 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { getDataMigrationJob, type DataMigrationJob } from '@/api/migration'
+import { getDataMigrationJob, type DataMigrationJob, type MigrationReport } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, refreshIndexRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, canRetryManualTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, isManualPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, groupRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, canRetryManualTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, isManualPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, presentRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairCountDifference, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { formatSQLText } from '@/utils/sqlFormatting'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
 
 const SqlEditor = defineAsyncComponent(() => import('@/components/SqlEditor.vue'))
-const props = defineProps<{ jobID: string }>()
-const emit = defineEmits<{ 'summary-change': [summary: RepairSummary] }>()
+const props = defineProps<{ jobID: string; report?: MigrationReport | null }>()
+const emit = defineEmits<{ 'summary-change': [summary: RepairSummary]; 'show-row-difference': [table: string] }>()
 const repairSection = ref<HTMLElement | null>(null)
 const page = ref(1)
 const highlightedObjectID = ref('')
@@ -414,21 +416,22 @@ const canExecute = computed(() => {
   return draftUnits.value.some(unit => unit.selected && unit.sql.trim() && !unitCommitted(unit.status) && !unit.destructive)
 })
 const canRetryOriginalPGTrigger = computed(() => pgTriggerEditor.value && canExecute.value && !!editing.value && canRetryMySQLPGTrigger(editing.value.object) && editing.value.object.units.every((unit, index) => unit.sql === draftUnits.value[index]?.sql))
-const displayRecords = computed(() => groupRepairRecords(records.value))
+const historyAvailable = ref(false)
+const displayRecords = computed(() => presentRepairRecords(records.value, attempts.value, props.report, historyAvailable.value))
 const errorDetailRecord = computed(() => displayRecords.value.find(record => record.object.id === errorObjectID.value))
 const visibleRecords = computed(() => displayRecords.value.filter(record => matchesRepairDisplayFilter(record, filter.value, attempts.value) && record.members.some(({ object }) => `${object.schema || ''} ${object.name} ${object.source_name || ''} ${object.target_name} ${object.table || ''} ${object.source_table || ''} ${object.original_error || ''} ${object.error || ''}`.toLowerCase().includes(keyword.value.trim().toLowerCase()))).map(record => {
   const batchReason = batchIneligibleReason(record.object)
-  return { ...record, key: record.object.id, errors: repairDisplayErrors(record), batchReason, disabled: busy.value || loading.value || !!batchReason }
+  return { ...record, key: record.object.id, errors: repairDisplayErrors(record), difference: repairCountDifference(record), batchReason, disabled: busy.value || loading.value || !!batchReason }
 }))
 const batchExecutableCount = computed(() => batchItems.value.filter(item => item.status === 'pending').length)
 const batchCompletedCount = computed(() => batchItems.value.filter(item => !['pending', 'saving', 'running'].includes(item.status)).length)
 const stats = computed(() => {
-  const counts: Record<RepairCategory, number> = { repaired: 0, pending: 0, blocked: 0, data: 0 }
+  const counts: Record<RepairCategory, number> = { repaired: 0, pending: 0, blocked: 0, data: 0, review: 0 }
   for (const { key } of repairCategories) counts[key] = displayRecords.value.filter(record => matchesRepairDisplayFilter(record, key, attempts.value)).length
   return counts
 })
 const emptyDescription = computed(() => error.value ? '修复状态未知，请刷新重试' : loading.value ? '修复状态加载中' : keyword.value.trim() ? '没有匹配的对象' : filter.value === 'attention' ? '当前无待处理对象' : repairCategories.find(category => category.key === filter.value)?.empty || '当前无对象')
-const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, attention: displayRecords.value.filter(needsRepairDisplayAttention).length }))
+const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, review: stats.value.review, attention: displayRecords.value.filter(needsRepairDisplayAttention).length }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
 const relatedCandidates = computed(() => {
@@ -593,14 +596,19 @@ async function applyPendingFocus() {
 }
 
 async function refresh() {
-  const scope = epoch, id = props.jobID, serial = ++refreshSerial
+  const scope = epoch, id = props.jobID, serial = ++refreshSerial, historyRequest = ++historySerial
   loading.value = true
   error.value = ''
   try {
-    const [data, detail] = await Promise.all([listRepairs(id), getDataMigrationJob(id)])
+    const [data, detail, history] = await Promise.all([listRepairs(id), getDataMigrationJob(id), listRepairAttempts(id).catch(() => null)])
     if (!current(scope, id) || serial !== refreshSerial) return
     records.value = data.data.objects || []
     binding.value = data.data.binding
+    if (historyRequest === historySerial) {
+      loadingHistory.value = false
+      historyAvailable.value = !!history
+      if (history) attempts.value = history.data.items || []
+    }
     job.value = detail.data
     const attemptID = data.data.running_attempt_id || (activeAttempt.value && attemptRunning(activeAttempt.value.status) ? activeAttempt.value.id : '')
     if (!batchRunning.value && attemptID && (activeAttempt.value?.id !== attemptID || attemptRunning(activeAttempt.value.status))) await pollAttempt(attemptID, scope, id)
@@ -918,7 +926,13 @@ async function confirmRecovery() {
 async function refreshHistory() {
   const scope = epoch, id = props.jobID, serial = ++historySerial
   loadingHistory.value = true
-  try { const result = await listRepairAttempts(id); if (current(scope, id) && serial === historySerial) attempts.value = result.data.items || [] }
+  try {
+    const result = await listRepairAttempts(id)
+    if (current(scope, id) && serial === historySerial) {
+      attempts.value = result.data.items || []
+      historyAvailable.value = true
+    }
+  }
   catch (e) { if (current(scope, id) && serial === historySerial) showError(e) }
   finally { if (current(scope, id) && serial === historySerial) loadingHistory.value = false }
 }
@@ -927,7 +941,7 @@ async function exportHistory() {
   const scope = epoch, id = props.jobID
   const [objects, history] = await Promise.all([listRepairs(id), listRepairAttempts(id)])
   if (!current(scope, id)) throw new Error('任务已切换，请重新导出')
-  return formatRepairHistory(objects.data.objects || [], history.data.items || [])
+  return formatRepairHistory(objects.data.objects || [], history.data.items || [], props.report)
 }
 defineExpose({ exportHistory, focusObject })
 watch(summary, value => emit('summary-change', value), { immediate: true })
@@ -943,7 +957,7 @@ watch(() => props.jobID, () => {
   epoch++; refreshSerial++; previewSerial++; editorSerial++; historySerial++
   selectedObjectIDs.value = []; batchItems.value = []; batchPreviewVisible.value = false; batchReviewed.value = false
   batchHasRun.value = false; batchStopped.value = false; batchError.value = ''; batchExpectedBinding = ''
-  records.value = []; binding.value = null; job.value = null; activeAttempt.value = null; attempts.value = []
+  records.value = []; binding.value = null; job.value = null; activeAttempt.value = null; attempts.value = []; historyAvailable.value = false
   filter.value = 'attention'; keyword.value = ''; page.value = 1; highlightedObjectID.value = ''; pendingFocus.value = null
   closeErrorDetails()
   editorVisible.value = false; recoveryVisible.value = false; bindingVisible.value = false; historyVisible.value = false
@@ -1006,6 +1020,7 @@ onUnmounted(() => {
 .repair-stat:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 .repair-stats strong { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .attempt-banner, .editor-toolbar { margin: 12px 0; }
+.repair-count-detail { margin-top: 4px; color: var(--color-text-2); font-size: 12px; }
 .repair-statuses { display: flex; align-items: center; flex-wrap: nowrap; gap: 12px; white-space: nowrap; }
 .repair-status-line { display: flex; align-items: center; flex-shrink: 0; gap: 4px; white-space: nowrap; }
 .repair-status-label { flex-shrink: 0; font-size: 12px; color: var(--color-text-3); }

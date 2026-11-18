@@ -159,6 +159,13 @@ export interface TableRowCount {
   match: boolean
 }
 
+export interface MigrationDataIssue {
+  table: string
+  target_table?: string
+  kind: 'copy_error' | 'row_count_mismatch' | 'row_count_error' | 'content_validation' | 'verification_error'
+  message?: string
+}
+
 export interface CompatibilityFunctionResult extends ObjectResult {
   kind?: 'function' | 'procedure'
   signature?: string
@@ -251,6 +258,7 @@ export interface DataValidationReport {
 }
 
 export interface MigrationReport {
+  data_issues?: MigrationDataIssue[]
   partition_migration?: PartitionPreflight
   native_schema?: { preflight?: DamengNativePreflight; categories: (CategoryReport & { kind: string; label: string })[]; verification: DamengNativeIssue[]; inventory: DamengNativeObject[] }
   dataValidation?: DataValidationReport

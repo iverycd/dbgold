@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -28,6 +28,7 @@ function panel(name, props, exports, { api = {}, emit = () => {}, copied = [], l
         ...api,
       }
       if (id === '@/utils/autoRepairs') return autoRepairUtils
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/clipboard') return { copyText: async text => copied.push(text) }
       if (id === '@arco-design/web-vue') return { Message: { success() {}, error() {} } }
@@ -144,28 +145,29 @@ test('reloading a report and switching jobs reset all failure pages and page siz
   } finally { scope.stop() }
 })
 
-test('row counts put late mismatches on the first page without changing report order', () => {
+test('row-count panel prioritizes late differences and jumps to the exact table on a ten-row page', async () => {
   const scope = Vue.effectScope()
   try {
-    const p = scope.run(() => panel('MigrationReportPanel', { jobID: 'job' },
-      'report, allRowCounts, sortedRowCounts, mismatchedRows, hasRowCounts'))
     const rows = Array.from({ length: 65 }, (_, i) => ({
-      table: `Orders_${i}`, src: 10, dst: i === 24 || i === 64 ? 9 : 10, match: i !== 24 && i !== 64,
+      table: `Orders_${i}`, src: 10, dst: i % 3 === 0 ? 9 : 10, match: i % 3 !== 0,
     }))
     const original = structuredClone(rows)
-    p.report.value = { rowCounts: rows }
-    const names = values => Array.from(values, row => row.table)
-    assert.deepEqual(names(p.sortedRowCounts.value.slice(0, 2)), ['Orders_24', 'Orders_64'])
-    assert.deepEqual(names(p.sortedRowCounts.value.slice(2)), names(rows.filter(row => row.match)))
-    assert.equal(p.sortedRowCounts.value.slice(0, 20).filter(row => !row.match).length, 2)
-    assert.deepEqual(names(p.allRowCounts.value), names(original))
+    const props = Vue.reactive({ entries: migrationDataIssueUtils.rowCountEntries({ rowCounts: rows }), summary: '' })
+    const p = scope.run(() => panel('../components/MigrationRowCountPanel', props,
+      'filter, keyword, page, focusedTable, visibleRows, focusTable'))
+    assert.equal(p.visibleRows.value[1].table, 'Orders_3')
+    assert.equal(p.visibleRows.value.slice(0, 10).filter(row => row.mismatch).length, 10)
     assert.deepEqual(rows, original)
-    for (const sample of [rows.slice(0, 2), rows.filter(row => !row.match), []]) {
-      p.report.value = { rowCounts: sample }
-      assert.deepEqual(names(p.sortedRowCounts.value), names(sample))
-      assert.equal(p.mismatchedRows.value.length, sample.filter(row => !row.match).length)
-      assert.equal(p.hasRowCounts.value, sample.length > 0)
-    }
+    p.keyword.value = 'Orders_1'
+    await p.focusTable('Orders_60')
+    assert.equal(p.keyword.value, '')
+    assert.equal(p.page.value, 3)
+    assert.equal(p.visibleRows.value.slice(20, 30)[0].table, 'Orders_60')
+    assert.equal(p.focusedTable.value, 'Orders_60')
+    await p.focusTable()
+    assert.equal(p.filter.value, 'attention')
+    assert.equal(p.page.value, 1)
+    assert.equal(p.visibleRows.value.length, 22)
   } finally { scope.stop() }
 })
 

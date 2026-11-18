@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
 import ts from 'typescript'
 
-const context = { exports: {} }
+const context = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 const source = readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')
 vm.runInNewContext(ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -56,7 +57,7 @@ test('table and dependent data failure form one immutable display row with the t
     assert.ok(rows[0].members.includes(failure))
     assert.deepEqual(plain(utils.repairDisplayStatuses(rows[0])), [
       { label: '表结构', status: 'succeeded', text: '执行成功' },
-      { label: '数据', status: 'failed', text: '导入失败，待接续' },
+      { label: '数据', status: 'needs_verification', text: '数据待核对' },
     ])
     assert.deepEqual(plain(utils.repairDisplayErrors(rows[0])), [{ label: '数据', text: failure.object.original_error }])
   }
@@ -181,7 +182,7 @@ test('a standalone legacy data object keeps its recovery identity, mappings and 
   assert.equal(row.version, 14)
   assert.equal(row.object.column_mapping, failure.object.column_mapping)
   assert.deepEqual(memberIDs(row), ['data-orders'])
-  assert.deepEqual(plain(utils.repairDisplayStatuses(row)), [{ label: '数据', status: 'failed', text: '导入失败，待接续' }])
+  assert.deepEqual(plain(utils.repairDisplayStatuses(row)), [{ label: '数据', status: 'needs_verification', text: '数据待核对' }])
 })
 
 test('non-table objects retain their individual status and errors', () => {
@@ -194,11 +195,11 @@ test('non-table objects retain their individual status and errors', () => {
   assert.deepEqual(plain(utils.repairDisplayErrors(row)), [{ label: '', text: 'table unavailable' }])
 })
 
-test('conflicting current import states require verification and remain in data and attention filters', () => {
+test('conflicting current import states require verification and remain in attention', () => {
   const pairs = [
     ['succeeded', 'failed'], ['failed', 'succeeded'],
     ['succeeded', 'unknown'], ['unknown', 'succeeded'],
-    ['succeeded', 'running'], ['succeeded', 'pending'],
+    ['succeeded', 'running'], ['succeeded', 'pending'], ['succeeded', 'not_required'],
   ]
   for (const [tableStatus, dataStatus] of pairs) {
     const row = utils.groupRepairRecords([
@@ -211,14 +212,14 @@ test('conflicting current import states require verification and remain in data 
     assert.equal(status.text, '数据状态待核对')
     assert.equal(utils.needsRepairDisplayAttention(row), true)
     assert.equal(utils.matchesRepairDisplayFilter(row, 'attention'), true)
-    assert.equal(utils.matchesRepairDisplayFilter(row, 'data'), true)
+    assert.equal(utils.matchesRepairDisplayFilter(row, 'data'), false)
   }
 })
 
 test('matching current data failures and unknown outcomes preserve their specific presentation', () => {
-  for (const [status, text] of [['failed', '导入失败，待接续'], ['unknown', '导入结果未知']]) {
+  for (const [status, text] of [['failed', '数据待核对'], ['unknown', '导入结果未知']]) {
     const row = utils.groupRepairRecords([table({ data_status: status }), data({ data_status: status })])[0]
-    assert.deepEqual(plain(utils.repairDisplayStatuses(row)).find(item => item.label === '数据'), { label: '数据', status, text })
+    assert.deepEqual(plain(utils.repairDisplayStatuses(row)).find(item => item.label === '数据'), { label: '数据', status: status === 'failed' ? 'needs_verification' : status, text })
     assert.equal(utils.needsRepairDisplayAttention(row), true)
   }
 })
@@ -251,7 +252,7 @@ test('display filters match member results and count each group once', () => {
     table({ original_status: 'failed' }),
     data(), data({ id: 'data-second' }),
   ])
-  for (const filter of ['all', 'attention', 'data', 'repaired']) {
+  for (const filter of ['all', 'attention', 'repaired']) {
     assert.equal(rows.filter(row => utils.matchesRepairDisplayFilter(row, filter)).length, 1, filter)
   }
   assert.equal(rows.filter(row => utils.needsRepairDisplayAttention(row)).length, 1)
@@ -268,7 +269,7 @@ test('display filters match member results and count each group once', () => {
 test('duplicate raw IDs do not duplicate group membership or category counts', () => {
   const structure = table()
   const failure = data()
-  const rows = utils.groupRepairRecords([structure, failure, structure, failure])
+  const rows = utils.presentRepairRecords([structure, failure, structure, failure], [], { data_issues: [{ table: 'ORDERS', target_table: 'orders', kind: 'copy_error' }] })
   assert.equal(rows.length, 1)
   assert.deepEqual(memberIDs(rows[0]), ['data-orders', 'table-orders'])
   assert.equal(rows.filter(row => utils.matchesRepairDisplayFilter(row, 'data')).length, 1)

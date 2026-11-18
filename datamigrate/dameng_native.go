@@ -597,12 +597,19 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		dstRows := int64(-1)
 		if err == nil {
 			dstRows, err = m.writer.CountRows(ctx, t.Name)
+			readErr := countReadError(nil, err)
+			detail := ""
 			m.stopMigrationTask(ctx, err)
 			if err == nil && (res.rows != t.Rows || dstRows != t.Rows) {
 				err = fmt.Errorf("行数不同: 冻结源=%d 已复制=%d 目标=%d", t.Rows, res.rows, dstRows)
+				detail = err.Error()
 			}
+			report.addRowCount(name, t.Name, TableRowCount{Table: name, Src: t.Rows, Dst: dstRows, Match: err == nil}, readErr, detail)
+		} else {
+			report.addDataIssue(name, t.Name, copyError, err.Error())
+			// Native reports have always retained a row entry for a failed copy.
+			report.RowCounts = append(report.RowCounts, TableRowCount{Table: name, Src: t.Rows, Dst: dstRows})
 		}
-		report.RowCounts = append(report.RowCounts, TableRowCount{Table: name, Src: t.Rows, Dst: dstRows, Match: err == nil})
 		if err != nil {
 			states[t.ObjectID] = nativeObjectFailure("execute", err)
 			m.blockMigrationTable(name, "execute", err)

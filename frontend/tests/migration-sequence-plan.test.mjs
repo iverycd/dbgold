@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
@@ -12,7 +13,7 @@ const transpile = source => ts.transpileModule(source, { compilerOptions: { modu
 const require = createRequire(import.meta.url)
 const formattingContext = { exports: {}, require }
 vm.runInNewContext(transpile(file('../src/utils/sqlFormatting.ts')), formattingContext)
-const utilityContext = { exports: {} }
+const utilityContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityContext)
 const batchContext = { exports: {}, require: () => utilityContext.exports }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepairBatch.ts')), batchContext)

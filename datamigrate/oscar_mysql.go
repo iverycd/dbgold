@@ -51,7 +51,7 @@ func configureOscarMySQL(ctx context.Context, w target.Writer) (oscarMySQLWriter
 	return writer, nil
 }
 
-func (m *Migrator) preflightOscarMySQLTables(ctx context.Context, tables []string) {
+func (m *Migrator) preflightOscarMySQLTables(ctx context.Context, tables []string, report *MigrationReport) {
 	w := m.writer.(oscarMySQLWriter)
 	appendData := m.cfg.Content == "data_only" && !m.cfg.objectMode()
 	if appendData {
@@ -104,6 +104,7 @@ func (m *Migrator) preflightOscarMySQLTables(ctx context.Context, tables []strin
 			count, e := m.writer.CountRows(ctx, m.objName(table))
 			if e != nil {
 				err = fmt.Errorf("冻结目标表追加前行数: %w", e)
+				report.addDataIssue(table, m.objName(table), rowCountError, err.Error())
 			} else {
 				m.oscarAppendCounts[table] = count
 			}
@@ -159,16 +160,16 @@ func (m *Migrator) oscarSourceTableDDL(ctx context.Context, table string) string
 	return ddl
 }
 
-func (m *Migrator) migrateOscarMySQLTable(ctx context.Context, table string) (bool, string) {
+func (m *Migrator) migrateOscarMySQLTable(ctx context.Context, table string) error {
 	if m.cfg.Content == "data_only" {
 		if err := m.oscarAppendReady(ctx, table); err != nil {
 			m.stopMigrationTask(ctx, err)
-			return false, err.Error()
+			return err
 		}
 	}
 	r, ok := m.reader.(oscarTableStream)
 	if !ok {
-		return false, "神通源库缺少固定游标读取能力"
+		return fmt.Errorf("神通源库缺少固定游标读取能力")
 	}
 	var copied int64
 	err := r.StreamOscarTable(ctx, table, m.cfg.PageSize, func(cols, types []string, rows [][]any) error {
@@ -185,10 +186,10 @@ func (m *Migrator) migrateOscarMySQLTable(ctx context.Context, table string) (bo
 	if err != nil {
 		m.stopMigrationTask(ctx, err)
 		m.log.Errorf("迁移神通源表 [%s] 失败: %v", table, err)
-		return false, err.Error()
+		return err
 	}
 	m.log.Dataf("迁移 %s: %d 行 ... OK", table, copied)
-	return true, ""
+	return nil
 }
 
 func (m *Migrator) freezeOscarAppendContent(ctx context.Context, frozen *frozenValidationTable) {
@@ -215,21 +216,21 @@ func (m *Migrator) freezeOscarAppendContent(ctx context.Context, frozen *frozenV
 func (m *Migrator) oscarAppendReady(ctx context.Context, table string) error {
 	baseline, ok := m.oscarAppendCounts[table]
 	if !ok {
-		return fmt.Errorf("缺少目标表 %s 的追加前行数", table)
+		return dataCheckError{rowCountError, fmt.Errorf("缺少目标表 %s 的追加前行数", table)}
 	}
 	if m.dataValidationEnabled() {
 		for _, frozen := range m.validationTables {
 			if frozen.name == table && frozen.err != nil {
-				return frozen.err
+				return dataCheckError{verificationError, frozen.err}
 			}
 		}
 	}
 	count, err := m.writer.CountRows(ctx, m.objName(table))
 	if err != nil {
-		return err
+		return dataCheckError{rowCountError, countReadError(nil, err)}
 	}
 	if count != baseline {
-		return fmt.Errorf("目标表 %s 行数已偏离追加前基线", table)
+		return dataCheckError{verificationError, fmt.Errorf("目标表 %s 行数已偏离追加前基线", table)}
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -13,7 +13,7 @@ import Arco from '@arco-design/web-vue'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
 
 const { descriptor } = parse(readFileSync(new URL('../src/views/MigrationReportPanel.vue', import.meta.url), 'utf8'))
-const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, overviewRows, mismatchedRows, hasRowCounts, allRowCounts, sortedRowCounts, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems, originalFailuresVisible, originalFailurePage, originalFailures, visibleOriginalFailures, showOriginalFailures, recordedFailureDDL };`, {
+const script = ts.transpileModule(`${descriptor.scriptSetup.content}\nexport { report, loading, fetchError, noReport, failedCount, tableRows, overviewRows, rowEntries, rowIssueCount, rowSummary, showRowDifference, rowPanel, preflightActiveKeys, copyDDL, exportReport, activeTab, repairSummary, updateRepairSummary, goToRepair, repairPanel, getFailurePagination, setFailurePage, setFailurePageSize, pagedFailureItems, originalFailuresVisible, originalFailurePage, originalFailures, visibleOriginalFailures, showOriginalFailures, recordedFailureDDL };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const renderCode = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
@@ -30,6 +30,7 @@ function harness(props = { jobID: 'job-manual-ddl' }, api = {}) {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === '@/api/migration') return api
       if (id === '@/utils/autoRepairs') return autoRepairUtils
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/utils/clipboard') return { copyText: async value => copied.push(value) }
       if (id === '@arco-design/web-vue') return { Message: { success() {}, error: msg => assert.fail(msg) } }
@@ -41,7 +42,7 @@ function harness(props = { jobID: 'job-manual-ddl' }, api = {}) {
   const render = vm.runInNewContext(`(function() { ${renderCode} })()`, { Vue })
   const app = Vue.createSSRApp({ setup: () => ({ ...migrationReportUtils, ...p, jobID: 'job-manual-ddl' }), render })
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-alert', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel', 'AutoRepairPanel', 'DataValidationPanel']) app.component(name, passthrough)
+  for (const name of ['a-alert', 'a-tag', 'a-empty', 'a-badge', 'a-collapse', 'a-collapse-item', 'icon-download', 'a-spin', 'a-table-column', 'PGMySQLPreflightPanel', 'AutoRepairPanel', 'DataValidationPanel', 'MigrationRowCountPanel']) app.component(name, passthrough)
   app.component('a-tabs', {
     props: ['activeKey', 'lazyLoad', 'destroyOnHide'],
     setup: (props, { slots }) => () => {
@@ -107,7 +108,7 @@ test('both failure links open original report errors when repair attention is ze
     h.p.report.value = r
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'ready', repaired: 0, attention: 0 })
     const overview = await renderToString(h.app)
-    assert.match(overview, /原始失败 2 项，[^]*当前无待处理对象/)
+    assert.match(overview, /原始报告记录失败 2 项，[^]*当前无待处理对象/)
     for (const label of ['查看失败原因', '查看原始失败原因']) {
       h.clicks.find(button => button.label === label).handler()
       const html = (await renderToString(h.app)).match(/<section role="dialog"[^]*?<\/section>/)[0]
@@ -115,7 +116,7 @@ test('both failure links open original report errors when repair attention is ze
       assert.match(html, /元数据读取失败/)
       assert.match(html, /first line\nsecond line/)
       assert.match(html, /<details[^]*CREATE TABLE Orders/)
-      assert.match(html, /数据写入 · Payments[^]*未保存该对象的错误原文/)
+      assert.match(html, /数据迁移 · Payments[^]*未保存该对象的错误原文/)
       h.p.originalFailuresVisible.value = false
     }
     h.p.report.value.tables.failed = 2
@@ -349,7 +350,7 @@ test('report renders overview first and mounts repair in an inactive persistent 
     assert.equal(h.tabStates[0].lazyLoad, false)
     assert.equal(h.tabStates[0].destroyOnHide, false)
     assert.deepEqual(h.repairInstances, ['job-manual-ddl'], 'repair loads before its tab is opened')
-    assert.match(html, /原始失败项/)
+    assert.match(html, /原始报告记录失败/)
     assert.match(html, /class="arco-tabs-content-item arco-tabs-content-item-active"[^]*original error/)
     assert.match(html, /class="arco-tabs-content-item"><div class="arco-tabs-pane"><!--\[-->[^]*修复操作面板/)
     const focused = []
@@ -373,7 +374,7 @@ test('report summary and repair badge distinguish loaded, failed and completed r
     h.p.report.value = report({ name: 'Orders', ddl: '', error: 'original error' })
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'ready', repaired: 1, attention: 2 })
     let html = await renderToString(h.app)
-    assert.match(html, /原始失败 1 项，[^]*修复执行成功 1 项，[^]*当前待处理 2 个对象/)
+    assert.match(html, /原始报告记录失败 1 项，[^]*修复执行成功 1 项，[^]*当前待处理 2 个对象/)
     const titleBadge = () => h.tabStates.at(-1).panes.find(pane => pane.key === 'repair').children.title().find(vnode => vnode.props?.count)
     assert.equal(titleBadge().props.count, 2)
     h.p.updateRepairSummary({ jobID: 'job-manual-ddl', state: 'unknown', repaired: 1, attention: 0 })
@@ -462,14 +463,14 @@ test('data failures display and export multiline column diagnostics without an e
     const error = 'pq: numeric field overflow\nSQLSTATE: 22003\nDetail: precision 8, scale 2\nWhere: COPY cg_purchasebudgetandou, line 42, column Amount: "1000000"'
     h.p.report.value = report({ name: 'cg_purchasebudgetandou', ddl: '', error }, 'data')
     const html = await renderToString(h.app)
-    assert.match(html, /失败阶段：数据迁移失败/)
+    assert.match(html, /失败阶段：数据待核对/)
     assert.match(html, /numeric field overflow\nSQLSTATE: 22003\nDetail: precision 8, scale 2\nWhere: COPY cg_purchasebudgetandou, line 42, column Amount/)
     assert.doesNotMatch(html, /目标 DDL：|失败阶段未记录/)
     assert.ok(!h.clicks.some(c => c.label === '复制 DDL'))
     h.p.exportReport()
     const text = await h.downloads[0].text()
     assert.ok(text.includes(error))
-    assert.match(text, /失败阶段：数据迁移失败/)
+    assert.match(text, /失败阶段：数据待核对/)
     assert.doesNotMatch(text, /目标 DDL：/)
   } finally { scope.stop() }
 })

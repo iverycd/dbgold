@@ -54,8 +54,7 @@ func TestMySQLDamengWriteStrategyOrdinaryTable(t *testing.T) {
 			}
 			observed := &mysqlDMStrategyWriter{fullScanTestWriter: w, product: tc.dst}
 			m.writer = observed
-			ok, why := m.migrateTableData(context.Background(), "MixedCase")
-			require.True(t, ok, why)
+			require.NoError(t, m.migrateTableData(context.Background(), "MixedCase"))
 			require.Equal(t, tc.batches, observed.batches.Load())
 			sort.Ints(w.data["mixedcase"])
 			require.Equal(t, []int{1, 2, 3, 4, 5, 6}, w.data["mixedcase"])
@@ -77,8 +76,7 @@ func TestMySQLDamengWriteStrategySkipsPartitionCopy(t *testing.T) {
 	require.True(t, p.Ready)
 	m.writer = &mysqlDMPartitionWriter{w}
 	m.cfg.DamengWriteStrategy, m.cfg.MySQLReadStrategy = "batch", "stream"
-	ok, why := m.migrateTableData(context.Background(), "Root")
-	require.True(t, ok, why)
+	require.NoError(t, m.migrateTableData(context.Background(), "Root"))
 	require.Equal(t, []string{"Root"}, r.streamed)
 	rows, err := w.CountRows(context.Background(), "Root")
 	require.NoError(t, err)

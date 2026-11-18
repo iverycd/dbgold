@@ -166,6 +166,7 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 			}
 			baseline, e := m.writer.CountRows(ctx, m.objName(ref.Name))
 			if e != nil {
+				report.addDataIssue(ref.Name, m.objName(ref.Name), rowCountError, countReadError(nil, e).Error())
 				report.Data.Failed++
 				report.Data.Items = append(report.Data.Items, ObjectResult{Name: ref.Name, Error: e.Error()})
 				p.blocked[ref] = e
@@ -192,14 +193,18 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 				src, se := m.reader.CountRows(ctx, ref.Name)
 				dst, de := m.writer.CountRows(ctx, m.objName(ref.Name))
 				rc := TableRowCount{Table: m.objName(ref.Name), Src: src, Dst: dst - baseline, Match: se == nil && de == nil && src == copied && dst-baseline == copied}
-				report.RowCounts = append(report.RowCounts, rc)
+				detail := ""
 				if se != nil {
 					err = se
 				} else if de != nil {
 					err = de
 				} else if !rc.Match {
 					err = fmt.Errorf("行数校验失败：源=%d 已提交=%d 目标新增=%d", src, copied, dst-baseline)
+					detail = err.Error()
 				}
+				report.addRowCount(ref.Name, rc.Table, rc, countReadError(se, de), detail)
+			} else {
+				report.addDataIssue(ref.Name, m.objName(ref.Name), copyIssueKind(err), err.Error())
 			}
 			if err != nil {
 				report.Data.Failed++
@@ -229,7 +234,7 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 
 func (m *Migrator) eachPGOraclePage(ctx context.Context, t source.PGTable, fn func([]string, []string, [][]any) error) error {
 	if err := m.pgOracleValidationCopyReady(t.Info.TableName); err != nil {
-		return err
+		return dataCheckError{verificationError, err}
 	}
 	limit := m.cfg.PageSize
 	if limit <= 0 {
@@ -262,21 +267,21 @@ func (m *Migrator) eachPGOraclePage(ctx context.Context, t source.PGTable, fn fu
 	if s := m.partitionState; s != nil {
 		if p := s.tables[t.Info.TableName]; p != nil && p.Plan != nil {
 			if e := m.partitionCopyReady(t.Info.TableName); e != nil {
-				return e
+				return dataCheckError{verificationError, e}
 			}
 			if e := m.recheckPartitionSource(ctx, t.Info.TableName); e != nil {
-				return e
+				return dataCheckError{verificationError, e}
 			}
 			inspector, ok := m.writer.(target.PartitionInspector)
 			if !ok {
-				return fmt.Errorf("目标缺少分区核验能力")
+				return dataCheckError{verificationError, fmt.Errorf("目标缺少分区核验能力")}
 			}
 			actual, e := inspector.InspectPartitionTable(ctx, p.TargetTable)
 			if e != nil {
-				return e
+				return dataCheckError{verificationError, e}
 			}
 			if e = partition.Equivalent(p.Plan.Target, actual); e != nil {
-				return e
+				return dataCheckError{verificationError, e}
 			}
 			e = m.reader.(source.PartitionReader).StreamPartitionRows(ctx, t.Info.TableName, limit, consume)
 			if e == nil {

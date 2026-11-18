@@ -303,6 +303,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 			table            string
 			before, src, dst int64
 			err              error
+			issueKind        string
 		}
 		out := make(chan result, len(tables))
 		sem := make(chan struct{}, max(1, m.cfg.MaxParallel))
@@ -325,7 +326,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		}
 		m.logPreparationComplete(ctx)
 		migrateOne := func(t string) {
-			r := result{table: t}
+			r := result{table: t, issueKind: copyError}
 			if ctx.Err() != nil {
 				return
 			}
@@ -333,28 +334,34 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				r.before, r.err = m.writer.CountRows(ctx, m.objName(t))
 				if r.err == nil {
 					r.err = m.sqlServerAppendValidationError(t, r.before)
+					if r.err != nil {
+						r.issueKind = verificationError
+					}
+				} else {
+					r.issueKind = rowCountError
 				}
 			}
 			if r.err == nil {
-				var ok bool
-				var msg string
+				var copyErr error
 				if s := m.partitionState; s != nil && s.tables[t] != nil && s.tables[t].Plan != nil {
 					// The partition stream is serial within this table and rechecks
 					// both source and target routing before its first write.
-					ok, msg = m.migratePartitionData(ctx, t)
+					copyErr = m.migratePartitionData(ctx, t)
 				} else {
 					var pk []string
 					pk, r.err = m.reader.GetPrimaryKey(ctx, t)
 					if r.err == nil {
-						ok, msg = m.migrateTableDataSerial(ctx, t, pk)
+						copyErr = copyResultError(m.migrateTableDataSerial(ctx, t, pk))
 					}
 				}
-				if r.err == nil && !ok {
-					r.err = fmt.Errorf("%s；已停止该表，之前提交的数据可能保留", msg)
+				if copyErr != nil {
+					r.issueKind = copyIssueKind(copyErr)
+					r.err = fmt.Errorf("%s；已停止该表，之前提交的数据可能保留", copyErr)
 				}
 			}
 			if r.err == nil {
 				m.markDataValidationCopied(t)
+				r.issueKind = rowCountError
 				r.src, r.err = m.reader.CountRows(ctx, t)
 			}
 			if r.err == nil {
@@ -386,15 +393,19 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		wg.Wait()
 		close(out)
 		for r := range out {
-			if r.err == nil && m.isOraclePGSQLServer() && r.src != r.dst-r.before {
-				r.err = fmt.Errorf("表 %s 行数不一致，源 %d 行，目标写入 %d 行", r.table, r.src, r.dst-r.before)
+			if r.err == nil {
+				count := TableRowCount{Table: r.table, Src: r.src, Dst: r.dst - r.before, Match: r.src == r.dst-r.before}
+				report.addRowCount(r.table, m.objName(r.table), count, nil, "")
+				if m.isOraclePGSQLServer() && !count.Match {
+					r.err = fmt.Errorf("表 %s 行数不一致，源 %d 行，目标写入 %d 行", r.table, r.src, r.dst-r.before)
+				}
+			} else {
+				report.addDataIssue(r.table, m.objName(r.table), r.issueKind, r.err.Error())
 			}
 			sqlServerResult(&report.Data, r.table, "", r.err)
 			if r.err != nil {
 				dataFailed[r.table] = true
 				m.blockMigrationTable(r.table, "data", r.err)
-			} else {
-				report.RowCounts = append(report.RowCounts, TableRowCount{Table: r.table, Src: r.src, Dst: r.dst - r.before, Match: r.src == r.dst-r.before})
 			}
 		}
 		sort.Slice(report.RowCounts, func(i, j int) bool { return report.RowCounts[i].Table < report.RowCounts[j].Table })

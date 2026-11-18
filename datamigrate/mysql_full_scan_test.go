@@ -195,7 +195,7 @@ func TestMySQLFullScanConcurrencyAndCancel(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			result := make(chan bool, 1)
-			go func() { ok, _ := m.migrateTableData(ctx, "MixedCase"); result <- ok }()
+			go func() { result <- m.migrateTableData(ctx, "MixedCase") == nil }()
 			for range 2 {
 				select {
 				case <-w.started:
@@ -219,8 +219,7 @@ func TestMySQLFullScanConcurrencyAndCancel(t *testing.T) {
 func TestMySQLFullScanCDCUsesOriginalPagination(t *testing.T) {
 	m, r, _ := newFullScanTest("range", "T")
 	m.cfg.MigrationPurpose = "cdc"
-	ok, reason := m.migrateTableData(context.Background(), "T")
-	require.True(t, ok, reason)
+	require.NoError(t, m.migrateTableData(context.Background(), "T"))
 	require.Equal(t, 3, r.pages)
 	require.Zero(t, r.plans+r.streams+r.ranges)
 }

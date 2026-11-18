@@ -63,12 +63,13 @@
         <div class="metric-item">
           <span class="metric-label">报告项</span>
           <strong>{{ objectSuccessCount }} / {{ objectTotalCount }}</strong>
-          <span class="metric-note">失败 {{ failedObjectCount }} 项</span>
+          <a-button v-if="failedItems.length" type="text" size="mini" @click="activeTab = 'failures'">原始报告记录失败 {{ failedObjectCount }} 项</a-button>
+          <span v-else class="metric-note">原始报告记录失败 {{ failedObjectCount }} 项</span>
         </div>
         <div class="metric-item">
           <span class="metric-label">行数对比</span>
-          <strong>{{ matchedRows.length }} / {{ allRowCounts.length }}</strong>
-          <span class="metric-note">不一致 {{ mismatchedRows.length }} 张表</span>
+          <strong>{{ rowSummary.checked - rowSummary.mismatched }} / {{ rowSummary.checked }}</strong>
+          <span class="metric-note">行数一致 / 已核对</span>
         </div>
         <div class="metric-item">
           <span class="metric-label">数据内容校验</span>
@@ -94,12 +95,12 @@
               <strong>{{ risk.title }}</strong>
               <p>{{ risk.description }}</p>
             </div>
-            <a-button v-if="risk.tab" size="small" @click="activeTab = risk.tab">{{ risk.action }}</a-button>
+            <a-button v-if="risk.tab" size="small" @click="risk.tab === 'rowcounts' ? showRowDifference() : activeTab = risk.tab">{{ risk.action }}</a-button>
           </article>
         </div>
       </section>
 
-      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" />
+      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" :report="report" @show-row-difference="showRowDifference" />
 
       <section class="detail-tabs-surface">
         <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
@@ -123,6 +124,10 @@
               <div class="tab-toolbar">
                 <div><h2>分类迁移结果</h2><p>按对象类型核对迁移数量和失败情况。</p></div>
               </div>
+              <a-alert v-if="rowIssueCount" type="warning" class="report-alert">
+                {{ rowSummary.text }}
+                <a-button type="text" size="mini" @click="showRowDifference()">{{ rowSummary.mismatched ? '查看行数差异' : '查看行数校验' }}</a-button>
+              </a-alert>
               <a-table :data="overviewRows" row-key="key" :pagination="{ pageSize: 10 }" size="small" :scroll="{ x: 760 }"
                 :row-class="record => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? '' : 'category-no-details'"
                 :expandable="{ icon: (_, record) => record.autoIncrementItems?.length || record.isCompatibility && record.items.length ? undefined : null }">
@@ -172,11 +177,11 @@
                   <a-input-search v-model="failureKeyword" allow-clear placeholder="搜索对象名称" style="width: 240px" />
                 </div>
               </div>
-              <a-table :data="filteredFailedItems" row-key="key" size="small" :pagination="{ pageSize: 30 }" :scroll="{ x: 900, y: 480 }" :expandable="failedExpandable">
+              <a-table :data="filteredFailedItems" row-key="key" size="small" :pagination="{ pageSize: 10 }" :scroll="{ x: 900, y: 480 }" :expandable="failedExpandable">
                 <template #columns>
                   <a-table-column title="对象" data-index="name" :width="260" />
                   <a-table-column title="分类" data-index="categoryLabel" :width="130" />
-                  <a-table-column title="错误摘要"><template #cell="{ record }"><span class="error-clamp">{{ record.error || '—' }}</span></template></a-table-column>
+                  <a-table-column title="错误摘要"><template #cell="{ record }"><span v-if="record.category === 'data'" class="issue-stage">{{ record.stageLabel }}</span><span class="error-clamp">{{ record.error || '—' }}</span></template></a-table-column>
                   <a-table-column title="DDL" :width="90"><template #cell="{ record }"><a-tag :color="record.ddl ? 'orange' : 'gray'">{{ record.ddl ? '有' : '无' }}</a-tag></template></a-table-column>
                 </template>
                 <template #expand-row="{ record }">
@@ -193,29 +198,10 @@
             </div>
           </a-tab-pane>
 
-          <a-tab-pane v-if="allRowCounts.length" key="rowcounts">
-            <template #title>行数对比 <a-badge v-if="mismatchedRows.length" :count="mismatchedRows.length" /></template>
+          <a-tab-pane v-if="rowEntries.length" key="rowcounts">
+            <template #title>行数对比 <a-badge v-if="rowIssueCount" :count="rowIssueCount" :dot-style="{ backgroundColor: 'rgb(var(--orange-6))' }" /></template>
             <div class="tab-content">
-              <div class="tab-toolbar filter-toolbar">
-                <div><h2>源端与目标端行数</h2><p>默认优先显示不一致表，可切换查看全部结果。</p></div>
-                <div class="filters">
-                  <a-radio-group v-model="rowCountFilter" type="button">
-                    <a-radio value="mismatch">仅不一致</a-radio>
-                    <a-radio value="all">全部</a-radio>
-                  </a-radio-group>
-                  <a-input-search v-model="rowCountKeyword" allow-clear placeholder="搜索表名" style="width: 220px" />
-                </div>
-              </div>
-              <a-table :data="filteredRowCounts" row-key="table" size="small" :pagination="{ pageSize: 50 }" :scroll="{ x: 760, y: 520 }">
-                <template #columns>
-                  <a-table-column title="表名" data-index="table" :width="300" />
-                  <a-table-column title="源行数" data-index="src" :width="140" />
-                  <a-table-column title="目标行数" data-index="dst" :width="140" />
-                  <a-table-column title="差异" :width="120"><template #cell="{ record }"><span :class="{ 'danger-text': !record.match }">{{ signedDifference(record.dst - record.src) }}</span></template></a-table-column>
-                  <a-table-column title="结果"><template #cell="{ record }"><a-tag :color="record.match ? 'green' : 'orange'">{{ record.match ? '一致' : '不一致' }}</a-tag></template></a-table-column>
-                </template>
-              </a-table>
-              <a-empty v-if="!filteredRowCounts.length" description="没有符合筛选条件的表" />
+              <MigrationRowCountPanel :key="jobID" ref="rowPanel" :entries="rowEntries" :summary="rowSummary.text" attention-only />
             </div>
           </a-tab-pane>
 
@@ -268,17 +254,19 @@
 </template>
 
 <script setup lang="ts">
+import MigrationRowCountPanel from '@/components/MigrationRowCountPanel.vue'
+import { indexMigrationDataIssues, rowCountEntries, summarizeRowCounts } from '@/utils/migrationDataIssues'
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
 import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
-import { reportCategories, migrationOverviewRows, formatReportCategories, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary, migrationPGPreflight, preflightStatusLabel } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, formatReportCategories, formatReportRowCounts, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary, migrationPGPreflight, preflightStatusLabel } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import MigrationConnectionRoute from '@/components/MigrationConnectionRoute.vue'
@@ -290,10 +278,9 @@ import {
   type DataMigrationJob,
   type MigrationReport,
   type ObjectResult,
-  type TableRowCount,
 } from '@/api/migration'
 
-interface FailedItem extends ObjectResult { key: string; category: string; categoryLabel: string }
+interface FailedItem extends ObjectResult { key: string; category: string; categoryLabel: string; stageLabel: string }
 interface RiskItem { key: string; level: 'warning' | 'danger'; title: string; description: string; tab?: string; action?: string }
 
 const route = useRoute()
@@ -309,8 +296,7 @@ const reportError = ref('')
 const activeTab = ref('overview')
 const failureCategory = ref('all')
 const failureKeyword = ref('')
-const rowCountFilter = ref<'mismatch' | 'all'>('mismatch')
-const rowCountKeyword = ref('')
+const rowPanel = ref<InstanceType<typeof MigrationRowCountPanel> | null>(null)
 let timer: number | undefined
 let requestRunning = false
 let disposed = false
@@ -334,13 +320,16 @@ const filteredFailedItems = computed(() => {
 })
 const failedExpandable = { icon: (_: boolean, record: any) => (record.error || record.ddl) ? undefined : null }
 
-const allRowCounts = computed<TableRowCount[]>(() => report.value?.rowCounts || [])
-const matchedRows = computed(() => allRowCounts.value.filter(row => row.match))
-const mismatchedRows = computed(() => allRowCounts.value.filter(row => !row.match))
-const filteredRowCounts = computed(() => {
-  const keyword = rowCountKeyword.value.trim().toLowerCase()
-  return allRowCounts.value.filter(row => (rowCountFilter.value === 'all' || !row.match) && (!keyword || row.table.toLowerCase().includes(keyword)))
-})
+const dataIssueIndex = computed(() => indexMigrationDataIssues(report.value))
+const rowEntries = computed(() => rowCountEntries(report.value, dataIssueIndex.value))
+const rowIssueCount = computed(() => rowEntries.value.filter(entry => entry.color !== 'green').length)
+const rowSummary = computed(() => summarizeRowCounts(report.value, dataIssueIndex.value))
+async function showRowDifference(table?: string) {
+  const id = jobID.value
+  activeTab.value = 'rowcounts'
+  await nextTick()
+  if (id === jobID.value) await rowPanel.value?.focusTable(table)
+}
 
 const migrationTypeText = computed(() => job.value?.migrate_objects ? '仅对象迁移' : '单次迁移')
 const migrationModeText = computed(() => {
@@ -353,20 +342,20 @@ const pendingTriggerCount = computed(() => report.value?.trigger_migration_enabl
   ? Math.max(0, report.value.triggers.total - report.value.triggers.success - report.value.triggers.failed) : 0)
 const reportHealthText = computed(() => {
   if (!report.value) return job.value?.status === 'running' ? '生成中' : '暂无报告'
-  if (nativeSchemaNeedsAttention(report.value) || failedObjectCount.value || mismatchedRows.value.length || contentValidationAttention.value) return '需要处理'
+  if (nativeSchemaNeedsAttention(report.value) || failedObjectCount.value || rowIssueCount.value || contentValidationAttention.value) return '需要处理'
   if (pendingTriggerCount.value) return '尚未完成'
   return '全部通过'
 })
 const summaryText = computed(() => job.value?.summary || (job.value?.status === 'running' ? '迁移正在执行，完成后将在此生成对象与行数校验报告。' : reportHealthText.value === '全部通过' ? (report.value?.dataValidation ? '迁移对象、行数与数据内容校验均已通过。' : '迁移对象与行数校验均已通过；数据内容校验未启用。') : pendingTriggerCount.value ? '迁移已结束，部分触发器尚未执行，请核对迁移概览。' : '迁移已结束，请核对失败对象、行数及数据内容校验结果。'))
 const risks = computed<RiskItem[]>(() => {
   const items: RiskItem[] = []
-  if (job.value?.status === 'failed') items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请优先核对失败对象及错误信息，确认目标端是否需要清理或补建。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
+  if (job.value?.status === 'failed' && (failedObjectCount.value || !rowIssueCount.value)) items.push({ key: 'job-failed', level: 'danger', title: '迁移任务以失败状态结束', description: '请核对原始报告记录的失败原因。', tab: failedItems.value.length ? 'failures' : 'overview', action: '查看结果' })
   for (const row of categoryRows.value.filter(row => row.isCompatibility && row.failed > 0)) {
     items.push({ key: row.key, level: 'danger', title: `${row.label}初始化失败`, description: `在迁移概览展开${row.label}，查看初始化结果、DDL 和错误明细。`, tab: 'overview', action: `查看${row.label}` })
   }
-  if (failedBusinessObjectCount.value > 0) items.push({ key: 'objects', level: 'danger', title: `${failedBusinessObjectCount.value} 个对象迁移失败`, description: failedItems.value.length ? '在对象修复面板编辑 DDL、核验执行结果，并按需接续此表迁移。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
+  if (failedBusinessObjectCount.value > 0) items.push({ key: 'objects', level: 'danger', title: `原始报告记录失败 ${failedBusinessObjectCount.value} 项`, description: failedItems.value.length ? '可按对象查看原始错误与发生阶段。' : '报告记录了失败对象，但没有保存可展开的错误明细，请结合任务日志进一步定位。', tab: failedItems.value.length ? 'failures' : 'overview', action: failedItems.value.length ? '查看失败对象' : '查看迁移概览' })
   if (pendingTriggerCount.value) items.push({ key: 'pending-triggers', level: 'warning', title: `${pendingTriggerCount.value} 个触发器尚未执行`, description: '原任务结束前未完成这些触发器，请核对对象修复记录后重试原生成 SQL。', tab: 'overview', action: '查看迁移概览' })
-  if (mismatchedRows.value.length) items.push({ key: 'rows', level: 'warning', title: `${mismatchedRows.value.length} 张表行数不一致`, description: '在业务切换前核查源端写入、过滤范围和失败表，避免带着数据差异上线。', tab: 'rowcounts', action: '查看行数差异' })
+  if (rowIssueCount.value) items.push({ key: 'rows', level: 'warning', title: '行数校验需核对', description: rowSummary.value.text, tab: 'rowcounts', action: rowSummary.value.mismatched ? '查看行数差异' : '查看行数校验' })
   if (report.value && contentValidationAttention.value) items.push({ key: 'content-validation', level: 'danger', title: `数据内容校验：${contentValidationLabel.value}`, description: '请核查未通过的表、数据差异与失败原因；只有全量校验完整通过才表示本次内容比对通过。', tab: 'validation', action: '查看内容校验' })
   if (reportError.value && job.value?.status !== 'running') items.push({ key: 'report', level: 'warning', title: '报告数据不可用', description: reportError.value })
   return items
@@ -374,7 +363,6 @@ const risks = computed<RiskItem[]>(() => {
 
 function statusText(status: string) { return ({ running: '迁移中', done: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[status] || status }
 function statusColor(status: string) { return ({ running: 'blue', done: 'green', failed: 'red', cancelled: 'gray' } as Record<string, string>)[status] || 'gray' }
-function signedDifference(value: number) { return value > 0 ? `+${value}` : String(value) }
 function yesNo(value?: boolean) { return value ? '是' : '否' }
 
 async function copy(value: string, label: string) {
@@ -440,10 +428,7 @@ async function exportReport() {
   for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
   if (report.value.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(report.value.partition_migration, null, 2), '')
-  if (allRowCounts.value.length) {
-    lines.push('', '=== 行数对比 ===')
-    for (const row of allRowCounts.value) lines.push(`${row.table}：源 ${row.src} / 目标 ${row.dst} / ${row.match ? '一致' : `差异 ${signedDifference(row.dst - row.src)}`}`)
-  }
+  for (const line of formatReportRowCounts(report.value)) lines.push(line)
   for (const line of formatDataValidation(report.value.dataValidation, job.value.validate_data)) lines.push(line)
   if (repairPanel.value) {
     try {
@@ -502,6 +487,7 @@ onUnmounted(() => {
 .metric-label { color: var(--fg-muted); font-size: 11px; font-weight: 600; }
 .metric-item strong { margin: 7px 0 4px; color: var(--fg-primary); font-family: var(--font-mono); font-size: 18px; overflow-wrap: anywhere; }
 .metric-note { color: var(--fg-muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.issue-stage { display: block; font-weight: 600; }
 .risk-section,.detail-tabs-surface { padding: 20px; margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-sm); }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .section-heading.compact { margin-bottom: 10px; }

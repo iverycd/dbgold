@@ -8,7 +8,7 @@ import { createSSRApp, h } from 'vue'
 import { parse } from '@vue/compiler-sfc'
 import { renderToString } from '@vue/server-renderer'
 import { createCompatibilityPanel } from './helpers/compatibility-functions.mjs'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 
 const { failureStage, describeFailure, categoryPresentation, compatibilityReportGroups, reportCategories, formatReportCategories, sourceIndexDefinition } = migrationReportUtils
@@ -140,6 +140,7 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
         require: id => {
           if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
           if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'known-sequences' } }), useRouter: () => ({}) }
+          if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
           if (id === '@/utils/migrationReport') return migrationReportUtils
           if (id === '@/utils/autoRepairs') return autoRepairUtils
           if (id === '@/api/migration' || id === '@/utils/clipboard') return {}
@@ -233,11 +234,11 @@ test('data failures retain column diagnostics and use their category for legacy 
   const r = report(empty())
   r.data = { total: 1, success: 0, failed: 1, items: [failure({ name: 'cg_purchasebudgetandou', error })] }
   const item = reportCategories(r).find(row => row.key === 'data').items[0]
-  assert.equal(item.stageLabel, '数据迁移失败')
+  assert.equal(item.stageLabel, '数据待核对')
   assert.equal(item.showTargetDDL, false)
   assert.equal(item.error, error)
   const text = formatReportCategories(r).join('\n')
-  assert.match(text, /失败阶段：数据迁移失败/)
+  assert.match(text, /失败阶段：数据待核对/)
   assert.ok(text.includes(error))
   assert.doesNotMatch(text, /目标 DDL：|失败阶段未记录/)
 })
@@ -250,6 +251,31 @@ test('data failures preserve recorded stages and target DDL when available', () 
   const item = reportCategories(r).find(row => row.key === 'data').items[0]
   assert.equal(item.showTargetDDL, true)
   assert.match(formatReportCategories(r).join('\n'), /目标 DDL：\n\s+CREATE TABLE t/)
+})
+
+test('the overview distinguishes completed copying from count verification', () => {
+  const r = report(empty())
+  r.data = { total: 2, success: 2, failed: 0, items: [] }
+  r.rowCounts = [{ table: 'Orders', src: 3, dst: 2, match: false }]
+  const dataRow = () => reportCategories(r).find(row => row.key === 'data')
+  assert.equal(dataRow().statusLabel, '复制完成，行数待核对')
+  assert.equal(dataRow().statusColor, 'orange')
+  assert.equal(dataRow().success, 2)
+  r.data_issues = [{ table: 'Sessions', kind: 'row_count_error', message: '无法读取目标表行数' }]
+  assert.equal(dataRow().statusLabel, '复制完成，行数统计失败')
+  r.data.success = 1
+  assert.doesNotMatch(dataRow().statusLabel, /复制完成/)
+})
+
+test('target-only names identify a unique structured copy error and preserve its database message', () => {
+  const r = report(empty())
+  r.data = { total: 1, success: 0, failed: 1, items: [failure({ name: 'ORDERS_NEW', stage: 'execute', error: 'COPY rejected value' })] }
+  r.data_issues = [{ table: 'Orders', target_table: 'ORDERS_NEW', kind: 'copy_error', message: 'COPY rejected value' }]
+  const row = reportCategories(r).find(row => row.key === 'data')
+  assert.equal(row.statusLabel, '数据复制失败')
+  assert.equal(row.statusColor, 'red')
+  assert.equal(row.items[0].stageLabel, '数据复制失败')
+  assert.equal(row.items[0].error, 'COPY rejected value')
 })
 
 test('same-name objects from different tables get distinct stable detail keys', () => {

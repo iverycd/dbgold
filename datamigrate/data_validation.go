@@ -120,6 +120,7 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 			targetName = m.objName(frozen.name)
 		}
 		table := validation.TableResult{SourceTable: frozen.name, TargetTable: targetName}
+		var contentCountErr error
 		switch {
 		case ctx.Err() != nil:
 			table.Status, table.Error = validation.StatusCancelled, "任务已取消，内容校验未完成"
@@ -145,9 +146,11 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 						}
 						if err == nil {
 							table.SourceRows, err = m.reader.CountRows(ctx, frozen.name)
+							contentCountErr = countReadError(err, nil)
 						}
 						if err == nil {
 							table.TargetRows, err = m.writer.CountRows(ctx, targetName)
+							contentCountErr = countReadError(nil, err)
 						}
 						table.Status = validation.StatusPassed
 						if err != nil {
@@ -180,6 +183,11 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 			table.Note += frozen.note
 		}
 		result.Tables = append(result.Tables, table)
+		if contentCountErr != nil {
+			report.addDataIssue(frozen.name, targetName, rowCountError, contentCountErr.Error())
+		} else if _, copied := m.validationCopied.Load(frozen.name); copied && !m.migrationTableBlocked(frozen.name) {
+			report.addContentIssue(frozen.name, targetName, table)
+		}
 		if table.Status == validation.StatusPassed {
 			m.log.Dataf("内容校验 [%s]: 源=%d 目标=%d ... OK", frozen.name, table.SourceRows, table.TargetRows)
 		} else {

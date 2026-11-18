@@ -147,6 +147,17 @@ func TestPGStructurePreflightAndRuntimeValidation(t *testing.T) {
 			if strings.Contains(scenario, "count") && (report.RowCounts[0].Match || report.Data.Failed != 1 || len(report.Data.Items) != 1) {
 				t.Fatal(report)
 			}
+			wantIssue := map[string]string{
+				"overflow": copyError, "negative_auto": copyError, "count_mismatch": rowCountMismatch,
+				"both_counts_changed": verificationError, "count_error": rowCountError, "target_count_error": rowCountError,
+			}[scenario]
+			if wantIssue != "" {
+				if len(report.DataIssues) != 1 || report.DataIssues[0].Kind != wantIssue || report.DataIssues[0].Table != "MixedTable" {
+					t.Fatalf("expected %s for MixedTable, got %+v", wantIssue, report.DataIssues)
+				}
+			} else if len(report.DataIssues) != 0 {
+				t.Fatalf("unexpected data issues: %+v", report.DataIssues)
+			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
 			}

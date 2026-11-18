@@ -89,6 +89,7 @@ type partitionFlowWriter struct {
 	copyErr      error
 	createErr    error
 	keyColumnErr error
+	leafCountErr error
 }
 
 func (w *partitionFlowWriter) InspectPartitionProfile(context.Context) (partition.Profile, error) {
@@ -106,6 +107,9 @@ func (w *partitionFlowWriter) VerifyPartitionKeyColumns(context.Context, string,
 func (w *partitionFlowWriter) CountPartitionRows(_ context.Context, table string, _ *source.PartitionSpec) (map[string]int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.leafCountErr != nil {
+		return nil, w.leafCountErr
+	}
 	out := map[string]int64{}
 	for key, count := range w.counts[table] {
 		out[key] = count
@@ -402,6 +406,27 @@ func TestPartitionsCancellationAfterFinalLeafCountCannotSucceed(t *testing.T) {
 	require.Equal(t, "incomplete", report.PartitionMigration.Tables[0].Status)
 	require.Contains(t, report.PartitionMigration.Tables[0].Error, "canceled")
 	require.True(t, report.HasFailures())
+}
+
+func TestPartitionCountErrorDoesNotInvalidateIndependentRootCount(t *testing.T) {
+	for _, mode := range []string{"both", "data_only"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r, w := newPartitionFlow(t, "Root")
+			r.specs["Root"] = partitionFlowSpec()
+			m.cfg.Content = mode
+			w.leafCountErr = errors.New("target partition count unavailable")
+			report := m.Run(context.Background())
+			require.Len(t, report.DataIssues, 1)
+			require.Equal(t, rowCountError, report.DataIssues[0].Kind)
+			require.Contains(t, report.DataIssues[0].Message, w.leafCountErr.Error())
+			if mode == "both" {
+				require.Equal(t, []TableRowCount{{Table: "Root", Src: 2, Dst: 2, Match: true}}, report.RowCounts)
+			} else {
+				require.Empty(t, report.RowCounts, "pre-copy baseline failed")
+				require.Empty(t, w.copied)
+			}
+		})
+	}
 }
 
 func TestPartitionsDataOnlyRequiresEveryBaselineLeaf(t *testing.T) {

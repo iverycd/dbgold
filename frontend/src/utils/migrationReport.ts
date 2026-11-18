@@ -1,4 +1,5 @@
 import type { DataValidationValue, DataValidationReport, CategoryReport, CompatibilityFunctionsReport, MigrationReport, ObjectResult, TriggerAdaptationReport } from '@/api/migration'
+import { formatRowCountDetail, indexMigrationDataIssues, issueLabels, reportDataIssueLines, rowCountEntries, summarizeRowCounts, type MigrationDataIssueIndex } from './migrationDataIssues'
 
 // Historical PG/MySQL reports keep their original field and wire shape.
 export function migrationPGPreflight(report?: Pick<MigrationReport, 'preflight' | 'pg_oracle_preflight' | 'cross_preflight'> | null) {
@@ -60,15 +61,28 @@ export function failureStage(item: ObjectResult): ObjectResult['stage'] {
   return undefined
 }
 
-export function describeFailure(item: ObjectResult, category?: string) {
+function dataFailureLabel(item: ObjectResult, dataIssues?: MigrationDataIssueIndex) {
+  const source = item.source_name || item.table
+  const target = item.target_table || item.target_name
+  const table = source || item.name || target || ''
+  const related = (dataIssues?.byName.get(table) || []).filter(issue =>
+    (!source || issue.table === source) && (!target || !issue.target_table || issue.target_table === target))
+  if (new Set(related.map(issue => JSON.stringify([issue.table, issue.target_table]))).size > 1) return issueLabels.unknown
+  const exact = related.filter(issue => issue.message && issue.message === item.error)
+  const reasons = new Set((exact.length ? exact : related).map(issue => issue.kind))
+  const reason = reasons.size === 1 ? reasons.values().next().value : undefined
+  return issueLabels[reason || (item.failed_page ? 'copy_error' : 'unknown')]
+}
+
+export function describeFailure(item: ObjectResult, category?: string, dataIssues?: MigrationDataIssueIndex) {
   const stage = failureStage(item)
   const stageLabel = stage === 'metadata' ? '元数据读取失败'
     : stage === 'preflight' ? '迁移预检失败'
     : stage === 'dependency' ? '依赖对象失败，已跳过'
     : stage === 'task' ? '任务级错误，迁移已终止'
     : stage === 'unsupported' ? '不支持自动转换'
-    : stage === 'execute' ? 'DDL 执行失败'
-    : category === 'data' ? '数据迁移失败' : '失败阶段未记录'
+    : category === 'data' ? dataFailureLabel(item, dataIssues)
+    : stage === 'execute' ? 'DDL 执行失败' : '失败阶段未记录'
   const emptyDDLMessage = stage === 'metadata' ? '元数据读取失败，尚未生成目标 DDL。'
     : stage === 'preflight' ? '该对象预检未通过，尚未执行该对象的目标写入。'
     : stage === 'dependency' ? '该对象依赖的表或对象失败，未执行该对象的目标写入。'
@@ -156,8 +170,9 @@ function triggerMigrationPresentation(category: CategoryReport) {
 
 export function reportCategories(report: MigrationReport) {
   const adaptation = report.trigger_adaptation
+  const dataIssues = indexMigrationDataIssues(report)
   const categories = [
-    ['tables', '表'], ['data', '数据写入'], ['primaryKeys', '主键'], ['views', '视图'],
+    ['tables', '表'], ['data', '数据迁移'], ['primaryKeys', '主键'], ['views', '视图'],
     ['indexes', '索引'], ['constraints', '外键'], ['sequences', '序列'],
     ['comments', '注释'], ['triggers', '触发器'],
   ] as const
@@ -193,6 +208,21 @@ export function reportCategories(report: MigrationReport) {
     const sourceInventoryOnly = isTrigger && !!adaptation
     const presentation = isTriggerAdaptation && adaptation ? triggerAdaptationPresentation(adaptation)
       : key === 'triggers' && report.trigger_migration_enabled ? triggerMigrationPresentation(category) : categoryPresentation(category)
+    if (key === 'data' && category.failed > 0) {
+      const reasons = new Set((category.items || []).map(item => describeFailure(item, key, dataIssues).stageLabel))
+      if (reasons.size) {
+        presentation.statusLabel = [...reasons].join('、')
+        if (reasons.has(issueLabels.copy_error)) presentation.statusColor = 'red'
+      }
+    }
+    if (key === 'data' && category.total > 0 && category.total === category.success && !category.failed && !report.data?.total_unknown &&
+        !dataIssues.issues.some(issue => issue.kind === 'copy_error' || issue.kind === 'unknown')) {
+      const summary = summarizeRowCounts(report, dataIssues)
+      if (summary.countErrors || summary.mismatched || summary.unknown) {
+        presentation.statusLabel = summary.countErrors ? '复制完成，行数统计失败' : '复制完成，行数待核对'
+        presentation.statusColor = 'orange'
+      }
+    }
     const isCompatibility = !!compatibilityReport
     return {
       autoIncrementItems: isTriggerAdaptation && adaptation?.mode === 'mysql_auto_increment' ? adaptation.items ?? [] : [],
@@ -208,7 +238,7 @@ export function reportCategories(report: MigrationReport) {
       success: isTrigger ? 0 : category.success,
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
-        ...item, ...describeFailure(item, key),
+        ...item, ...describeFailure(item, key, dataIssues),
         repairKind: key.startsWith('native:') ? key.slice(7) : key,
         nameLabel: key === 'indexes' && failureStage(item) !== 'metadata' ? '索引名称：' : '',
         targetNameLabel: failureStage(item) === 'unsupported' ? '目标索引名称（计划）：' : '目标索引名称：',
@@ -261,9 +291,30 @@ function appendReportDDL(lines: string[], label: string, ddl: string) {
   for (const line of ddl.split('\n')) lines.push(`      ${line}`)
 }
 
+export function formatReportRowCounts(report: MigrationReport): string[] {
+  const index = indexMigrationDataIssues(report)
+  const entries = rowCountEntries(report, index)
+  const lines: string[] = []
+  if (entries.length) {
+    lines.push('', '=== 行数对比 ===', summarizeRowCounts(report, index).text)
+    for (const entry of entries) {
+      const detail = entry.comparable && entry.row ? formatRowCountDetail(entry.row) : entry.detail
+      lines.push(`${entry.table}：${entry.label}${detail ? ` · ${detail}` : ''}`)
+    }
+  }
+  const issues = reportDataIssueLines(report, index)
+  if (issues.length) {
+    lines.push('', '=== 数据异常明细 ===')
+    for (const issue of issues) lines.push(issue)
+  }
+  return lines
+}
+
 export function formatReportCategories(report: MigrationReport): string[] {
   const categories = reportCategories(report)
   const lines = ['=== 迁移概览 ===']
+  const originalFailures = categories.reduce((sum, row) => sum + (row.isInformational ? 0 : row.failed), 0)
+  lines.push(`原始报告记录失败 ${originalFailures} 项`)
   for (const row of categories) {
     if (row.isTrigger) {
       lines.push(`${row.label.padEnd(6)} 总计 ${row.total === -1 ? '获取失败' : row.totalLabel}  （${row.sourceInventoryOnly ? row.statusLabel : '未迁移'}）`)

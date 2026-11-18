@@ -7,7 +7,7 @@ import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
-import { migrationReportUtils as utils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils as utils } from './helpers/migration-report.mjs'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
 import { connectionDatabaseUtils, connectionDatabaseEditors } from './helpers/connection-database.mjs'
 
@@ -91,6 +91,7 @@ function reportView(name) {
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'content-report' } }), useRouter: () => ({}) }
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return utils
       if (id === '@/utils/autoRepairs') return autoRepairUtils
       if (id === '@arco-design/web-vue') return { Message: { error: message => assert.fail(message) } }

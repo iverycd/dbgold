@@ -27,17 +27,18 @@ type PartitionPreflight struct {
 }
 
 type PartitionTableResult struct {
-	schemaExecuted bool
-	dataExecuted   bool
-	SourceTable    string                `json:"source_table"`
-	TargetTable    string                `json:"target_table"`
-	Status         string                `json:"status"`
-	Error          string                `json:"error,omitempty"`
-	Source         *source.PartitionSpec `json:"source,omitempty"`
-	Plan           *partition.Plan       `json:"plan,omitempty"`
-	SourceRows     map[string]int64      `json:"source_rows,omitempty"`
-	TargetRows     map[string]int64      `json:"target_rows,omitempty"`
-	Baseline       map[string]int64      `json:"baseline,omitempty"`
+	schemaExecuted      bool
+	dataExecuted        bool
+	baselineCountFailed bool
+	SourceTable         string                `json:"source_table"`
+	TargetTable         string                `json:"target_table"`
+	Status              string                `json:"status"`
+	Error               string                `json:"error,omitempty"`
+	Source              *source.PartitionSpec `json:"source,omitempty"`
+	Plan                *partition.Plan       `json:"plan,omitempty"`
+	SourceRows          map[string]int64      `json:"source_rows,omitempty"`
+	TargetRows          map[string]int64      `json:"target_rows,omitempty"`
+	Baseline            map[string]int64      `json:"baseline,omitempty"`
 }
 
 type partitionRunState struct {
@@ -339,11 +340,13 @@ func (m *Migrator) compilePartitionTable(ctx context.Context, t *PartitionTableR
 		}
 		t.Baseline, e = inspector.CountPartitionRows(ctx, t.TargetTable, t.Plan.Target)
 		if e != nil {
-			return e
+			t.baselineCountFailed = true
+			return fmt.Errorf("读取目标分区追加前行数失败: %w", e)
 		}
 		for _, mapping := range t.Plan.Mapping {
 			count, found := partitionRowCount(t.Baseline, mapping.TargetSchema, mapping.TargetName, mapping.TargetOrdinal)
 			if !found || count < 0 {
+				t.baselineCountFailed = true
 				return fmt.Errorf("目标分区 %s 的追加基线缺失或无效", mapping.TargetName)
 			}
 		}
@@ -708,15 +711,15 @@ func verifyPartitionKeySourceChecks(ctx context.Context, r source.Reader, table 
 	return nil
 }
 
-func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool, string) {
+func (m *Migrator) migratePartitionData(ctx context.Context, table string) error {
 	s := m.partitionState
 	t := s.tables[table]
 	if err := m.partitionCopyReady(table); err != nil {
-		return false, err.Error()
+		return dataCheckError{verificationError, err}
 	}
 	if e := m.recheckPartitionSource(ctx, table); e != nil {
 		m.stopMigrationTask(ctx, e)
-		return false, e.Error()
+		return dataCheckError{verificationError, e}
 	}
 	inspector := m.writer.(target.PartitionInspector)
 	actual, e := inspector.InspectPartitionTable(ctx, t.TargetTable)
@@ -728,7 +731,7 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 	}
 	if e != nil {
 		m.stopMigrationTask(ctx, e)
-		return false, fmt.Sprintf("写入前分区核对失败: %v", e)
+		return dataCheckError{verificationError, fmt.Errorf("写入前分区核对失败: %w", e)}
 	}
 	batch := m.cfg.PageSize
 	if batch <= 0 {
@@ -736,7 +739,7 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 	}
 	reader, ok := partitionSourceReader(m.reader).(source.PartitionReader)
 	if !ok {
-		return false, "源库缺少分区固定游标读取能力"
+		return fmt.Errorf("源库缺少分区固定游标读取能力")
 	}
 	e = reader.StreamPartitionRows(ctx, table, batch, func(cols, types []string, rows [][]interface{}) error {
 		mapped := make([]string, len(cols))
@@ -747,10 +750,10 @@ func (m *Migrator) migratePartitionData(ctx context.Context, table string) (bool
 	})
 	if e != nil {
 		m.stopMigrationTask(ctx, e)
-		return false, e.Error()
+		return e
 	}
 	t.dataExecuted = true
-	return true, ""
+	return nil
 }
 
 func partitionRowCount(rows map[string]int64, schema, name string, ordinal int) (int64, bool) {
@@ -783,6 +786,9 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 	}
 	for _, t := range s.preflight.Tables {
 		if s.blocked[t.SourceTable] {
+			if t.baselineCountFailed {
+				report.addDataIssue(t.SourceTable, t.TargetTable, rowCountError, t.Error)
+			}
 			report.Tables.Total++
 			report.Tables.Failed++
 			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: t.SourceTable, Stage: "preflight", Error: t.Error})
@@ -823,6 +829,7 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 			continue
 		}
 		inspector := m.writer.(target.PartitionInspector)
+		issueKind := verificationError
 		e := m.recheckPartitionSource(ctx, t.SourceTable)
 		if e == nil {
 			var actual *source.PartitionSpec
@@ -842,17 +849,30 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 				e = fmt.Errorf("源库缺少逐分区计数能力")
 			} else {
 				t.SourceRows, e = counter.CountPartitionRows(ctx, t.SourceTable, t.Source)
+				if e != nil {
+					e = fmt.Errorf("读取源表分区行数失败: %w", e)
+				}
 			}
 			if e == nil {
 				t.TargetRows, e = inspector.CountPartitionRows(ctx, t.TargetTable, t.Plan.Target)
+				if e != nil {
+					e = fmt.Errorf("读取目标表分区行数失败: %w", e)
+				}
 			}
-			if e == nil {
+			if e != nil {
+				issueKind = rowCountError
+			} else {
 				for _, mapping := range t.Plan.Mapping {
 					a, aok := partitionRowCount(t.SourceRows, mapping.SourceSchema, mapping.SourceName, 0)
 					b, bok := partitionRowCount(t.TargetRows, mapping.TargetSchema, mapping.TargetName, mapping.TargetOrdinal)
 					base, _ := partitionRowCount(t.Baseline, mapping.TargetSchema, mapping.TargetName, mapping.TargetOrdinal)
-					if !aok || !bok || a != b-base {
-						e = fmt.Errorf("分区 %s 行数不一致或缺少目录证据: 源=%d 目标增量=%d", mapping.SourceName, a, b-base)
+					if !aok || !bok {
+						issueKind = rowCountError
+						e = fmt.Errorf("分区 %s 缺少源或目标行数", mapping.SourceName)
+						break
+					}
+					if a != b-base {
+						e = fmt.Errorf("分区 %s 行数不一致: 源=%d 目标增量=%d", mapping.SourceName, a, b-base)
 						break
 					}
 				}
@@ -869,6 +889,9 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 			t.Error = e.Error()
 			report.Tables.Failed++
 			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: t.SourceTable, Stage: "verification", Error: e.Error()})
+			if t.dataExecuted {
+				report.addDataIssue(t.SourceTable, t.TargetTable, issueKind, e.Error())
+			}
 		} else {
 			t.Status = "succeeded"
 			if m.cfg.Content != "schema_only" && !m.cfg.objectMode() {
@@ -888,6 +911,11 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 				for i := range report.RowCounts {
 					if report.RowCounts[i].Table == t.TargetTable || report.RowCounts[i].Table == t.SourceTable {
 						report.RowCounts[i] = count
+						// The partition proof supersedes the ordinary count, which may
+						// have included rows already present before an append run.
+						report.DataIssues = slices.DeleteFunc(report.DataIssues, func(issue DataIssue) bool {
+							return issue.Table == t.SourceTable && (issue.Kind == rowCountMismatch || issue.Kind == rowCountError)
+						})
 						found = true
 					}
 				}

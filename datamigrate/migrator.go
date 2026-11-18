@@ -490,7 +490,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 	m.initializeOracleMySQLAuto(ctx, tables)
 	m.preflightMigrationNames(tables)
 	if m.isOscarMySQL() {
-		m.preflightOscarMySQLTables(ctx, tables)
+		m.preflightOscarMySQLTables(ctx, tables, &report)
 		if ctx.Err() != nil {
 			return report
 		}
@@ -722,14 +722,16 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 					m.observeDataCopy(tbl, true)
 					defer m.observeDataCopy(tbl, false)
 				}
-				ok, firstErr := m.migrateTableData(ctx, tbl)
+				err := m.migrateTableData(ctx, tbl)
 				mu.Lock()
-				if ok {
+				if err == nil {
 					m.markDataValidationCopied(tbl)
 					report.Data.Success++
 				} else if !m.isOracleDameng() || ctx.Err() == nil {
+					firstErr := err.Error()
 					report.Data.Failed++
 					report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
+					report.addDataIssue(tbl, m.objName(tbl), copyIssueKind(err), firstErr)
 					dataFailed[tbl] = true
 					m.blockMigrationTable(tbl, "data", fmt.Errorf("%s", firstErr))
 				}
@@ -783,7 +785,11 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				successTables = append(successTables, table)
 			}
 		}
-		rowCounts := make([]TableRowCount, len(successTables))
+		type countResult struct {
+			count TableRowCount
+			err   error
+		}
+		rowCounts := make([]countResult, len(successTables))
 		var rcWg sync.WaitGroup
 		rcSem := make(chan struct{}, m.cfg.MaxParallel)
 	rowCountLoop:
@@ -805,10 +811,12 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				m.log.Infof("开始行数校验 [%s]", tbl)
 				srcCount, srcErr := m.reader.CountRows(ctx, tbl)
 				if m.stopOracleDamengTask(ctx, srcErr) {
+					rowCounts[idx].err = countReadError(srcErr, nil)
 					return
 				}
 				dstCount, dstErr := m.writer.CountRows(ctx, dstTable)
 				if m.stopOracleDamengTask(ctx, dstErr) {
+					rowCounts[idx].err = countReadError(srcErr, dstErr)
 					return
 				}
 				rc := TableRowCount{Table: dstTable}
@@ -833,13 +841,15 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				} else {
 					m.log.Errorf("读取目标表行数失败 [%s]: %v", tbl, dstErr)
 				}
-				rowCounts[idx] = rc
+				rowCounts[idx] = countResult{count: rc, err: countReadError(srcErr, dstErr)}
 			}(i, table)
 		}
 		rcWg.Wait()
-		for _, rc := range rowCounts {
-			if rc.Table != "" {
-				report.RowCounts = append(report.RowCounts, rc)
+		for i, result := range rowCounts {
+			if result.count.Table != "" {
+				report.addRowCount(successTables[i], result.count.Table, result.count, result.err, "")
+			} else if result.err != nil {
+				report.addDataIssue(successTables[i], m.objName(successTables[i]), rowCountError, result.err.Error())
 			}
 		}
 	}
@@ -898,8 +908,8 @@ func (m *Migrator) buildCreateTableDDL(ctx context.Context, table string) ([]dia
 	return stmts, dialect.JoinSQL(stmts), nil
 }
 
-// migrateTableData 迁移单张表的数据，返回（是否成功，首次错误信息）
-func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, string) {
+// migrateTableData retains the failing operation when a pre-copy check fails.
+func (m *Migrator) migrateTableData(ctx context.Context, table string) error {
 	if m.hasPartitionPlan(table) {
 		return m.migratePartitionData(ctx, table)
 	}
@@ -925,24 +935,37 @@ func (m *Migrator) migrateTableData(ctx context.Context, table string) (bool, st
 			})
 			if err != nil {
 				m.stopMigrationTask(ctx, err)
-				return false, err.Error()
+				return err
 			}
-			return true, ""
+			return nil
 		}
 	}
 	if m.reader.DBType() == "mysql" && m.cfg.MigrationPurpose != "cdc" && m.cfg.MySQLReadStrategy != "" && m.cfg.MySQLReadStrategy != "offset" {
-		return m.migrateMySQLScan(ctx, table)
+		return copyResultError(m.migrateMySQLScan(ctx, table))
 	}
 	pks, err := m.reader.GetPrimaryKey(ctx, table)
 	if err != nil {
 		m.stopOracleDamengTask(ctx, err)
 		m.log.Errorf("获取主键失败 [%s]: %v", table, err)
-		return false, err.Error()
+		return err
 	}
 	if m.cfg.IntraTableParallel <= 1 {
-		return m.migrateTableDataSerial(ctx, table, pks)
+		return copyResultError(m.migrateTableDataSerial(ctx, table, pks))
 	}
-	return m.migrateTableDataParallel(ctx, table, pks)
+	totalRows, err := m.reader.CountRows(ctx, table)
+	if err != nil {
+		m.stopOracleDamengTask(ctx, err)
+		m.log.Errorf("获取行数失败 [%s]: %v", table, err)
+		return dataCheckError{rowCountError, countReadError(err, nil)}
+	}
+	return copyResultError(m.migrateTableDataParallel(ctx, table, pks, totalRows))
+}
+
+func copyResultError(ok bool, message string) error {
+	if !ok {
+		return errors.New(message)
+	}
+	return nil
 }
 
 func (m *Migrator) hasPartitionPlan(table string) bool {
@@ -1019,13 +1042,7 @@ func (m *Migrator) migrateTableDataSerial(ctx context.Context, table string, pks
 }
 
 // migrateTableDataParallel 并发分页迁移单张表
-func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, pks []string) (bool, string) {
-	totalRows, err := m.reader.CountRows(ctx, table)
-	if err != nil {
-		m.stopOracleDamengTask(ctx, err)
-		m.log.Errorf("获取行数失败 [%s]: %v", table, err)
-		return false, err.Error()
-	}
+func (m *Migrator) migrateTableDataParallel(ctx context.Context, table string, pks []string, totalRows int64) (bool, string) {
 	if totalRows == 0 {
 		m.log.Dataf("迁移 %s: 空表，跳过", table)
 		return true, ""

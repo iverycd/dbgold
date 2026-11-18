@@ -1,11 +1,13 @@
 import type { RepairAttempt, RepairObject, RepairRecord, RepairUnit } from '@/api/migrationRepair'
-import type { ObjectResult } from '@/api/migration'
+import { indexMigrationDataIssues, issuesForRepairRow, formatRowCountDetail, issueLabels, type MigrationTableEvidence } from './migrationDataIssues'
+import type { MigrationReport, ObjectResult } from '@/api/migration'
 
 export interface RepairSummary {
   jobID: string
   state: 'loading' | 'ready' | 'unknown'
   repaired: number
   attention: number
+  review?: number
 }
 export type RepairFocusTarget = Pick<ObjectResult, 'name' | 'source_name' | 'target_name' | 'table' | 'target_table' | 'target_schema'> & { kind: string }
 
@@ -18,6 +20,7 @@ export const repairCategories = [
   { key: 'pending', label: '待修复', empty: '当前无待修复对象' },
   { key: 'blocked', label: '依赖阻塞', empty: '当前无依赖阻塞对象' },
   { key: 'data', label: '待补数据', empty: '当前无待补数据对象' },
+  { key: 'review', label: '待核对', empty: '当前无待核对对象' },
 ] as const
 export type RepairCategory = typeof repairCategories[number]['key']
 export type RepairFilter = 'attention' | 'all' | RepairCategory
@@ -25,6 +28,9 @@ export type RepairFilter = 'attention' | 'all' | RepairCategory
 // The primary record stays untouched so commands retain its ID and draft version.
 export interface RepairDisplayRow extends RepairRecord {
   members: RepairRecord[]
+  evidence?: MigrationTableEvidence
+  recovery?: RepairAttempt
+  historyUnavailable?: boolean
 }
 
 export function matchesRepairFilter(object: RepairObject, filter: RepairFilter, attempts: RepairAttempt[] = []): boolean {
@@ -39,7 +45,11 @@ export function matchesRepairFilter(object: RepairObject, filter: RepairFilter, 
       )
     case 'pending': return !unitCommitted(object.status) && object.status !== 'blocked'
     case 'blocked': return object.status === 'blocked'
-    case 'data': return !object.diagnostic_only && isTableRepair(object) && !!object.data_status && object.data_status !== 'not_required' && !unitCommitted(object.data_status)
+    case 'review': return false // Review depends on the complete table, including grouped data records.
+    case 'data': {
+      const status = object.data_status || (object.kind === 'data' ? object.status : '')
+      return !object.diagnostic_only && isTableRepair(object) && !!status && status !== 'not_required' && !unitCommitted(status)
+    }
   }
 }
 
@@ -66,16 +76,10 @@ export function repairStatus(value: string) {
 }
 export function repairDataStatus(value: string): string {
   if (unitCommitted(value)) return '导入成功'
-  return ({ failed: '导入失败，待接续', pending: '待导入', not_started: '待导入', skipped: '待导入', needs_data: '待导入', draft: '待导入', running: '导入中', queued: '等待导入', cancelling: '取消中', cancelled: '已取消', unknown: '导入结果未知', unverified: '导入结果未知', needs_verification: '导入结果未知', blocked: '依赖阻塞', not_required: '无需导入' } as Record<string, string>)[value] || value || '待导入'
+  return ({ failed: '数据待核对', pending: '待导入', not_started: '待导入', skipped: '待导入', needs_data: '待导入', draft: '待导入', running: '导入中', queued: '等待导入', cancelling: '取消中', cancelled: '已取消', unknown: '导入结果未知', unverified: '导入结果未知', needs_verification: '导入结果未知', blocked: '依赖阻塞', not_required: '无需导入' } as Record<string, string>)[value] || value || '待导入'
 }
 export function repairObjectStatuses(object: RepairObject): { label: string; status: string; text: string }[] {
-  if (object.kind === 'data') {
-    const status = object.data_status || object.status
-    return [{ label: '数据', status, text: repairDataStatus(status) }]
-  }
-  const statuses = [{ label: ['table', 'tables'].includes(object.kind) ? '表结构' : '', status: object.status, text: repairStatus(object.status) }]
-  if (object.data_status) statuses.push({ label: '数据', status: object.data_status, text: repairDataStatus(object.data_status) })
-  return statuses
+  return repairDisplayStatuses({ object, version: 0, members: [{ object, version: 0 }] })
 }
 export function repairKind(value: string) {
   return ({ table: '表', tables: '表', data: '数据', primary_key: '主键', primary_keys: '主键', primaryKeys: '主键', index: '索引', indexes: '索引', unique: '唯一约束', foreign_key: '外键', foreign_keys: '外键', constraints: '外键', sequence: '序列 / 自增', sequences: '序列 / 自增', view: '视图', views: '视图', comment: '表 / 列注释', comments: '表 / 列注释', trigger: '触发器', triggers: '触发器', function: '函数', procedure: '存储过程', package: '包', package_body: '包体', type: '自定义类型', type_body: '类型体', synonym: '同义词', materialized_view: '物化视图', grant: '对象授权', check: '检查约束', owner: 'Owner', distribution: '分布属性' } as Record<string, string>)[value] || value
@@ -141,12 +145,20 @@ export function mappingError(mapping: Record<string, string>): string {
   if (new Set(targets).size !== targets.length) return '多个源列不能映射到同一个目标列'
   return ''
 }
-export function formatRepairHistory(records: RepairRecord[], attempts: RepairAttempt[]): string[] {
+export function formatRepairHistory(records: RepairRecord[], attempts: RepairAttempt[], report?: MigrationReport | null): string[] {
   const lines = ['','=== 对象修复记录（原始迁移结果保留） ===']
   if (!records.length) lines.push('无对象修复记录')
+  const rowsByID = new Map<string, RepairDisplayRow>()
+  for (const row of presentRepairRecords(records, attempts, report)) {
+    for (const { object } of row.members) rowsByID.set(object.id, row)
+  }
   for (const { object, version } of records) {
-    const statuses = repairObjectStatuses(object).map(({ label, text }) => `${label ? `${label}：` : ''}${text}`).join('；')
+    const row = rowsByID.get(object.id)!
+    const statuses = repairDisplayStatuses(row).filter(status => object.kind !== 'data' || status.label === '数据').map(({ label, text }) => `${label ? `${label}：` : ''}${text}`).join('；')
     lines.push(`【${repairKind(object.kind)}】${object.schema ? `${object.schema}.` : ''}${object.target_name}：${statuses}；草稿版本 ${version}`)
+    if (row.object.id === object.id) {
+      for (const detail of reportDataDetails(row)) lines.push(`原始数据核对：${detail}`)
+    }
     if (object.original_error ?? object.error) lines.push(`原始错误：${object.original_error ?? object.error}`)
     if (object.original_error !== undefined && object.error && object.original_error !== object.error) lines.push(`当前错误：${object.error}`)
     if (object.ddl) lines.push(`原始 DDL：\n${object.ddl}`)
@@ -238,6 +250,31 @@ export function groupRepairRecords(records: RepairRecord[]): RepairDisplayRow[] 
   return rows
 }
 
+// Recovery attempts arrive newest first from the API. Key by every original member ID.
+export function presentRepairRecords(records: RepairRecord[], attempts: RepairAttempt[], report?: MigrationReport | null, historyAvailable = true): RepairDisplayRow[] {
+  const rows = groupRepairRecords(records)
+  const index = indexMigrationDataIssues(report, rows)
+  const rowByMember = new Map<string, RepairDisplayRow>()
+  for (const row of rows) {
+    row.evidence = issuesForRepairRow(index, row)
+    row.historyUnavailable = !historyAvailable
+    for (const { object } of row.members) rowByMember.set(object.id, row)
+  }
+  for (const attempt of attempts) {
+    const row = rowByMember.get(attempt.object_id)
+    if (attempt.kind === 'recovery' && row && !row.recovery) row.recovery = attempt
+  }
+  return rows
+}
+
+function reportDataDetails(row: RepairDisplayRow): string[] {
+  if (!row.evidence) return []
+  const difference = repairCountDifference(row)
+  const messages = row.evidence.issues.map(issue => issue.kind === 'row_count_mismatch' && difference
+    ? difference.detail : issue.message || issueLabels[issue.kind])
+  return [...new Set(messages.filter(Boolean))]
+}
+
 export function repairDisplayErrors(row: RepairDisplayRow): { label: '结构' | '数据' | ''; text: string }[] {
   const errors: { label: '结构' | '数据' | ''; text: string }[] = []
   for (const { object } of row.members) {
@@ -245,6 +282,10 @@ export function repairDisplayErrors(row: RepairDisplayRow): { label: '结构' | 
     if (!text) continue
     const label = object.kind === 'data' ? '数据' : ['table', 'tables'].includes(object.kind) ? '结构' : ''
     if (!errors.some(error => error.label === label && error.text === text)) errors.push({ label, text })
+  }
+  // A pure count difference is already displayed below the current status.
+  for (const text of repairCountDifference(row)?.current ? [] : reportDataDetails(row)) {
+    if (!errors.some(error => error.text === text)) errors.push({ label: '数据', text })
   }
   return errors
 }
@@ -255,17 +296,48 @@ function normalizedRepairDataStatus(status: string): string {
   return ['pending', 'not_started', 'skipped', 'needs_data', 'draft'].includes(status) ? 'pending' : status
 }
 
-function repairDisplayDataStatus(row: RepairDisplayRow): { status: string; text: string; conflict: boolean } | undefined {
+function repairDisplayDataStatus(row: RepairDisplayRow) {
   const statuses = row.members.map(({ object }) => object.kind === 'data' ? object.data_status || object.status : object.data_status).filter((status): status is string => !!status)
-  if (!statuses.length) return undefined
+  if (!statuses.length) return
   if (new Set(statuses.map(normalizedRepairDataStatus)).size > 1) return { status: 'needs_verification', text: '数据状态待核对', conflict: true }
-  return { status: statuses[0]!, text: repairDataStatus(statuses[0]!), conflict: false }
+  const status = statuses[0]!
+  if (status !== 'failed') return { status, text: repairDataStatus(status) }
+  if (row.historyUnavailable) return { status: 'needs_verification', text: '接续记录暂不可用，数据待核对' }
+  if (row.recovery) {
+    const outcome = row.recovery.status
+    if (outcome === 'failed') return { status: 'failed', text: '接续迁移失败' }
+    if (attemptRunning(outcome) || outcome === 'cancelled') return { status: outcome, text: repairAttemptStatus(row.recovery) }
+    return { status: 'needs_verification', text: '接续结果待核对' }
+  }
+  const evidence = row.evidence
+  if (evidence?.issues.some(issue => issue.kind === 'copy_error')) return { status: 'failed', text: issueLabels.copy_error }
+  if (evidence?.pureMismatch) {
+    const otherIssue = row.members.some(({ object }) => {
+      if (object.diagnostic_only) return true
+      if (object.kind !== 'data') return object.status === 'failed' || object.status === 'blocked'
+      const error = object.original_error || object.error
+      return !!error && !evidence.originalMismatchErrors?.includes(error) && evidence.issues.every(issue => issue.message !== error)
+    })
+    return otherIssue ? { status: 'needs_verification', text: '行数不一致，另有问题待核对' } : { status: 'row_count_mismatch', text: '行数不一致，待核对' }
+  }
+  const issue = evidence?.issues.find(issue => ['row_count_error', 'content_validation', 'verification_error'].includes(issue.kind))
+  return { status: 'needs_verification', text: issue ? issueLabels[issue.kind] : '数据待核对' }
+}
+
+export function repairCountDifference(row: RepairDisplayRow) {
+  const evidence = row.evidence
+  const count = evidence?.rowCount
+  if (!count || count.match || count.src === count.dst || !evidence?.issues.some(issue => issue.kind === 'row_count_mismatch') || evidence.issues.some(issue => issue.kind === 'row_count_error')) return
+  return { table: count.table, detail: formatRowCountDetail(count), current: repairDisplayDataStatus(row)?.status === 'row_count_mismatch' }
 }
 
 export function repairDisplayStatuses(row: RepairDisplayRow): { label: string; status: string; text: string }[] {
-  if (row.members.length === 1) return repairObjectStatuses(row.object)
-  const statuses = [{ label: '表结构', status: row.object.status, text: repairStatus(row.object.status) }]
+  const { object } = row
   const data = repairDisplayDataStatus(row)
+  const isTable = ['table', 'tables'].includes(object.kind)
+  const created = isTable && data?.status === 'row_count_mismatch' && unitCommitted(object.status) && object.units?.some(unit =>
+    unitCommitted(unit.status) && /^\s*create\s+(?:(?:global|local|temporary|temp|unlogged)\s+)*table\s+(?!if\s+not\s+exists\b)\S/i.test(unit.sql))
+  const statuses = object.kind === 'data' ? [] : [{ label: isTable ? '表结构' : '', status: object.status, text: created ? '已创建' : repairStatus(object.status) }]
   if (data) statuses.push({ label: '数据', status: data.status, text: data.text })
   return statuses
 }
@@ -276,6 +348,12 @@ export function needsRepairDisplayAttention(row: RepairDisplayRow): boolean {
 
 export function matchesRepairDisplayFilter(row: RepairDisplayRow, filter: RepairFilter, attempts: RepairAttempt[] = []): boolean {
   if (filter === 'attention') return needsRepairDisplayAttention(row)
-  if (filter === 'data' && row.members.length > 1 && repairDisplayDataStatus(row)?.conflict === true) return true
+  if (filter === 'repaired' && row.recovery && unitCommitted(row.recovery.status) && !needsRepairDisplayAttention(row)) return true
+  if (filter === 'data' || filter === 'review' || filter === 'pending') {
+    const status = repairDisplayDataStatus(row)?.status
+    const review = !row.object.diagnostic_only && isTableRepair(row.object) && (status === 'row_count_mismatch' || status === 'needs_verification')
+    if (filter === 'review') return review && status === 'row_count_mismatch'
+    if (review) return filter === 'pending' && row.members.some(({ object }) => object.kind !== 'data' && matchesRepairFilter(object, filter, attempts))
+  }
   return row.members.some(({ object }) => matchesRepairFilter(object, filter, attempts))
 }

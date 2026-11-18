@@ -248,6 +248,7 @@ func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
 			})
 			if err != nil {
 				err = fmt.Errorf("表 %s，第 %d 批失败，已提交 %d 行：%w", t.Info.TableName, batch, copied, err)
+				report.addDataIssue(t.Info.TableName, m.objName(t.Info.TableName), copyIssueKind(err), err.Error())
 				report.Data.Failed++
 				report.Data.Items = append(report.Data.Items, ObjectResult{Name: t.Info.TableName, Error: err.Error()})
 				m.log.Errorf("数据迁移失败 [%s]: %v", t.Info.TableName, err)
@@ -299,10 +300,12 @@ func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
 			}
 			src, e1 := m.reader.CountRows(ctx, t.Info.TableName)
 			if m.stopMigrationTask(ctx, e1) {
+				report.addDataIssue(t.Info.TableName, m.objName(t.Info.TableName), rowCountError, countReadError(e1, nil).Error())
 				return report
 			}
 			dst, e2 := m.writer.CountRows(ctx, m.objName(t.Info.TableName))
 			if m.stopMigrationTask(ctx, e2) {
+				report.addDataIssue(t.Info.TableName, m.objName(t.Info.TableName), rowCountError, countReadError(e1, e2).Error())
 				return report
 			}
 			copied := copiedCounts[t.Info.TableName]
@@ -321,14 +324,15 @@ func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
 				}
 			}
 			rc := TableRowCount{Table: m.objName(t.Info.TableName), Src: src, Dst: increment, Match: e1 == nil && e2 == nil && src == increment && src == copied}
-			report.RowCounts = append(report.RowCounts, rc)
+			detail := ""
 			if !rc.Match {
-				detail := fmt.Sprintf("行数校验失败：源=%d 目标本次行数=%d 已提交=%d 源错误=%v 目标错误=%v", src, increment, copied, e1, e2)
+				detail = fmt.Sprintf("行数校验失败：源=%d 目标本次行数=%d 已提交=%d 源错误=%v 目标错误=%v", src, increment, copied, e1, e2)
 				report.Data.Success--
 				report.Data.Failed++
 				report.Data.Items = append(report.Data.Items, ObjectResult{Name: t.Info.TableName, Error: detail})
 				m.log.Errorf("行数校验失败 [%s]: %s", t.Info.TableName, detail)
 			}
+			report.addRowCount(t.Info.TableName, rc.Table, rc, countReadError(e1, e2), detail)
 		}
 	}
 	if dependencyTarget != nil {

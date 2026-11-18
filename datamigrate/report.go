@@ -1,9 +1,10 @@
 package datamigrate
 
 import (
-	"dbgold/datamigrate/damengnative"
 	"errors"
+	"fmt"
 
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/target"
 	"dbgold/datamigrate/validation"
@@ -114,6 +115,7 @@ type MigrationReport struct {
 	Comments                CategoryReport                       `json:"comments"`
 	Triggers                CategoryReport                       `json:"triggers"`
 	RowCounts               []TableRowCount                      `json:"rowCounts"`
+	DataIssues              []DataIssue                          `json:"data_issues,omitempty"`
 }
 
 type NativeCategoryReport struct {
@@ -149,6 +151,87 @@ type TableRowCount struct {
 	Src   int64  `json:"src"`
 	Dst   int64  `json:"dst"`
 	Match bool   `json:"match"`
+}
+
+// DataIssue records what failed while the copy or verification stage is known.
+// It supplements the original category counters without changing job outcomes.
+type DataIssue struct {
+	Table       string `json:"table"`
+	TargetTable string `json:"target_table,omitempty"`
+	Kind        string `json:"kind"`
+	Message     string `json:"message,omitempty"`
+}
+
+const (
+	copyError         = "copy_error"
+	rowCountMismatch  = "row_count_mismatch"
+	rowCountError     = "row_count_error"
+	contentValidation = "content_validation"
+	verificationError = "verification_error"
+)
+
+func (r *MigrationReport) addDataIssue(table, target, kind, message string) {
+	r.DataIssues = append(r.DataIssues, DataIssue{Table: table, TargetTable: target, Kind: kind, Message: message})
+}
+
+// Carry a preparation/verification cause across copy routines that also return
+// ordinary read and write errors. Preserve the original error for cancellation.
+type dataCheckError struct {
+	kind string
+	err  error
+}
+
+func (e dataCheckError) Error() string { return e.err.Error() }
+func (e dataCheckError) Unwrap() error { return e.err }
+
+func copyIssueKind(err error) string {
+	var check dataCheckError
+	if errors.As(err, &check) {
+		return check.kind
+	}
+	return copyError
+}
+
+func countReadError(src, dst error) error {
+	if src != nil {
+		src = fmt.Errorf("读取源表行数失败: %w", src)
+	}
+	if dst != nil {
+		dst = fmt.Errorf("读取目标表行数失败: %w", dst)
+	}
+	return errors.Join(src, dst)
+}
+
+// Some routes also check the number of rows acknowledged by the writer. A
+// failed three-way check can have equal source and target counts.
+func (r *MigrationReport) addRowCount(table, target string, count TableRowCount, readErr error, detail string) {
+	r.RowCounts = append(r.RowCounts, count)
+	switch {
+	case readErr != nil:
+		r.addDataIssue(table, target, rowCountError, readErr.Error())
+	case count.Src != count.Dst:
+		if detail == "" {
+			detail = fmt.Sprintf("源行数 %d，目标行数 %d", count.Src, count.Dst)
+		}
+		r.addDataIssue(table, target, rowCountMismatch, detail)
+	case !count.Match:
+		r.addDataIssue(table, target, verificationError, detail)
+	}
+}
+
+func (r *MigrationReport) addContentIssue(table, target string, result validation.TableResult) {
+	switch result.Status {
+	case validation.StatusPassed:
+	case validation.StatusMismatch:
+		detail := result.Error
+		if detail == "" {
+			detail = fmt.Sprintf("%s 内容校验发现差异：缺少 %d 行，多出 %d 行，变化 %d 行，重复键 %d 个",
+				result.SourceTable, result.MissingRows, result.ExtraRows, result.ChangedRows, result.DuplicateKeys)
+		}
+		r.addDataIssue(table, target, contentValidation, detail)
+	default:
+		r.addDataIssue(table, target, verificationError, result.Error)
+	}
 }
 
 func newCategoryReport() CategoryReport {

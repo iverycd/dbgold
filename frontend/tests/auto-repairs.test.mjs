@@ -9,7 +9,7 @@ import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
 import { autoRepairUtils } from './helpers/auto-repairs.mjs'
-import { migrationReportUtils } from './helpers/migration-report.mjs'
+import { migrationDataIssueUtils, migrationReportUtils } from './helpers/migration-report.mjs'
 
 const repairs = [
   { type: 'column_rename', table: 'gj_data', target_table: 'APP.GJ_DATA', source: 'ROWID', target: 'ROW_ID_2', reason: '达梦禁用列名', status: 'applied' },
@@ -46,6 +46,7 @@ function execute(path, exported, props = {}) {
       if (id === 'vue') return { ...Vue, onMounted() {}, onUnmounted() {} }
       if (id === 'vue-router') return { useRoute: () => ({ params: { jobId: 'job-repairs' } }), useRouter: () => ({}) }
       if (id === '@/utils/autoRepairs') return autoRepairUtils
+      if (id === '@/utils/migrationDataIssues') return migrationDataIssueUtils
       if (id === '@/utils/migrationReport') return migrationReportUtils
       if (id === '@/api/migration' || id === '@/utils/clipboard') return {}
       if (id === '@arco-design/web-vue') return { Message: {} }
@@ -378,7 +379,7 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
         h.values.report.value.indexes = { total: 1, success: 0, failed: 1, items: [{ name: 'bad_index', ddl: '', error: 'index error' }] }
         assert.equal(h.values.failedObjectCount.value, 2)
         assert.equal(h.values.failedItems.value.length, 1)
-        assert.equal(h.values.risks.value.find(item => item.key === 'objects').title, '1 个对象迁移失败')
+        assert.equal(h.values.risks.value.find(item => item.key === 'objects').title, '原始报告记录失败 1 项')
       } else {
         assert.equal(h.values.failedCount.value, 1)
       }
@@ -421,7 +422,7 @@ for (const view of ['MigrationReportPanel', 'DataMigrationJobDetailView']) {
         const html = await renderToString(app)
         return Array.from(html.matchAll(/class="arco-table-td-content">([^<]+)<\/span>/g), match => match[1])
       }
-      assert.deepEqual(await pageLabels(1), ['表', '数据写入', '主键', '视图', '索引', '外键', '序列', '注释', '兼容函数', '兼容存储过程'])
+      assert.deepEqual(await pageLabels(1), ['表', '数据迁移', '主键', '视图', '索引', '外键', '序列', '注释', '兼容函数', '兼容存储过程'])
       assert.deepEqual(await pageLabels(2), ['触发器'])
 
       await h.values.exportReport()

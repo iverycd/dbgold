@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
 import ts from 'typescript'
 
 const transpile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-const utilsContext = { exports: {} }
+const utilsContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const batchContext = { exports: {}, setTimeout, clearTimeout, require: id => {
   assert.equal(id, '@/utils/migrationRepair')

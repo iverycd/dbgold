@@ -679,6 +679,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			}
 			n, e := m.writer.CountRows(ctx, m.objName(t))
 			if e != nil {
+				report.addDataIssue(t, m.objName(t), rowCountError, countReadError(nil, e).Error())
 				if m.stopMigrationTask(ctx, e) {
 					return report
 				}
@@ -717,18 +718,14 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			go func(t string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				ok, text := m.migrateTableData(ctx, t)
-				var e error
-				if !ok {
-					e = fmt.Errorf("%s", text)
-				}
+				e := m.migrateTableData(ctx, t)
 				mu.Lock()
 				defer mu.Unlock()
-				dataOK[t] = ok
-				if !ok {
+				dataOK[t] = e == nil
+				if e != nil {
 					m.blockMigrationTable(t, "data", e)
-				}
-				if ok {
+					report.addDataIssue(t, m.objName(t), copyIssueKind(e), e.Error())
+				} else {
 					m.markDataValidationCopied(t)
 				}
 				m.recordOracleResult(&report.Data, m.objName(t), "", e)
@@ -881,14 +878,17 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		}
 		src, e1 := m.reader.CountRows(ctx, t)
 		if m.stopMigrationTask(ctx, e1) {
+			report.addDataIssue(t, m.objName(t), rowCountError, countReadError(e1, nil).Error())
 			return report
 		}
 		dst, e2 := m.writer.CountRows(ctx, m.objName(t))
 		if m.stopMigrationTask(ctx, e2) {
+			report.addDataIssue(t, m.objName(t), rowCountError, countReadError(e1, e2).Error())
 			return report
 		}
 		if e1 != nil || e2 != nil {
 			err := fmt.Errorf("行数校验失败，源端: %v; 目标端: %v", e1, e2)
+			report.addDataIssue(t, m.objName(t), rowCountError, countReadError(e1, e2).Error())
 			report.Data.Success--
 			report.Data.Failed++
 			report.Data.Items = append(report.Data.Items, ObjectResult{Name: m.objName(t), Error: err.Error()})
@@ -897,7 +897,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			continue
 		}
 		dst -= baseline[t]
-		report.RowCounts = append(report.RowCounts, TableRowCount{Table: m.objName(t), Src: src, Dst: dst, Match: src == dst})
+		report.addRowCount(t, m.objName(t), TableRowCount{Table: m.objName(t), Src: src, Dst: dst, Match: src == dst}, nil, "")
 	}
 	m.logMigrationCompletion(m.reader.DBType()+" → Oracle 迁移结束，耗时 %s", time.Since(start).Round(time.Second))
 	return report

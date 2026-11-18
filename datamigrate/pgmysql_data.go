@@ -102,21 +102,21 @@ func (m *Migrator) eachPGPage(ctx context.Context, t source.PGTable, targetDB *s
 	if s := m.partitionState; targetDB == nil && s != nil {
 		if p := s.tables[t.Info.TableName]; p != nil && p.Plan != nil {
 			if err := m.partitionCopyReady(t.Info.TableName); err != nil {
-				return err
+				return dataCheckError{verificationError, err}
 			}
 			if err := m.recheckPartitionSource(ctx, t.Info.TableName); err != nil {
-				return err
+				return dataCheckError{verificationError, err}
 			}
 			inspector, ok := m.writer.(target.PartitionInspector)
 			if !ok {
-				return fmt.Errorf("目标库缺少分区核验能力")
+				return dataCheckError{verificationError, fmt.Errorf("目标库缺少分区核验能力")}
 			}
 			actual, err := inspector.InspectPartitionTable(ctx, p.TargetTable)
 			if err == nil {
 				err = partition.Equivalent(p.Plan.Target, actual)
 			}
 			if err != nil {
-				return fmt.Errorf("写入前分区核对失败: %w", err)
+				return dataCheckError{verificationError, fmt.Errorf("写入前分区核对失败: %w", err)}
 			}
 			err = m.reader.(source.PartitionReader).StreamPartitionRows(ctx, t.Info.TableName, limit, func(cols, _ []string, rows [][]any) error {
 				converted, err := convertPGPage(t, cols, rows)

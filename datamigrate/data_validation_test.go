@@ -36,6 +36,7 @@ type contentTestReader struct {
 	metadata         validation.Table
 	describes, scans int
 	cleanText        bool
+	countErr         error
 }
 
 func (r *contentTestReader) DescribeValidationTable(context.Context, string) (validation.Table, error) {
@@ -47,7 +48,7 @@ func (r *contentTestReader) OpenValidationScan(_ context.Context, table string, 
 	return &contentTestStream{rows: r.rows[table]}, nil
 }
 func (r *contentTestReader) CountRows(_ context.Context, table string) (int64, error) {
-	return int64(len(r.rows[table])), nil
+	return int64(len(r.rows[table])), r.countErr
 }
 func (r *contentTestReader) ReadPage(_ context.Context, table string, _ []string, offset, limit int64) ([]string, []string, [][]any, error) {
 	cols, types := []string{}, []string{}
@@ -80,6 +81,7 @@ type contentTestWriter struct {
 	rows             map[string][][]any
 	describes, scans int
 	corrupt          bool
+	countErr         error
 	afterCopy        func()
 }
 
@@ -92,7 +94,7 @@ func (w *contentTestWriter) OpenValidationScan(_ context.Context, table string, 
 	return &contentTestStream{rows: w.rows[table]}, nil
 }
 func (w *contentTestWriter) CountRows(_ context.Context, table string) (int64, error) {
-	return int64(len(w.rows[table])), nil
+	return int64(len(w.rows[table])), w.countErr
 }
 func (w *contentTestWriter) CopyData(_ context.Context, table string, _ []string, _ []string, rows [][]any) error {
 	if w.copyDataFail {
@@ -133,6 +135,47 @@ func TestContentValidationMigrationDefaultDoesNotRead(t *testing.T) {
 	require.Zero(t, w.scans)
 }
 
+func TestGenericCopySuccessReportsCountDifferenceOrReadError(t *testing.T) {
+	for _, kind := range []string{rowCountMismatch, rowCountError} {
+		t.Run(kind, func(t *testing.T) {
+			r, w, m := contentFixture()
+			m.cfg.ValidateData = false
+			if kind == rowCountMismatch {
+				w.afterCopy = func() { r.rows["Users"] = append(r.rows["Users"], []any{2, "later"}) }
+			} else {
+				w.countErr = fmt.Errorf("target count unavailable")
+			}
+			report := m.Run(context.Background())
+			require.Equal(t, 1, report.Data.Success)
+			require.Zero(t, report.Data.Failed)
+			require.True(t, report.HasFailures())
+			require.Len(t, report.DataIssues, 1)
+			issue := report.DataIssues[0]
+			require.Equal(t, kind, issue.Kind)
+			require.Equal(t, "Users", issue.Table)
+			require.Equal(t, "users", issue.TargetTable)
+			if kind == rowCountMismatch {
+				require.Equal(t, []TableRowCount{{Table: "users", Src: 2, Dst: 1}}, report.RowCounts)
+			} else {
+				require.Contains(t, issue.Message, w.countErr.Error())
+			}
+		})
+	}
+}
+
+func TestParallelCopyInitialCountError(t *testing.T) {
+	r, w, m := contentFixture()
+	m.cfg.IntraTableParallel = 2
+	r.countErr = fmt.Errorf("source count unavailable")
+	report := m.Run(context.Background())
+	require.Empty(t, w.rows)
+	require.Equal(t, 1, report.Data.Failed)
+	require.Empty(t, report.RowCounts)
+	require.Len(t, report.DataIssues, 1)
+	require.Equal(t, rowCountError, report.DataIssues[0].Kind)
+	require.Contains(t, report.DataIssues[0].Message, r.countErr.Error())
+}
+
 func TestContentValidationMigrationDetectsSameCountDifference(t *testing.T) {
 	for _, corrupt := range []bool{false, true} {
 		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
@@ -145,9 +188,14 @@ func TestContentValidationMigrationDetectsSameCountDifference(t *testing.T) {
 			if corrupt {
 				require.Equal(t, validation.StatusMismatch, report.DataValidation.Status)
 				require.EqualValues(t, 1, report.DataValidation.Tables[0].ChangedRows)
+				require.Len(t, report.DataIssues, 1)
+				require.Equal(t, contentValidation, report.DataIssues[0].Kind)
+				require.Equal(t, "Users", report.DataIssues[0].Table)
+				require.Equal(t, "users", report.DataIssues[0].TargetTable)
 				require.True(t, report.HasFailures())
 			} else {
 				require.Equal(t, validation.StatusPassed, report.DataValidation.Status)
+				require.Empty(t, report.DataIssues)
 				require.False(t, report.HasFailures())
 			}
 			require.Greater(t, r.scans, 0)
@@ -170,6 +218,8 @@ func TestContentValidationCopyFailureCannotPass(t *testing.T) {
 	report := m.Run(context.Background())
 	require.True(t, report.HasFailures())
 	require.Equal(t, validation.StatusError, report.DataValidation.Status)
+	require.Len(t, report.DataIssues, 1, "a skipped check must not obscure the copy error")
+	require.Equal(t, copyError, report.DataIssues[0].Kind)
 	require.Zero(t, r.scans)
 	require.Zero(t, w.scans)
 }
