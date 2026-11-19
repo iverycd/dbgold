@@ -11,15 +11,18 @@ import (
 
 const SourceSchemaVersion = 1
 const LegacyDamengSchemaMessage = "达梦 CDC 源结构快照已升级，旧任务不能恢复，请重新建立全量或增量起点"
+const LegacyPostgresSchemaMessage = "PG 系列 CDC 任务缺少冻结的源结构，不能恢复，请重新建立全量或增量起点"
 
 // SourceSchemaTable explicitly persists fields intentionally omitted from the
 // public TableInfo response. Column order is part of the binlog wire format.
 type SourceSchemaTable struct {
 	TableInfo
-	Definitions  []string          `json:"definitions"`
-	Charsets     []string          `json:"charsets"`
-	SpatialSRIDs []*uint32         `json:"spatial_srids"`
-	Indexes      []UniqueIndexInfo `json:"unique_indexes"`
+	Definitions        []string          `json:"definitions"`
+	Charsets           []string          `json:"charsets"`
+	SpatialSRIDs       []*uint32         `json:"spatial_srids"`
+	Indexes            []UniqueIndexInfo `json:"unique_indexes"`
+	InboundForeignKeys []foreignKey      `json:"inbound_foreign_keys,omitempty"`
+	ForeignKeysKnown   bool              `json:"foreign_keys_known,omitempty"`
 }
 type SourceSchemaSnapshot struct {
 	Version  int                 `json:"version"`
@@ -33,7 +36,10 @@ func NewSourceSchema(database string, tables []TableInfo) (SourceSchemaSnapshot,
 	for _, t := range tables {
 		// Row locators have their own frozen manifest. They are not source DDL.
 		t.LocatorStrategy, t.LocatorIndex, t.LocatorWarning, t.LocatorColumns = "", "", "", nil
-		s.Tables = append(s.Tables, SourceSchemaTable{t, t.ColumnDefinitions, t.ColumnCharsets, t.ColumnSpatialSRIDs, t.UniqueIndexes})
+		s.Tables = append(s.Tables, SourceSchemaTable{
+			TableInfo: t, Definitions: t.ColumnDefinitions, Charsets: t.ColumnCharsets, SpatialSRIDs: t.ColumnSpatialSRIDs,
+			Indexes: t.UniqueIndexes, InboundForeignKeys: t.InboundForeignKeys, ForeignKeysKnown: t.ForeignKeysKnown,
+		})
 	}
 	sort.Slice(s.Tables, func(i, j int) bool { return s.Tables[i].Name < s.Tables[j].Name })
 	raw, err := json.Marshal(s)
@@ -57,7 +63,7 @@ func (s SourceSchemaSnapshot) digest() string {
 }
 func (s SourceSchemaSnapshot) Validate(database string) error {
 	if s.Version != SourceSchemaVersion {
-		return fmt.Errorf("%s", LegacyDamengSchemaMessage)
+		return fmt.Errorf("CDC 源结构快照版本不兼容，旧任务不能恢复，请重新建立全量或增量起点")
 	}
 	if s.Database != database || s.Hash == "" || s.Hash != s.digest() || len(s.Tables) == 0 {
 		return fmt.Errorf("CDC 源结构快照缺失、数据库不匹配或摘要校验失败")
@@ -101,6 +107,7 @@ func (s SourceSchemaSnapshot) TableInfos(database string, names []string) ([]Tab
 	for _, saved := range copy.Tables {
 		t := saved.TableInfo
 		t.ColumnDefinitions, t.ColumnCharsets, t.ColumnSpatialSRIDs, t.UniqueIndexes = saved.Definitions, saved.Charsets, saved.SpatialSRIDs, saved.Indexes
+		t.InboundForeignKeys, t.ForeignKeysKnown = saved.InboundForeignKeys, saved.ForeignKeysKnown
 		byName[t.Name] = t
 	}
 	if names == nil {
@@ -142,6 +149,9 @@ func CaptureSourceSchema(ctx context.Context, cfg Config, start Position) (Sourc
 	}
 	tables, err := LoadConfiguredTables(ctx, db, cfg)
 	if err != nil {
+		return SourceSchemaSnapshot{}, err
+	}
+	if err = LoadSourceInboundForeignKeys(ctx, db, cfg.SourceDatabase, tables); err != nil {
 		return SourceSchemaSnapshot{}, err
 	}
 	head, err := CurrentPosition(ctx, db)

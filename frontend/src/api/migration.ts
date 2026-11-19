@@ -414,6 +414,9 @@ export interface IncrementalJob {
   cutover_gtid: string
   validation_state: string
   validation_json: string
+  content_validation_state: string
+  content_validation_waived_by?: number
+  content_validation_waived_at?: string
   insert_count: number
   update_count: number
   delete_count: number
@@ -531,10 +534,11 @@ export const pauseIncrementalJob = (jobID: string) => api.post(`/migration/incre
 export const resumeIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/resume`)
 export const prepareIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/prepare-cutover`)
 export const cancelIncrementalCutover = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/cancel-cutover`)
-export const stopIncrementalJob = (jobID: string, acknowledgeWarnings = false, acknowledgeExclusions = false) =>
+export const stopIncrementalJob = (jobID: string, acknowledgeWarnings = false, acknowledgeExclusions = false, acknowledgeContentValidation = false) =>
   api.post(`/migration/incremental/jobs/${jobID}/stop`, {
     acknowledge_warnings: acknowledgeWarnings,
     acknowledge_exclusions: acknowledgeExclusions,
+    acknowledge_content_validation: acknowledgeContentValidation,
   })
 export const abortIncrementalJob = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/abort`)
 export const acknowledgeIncrementalDDL = (jobID: string) => api.post(`/migration/incremental/jobs/${jobID}/ack-ddl`)

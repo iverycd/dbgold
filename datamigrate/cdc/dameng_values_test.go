@@ -34,22 +34,38 @@ func TestConvertDamengBinlogRowMatchesSnapshotValues(t *testing.T) {
 	require.Equal(t, "a\x00b", input[7], "conversion must not change before image")
 }
 
+func TestPostgresConvertsMySQLBinlogLabelsAndUnsignedValues(t *testing.T) {
+	table := &TableInfo{Name: "Mixed", Columns: []string{"state", "flags", "tiny", "large", "huge"},
+		ColumnTypes:       []string{"ENUM", "SET", "TINYINT", "INT", "BIGINT"},
+		ColumnDefinitions: []string{"enum('new','done')", "set('a','b','c')", "tinyint unsigned", "int unsigned", "bigint unsigned"}}
+	applier := &PostgresApplier{}
+	input := []any{int64(2), int64(5), int8(-56), int32(-1), int64(-1)}
+	want := []any{"done", "a,c", int64(200), int64(4294967295), "18446744073709551615"}
+	for i, value := range input {
+		got, err := applier.convertValue(table, i, value)
+		require.NoError(t, err)
+		require.Equal(t, want[i], got)
+	}
+	_, err := applier.convertValue(table, 0, int64(3))
+	require.ErrorContains(t, err, "表 Mixed 列 state")
+}
+
 func TestDamengEnumSetEscapesAndBounds(t *testing.T) {
 	members, err := mysqlEnumSetMembers(`enum('a,b','it\'s','quote''d','back\\slash','line\nfeed','')`, "ENUM")
 	require.NoError(t, err)
 	require.Equal(t, []string{"a,b", "it's", "quote'd", `back\slash`, "line\nfeed", ""}, members)
-	_, err = damengEnumSetValue(int64(3), `enum('a','b')`, "ENUM")
+	_, err = mysqlEnumSetBinlogValue(int64(3), `enum('a','b')`, "ENUM")
 	require.ErrorContains(t, err, "超出")
-	_, err = damengEnumSetValue(int64(4), `set('a','b')`, "SET")
+	_, err = mysqlEnumSetBinlogValue(int64(4), `set('a','b')`, "SET")
 	require.ErrorContains(t, err, "超出")
-	got, err := damengEnumSetValue(int64(0), `enum('a')`, "ENUM")
+	got, err := mysqlEnumSetBinlogValue(int64(0), `enum('a')`, "ENUM")
 	require.NoError(t, err)
 	require.Equal(t, "", got)
 	labels := make([]string, 64)
 	for i := range labels {
 		labels[i] = "'x'"
 	}
-	got, err = damengEnumSetValue(int64(math.MinInt64), "set("+strings.Join(labels, ",")+")", "SET")
+	got, err = mysqlEnumSetBinlogValue(int64(math.MinInt64), "set("+strings.Join(labels, ",")+")", "SET")
 	require.NoError(t, err)
 	require.Equal(t, "x", got)
 	for _, definition := range []string{"", "enum()", "enum('a',)", "enum('a)", "enum(a)", "set('a')"} {
@@ -79,7 +95,7 @@ func TestDamengUnsignedWidths(t *testing.T) {
 		{"SMALLINT", int16(-1), int64(65535)}, {"INT", int32(-1), int64(4294967295)},
 		{"BIGINT", uint64(math.MaxUint64), "18446744073709551615"}, {"BIGINT", int64(7), int64(7)},
 	} {
-		got, err := damengUnsignedValue(test.input, test.dt)
+		got, err := mysqlUnsignedBinlogValue(test.input, test.dt)
 		require.NoError(t, err)
 		require.Equal(t, test.want, got)
 	}

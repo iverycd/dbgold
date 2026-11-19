@@ -170,12 +170,27 @@ func damengOptionalClob(value string) any {
 
 const damengBootstrapAssignments = `BINLOG_FILE=?,BINLOG_POSITION=?,GTID=?,BOOTSTRAP_STATE=?,EFFECTIVE_TABLES=?,EXCLUDED_TABLES=?,MANIFEST_HASH=?,FAILED_OBJECTS=?,FAILURE_REPORT_VERSION=?,LOCATOR_STRATEGY_VERSION=?,LOCATOR_STRATEGIES=?,SOURCE_SCHEMA_VERSION=?,SOURCE_SCHEMA=?,SOURCE_SCHEMA_HASH=?,UPDATED_AT=CURRENT_TIMESTAMP`
 
+func (a *DamengApplier) insertBootstrapRecord(ctx context.Context, exec checkpointExecutor, record BootstrapRecord) error {
+	values, err := damengBootstrapValues(record)
+	if err != nil {
+		return err
+	}
+	result, err := exec.ExecContext(ctx, `INSERT INTO `+a.checkpointTable()+` (BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES,SOURCE_SCHEMA_VERSION,SOURCE_SCHEMA,SOURCE_SCHEMA_HASH,JOB_ID) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, append(values, a.jobID)...)
+	if err != nil {
+		return err
+	}
+	return requireCheckpointWrite(result)
+}
+
 func (a *DamengApplier) SaveBootstrapRecord(ctx context.Context, r BootstrapRecord) error {
 	damengBootstrapMu.Lock()
 	defer damengBootstrapMu.Unlock()
 	stored, exists, err := a.LoadBootstrapRecord(ctx)
 	if err != nil {
 		return err
+	}
+	if !exists && a.cfg.ManagedCheckpoint {
+		return ErrCheckpointMissing
 	}
 	if exists {
 		switch stored.State {
@@ -252,7 +267,10 @@ func (a *DamengApplier) SaveBootstrapRecord(ctx context.Context, r BootstrapReco
 		return err
 	}
 	if n == 0 {
-		_, err = tx.ExecContext(ctx, `INSERT INTO `+a.checkpointTable()+` (BINLOG_FILE,BINLOG_POSITION,GTID,BOOTSTRAP_STATE,EFFECTIVE_TABLES,EXCLUDED_TABLES,MANIFEST_HASH,FAILED_OBJECTS,FAILURE_REPORT_VERSION,LOCATOR_STRATEGY_VERSION,LOCATOR_STRATEGIES,SOURCE_SCHEMA_VERSION,SOURCE_SCHEMA,SOURCE_SCHEMA_HASH,JOB_ID) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, append(values, a.jobID)...)
+		if a.cfg.ManagedCheckpoint {
+			return ErrCheckpointMissing
+		}
+		err = a.insertBootstrapRecord(ctx, tx, r)
 		if err != nil {
 			return err
 		}

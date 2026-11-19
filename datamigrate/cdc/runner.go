@@ -34,7 +34,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer src.Close()
-	applier, err := newTargetApplier(ctx, r.cfg)
+	openApplier := newTargetApplier
+	if r.cfg.ManagedCheckpoint || r.cfg.RequireExistingCheckpoint {
+		openApplier = newExistingTargetApplier
+	}
+	applier, err := openApplier(ctx, r.cfg)
 	if err != nil {
 		return err
 	}
@@ -43,16 +47,40 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var tables []TableInfo
-	if r.cfg.TargetDBType == "dameng" {
-		snapshot := r.cfg.SourceSchema
-		names := r.cfg.TableNames
-		if recordExists {
-			snapshot, names = record.SourceSchema, record.EffectiveTables
+	if r.cfg.RequireExistingCheckpoint && !recordExists {
+		return fmt.Errorf("目标检查点缺失，不能安全恢复；请核对目标数据并重新建立起点")
+	}
+	start := r.cfg.Start
+	if recordExists {
+		if record.State != "completed" {
+			return fmt.Errorf("目标检查点状态为 %s，不能启动 CDC", record.State)
 		}
+		start = record.Position
+	}
+	if start.GTID == "" && (start.File == "" || start.Pos < 4) {
+		return fmt.Errorf("缺少有效的 CDC 起始位点")
+	}
+	if r.cfg.ManagedCheckpoint {
+		if err = checkTargetSchemaOwner(ctx, applier); err != nil {
+			return err
+		}
+		if err = ValidatePositionAvailable(ctx, r.cfg, start); err != nil {
+			return fmt.Errorf("目标检查点对应的源位点不可读取: %w", err)
+		}
+	}
+	var tables []TableInfo
+	snapshot, names := r.cfg.SourceSchema, r.cfg.TableNames
+	if recordExists {
+		snapshot, names = record.SourceSchema, record.EffectiveTables
+	}
+	if recordExists || r.cfg.ManagedCheckpoint || snapshot.Version != 0 || r.cfg.TargetDBType == "dameng" {
 		tables, err = snapshot.TableInfos(r.cfg.SourceDatabase, names)
 	} else {
+		// Low-level callers without a durable task can supply their own baseline.
 		tables, err = LoadConfiguredTables(ctx, src, r.cfg)
+		if err == nil && !recordExists {
+			snapshot, err = NewSourceSchema(r.cfg.SourceDatabase, tables)
+		}
 	}
 	if err != nil {
 		return err
@@ -82,31 +110,21 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err = ApplyLocatorStrategies(tables, r.cfg.LocatorStrategies); err != nil {
 			return err
 		}
-		record = BootstrapRecord{SourceSchema: r.cfg.SourceSchema, State: "completed", Position: r.cfg.Start, EffectiveTables: tableNames(tables), ExcludedTables: r.cfg.ScopeExclusions,
+		record = BootstrapRecord{SourceSchema: snapshot, State: "completed", Position: start, EffectiveTables: tableNames(tables), ExcludedTables: r.cfg.ScopeExclusions,
 			ManifestHash: r.cfg.ScopeManifestHash, LocatorStrategyVersion: LocatorStrategyVersion, LocatorStrategies: r.cfg.LocatorStrategies}
 		if record.ManifestHash == "" {
 			record.ManifestHash = HashBootstrapManifest(record)
 		}
-		if err = applier.SaveBootstrapRecord(ctx, record); err != nil {
+		if r.cfg.ManagedCheckpoint {
+			err = initializeTargetCheckpoint(ctx, applier, record)
+		} else {
+			err = applier.SaveBootstrapRecord(ctx, record)
+		}
+		if err != nil {
 			return fmt.Errorf("保存 CDC 定位策略失败: %w", err)
 		}
 	}
-	start := r.cfg.Start
-	hasCheckpoint := false
-	if cp, ok, e := applier.LoadCheckpoint(ctx); e != nil {
-		return e
-	} else if ok {
-		start = cp
-		hasCheckpoint = true
-	}
-	if start.GTID == "" && start.File == "" {
-		return fmt.Errorf("缺少 CDC 起始位点")
-	}
-	if !hasCheckpoint {
-		if err := applier.SaveCheckpoint(ctx, start); err != nil {
-			return err
-		}
-	}
+	setApplierForeignKeyScope(applier, tables)
 
 	cfg := replication.BinlogSyncerConfig{ServerID: r.cfg.ServerID, Flavor: "mysql", Host: r.cfg.SourceHost, Port: r.cfg.SourcePort,
 		User: r.cfg.SourceUser, Password: r.cfg.SourcePassword, ParseTime: r.cfg.TargetDBType != "dameng", HeartbeatPeriod: 10 * time.Second, ReadTimeout: 60 * time.Second,
@@ -212,7 +230,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := publish(time.Time{}, false); err != nil {
 		return err
 	}
-	commit := func(eventTime time.Time) error {
+	commit := func(eventTime time.Time, metadataOnly bool) error {
 		if PositionReached(applied, state.Position) {
 			// go-mysql may replay the most recently committed GTID after an
 			// internal reconnect. The target checkpoint is authoritative, so a
@@ -229,7 +247,11 @@ func (r *Runner) Run(ctx context.Context) error {
 				}
 			}
 			if e == nil {
-				stats, e = applier.Apply(eventCtx, state.Changes, state.Position)
+				if r.cfg.ManagedCheckpoint {
+					stats, e = applyExistingCheckpoint(eventCtx, applier, state.Changes, applied, state.Position, snapshot.Hash)
+				} else {
+					stats, e = applier.Apply(eventCtx, state.Changes, state.Position)
+				}
 			}
 			if e != nil {
 				var conflict *RowConflictError
@@ -241,10 +263,13 @@ func (r *Runner) Run(ctx context.Context) error {
 				return e
 			}
 			state.Changes = nil
+			if metadataOnly {
+				stats.LastEventAt = totals.LastEventAt
+			}
 			totals = addStats(totals, stats)
 			applied = state.Position
 		}
-		if err := publish(eventTime, false); err != nil {
+		if err := publish(eventTime, metadataOnly); err != nil {
 			totals.Position, totals.SourceHead = applied, head
 			emitStats(true)
 			return err
@@ -289,8 +314,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			return ErrDDLPause
 		}
-		if outcome.Commit {
-			if err := commit(outcome.Time); err != nil {
+		if outcome.MetadataProgress {
+			if err := commit(time.Time{}, true); err != nil {
+				return err
+			}
+		} else if outcome.Commit {
+			if err := commit(outcome.Time, false); err != nil {
 				return err
 			}
 		}
@@ -393,16 +422,8 @@ func addStats(a, b Stats) Stats {
 }
 
 func AcknowledgeDDL(ctx context.Context, cfg Config, p Position) error {
-	if cfg.TargetDBType == "dameng" {
-		_, err := AcknowledgeDamengDDL(ctx, cfg, p)
-		return err
-	}
-	a, e := newTargetApplier(ctx, cfg)
-	if e != nil {
-		return e
-	}
-	defer a.Close()
-	return a.SaveCheckpoint(ctx, p)
+	_, err := AcknowledgeDDLRecord(ctx, cfg, p)
+	return err
 }
 
 func SaveTargetCheckpoint(ctx context.Context, cfg Config, p Position) error {
@@ -415,7 +436,11 @@ func SaveTargetCheckpoint(ctx context.Context, cfg Config, p Position) error {
 }
 
 func LoadTargetCheckpoint(ctx context.Context, cfg Config) (Position, bool, error) {
-	a, e := newTargetApplier(ctx, cfg)
+	openApplier := newTargetApplier
+	if cfg.ManagedCheckpoint {
+		openApplier = newExistingTargetApplier
+	}
+	a, e := openApplier(ctx, cfg)
 	if e != nil {
 		return Position{}, false, e
 	}
@@ -424,7 +449,7 @@ func LoadTargetCheckpoint(ctx context.Context, cfg Config) (Position, bool, erro
 }
 
 func SaveTargetBootstrapRecord(ctx context.Context, cfg Config, record BootstrapRecord) error {
-	a, e := newTargetApplier(ctx, cfg)
+	a, e := openBootstrapTargetForUpdate(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -433,7 +458,11 @@ func SaveTargetBootstrapRecord(ctx context.Context, cfg Config, record Bootstrap
 }
 
 func LoadTargetBootstrapRecord(ctx context.Context, cfg Config) (BootstrapRecord, bool, error) {
-	a, e := newTargetApplier(ctx, cfg)
+	openApplier := newTargetApplier
+	if cfg.ManagedCheckpoint {
+		openApplier = newExistingTargetApplier
+	}
+	a, e := openApplier(ctx, cfg)
 	if e != nil {
 		return BootstrapRecord{}, false, e
 	}
@@ -442,7 +471,7 @@ func LoadTargetBootstrapRecord(ctx context.Context, cfg Config) (BootstrapRecord
 }
 
 func FinalizeTargetBootstrap(ctx context.Context, cfg Config, record BootstrapRecord) error {
-	a, e := newTargetApplier(ctx, cfg)
+	a, e := openBootstrapTargetForUpdate(ctx, cfg)
 	if e != nil {
 		return e
 	}
@@ -451,12 +480,27 @@ func FinalizeTargetBootstrap(ctx context.Context, cfg Config, record BootstrapRe
 }
 
 func AbortTargetBootstrap(ctx context.Context, cfg Config) error {
-	a, e := newTargetApplier(ctx, cfg)
+	a, e := openBootstrapTargetForUpdate(ctx, cfg)
 	if e != nil {
 		return e
 	}
 	defer a.Close()
 	return a.MarkBootstrapAborted(ctx)
+}
+
+func openBootstrapTargetForUpdate(ctx context.Context, cfg Config) (targetApplier, error) {
+	if !cfg.ManagedCheckpoint {
+		return newTargetApplier(ctx, cfg)
+	}
+	a, err := newExistingTargetApplier(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err = checkTargetSchemaOwner(ctx, a); err != nil {
+		a.Close()
+		return nil, err
+	}
+	return a, nil
 }
 
 func SyncSequences(ctx context.Context, cfg Config) error {

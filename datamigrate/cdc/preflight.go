@@ -28,17 +28,15 @@ func Preflight(ctx context.Context, cfg Config, incrementalOnly bool) PreflightR
 		r.Errors = append(r.Errors, "读取 binlog 配置失败: "+err.Error())
 		return r
 	}
-	if cfg.TargetDBType == "dameng" {
-		var compression string
-		err := src.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_transaction_compression").Scan(&compression)
-		var mysqlErr *mysqldriver.MySQLError
-		if err != nil && !(errors.As(err, &mysqlErr) && mysqlErr.Number == 1193) {
-			r.Errors = append(r.Errors, "读取事务压缩配置失败: "+err.Error())
-		} else if strings.EqualFold(compression, "ON") || compression == "1" {
-			r.Errors = append(r.Errors, "达梦 CDC 暂不支持 binlog_transaction_compression，请关闭并重新建立全量或经过核验的增量起点；历史压缩事件不会因关闭配置而改变")
-		}
-		r.Warnings = append(r.Warnings, "达梦 CDC 暂不支持显式 XA 和历史压缩事务；运行时遇到将停止并保留检查点")
+	var compression string
+	compressionErr := src.QueryRowContext(ctx, "SELECT @@GLOBAL.binlog_transaction_compression").Scan(&compression)
+	var mysqlErr *mysqldriver.MySQLError
+	if compressionErr != nil && !(errors.As(compressionErr, &mysqlErr) && mysqlErr.Number == 1193) {
+		r.Errors = append(r.Errors, "读取事务压缩配置失败: "+compressionErr.Error())
+	} else if strings.EqualFold(compression, "ON") || compression == "1" {
+		r.Errors = append(r.Errors, "CDC 暂不支持 binlog_transaction_compression，请关闭并重新建立全量或经过核验的增量起点；历史压缩事件不会因关闭配置而改变")
 	}
+	r.Warnings = append(r.Warnings, "CDC 暂不支持显式 XA、压缩事务和部分行镜像；运行时遇到将停止并保留检查点")
 	r.LogBin = strings.EqualFold(logBin, "ON") || logBin == "1"
 	r.BinlogFormat, r.BinlogRowImage, r.GTIDMode = format, image, gtid
 	if !r.LogBin {

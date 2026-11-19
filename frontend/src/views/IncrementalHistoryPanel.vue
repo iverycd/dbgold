@@ -45,7 +45,7 @@
             <div class="status-cell">
               <a-tooltip :content="record.last_error || record.summary || incrementalStatusText(record.status)" mini>
                 <a-tag :color="incrementalStatusColor(record.status)">
-                  {{ record.status !== 'stopped' && (record.locator_strategy_version !== 1 || legacyDamengSchema(record)) ? '版本升级后已废弃' : incrementalStatusText(record.status) }}
+                  {{ record.status !== 'stopped' && (record.locator_strategy_version !== 1 || legacyIncrementalSchema(record)) ? '版本升级后已废弃' : incrementalStatusText(record.status) }}
                 </a-tag>
               </a-tooltip>
               <span :class="['progress-note', { caught: record.caught_up }]">{{ progressText(record) }}</span>
@@ -141,13 +141,15 @@ import {
   abortable,
   cancelable,
   completable,
+  cutoverContentNeedsAcknowledgment,
+  cutoverHasWarnings,
   formatIncrementalDate,
   incrementalStatusColor,
   incrementalStatusText,
   pausable,
   preparable,
   resumable,
-  legacyDamengSchema,
+  legacyIncrementalSchema,
 } from '@/utils/incrementalJob'
 
 type PageSize = 20 | 50 | 100
@@ -293,11 +295,11 @@ function availableActions(job: IncrementalJob): RowAction[] {
   const actions: RowAction[] = []
   if (pausable(job)) actions.push({ value: 'pause', label: '暂停', type: 'secondary' })
   if (resumable(job)) actions.push({ value: 'resume', label: '恢复', type: 'primary' })
-  if (job.status === 'paused_ddl' && !legacyDamengSchema(job)) actions.push({ value: 'ack', label: '确认 DDL', type: 'primary' })
+  if (job.status === 'paused_ddl' && !legacyIncrementalSchema(job)) actions.push({ value: 'ack', label: '确认 DDL', type: 'primary' })
   if (job.status === 'paused_bootstrap_review') actions.push({ value: 'detail', label: '处理', type: 'primary' })
   if (preparable(job.status)) actions.push({ value: 'prepare', label: '准备切换', type: 'primary' })
   if (cancelable(job.status)) actions.push({ value: 'cancel', label: '取消切换', type: 'secondary' })
-  if (completable(job.status)) actions.push({ value: 'complete', label: '完成切换', type: 'primary' })
+  if (completable(job)) actions.push({ value: 'complete', label: '完成切换', type: 'primary' })
   if (abortable(job.status)) actions.push({ value: 'abort', label: '放弃任务' })
   return actions
 }
@@ -317,16 +319,35 @@ function secondaryActions(job: IncrementalJob) {
   return availableActions(job).filter(action => action.value !== primary?.value)
 }
 
-function confirmAction(title: string, content: string, action: () => Promise<unknown>, danger = false) {
+function confirmAction(title: string, content: string, action: () => Promise<unknown> | void, danger = false, okText = '确认') {
   Modal.confirm({
     title,
     content,
     maskClosable: false,
-    okText: '确认',
+    okText,
     cancelText: '取消',
     okButtonProps: danger ? { status: 'danger' } : undefined,
     onOk: action,
   })
+}
+
+function confirmComplete(job: IncrementalJob) {
+  if (!completable(job)) return
+  const warnings = cutoverHasWarnings(job)
+  const complete = (waive: boolean) => act(
+    () => stopIncrementalJob(job.job_id, warnings, job.excluded_table_count > 0, waive),
+    waive ? '内容校验已人工豁免，切换完成' : '切换完成',
+  )
+  confirmAction(
+    '完成切换',
+    warnings
+      ? `请确认源库和目标库仍停写，且已核对同步警告及 ${job.excluded_table_count} 张排除表。`
+      : '请确认源库和目标库仍保持停写。',
+    () => {
+      if (!cutoverContentNeedsAcknowledgment(job)) return complete(false)
+      confirmAction('确认豁免内容校验', '部分表内容有差异或无法完成校验。请核对任务详情中的最终校验结果。确认接受并继续切换？', () => complete(true), true, '确认豁免并切换')
+    },
+  )
 }
 
 function runAction(value: string, job: IncrementalJob) {
@@ -350,13 +371,7 @@ function runAction(value: string, job: IncrementalJob) {
       void act(() => cancelIncrementalCutover(job.job_id), '已取消切换并继续同步')
       break
     case 'complete':
-      confirmAction(
-        '完成切换',
-        job.status === 'ready_with_warnings'
-          ? `存在同步警告或 ${job.excluded_table_count || 0} 张排除表，请确认已核对并接受当前迁移范围。`
-          : '请确认源库仍保持停写，并完成迁移切换。',
-        () => act(() => stopIncrementalJob(job.job_id, job.status === 'ready_with_warnings', job.excluded_table_count > 0), '迁移闭环已安全完成'),
-      )
+      confirmComplete(job)
       break
     case 'abort':
       confirmAction('放弃任务', '放弃后不能恢复，目标端数据不会自动删除。', () => act(() => abortIncrementalJob(job.job_id), '任务已放弃'), true)

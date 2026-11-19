@@ -15,10 +15,11 @@ import (
 // DamengApplier applies a complete source transaction and its checkpoint on
 // one physical DM session. Schema changes never run inside that transaction.
 type DamengApplier struct {
-	db     *sql.DB
-	cfg    Config
-	schema string
-	jobID  string
+	db              *sql.DB
+	cfg             Config
+	schema          string
+	jobID           string
+	checkpointGuard *targetCheckpointGuard
 }
 
 func newDamengApplier(ctx context.Context, cfg Config) (*DamengApplier, error) {
@@ -33,6 +34,9 @@ func newDamengApplier(ctx context.Context, cfg Config) (*DamengApplier, error) {
 		return nil, err
 	}
 	a := &DamengApplier{db: db, cfg: cfg, schema: cfg.TargetSchema, jobID: cfg.JobID}
+	if cfg.RequireExistingCheckpoint {
+		return a, nil
+	}
 	if err = a.ensureCheckpoint(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -140,6 +144,11 @@ func (a *DamengApplier) Apply(ctx context.Context, changes []Change, p Position)
 		return Stats{}, err
 	}
 	defer tx.Rollback()
+	if a.checkpointGuard != nil {
+		if err = lockTargetCheckpoint(ctx, tx, a, *a.checkpointGuard); err != nil {
+			return Stats{}, err
+		}
+	}
 	identityTable := ""
 	defer func() {
 		if identityTable == "" {
@@ -248,13 +257,14 @@ func (a *DamengApplier) SyncSequences(ctx context.Context, tables []TableInfo) e
 	if err != nil {
 		return err
 	}
-	var source *sql.DB
+	var source *sql.Conn
 	if a.cfg.SourceDSN != "" {
-		source, err = OpenSource(a.cfg.SourceDSN)
+		var closeSource func()
+		source, closeSource, err = openMySQLSequenceSource(ctx, a.cfg.SourceDSN)
 		if err != nil {
 			return err
 		}
-		defer source.Close()
+		defer closeSource()
 	}
 	for _, table := range tables {
 		target := metadata.Tables[a.name(table.Name)]
@@ -279,7 +289,7 @@ func (a *DamengApplier) SyncSequences(ctx context.Context, tables []TableInfo) e
 			}
 			var sourceNext sql.NullString
 			if source != nil {
-				if err = source.QueryRowContext(ctx, `SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?`, a.cfg.SourceDatabase, table.Name).Scan(&sourceNext); err != nil {
+				if err = source.QueryRowContext(ctx, mysqlAutoIncrementNextSQL, a.cfg.SourceDatabase, table.Name).Scan(&sourceNext); err != nil {
 					return fmt.Errorf("读取源表 %s 自增水位失败: %w", table.Name, err)
 				}
 			}

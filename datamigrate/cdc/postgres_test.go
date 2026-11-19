@@ -71,8 +71,18 @@ func TestSyncSequencesFallsBackToCatalog(t *testing.T) {
 	mock.ExpectQuery(sequenceCatalogQuery).
 		WithArgs("target", "seq_code_itemlev_sysid").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectExec(`SELECT setval($1::regclass, COALESCE((SELECT MAX("sysid") FROM "target"."code_itemlev"), 0) + 1, false)`).
-		WithArgs(`"target"."seq_code_itemlev_sysid"`).
+	mock.ExpectQuery(postgresSequenceBoundsSQL).WithArgs(`"target"."seq_code_itemlev_sysid"`).
+		WillReturnRows(sqlmock.NewRows([]string{"schema", "name", "min", "max", "step", "cycle"}).AddRow("target", "seq_code_itemlev_sysid", 1, 1000, 1, "NO"))
+	mock.ExpectQuery(`SELECT last_value,is_called FROM "target"."seq_code_itemlev_sysid"`).
+		WillReturnRows(sqlmock.NewRows([]string{"last_value", "is_called"}).AddRow(1, false))
+	mock.ExpectQuery(postgresSequenceColumnBoundsSQL).WithArgs("target", "code_itemlev", "sysid").
+		WillReturnRows(sqlmock.NewRows([]string{"data_type", "precision", "scale"}).AddRow("bigint", 64, 0))
+	mock.ExpectQuery(`SELECT MAX("sysid") FROM "target"."code_itemlev"`).
+		WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(99))
+	mock.ExpectQuery(`SELECT last_value,is_called FROM "target"."seq_code_itemlev_sysid"`).
+		WillReturnRows(sqlmock.NewRows([]string{"last_value", "is_called"}).AddRow(1, false))
+	mock.ExpectExec(`SELECT setval($1::regclass,$2,false)`).
+		WithArgs(`"target"."seq_code_itemlev_sysid"`, int64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := a.SyncSequences(context.Background(), tables); err != nil {

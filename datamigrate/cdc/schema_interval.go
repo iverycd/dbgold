@@ -56,6 +56,9 @@ func validateSchemaInterval(ctx context.Context, cfg Config, start, head Positio
 			// caller claims to have applied, potentially hiding a later DDL while
 			// replaying an earlier row. Locate the first missing transaction, then
 			// inspect EVERY physical event from there to the captured head.
+			if ev.Header.EventType == replication.GTID_TAGGED_LOG_EVENT {
+				return unsupportedTaggedGTID(p, ev.Header.LogPos)
+			}
 			if ev.Header.EventType != replication.GTID_EVENT && ev.Header.EventType != replication.ANONYMOUS_GTID_EVENT {
 				continue
 			}
@@ -80,7 +83,7 @@ func validateSchemaInterval(ctx context.Context, cfg Config, start, head Positio
 				return fmt.Errorf("起点之后存在源 DDL，无法用当前结构解释历史 binlog（%s:%d）；请重新建立全量或增量起点", p.File, p.Pos)
 			}
 		}
-		if err = checkDamengEvent(ev, p); err != nil {
+		if err = checkUnsupportedBinlogEvent(ev, p, false); err != nil {
 			return err
 		}
 		if err = boundary.consume(ev); err != nil {
@@ -103,7 +106,7 @@ type intervalTransactionState struct{ open bool }
 
 func (s *intervalTransactionState) consume(ev *replication.BinlogEvent) error {
 	switch ev.Header.EventType {
-	case replication.GTID_EVENT, replication.ANONYMOUS_GTID_EVENT:
+	case replication.GTID_EVENT, replication.ANONYMOUS_GTID_EVENT, replication.GTID_TAGGED_LOG_EVENT:
 		if s.open {
 			return fmt.Errorf("前一事务缺少提交事件")
 		}
@@ -115,11 +118,16 @@ func (s *intervalTransactionState) consume(ev *replication.BinlogEvent) error {
 		case "BEGIN":
 			s.open = true
 		case "SAVEPOINT", "RELEASE":
+			if !s.open {
+				return fmt.Errorf("起点位于事务内部，请使用提交后的位点")
+			}
 		case "COMMIT", "ROLLBACK":
 			if !s.open {
 				return fmt.Errorf("起点位于事务内部，请使用提交后的位点")
 			}
-			s.open = false
+			if !strings.HasPrefix(strings.ToUpper(query), "ROLLBACK TO ") {
+				s.open = false
+			}
 		default:
 			s.open = false // stand-alone statement/DDL, including other schemas
 		}

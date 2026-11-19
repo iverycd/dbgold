@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDamengUnsupportedEventsNeverCommitBufferedRows(t *testing.T) {
-	for _, tc := range []struct {
+func TestUnsupportedEventsNeverCommitBufferedRows(t *testing.T) {
+	tests := []struct {
 		name  string
 		kind  replication.EventType
 		event replication.Event
@@ -19,18 +19,77 @@ func TestDamengUnsupportedEventsNeverCommitBufferedRows(t *testing.T) {
 		{"xa rollback", replication.QUERY_EVENT, &replication.QueryEvent{Query: []byte("/* comment */ XA ROLLBACK 'x'")}},
 		{"xa executable comment", replication.QUERY_EVENT, &replication.QueryEvent{Query: []byte("/*!80000 XA START 'x' */")}},
 		{"xa adjacent comment", replication.QUERY_EVENT, &replication.QueryEvent{Query: []byte("XA/*comment*/COMMIT 'x' ONE PHASE")}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			before := Position{File: "mysql-bin.000001", Pos: 123}
-			state := newTransactionState(Config{TargetDBType: "dameng"}, nil, before)
-			state.Changes = []Change{{Action: "insert", After: []any{1}}}
-			result, err := state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: tc.kind, LogPos: 456}, Event: tc.event})
-			require.ErrorContains(t, err, "原检查点保留")
-			require.False(t, result.Commit)
-			require.Empty(t, state.Changes)
-			require.Equal(t, before, state.Position)
-		})
+		{"partial row", replication.UPDATE_ROWS_EVENTv2, &replication.RowsEvent{Table: &replication.TableMapEvent{Schema: []byte("app"), Table: []byte("t")}, SkippedColumns: [][]int{{0}}}},
+		{"partial json", replication.PARTIAL_UPDATE_ROWS_EVENT, &replication.RowsEvent{Table: &replication.TableMapEvent{Schema: []byte("app"), Table: []byte("t")}}},
 	}
+	for _, dbType := range []string{"postgres", "dameng"} {
+		for _, tc := range tests {
+			t.Run(dbType+"/"+tc.name, func(t *testing.T) {
+				before := Position{File: "mysql-bin.000001", Pos: 123}
+				state := newTransactionState(Config{TargetDBType: dbType, SourceDatabase: "app"}, []TableInfo{{Name: "t"}}, before)
+				state.Changes = []Change{{Action: "insert", After: []any{1}}}
+				result, err := state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: tc.kind, LogPos: 456}, Event: tc.event})
+				require.ErrorContains(t, err, "原检查点保留")
+				require.ErrorContains(t, err, "mysql-bin.000001:456")
+				require.False(t, result.Commit)
+				require.False(t, result.MetadataProgress)
+				require.Empty(t, state.Changes)
+				require.Equal(t, before, state.Position)
+			})
+		}
+	}
+}
+
+func TestFileCheckpointProgressUsesOnlyNewBinlogHeaders(t *testing.T) {
+	old := Position{File: "bin.000001", Pos: 200}
+	next := &replication.RotateEvent{NextLogName: []byte("bin.000002"), Position: 4}
+	rotate := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.ROTATE_EVENT, LogPos: 250, Timestamp: 15}, Event: next}
+	format := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.FORMAT_DESCRIPTION_EVENT, LogPos: 123, EventSize: 119, Timestamp: 15}, Event: &replication.FormatDescriptionEvent{}}
+	previousGTIDs := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.PREVIOUS_GTIDS_EVENT, LogPos: 150, EventSize: 27, Timestamp: 15}, Event: &replication.PreviousGTIDsEvent{}}
+	state := newTransactionState(Config{}, nil, old)
+	out, err := state.Consume(rotate)
+	require.NoError(t, err)
+	require.False(t, out.MetadataProgress)
+	// The physical Rotate may be followed by an artificial copy identifying
+	// the same file before its actual FORMAT_DESCRIPTION is sent.
+	out, err = state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.ROTATE_EVENT}, Event: next})
+	require.NoError(t, err)
+	require.False(t, out.MetadataProgress)
+	out, err = state.Consume(format)
+	require.NoError(t, err)
+	require.True(t, out.MetadataProgress)
+	require.False(t, out.Commit)
+	require.Equal(t, Position{File: "bin.000002", Pos: 123}, state.Position)
+	_, err = state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.HEARTBEAT_EVENT, LogPos: 900}, Event: &replication.HeartbeatEvent{}})
+	require.NoError(t, err)
+	require.Equal(t, Position{File: "bin.000002", Pos: 123}, state.Position)
+	out, err = state.Consume(previousGTIDs)
+	require.NoError(t, err)
+	require.True(t, out.MetadataProgress)
+	require.Equal(t, Position{File: "bin.000002", Pos: 150}, state.Position)
+
+	state = newTransactionState(Config{}, nil, old)
+	out, err = state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.ROTATE_EVENT}, Event: next})
+	require.NoError(t, err)
+	require.False(t, out.MetadataProgress)
+	out, err = state.Consume(format)
+	require.NoError(t, err)
+	require.False(t, out.MetadataProgress)
+
+	state = newTransactionState(Config{}, nil, old)
+	_, err = state.Consume(&replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.TABLE_MAP_EVENT}, Event: &replication.TableMapEvent{}})
+	require.NoError(t, err)
+	out, err = state.Consume(rotate)
+	require.ErrorContains(t, err, "尚未结束")
+	require.False(t, out.MetadataProgress)
+	require.Equal(t, old, state.Position)
+
+	state = newTransactionState(Config{}, nil, Position{File: old.File, Pos: old.Pos, GTID: "11111111-1111-1111-1111-111111111111:1"})
+	_, err = state.Consume(rotate)
+	require.NoError(t, err)
+	out, err = state.Consume(format)
+	require.NoError(t, err)
+	require.False(t, out.MetadataProgress)
 }
 func TestTransactionStateCommitRollbackAndDDL(t *testing.T) {
 	state := newTransactionState(Config{TargetDBType: "dameng", SourceDatabase: "SourceCase"}, nil, Position{File: "bin.000001", Pos: 4})

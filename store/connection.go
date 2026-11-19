@@ -8,7 +8,7 @@ import (
 
 var (
 	ErrConnectionChanged = errors.New("连接配置已变化，请刷新后重试")
-	ErrConnectionInUse   = errors.New("该连接有未终止的增量任务，请先停止或放弃任务后再修改数据库")
+	ErrConnectionInUse   = errors.New("该连接有未终止的增量任务，请先完成切换或放弃任务，再修改连接端点或删除连接")
 )
 
 func CreateConnection(c *Connection) error {
@@ -64,7 +64,14 @@ func UpdateConnection(id uint, updates map[string]any) error {
 		if err := tx.First(&current, id).Error; err != nil {
 			return err
 		}
-		if database, ok := updates["database"].(string); ok && database != current.Database {
+		endpointChanged := false
+		for field, existing := range map[string]any{"db_type": current.DBType, "host": current.Host, "port": current.Port, "database": current.Database} {
+			if replacement, ok := updates[field]; ok && replacement != existing {
+				endpointChanged = true
+				break
+			}
+		}
+		if endpointChanged {
 			if err := checkConnectionDatabaseUse(tx, id); err != nil {
 				return err
 			}
@@ -153,5 +160,10 @@ func CheckConnectionSnapshots(connections ...*Connection) error {
 }
 
 func DeleteConnection(id uint) error {
-	return DB.Delete(&Connection{}, id).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := checkConnectionDatabaseUse(tx, id); err != nil {
+			return err
+		}
+		return tx.Delete(&Connection{}, id).Error
+	})
 }

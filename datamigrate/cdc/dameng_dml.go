@@ -2,6 +2,7 @@ package cdc
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
@@ -11,10 +12,11 @@ import (
 )
 
 type damengRow struct {
-	applier  *DamengApplier
-	table    *TableInfo
-	columns  []targetColumnMetadata
-	identity []int
+	applier                    *DamengApplier
+	table                      *TableInfo
+	columns                    []targetColumnMetadata
+	identity                   []int
+	identityReplacementChecked bool
 }
 
 func newDamengRow(a *DamengApplier, table *TableInfo, target *targetTableMetadata) (*damengRow, error) {
@@ -176,7 +178,7 @@ func (r *damengRow) insert(ctx context.Context, tx damengDMLExecutor, row []any,
 	_, err := tx.ExecContext(ctx, "INSERT INTO "+r.qualified()+" ("+strings.Join(cols, ",")+") VALUES ("+strings.Join(marks, ",")+")", args...)
 	return err
 }
-func (r *damengRow) delete(ctx context.Context, tx damengDMLExecutor, before []any, full bool) error {
+func (r *damengRow) delete(ctx context.Context, tx damengDMLExecutor, before []any, full, requireMatch bool) error {
 	indexes := r.allIndexes()
 	if !full {
 		var err error
@@ -196,12 +198,12 @@ func (r *damengRow) delete(ctx context.Context, tx damengDMLExecutor, before []a
 	if err != nil {
 		return err
 	}
-	if full {
+	if full || requireMatch {
 		return requireOneFullRow(r.table, "delete", before, result)
 	}
 	return nil
 }
-func (r *damengRow) update(ctx context.Context, tx damengDMLExecutor, before, after []any, full bool) (int64, error) {
+func (r *damengRow) update(ctx context.Context, tx damengDMLExecutor, before, after []any, full, moveLocator bool) (int64, error) {
 	identity := map[int]bool{}
 	for _, i := range r.identity {
 		identity[i] = true
@@ -231,7 +233,7 @@ func (r *damengRow) update(ctx context.Context, tx damengDMLExecutor, before, af
 	var sets []string
 	var args []any
 	for i, value := range after {
-		if identity[i] || (!full && locator[i]) {
+		if identity[i] || (!full && locator[i] && !moveLocator) {
 			continue
 		}
 		mark, v, e := r.bind(i, value)
@@ -260,7 +262,7 @@ func (r *damengRow) upsert(ctx context.Context, tx damengDMLExecutor, row []any,
 	if r.table.LocatorStrategy == LocatorFullRow {
 		return r.insert(ctx, tx, row, setIdentity)
 	}
-	n, err := r.update(ctx, tx, row, row, false)
+	n, err := r.update(ctx, tx, row, row, false, false)
 	if err != nil {
 		return err
 	}
@@ -272,8 +274,26 @@ func (r *damengRow) upsert(ctx context.Context, tx damengDMLExecutor, row []any,
 	}
 	// A matching locator with a different identity cannot be updated in DM.
 	if len(r.identity) > 0 {
-		if err = r.delete(ctx, tx, row, false); err != nil {
+		indexes, err := locatorColumnIndexes(r.table)
+		if err != nil {
 			return err
+		}
+		where, args, err := r.predicate(indexes, row)
+		if err != nil {
+			return err
+		}
+		var exists int
+		err = tx.QueryRowContext(ctx, "SELECT 1 FROM "+r.qualified()+" WHERE "+where+" AND ROWNUM=1 FOR UPDATE", args...).Scan(&exists)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			if err = r.guardIdentityReplacement(ctx, tx); err != nil {
+				return err
+			}
+			if err = r.delete(ctx, tx, row, false, true); err != nil {
+				return err
+			}
 		}
 	}
 	return r.insert(ctx, tx, row, setIdentity)
@@ -298,25 +318,27 @@ func (r *damengRow) apply(ctx context.Context, tx damengDMLExecutor, ch Change, 
 	case "insert":
 		return r.upsert(ctx, tx, after, setIdentity)
 	case "delete":
-		return r.delete(ctx, tx, before, full)
+		return r.delete(ctx, tx, before, full, false)
 	case "update":
-		if full {
-			if r.identityChanged(before, after) {
-				if err = r.delete(ctx, tx, before, true); err != nil {
-					return err
-				}
-				return r.insert(ctx, tx, after, setIdentity)
+		if err = r.checkForeignKeyUpdate(ch); err != nil {
+			return err
+		}
+		if r.identityChanged(before, after) {
+			if err = r.guardIdentityReplacement(ctx, tx); err != nil {
+				return err
 			}
-			n, e := r.update(ctx, tx, before, after, true)
+			if err = r.delete(ctx, tx, before, full, true); err != nil {
+				return err
+			}
+			return r.insert(ctx, tx, after, setIdentity)
+		}
+		moveLocator := !full && locatorChanged(r.table, before, after)
+		if full || moveLocator {
+			n, e := r.update(ctx, tx, before, after, full, moveLocator)
 			if e != nil {
 				return e
 			}
 			return requireOneFullRow(r.table, "update", ch.Before, damengRowsAffected(n))
-		}
-		if locatorChanged(r.table, before, after) || r.identityChanged(before, after) {
-			if err = r.delete(ctx, tx, before, false); err != nil {
-				return err
-			}
 		}
 		return r.upsert(ctx, tx, after, setIdentity)
 	}

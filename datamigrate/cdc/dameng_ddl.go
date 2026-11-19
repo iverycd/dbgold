@@ -9,14 +9,34 @@ import (
 	"gitee.com/chunanyong/dm"
 )
 
-// AcknowledgeDamengDDL verifies the source schema at the DDL boundary before
-// atomically replacing BOTH the target checkpoint and its decoding metadata.
 func AcknowledgeDamengDDL(ctx context.Context, cfg Config, p Position) (BootstrapRecord, error) {
-	a, err := newDamengApplier(ctx, cfg)
+	cfg.TargetDBType = "dameng"
+	return AcknowledgeDDLRecord(ctx, cfg, p)
+}
+
+type ddlCheckpointApplier interface {
+	targetApplier
+	ddlAcknowledged(context.Context, Position) (bool, error)
+	acknowledgeDDL(context.Context, BootstrapRecord, BootstrapRecord) error
+}
+
+// AcknowledgeDDLRecord verifies the schema at the DDL boundary before updating
+// the target checkpoint, source schema, and row locator strategy together.
+func AcknowledgeDDLRecord(ctx context.Context, cfg Config, p Position) (BootstrapRecord, error) {
+	base, err := newExistingTargetApplier(ctx, cfg)
 	if err != nil {
 		return BootstrapRecord{}, err
 	}
-	defer a.Close()
+	defer base.Close()
+	if cfg.ManagedCheckpoint {
+		if err = checkTargetSchemaOwner(ctx, base); err != nil {
+			return BootstrapRecord{}, err
+		}
+	}
+	a, ok := base.(ddlCheckpointApplier)
+	if !ok {
+		return BootstrapRecord{}, fmt.Errorf("当前目标库不支持确认 CDC DDL")
+	}
 	current, exists, err := a.LoadBootstrapRecord(ctx)
 	if err != nil {
 		return current, err
@@ -58,6 +78,11 @@ func AcknowledgeDamengDDL(ctx context.Context, cfg Config, p Position) (Bootstra
 	if len(failures) > 0 {
 		return current, fmt.Errorf("DDL 后目标结构不兼容: %v", failures)
 	}
+	if pg, ok := a.(*PostgresApplier); ok {
+		if err = pg.inspectSpatial(ctx, tables); err != nil {
+			return current, err
+		}
+	}
 	if err = a.CheckBusinessTriggers(ctx, tables); err != nil {
 		return current, err
 	}
@@ -87,6 +112,11 @@ func (a *DamengApplier) acknowledgeDDL(ctx context.Context, expected, next Boots
 		return err
 	}
 	defer tx.Rollback()
+	if a.cfg.ManagedCheckpoint {
+		if err = checkpointStoreFor(a).requireOwner(ctx, tx, true); err != nil {
+			return err
+		}
+	}
 	var file, gtid, hash sql.NullString
 	var pos uint32
 	var state string

@@ -18,6 +18,11 @@ type IncrementalMigrationJobWithConn struct {
 type IncrementalMigrationJob struct {
 	SourceSchemaVersion int    `gorm:"not null;default:0" json:"source_schema_version"`
 	SourceSchemaJSON    string `json:"-"`
+	CheckpointManaged   bool   `gorm:"not null;default:false" json:"-"`
+
+	ContentValidationState    string     `json:"content_validation_state"`
+	ContentValidationWaivedBy uint       `json:"content_validation_waived_by,omitempty"`
+	ContentValidationWaivedAt *time.Time `json:"content_validation_waived_at,omitempty"`
 
 	ID                     uint       `gorm:"primaryKey" json:"id"`
 	OwnerID                uint       `gorm:"index;not null" json:"owner_id"`
@@ -311,6 +316,15 @@ func HasOpenIncrementalTarget(dstConnID uint, targetSchema string) (bool, error)
 	return count > 0, err
 }
 
+// LegacyIncrementalTargetJobs lists jobs which predate physical ownership.
+func LegacyIncrementalTargetJobs(schema string) ([]string, error) {
+	var jobs []string
+	err := DB.Model(&IncrementalMigrationJob{}).
+		Where("LOWER(target_schema) = LOWER(?) AND checkpoint_managed = ? AND status NOT IN ?", schema, false, []string{"stopped", "aborted"}).
+		Pluck("job_id", &jobs).Error
+	return jobs, err
+}
+
 func UpdateIncrementalJob(jobID string, fields map[string]any) error {
 	return DB.Model(&IncrementalMigrationJob{}).Where("job_id = ?", jobID).Updates(fields).Error
 }
@@ -320,6 +334,15 @@ func UpdateIncrementalJob(jobID string, fields map[string]any) error {
 func UpdateIncrementalJobIfStatus(jobID string, statuses []string, fields map[string]any) (bool, error) {
 	result := DB.Model(&IncrementalMigrationJob{}).
 		Where("job_id = ? AND status IN ?", jobID, statuses).
+		Updates(fields)
+	return result.RowsAffected == 1, result.Error
+}
+
+// CompleteIncrementalCutover binds an operator's decision to the same
+// validation attempt and boundary the completion request reviewed.
+func CompleteIncrementalCutover(job *IncrementalMigrationJob, fields map[string]any) (bool, error) {
+	result := DB.Model(&IncrementalMigrationJob{}).
+		Where("job_id = ? AND status = ? AND updated_at = ?", job.JobID, job.Status, job.UpdatedAt).
 		Updates(fields)
 	return result.RowsAffected == 1, result.Error
 }
@@ -371,6 +394,14 @@ func DiscardLegacyIncrementalJobs() error {
 		Updates(map[string]any{"status": "aborted", "phase": "aborted", "finished_at": &now,
 			"summary":    "达梦 CDC 源结构快照已升级，旧任务不能恢复，请重新建立全量或增量起点",
 			"last_error": "达梦 CDC 源结构快照已升级，旧任务不能恢复，请重新建立全量或增量起点"}).Error; err != nil {
+		return err
+	}
+	if err := DB.Model(&IncrementalMigrationJob{}).
+		Where("dst_db_type IN ? AND source_schema_version <> ? AND status NOT IN ?",
+			[]string{"postgres", "gaussdb", "highgo", "vastbase", "gbase", "kingbase", "seabox"}, 1, []string{"stopped", "aborted"}).
+		Updates(map[string]any{"status": "aborted", "phase": "aborted", "finished_at": &now,
+			"summary":    "旧版 PostgreSQL 系列 CDC 任务缺少冻结的源结构，请重新建立全量或经核验的增量起点",
+			"last_error": "旧版 PostgreSQL 系列 CDC 任务缺少冻结的源结构，请重新建立全量或经核验的增量起点"}).Error; err != nil {
 		return err
 	}
 

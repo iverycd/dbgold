@@ -3,8 +3,6 @@ package cdc
 import (
 	"bytes"
 	"fmt"
-	"math"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -26,21 +24,7 @@ func convertDamengBinlogRow(table *TableInfo, row []any) ([]any, error) {
 	converter := valueconv.NewDaMeng()
 	for i, value := range row {
 		dt := strings.ToUpper(table.ColumnTypes[i])
-		definition := ""
-		if i < len(table.ColumnDefinitions) {
-			definition = table.ColumnDefinitions[i]
-		}
-		var err error
-		if value != nil {
-			switch dt {
-			case "ENUM", "SET":
-				value, err = damengEnumSetValue(value, definition, dt)
-			case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT":
-				if strings.Contains(strings.ToLower(definition), "unsigned") {
-					value, err = damengUnsignedValue(value, dt)
-				}
-			}
-		}
+		value, err := decodeMySQLBinlogValue(table, i, value)
 		if err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", table.Name, table.Columns[i], err)
 		}
@@ -139,163 +123,4 @@ func decodeDamengMySQLText(value any, charset string) (string, error) {
 		return "", fmt.Errorf("MySQL %s binlog 文本不能无损解码", charset)
 	}
 	return string(decoded), nil
-}
-
-func damengUnsignedValue(value any, dt string) (any, error) {
-	var n uint64
-	switch v := value.(type) {
-	case int8:
-		n = uint64(uint8(v))
-	case int16:
-		n = uint64(uint16(v))
-	case int32:
-		n = uint64(uint32(v))
-		if dt == "MEDIUMINT" {
-			n &= 0xffffff
-		}
-	case int64:
-		n = uint64(v)
-		switch dt {
-		case "TINYINT":
-			n &= 0xff
-		case "SMALLINT":
-			n &= 0xffff
-		case "MEDIUMINT":
-			n &= 0xffffff
-		case "INT", "INTEGER":
-			n &= 0xffffffff
-		}
-	case int:
-		return damengUnsignedValue(int64(v), dt)
-	case uint8:
-		n = uint64(v)
-	case uint16:
-		n = uint64(v)
-	case uint32:
-		n = uint64(v)
-	case uint64:
-		n = v
-	case string, []byte:
-		return value, nil
-	default:
-		return nil, fmt.Errorf("UNSIGNED 列不支持 binlog 值类型 %T", value)
-	}
-	if n > math.MaxInt64 {
-		// The DM driver casts uint64 to int64. Decimal text lets the target
-		// reject an insufficient column range instead of storing a negative ID.
-		return strconv.FormatUint(n, 10), nil
-	}
-	return int64(n), nil
-}
-
-func damengEnumSetValue(value any, definition, kind string) (any, error) {
-	if text, ok := value.(string); ok {
-		return text, nil
-	}
-	if text, ok := value.([]byte); ok {
-		return string(text), nil
-	}
-	var n uint64
-	switch v := value.(type) {
-	case int64:
-		n = uint64(v)
-	case uint64:
-		n = v
-	case int:
-		n = uint64(v)
-	default:
-		return nil, fmt.Errorf("%s 列不支持 binlog 值类型 %T", kind, value)
-	}
-	members, err := mysqlEnumSetMembers(definition, kind)
-	if err != nil {
-		return nil, err
-	}
-	if kind == "ENUM" {
-		if n == 0 {
-			return "", nil
-		}
-		if n > uint64(len(members)) {
-			return nil, fmt.Errorf("ENUM 序号 %d 超出定义", n)
-		}
-		return members[n-1], nil
-	}
-	if len(members) > 64 || (len(members) < 64 && n>>len(members) != 0) {
-		return nil, fmt.Errorf("SET 位图超出定义")
-	}
-	selected := make([]string, 0, len(members))
-	for i, member := range members {
-		if n&(uint64(1)<<i) != 0 {
-			selected = append(selected, member)
-		}
-	}
-	return strings.Join(selected, ","), nil
-}
-
-// COLUMN_TYPE contains quoted MySQL string literals, not comma-separated
-// labels: commas, doubled quotes and backslash escapes may be inside labels.
-func mysqlEnumSetMembers(definition, kind string) ([]string, error) {
-	prefix := strings.ToLower(kind) + "("
-	if !strings.HasPrefix(strings.ToLower(definition), prefix) || !strings.HasSuffix(definition, ")") {
-		return nil, fmt.Errorf("缺少有效的 %s COLUMN_TYPE 元数据", kind)
-	}
-	text := definition[len(prefix) : len(definition)-1]
-	var result []string
-	for i := 0; i < len(text); {
-		if text[i] != '\'' {
-			return nil, fmt.Errorf("无效的 %s 成员定义", kind)
-		}
-		i++
-		var member strings.Builder
-		closed := false
-		for i < len(text) {
-			c := text[i]
-			i++
-			if c == '\'' {
-				if i < len(text) && text[i] == '\'' {
-					member.WriteByte('\'')
-					i++
-					continue
-				}
-				closed = true
-				break
-			}
-			if c == '\\' && i < len(text) {
-				c = text[i]
-				i++
-				switch c {
-				case '0':
-					c = 0
-				case 'b':
-					c = '\b'
-				case 'n':
-					c = '\n'
-				case 'r':
-					c = '\r'
-				case 't':
-					c = '\t'
-				case 'Z':
-					c = 26
-				}
-			}
-			member.WriteByte(c)
-		}
-		if !closed {
-			return nil, fmt.Errorf("未闭合的 %s 成员定义", kind)
-		}
-		result = append(result, member.String())
-		if i == len(text) {
-			break
-		}
-		if text[i] != ',' {
-			return nil, fmt.Errorf("无效的 %s 成员分隔符", kind)
-		}
-		i++
-		if i == len(text) {
-			return nil, fmt.Errorf("无效的 %s 尾部分隔符", kind)
-		}
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("%s 成员定义为空", kind)
-	}
-	return result, nil
 }

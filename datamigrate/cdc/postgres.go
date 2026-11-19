@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -31,13 +32,16 @@ func (e *RowConflictError) Error() string {
 func (e *RowConflictError) Unwrap() error { return ErrRowConflict }
 
 type PostgresApplier struct {
-	db            *sql.DB
-	schema        string
-	jobID         string
-	lower         bool
-	conv          *valueconv.PostgresValueConverter
-	spatialCaps   *target.PGSpatialCapabilities
-	spatialTables map[string]bool
+	db               *sql.DB
+	cfg              Config
+	schema           string
+	jobID            string
+	lower            bool
+	conv             *valueconv.PostgresValueConverter
+	spatialCaps      *target.PGSpatialCapabilities
+	spatialTables    map[string]bool
+	checkpointGuard  *targetCheckpointGuard
+	foreignKeyTables map[string]*TableInfo
 }
 
 func NewPostgresApplier(ctx context.Context, dsn, schema, jobID string, lower bool) (*PostgresApplier, error) {
@@ -53,7 +57,10 @@ func newPostgresApplier(ctx context.Context, cfg Config) (*PostgresApplier, erro
 		db.Close()
 		return nil, err
 	}
-	a := &PostgresApplier{db: db, schema: cfg.TargetSchema, jobID: cfg.JobID, lower: cfg.LowerCaseNames, conv: valueconv.NewPostgres()}
+	a := &PostgresApplier{db: db, cfg: cfg, schema: cfg.TargetSchema, jobID: cfg.JobID, lower: cfg.LowerCaseNames, conv: valueconv.NewPostgres()}
+	if cfg.RequireExistingCheckpoint {
+		return a, nil
+	}
 	if err = a.ensureCheckpoint(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -84,7 +91,10 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 			effective_tables text NOT NULL DEFAULT '[]', excluded_tables text NOT NULL DEFAULT '[]',
 			manifest_hash text NOT NULL DEFAULT '', failed_objects text NOT NULL DEFAULT '[]',
 			failure_report_version integer NOT NULL DEFAULT 0, locator_strategy_version integer NOT NULL DEFAULT 0,
-			locator_strategies text NOT NULL DEFAULT '[]', updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
+			locator_strategies text NOT NULL DEFAULT '[]',
+            source_schema_version integer NOT NULL DEFAULT 0, source_schema text NOT NULL DEFAULT '', source_schema_hash text NOT NULL DEFAULT '',
+            ack_ddl_file text NOT NULL DEFAULT '', ack_ddl_position bigint NOT NULL DEFAULT 0, ack_ddl_gtid text NOT NULL DEFAULT '',
+            updated_at timestamptz NOT NULL DEFAULT now())`, a.checkpointTable())); err != nil {
 		return err
 	}
 	for _, statement := range []string{
@@ -96,6 +106,12 @@ func (a *PostgresApplier) ensureCheckpoint(ctx context.Context) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS failure_report_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS locator_strategy_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
 		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS locator_strategies text NOT NULL DEFAULT '[]'`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_schema_version integer NOT NULL DEFAULT 0`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_schema text NOT NULL DEFAULT ''`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_schema_hash text NOT NULL DEFAULT ''`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS ack_ddl_file text NOT NULL DEFAULT ''`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS ack_ddl_position bigint NOT NULL DEFAULT 0`, a.checkpointTable()),
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS ack_ddl_gtid text NOT NULL DEFAULT ''`, a.checkpointTable()),
 	} {
 		if _, err := a.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -118,20 +134,32 @@ func (a *PostgresApplier) LoadCheckpoint(ctx context.Context) (Position, bool, e
 func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRecord, bool, error) {
 	var record BootstrapRecord
 	var n int64
-	var effectiveJSON, excludedJSON, failedObjectsJSON, locatorStrategiesJSON string
+	var effectiveJSON, excludedJSON, failedObjectsJSON, locatorStrategiesJSON, schemaJSON, schemaHash string
+	var schemaVersion int
 	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT binlog_file, binlog_position, gtid, bootstrap_state,
 		effective_tables, excluded_tables, manifest_hash, failed_objects, failure_report_version,
-		locator_strategy_version, locator_strategies
+		locator_strategy_version, locator_strategies, source_schema_version, source_schema, source_schema_hash
 		FROM %s WHERE job_id=$1`, a.checkpointTable()), a.jobID).
 		Scan(&record.Position.File, &n, &record.Position.GTID, &record.State, &effectiveJSON, &excludedJSON, &record.ManifestHash,
-			&failedObjectsJSON, &record.FailureReportVersion, &record.LocatorStrategyVersion, &locatorStrategiesJSON)
+			&failedObjectsJSON, &record.FailureReportVersion, &record.LocatorStrategyVersion, &locatorStrategiesJSON, &schemaVersion, &schemaJSON, &schemaHash)
 	if err == sql.ErrNoRows {
 		return BootstrapRecord{}, false, nil
 	}
 	if err != nil {
 		return BootstrapRecord{}, false, err
 	}
+	if n < 0 || n > math.MaxUint32 {
+		return record, false, fmt.Errorf("无效的 PG 系列检查点 binlog position: %d", n)
+	}
 	record.Position.Pos = uint32(n)
+	if schemaJSON != "" {
+		if err = json.Unmarshal([]byte(schemaJSON), &record.SourceSchema); err != nil {
+			return record, false, fmt.Errorf("解析 checkpoint 源结构快照: %w", err)
+		}
+	}
+	if record.SourceSchema.Version != schemaVersion || record.SourceSchema.Hash != schemaHash {
+		return record, false, fmt.Errorf("PG 系列 CDC 源结构快照版本或摘要不一致")
+	}
 	if err = json.Unmarshal([]byte(effectiveJSON), &record.EffectiveTables); err != nil {
 		return BootstrapRecord{}, false, fmt.Errorf("解析 checkpoint effective_tables 失败: %w", err)
 	}
@@ -148,32 +176,42 @@ func (a *PostgresApplier) LoadBootstrapRecord(ctx context.Context) (BootstrapRec
 }
 
 func (a *PostgresApplier) SaveBootstrapRecord(ctx context.Context, record BootstrapRecord) error {
-	effectiveJSON, err := json.Marshal(record.EffectiveTables)
+	return a.writeBootstrapRecord(ctx, a.db, record, false)
+}
+
+func (a *PostgresApplier) writeBootstrapRecord(ctx context.Context, exec checkpointExecutor, record BootstrapRecord, insertOnly bool) error {
+	values := []any{a.jobID, record.Position.File, record.Position.Pos, record.Position.GTID, record.State}
+	for _, metadata := range []any{record.EffectiveTables, record.ExcludedTables, record.FailedObjects, record.LocatorStrategies, record.SourceSchema} {
+		payload, err := json.Marshal(metadata)
+		if err != nil {
+			return err
+		}
+		values = append(values, string(payload))
+	}
+	values = append(values, record.ManifestHash, record.FailureReportVersion, record.LocatorStrategyVersion, record.SourceSchema.Version, record.SourceSchema.Hash)
+	statement := fmt.Sprintf(`INSERT INTO %s AS cp(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,failed_objects,
+        locator_strategies,source_schema,manifest_hash,failure_report_version,locator_strategy_version,source_schema_version,source_schema_hash,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`, a.checkpointTable())
+	if !insertOnly && a.cfg.ManagedCheckpoint {
+		statement = fmt.Sprintf(`UPDATE %s SET bootstrap_state=$5,effective_tables=$6,excluded_tables=$7,failed_objects=$8,
+            locator_strategies=$9,source_schema=$10,manifest_hash=$11,failure_report_version=$12,
+            locator_strategy_version=$13,source_schema_version=$14,source_schema_hash=$15,updated_at=now()
+            WHERE job_id=$1 AND binlog_file=$2 AND binlog_position=$3 AND gtid=$4
+              AND bootstrap_state IN ('snapshot_in_progress','review_pending')`, a.checkpointTable())
+	} else if !insertOnly {
+		statement += ` ON CONFLICT(job_id) DO UPDATE SET
+            bootstrap_state=EXCLUDED.bootstrap_state,effective_tables=EXCLUDED.effective_tables,excluded_tables=EXCLUDED.excluded_tables,
+            manifest_hash=EXCLUDED.manifest_hash,failed_objects=EXCLUDED.failed_objects,failure_report_version=EXCLUDED.failure_report_version,
+            locator_strategy_version=EXCLUDED.locator_strategy_version,locator_strategies=EXCLUDED.locator_strategies,
+            source_schema_version=EXCLUDED.source_schema_version,source_schema=EXCLUDED.source_schema,source_schema_hash=EXCLUDED.source_schema_hash,
+            updated_at=now() WHERE cp.bootstrap_state IN ('snapshot_in_progress','review_pending')
+              AND cp.binlog_file=EXCLUDED.binlog_file AND cp.binlog_position=EXCLUDED.binlog_position AND cp.gtid=EXCLUDED.gtid`
+	}
+	result, err := exec.ExecContext(ctx, statement, values...)
 	if err != nil {
 		return err
 	}
-	excludedJSON, err := json.Marshal(record.ExcludedTables)
-	if err != nil {
-		return err
-	}
-	failedObjectsJSON, err := json.Marshal(record.FailedObjects)
-	if err != nil {
-		return err
-	}
-	locatorStrategiesJSON, err := json.Marshal(record.LocatorStrategies)
-	if err != nil {
-		return err
-	}
-	_, err = a.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(job_id,binlog_file,binlog_position,gtid,bootstrap_state,effective_tables,excluded_tables,manifest_hash,failed_objects,failure_report_version,locator_strategy_version,locator_strategies,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) ON CONFLICT(job_id) DO UPDATE SET
-		binlog_file=EXCLUDED.binlog_file,binlog_position=EXCLUDED.binlog_position,gtid=EXCLUDED.gtid,
-		bootstrap_state=EXCLUDED.bootstrap_state,effective_tables=EXCLUDED.effective_tables,
-		excluded_tables=EXCLUDED.excluded_tables,manifest_hash=EXCLUDED.manifest_hash,
-		failed_objects=EXCLUDED.failed_objects,failure_report_version=EXCLUDED.failure_report_version,
-		locator_strategy_version=EXCLUDED.locator_strategy_version,locator_strategies=EXCLUDED.locator_strategies,updated_at=now()`, a.checkpointTable()),
-		a.jobID, record.Position.File, record.Position.Pos, record.Position.GTID, record.State, string(effectiveJSON), string(excludedJSON), record.ManifestHash,
-		string(failedObjectsJSON), record.FailureReportVersion, record.LocatorStrategyVersion, string(locatorStrategiesJSON))
-	return err
+	return requireCheckpointWrite(result)
 }
 
 func (a *PostgresApplier) FinalizeBootstrap(ctx context.Context, record BootstrapRecord) error {
@@ -182,6 +220,19 @@ func (a *PostgresApplier) FinalizeBootstrap(ctx context.Context, record Bootstra
 		return err
 	}
 	defer tx.Rollback()
+	var state string
+	var storedPosition Position
+	err = tx.QueryRowContext(ctx, `SELECT bootstrap_state,binlog_file,binlog_position,gtid FROM `+a.checkpointTable()+` WHERE job_id=$1 FOR UPDATE`, a.jobID).
+		Scan(&state, &storedPosition.File, &storedPosition.Pos, &storedPosition.GTID)
+	if err != nil {
+		return err
+	}
+	if state == "completed" {
+		return nil
+	}
+	if (state != "snapshot_in_progress" && state != "review_pending") || !PositionEquivalent(storedPosition, record.Position) {
+		return fmt.Errorf("bootstrap checkpoint 已变化或状态不可确认")
+	}
 	dropped := map[string]bool{}
 	effective := make(map[string]bool, len(record.EffectiveTables))
 	for _, table := range record.EffectiveTables {
@@ -220,12 +271,16 @@ func (a *PostgresApplier) FinalizeBootstrap(ctx context.Context, record Bootstra
 	if err != nil {
 		return err
 	}
+	schemaJSON, err := json.Marshal(record.SourceSchema)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET bootstrap_state='completed',
 		effective_tables=$2,excluded_tables=$3,manifest_hash=$4,failed_objects=$5,failure_report_version=$6,
-		locator_strategy_version=$7,locator_strategies=$8,updated_at=now()
+		locator_strategy_version=$7,locator_strategies=$8,source_schema_version=$9,source_schema=$10,source_schema_hash=$11,updated_at=now()
 		WHERE job_id=$1 AND bootstrap_state IN ('snapshot_in_progress','review_pending','completed')`, a.checkpointTable()),
 		a.jobID, string(effectiveJSON), string(excludedJSON), record.ManifestHash, string(failedObjectsJSON), record.FailureReportVersion,
-		record.LocatorStrategyVersion, string(locatorStrategiesJSON))
+		record.LocatorStrategyVersion, string(locatorStrategiesJSON), record.SourceSchema.Version, string(schemaJSON), record.SourceSchema.Hash)
 	if err != nil {
 		return err
 	}
@@ -312,6 +367,11 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 		return Stats{}, err
 	}
 	defer tx.Rollback()
+	if a.checkpointGuard != nil {
+		if err = lockTargetCheckpoint(ctx, tx, a, *a.checkpointGuard); err != nil {
+			return Stats{}, err
+		}
+	}
 	if err = a.checkTransactionTriggers(ctx, tx, changes); err != nil {
 		return Stats{}, err
 	}
@@ -319,7 +379,16 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 		return Stats{}, err
 	}
 	var stats Stats
+	foreignKeys := pgForeignKeyChecks{
+		rules: make(map[string][]postgresForeignKey), lockedChildren: make(map[string]bool), visited: make(map[pgForeignKeyVisit]bool),
+	}
 	for _, ch := range changes {
+		if ch.Table == nil {
+			return Stats{}, fmt.Errorf("CDC 变更缺少表元数据")
+		}
+		if err = a.checkForeignKeyActions(ctx, tx, ch, &foreignKeys); err != nil {
+			return Stats{}, err
+		}
 		switch ch.Action {
 		case "insert":
 			if err = a.insert(ctx, tx, ch.Table, ch.After); err == nil {
@@ -328,13 +397,10 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 		case "update":
 			if ch.Table.LocatorStrategy == LocatorFullRow {
 				err = a.updateFullRow(ctx, tx, ch.Table, ch.Before, ch.After)
+			} else if locatorChanged(ch.Table, ch.Before, ch.After) {
+				err = a.updateByLocator(ctx, tx, ch.Table, ch.Before, ch.After)
 			} else {
-				if locatorChanged(ch.Table, ch.Before, ch.After) {
-					err = a.deleteByLocator(ctx, tx, ch.Table, ch.Before)
-				}
-				if err == nil {
-					err = a.insert(ctx, tx, ch.Table, ch.After)
-				}
+				err = a.insert(ctx, tx, ch.Table, ch.After)
 			}
 			if err == nil {
 				stats.Updates++
@@ -348,9 +414,11 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 			if err == nil {
 				stats.Deletes++
 			}
+		default:
+			err = fmt.Errorf("未知 CDC 操作: %s", ch.Action)
 		}
 		if err != nil {
-			return Stats{}, fmt.Errorf("apply %s %s: %w", ch.Action, ch.Table.Name, err)
+			return Stats{}, fmt.Errorf("apply %s %s: %w", ch.Action, ch.Table.Name, pgWriteValueError(ch.Table, err))
 		}
 	}
 	if err = a.saveCheckpointTx(ctx, tx, p); err != nil {
@@ -361,6 +429,52 @@ func (a *PostgresApplier) Apply(ctx context.Context, changes []Change, p Positio
 	}
 	stats.Position, stats.LastEventAt = p, time.Now()
 	return stats, nil
+}
+
+func pgWriteValueError(table *TableInfo, err error) error {
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) {
+		switch state.SQLState() {
+		case "22001", "22003":
+			if columns := cdcBinlogValueColumns(table); len(columns) != 0 {
+				return fmt.Errorf("目标列容量不足，请检查 %s: %w", strings.Join(columns, ", "), err)
+			}
+		}
+	}
+	return err
+}
+
+func (a *PostgresApplier) updateByLocator(ctx context.Context, tx *sql.Tx, t *TableInfo, before, after []any) error {
+	if len(before) != len(t.Columns) || len(after) != len(t.Columns) {
+		return fmt.Errorf("列数不匹配: before=%d after=%d metadata=%d", len(before), len(after), len(t.Columns))
+	}
+	indexes, err := locatorColumnIndexes(t)
+	if err != nil {
+		return err
+	}
+	values := make([]any, len(t.Columns)+len(indexes))
+	sets := make([]string, len(t.Columns))
+	for i, column := range t.Columns {
+		sets[i] = quoteIdent(a.name(column)) + fmt.Sprintf("=$%d", i+1)
+		values[i], err = a.convertValue(t, i, after[i])
+		if err != nil {
+			return err
+		}
+	}
+	where := make([]string, len(indexes))
+	for i, index := range indexes {
+		parameter := len(t.Columns) + i
+		where[i] = quoteIdent(a.name(t.Columns[index])) + fmt.Sprintf("=$%d", parameter+1)
+		values[parameter], err = a.convertValue(t, index, before[index])
+		if err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE "+a.qualified(t.Name)+" SET "+strings.Join(sets, ",")+" WHERE "+strings.Join(where, " AND "), values...)
+	if err != nil {
+		return err
+	}
+	return requireOneFullRow(t, "update", before, result)
 }
 
 func locatorChanged(t *TableInfo, before, after []any) bool {
@@ -587,22 +701,4 @@ func (a *PostgresApplier) resolveSequence(ctx context.Context, t *TableInfo, col
 			t.Name, t.Columns[columnIndex], quoteIdent(a.schema), qualifiedCandidate)
 	}
 	return qualifiedCandidate, nil
-}
-
-// SyncSequences moves PostgreSQL-compatible sequences to at least MAX(column)+1.
-func (a *PostgresApplier) SyncSequences(ctx context.Context, tables []TableInfo) error {
-	for i := range tables {
-		t := &tables[i]
-		for _, idx := range t.AutoIncrement {
-			seq, err := a.resolveSequence(ctx, t, idx)
-			if err != nil {
-				return err
-			}
-			_, err = a.db.ExecContext(ctx, fmt.Sprintf(`SELECT setval($1::regclass, COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)`, quoteIdent(a.name(t.Columns[idx])), a.qualified(t.Name)), seq)
-			if err != nil {
-				return fmt.Errorf("校正自增列序列失败 [%s.%s，序列 %s]: %w", t.Name, t.Columns[idx], seq, err)
-			}
-		}
-	}
-	return nil
 }

@@ -116,7 +116,11 @@ func (a *PostgresApplier) convertValue(t *TableInfo, column int, value any) (any
 	if a.conv == nil {
 		a.conv = valueconv.NewPostgres()
 	}
-	converted, err := a.conv.Convert(value, "mysql", t.ColumnTypes[column])
+	normalized, err := decodeMySQLBinlogValue(t, column, value)
+	if err != nil {
+		return nil, fmt.Errorf("表 %s 列 %s binlog 值解码失败: %w", t.Name, t.Columns[column], err)
+	}
+	converted, err := a.conv.Convert(normalized, "mysql", t.ColumnTypes[column])
 	if err != nil {
 		return nil, fmt.Errorf("表 %s 列 %s 数据转换失败: %w", t.Name, t.Columns[column], err)
 	}

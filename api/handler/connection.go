@@ -221,7 +221,14 @@ func DeleteConnection(c *gin.Context) {
 	if _, ok := getOwnedConnection(c, uint(id)); !ok {
 		return
 	}
-	if err := store.DeleteConnection(uint(id)); err != nil {
+	incrementalStartMu.Lock()
+	err = store.DeleteConnection(uint(id))
+	incrementalStartMu.Unlock()
+	if err != nil {
+		if errors.Is(err, store.ErrConnectionInUse) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -174,7 +175,7 @@ func StartIncremental(c *gin.Context) {
 		effectiveJSON, excludedJSON = string(effectiveBytes), string(excludedBytes)
 	}
 	var sourceSchema cdc.SourceSchemaSnapshot
-	if dst.DBType == "dameng" && req.StartMode == "incremental_only" {
+	if req.StartMode == "incremental_only" {
 		cfg.TableNames = scopeRecord.EffectiveTables
 		var err error
 		sourceSchema, err = cdc.CaptureSourceSchema(c.Request.Context(), cfg, cfg.Start)
@@ -195,10 +196,9 @@ func StartIncremental(c *gin.Context) {
 		LocatorStrategyVersion: cdc.LocatorStrategyVersion, LocatorStrategiesJSON: string(locatorJSON), PrimaryLocatorCount: primaryCount,
 		UniqueLocatorCount: uniqueCount, FullRowLocatorCount: fullRowCount, BootstrapState: "pending", Status: "initializing", Phase: "initializing",
 		EffectiveJSON: effectiveJSON, ExcludedJSON: excludedJSON, EffectiveCount: len(scopeRecord.EffectiveTables), ExcludedCount: len(scopeRecord.ExcludedTables), ManifestHash: scopeRecord.ManifestHash}
-	if dst.DBType == "dameng" {
-		j.SourceSchemaVersion = cdc.SourceSchemaVersion
-		j.SourceSchemaJSON = string(sourceSchemaJSON)
-	}
+	j.SourceSchemaVersion = cdc.SourceSchemaVersion
+	j.SourceSchemaJSON = string(sourceSchemaJSON)
+	j.CheckpointManaged = true
 	if e := createIncrementalAfterPreflight(j, src, dst, func() {
 		if len(scopeRecord.ExcludedTables) > 0 {
 			names := make([]string, 0, len(scopeRecord.ExcludedTables))
@@ -207,7 +207,7 @@ func StartIncremental(c *gin.Context) {
 			}
 			appendIncrementalLifecycleLog(jobID, "preflight", "warn", fmt.Sprintf("用户确认排除 %d 张缺失目标表: %s", len(names), strings.Join(names, ", ")))
 		}
-		launchIncremental(j, src, dst)
+		startIncrementalRunner(j, src, dst, true)
 	}); e != nil {
 		switch {
 		case errors.Is(e, store.ErrConnectionChanged):
@@ -239,6 +239,18 @@ func createIncrementalAfterPreflight(j *store.IncrementalMigrationJob, src, dst 
 	if err := store.CreateIncrementalJob(j); err != nil {
 		return err
 	}
+	if j.CheckpointManaged {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := claimIncrementalTarget(ctx, configFromIncremental(j, src, dst)); err != nil {
+			now := time.Now()
+			stopErr := store.UpdateIncrementalJob(j.JobID, map[string]any{
+				"status": "aborted", "phase": "aborted", "finished_at": &now,
+				"summary": "未能占用目标 Schema", "last_error": err.Error(),
+			})
+			return errors.Join(err, stopErr)
+		}
+	}
 	// Registration is synchronous; the runner's network work is asynchronous.
 	// Abort must not observe a persisted task before it is in the registry.
 	launch()
@@ -246,6 +258,10 @@ func createIncrementalAfterPreflight(j *store.IncrementalMigrationJob, src, dst 
 }
 
 func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connection) {
+	startIncrementalRunner(j, src, dst, false)
+}
+
+func startIncrementalRunner(j *store.IncrementalMigrationJob, src, dst *store.Connection, fresh bool) {
 	ctx, err := cdc.Registry.Register(j.JobID)
 	if err != nil {
 		return
@@ -268,12 +284,14 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 				}
 			} else if ok {
 				runErr = fmt.Errorf("全量 checkpoint 状态为 %s，不能安全恢复或自动重跑", record.State)
-			} else {
+			} else if fresh {
 				runErr = runIncrementalBootstrap(ctx, j, src, dst)
+			} else {
+				runErr = cdc.ErrCheckpointMissing
 			}
 		}
 		if runErr == nil && ctx.Err() == nil {
-			runErr = runCDC(ctx, j, src, dst)
+			runErr = runCDCFromStart(ctx, j, src, dst, fresh && j.StartMode == "incremental_only")
 		}
 		action := cdc.Registry.Remove(j.JobID)
 		if errors.Is(runErr, cdc.ErrCutoverReady) {
@@ -308,7 +326,9 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 			cfg := configFromIncremental(j, src, dst)
 			_ = cdc.SyncSequences(context.Background(), cfg)
 			now := time.Now()
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "stopped", "phase": "stopped", "summary": "用户已停止", "finished_at": &now})
+			if err := store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "stopped", "phase": "stopped", "summary": "用户已停止", "finished_at": &now}); err == nil {
+				releaseIncrementalTarget(ctx, j, src, dst)
+			}
 			return
 		}
 		if action == "abort" {
@@ -316,7 +336,9 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 				_ = cdc.AbortTargetBootstrap(context.Background(), configFromIncremental(j, src, dst))
 			}
 			now := time.Now()
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "aborted", "phase": "aborted", "bootstrap_state": "aborted", "summary": "任务已放弃", "finished_at": &now})
+			if err := store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "aborted", "phase": "aborted", "bootstrap_state": "aborted", "summary": "任务已放弃", "finished_at": &now}); err == nil {
+				releaseIncrementalTarget(ctx, j, src, dst)
+			}
 			if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
 				appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "warn", "用户已放弃未完成的全量任务")
 			}
@@ -330,7 +352,8 @@ func launchIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connect
 
 func finishIncrementalCutover(j *store.IncrementalMigrationJob, src, dst *store.Connection) {
 	cfg := configFromIncremental(j, src, dst)
-	claimed, claimErr := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"cutting_over"}, map[string]any{"status": "validating", "phase": "validating", "validation_state": "running", "summary": "已到达切换边界，正在校验行数和序列"})
+	cfg.RequireExistingCheckpoint = true
+	claimed, claimErr := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"cutting_over"}, map[string]any{"status": "validating", "phase": "validating", "validation_state": "running", "summary": "已到达切换边界，正在校验行数"})
 	if claimErr != nil {
 		return
 	}
@@ -343,28 +366,108 @@ func finishIncrementalCutover(j *store.IncrementalMigrationJob, src, dst *store.
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
-	if e := cdc.SyncSequences(ctx, cfg); e != nil {
-		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "cutover_blocked", "phase": "validation_failed", "validation_state": "failed", "last_error": "序列校正失败: " + e.Error()})
+	block := func(state, message string) {
+		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "cutover_blocked", "phase": "validation_failed", "validation_state": state, "last_error": message, "summary": message})
+	}
+	if e := checkIncrementalTargetOwner(ctx, cfg); e != nil {
+		block("failed", e.Error())
 		return
 	}
-	results, match, e := cdc.ValidateCounts(ctx, cfg)
-	payload, _ := json.Marshal(results)
+	boundary := cdc.Position{File: j.CutoverFile, Pos: j.CutoverPos, GTID: j.CutoverGTID}
+	record, exists, e := cdc.LoadTargetBootstrapRecord(ctx, cfg)
+	if e != nil || !exists || record.State != "completed" || !cdc.PositionReached(record.Position, boundary) {
+		message := "目标检查点尚未到达切换边界"
+		if e != nil {
+			message += ": " + e.Error()
+		}
+		block("failed", message)
+		return
+	}
+	tables, e := record.SourceSchema.TableInfos(cfg.SourceDatabase, record.EffectiveTables)
 	if e != nil {
-		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "cutover_blocked", "phase": "validation_failed", "validation_state": "failed", "validation_json": string(payload), "last_error": "最终校验失败: " + e.Error()})
+		block("failed", "无法读取切换校验范围: "+e.Error())
+		return
+	}
+	cfg.SourceSchema = record.SourceSchema
+	cfg.TableNames = make([]string, len(tables))
+	for i, table := range tables {
+		cfg.TableNames[i] = table.Name
+	}
+	if e = checkIncrementalCutoverSource(ctx, cfg, boundary); e != nil {
+		block("failed", e.Error())
+		return
+	}
+	counts, match, e := cdc.ValidateCounts(ctx, cfg)
+	payload, _ := json.Marshal(counts)
+	if saveErr := store.UpdateIncrementalJob(j.JobID, map[string]any{"validation_json": string(payload)}); e != nil || saveErr != nil {
+		block("failed", "行数校验失败: "+errors.Join(e, saveErr).Error())
 		return
 	}
 	if !match {
-		_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": "cutover_blocked", "phase": "validation_failed", "validation_state": "mismatch", "validation_json": string(payload), "summary": "已追到边界，但存在行数不一致，禁止完成切换"})
+		block("mismatch", "源库和目标库行数不一致，禁止完成切换")
+		return
+	}
+	if e = store.UpdateIncrementalJob(j.JobID, map[string]any{"content_validation_state": "running", "summary": "行数一致，正在校验完整数据内容"}); e != nil {
+		block("failed", "无法保存内容校验状态: "+e.Error())
+		return
+	}
+	results, contentMatches, countsChanged := cdc.ValidateCutoverContents(ctx, cfg, counts)
+	payload, _ = json.Marshal(results)
+	contentState := contentValidationPassed
+	if !contentMatches {
+		contentState = contentValidationNeedsAcknowledgment
+	}
+	if e = store.UpdateIncrementalJob(j.JobID, map[string]any{"validation_json": string(payload), "content_validation_state": contentState, "summary": "已记录内容校验结果，正在复核切换边界及自增水位"}); e != nil {
+		block("failed", "无法保存内容校验结果: "+e.Error())
+		return
+	}
+	if countsChanged {
+		block("mismatch", "数据扫描期间行数发生变化，禁止完成切换")
+		return
+	}
+	// A content scan may exhaust its deadline. The hard checks still have
+	// their own deadline and cannot be waived with the content result.
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer finalCancel()
+	if e = checkIncrementalCutoverSource(finalCtx, cfg, boundary); e != nil {
+		block("failed", e.Error())
+		return
+	}
+	if e = cdc.SyncSequences(finalCtx, cfg); e != nil {
+		block("failed", "序列校正失败: "+e.Error())
+		return
+	}
+	fresh, e := store.GetIncrementalJob(j.JobID)
+	if e != nil {
+		block("failed", "无法读取任务状态: "+e.Error())
 		return
 	}
 	status := "ready_to_cutover"
-	summary := "已追到最终边界且行数校验通过，可以完成切换"
-	fresh, _ := store.GetIncrementalJob(j.JobID)
-	if fresh != nil && (fresh.SkippedCount > 0 || fresh.ExcludedCount > 0) {
+	summary := "行数及内容校验通过，可以完成切换"
+	if !contentMatches {
 		status = "ready_with_warnings"
-		summary = "已追到边界且行数一致，但存在被排除表或同步警告，请人工确认"
+		summary = "内容存在差异或无法完成校验，请查看结果后单独确认是否豁免"
+	} else if incrementalCutoverHasWarnings(fresh) {
+		status = "ready_with_warnings"
+		summary = "校验已通过，请确认同步警告及排除范围"
 	}
-	_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"status": status, "phase": "ready", "validation_state": "passed", "validation_json": string(payload), "caught_up": true, "lag_seconds": 0, "last_error": "", "summary": summary})
+	_, _ = store.UpdateIncrementalJobIfStatus(j.JobID, []string{"validating"}, map[string]any{"status": status, "phase": "ready", "validation_state": "passed", "caught_up": true, "lag_seconds": 0, "last_error": "", "summary": summary})
+}
+
+func checkIncrementalCutoverSource(ctx context.Context, cfg cdc.Config, boundary cdc.Position) error {
+	db, err := sql.Open("mysql", cfg.SourceDSN)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	head, err := cdc.CurrentPosition(ctx, db)
+	if err != nil {
+		return fmt.Errorf("复核切换边界失败: %w", err)
+	}
+	if !cdc.PositionEquivalent(head, boundary) {
+		return fmt.Errorf("源库位点在准备切换后发生变化，请取消切换、恢复同步后重新停写")
+	}
+	return nil
 }
 
 func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) (resultErr error) {
@@ -394,23 +497,23 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	}
 	defer r.Close()
 	var snapshot cdc.SourceSchemaSnapshot
-	var capture func(*sql.Tx) error
-	if dst.DBType == "dameng" {
-		capture = func(tx *sql.Tx) error {
-			tables, err := cdc.LoadTables(ctx, tx, j.SrcDatabase, j.MigrateMode, j.TableFilter)
-			if err != nil {
-				return err
-			}
-			names := make([]string, len(tables))
-			for i, table := range tables {
-				names[i] = table.Name
-			}
-			if err = r.PinSnapshotTables(ctx, names); err != nil {
-				return err
-			}
-			snapshot, err = cdc.NewSourceSchema(j.SrcDatabase, tables)
+	capture := func(tx *sql.Tx) error {
+		tables, err := cdc.LoadTables(ctx, tx, j.SrcDatabase, j.MigrateMode, j.TableFilter)
+		if err != nil {
 			return err
 		}
+		names := make([]string, len(tables))
+		for i, table := range tables {
+			names[i] = table.Name
+		}
+		if err = r.PinSnapshotTables(ctx, names); err != nil {
+			return err
+		}
+		if err = cdc.LoadSourceInboundForeignKeys(ctx, tx, j.SrcDatabase, tables); err != nil {
+			return err
+		}
+		snapshot, err = cdc.NewSourceSchema(j.SrcDatabase, tables)
+		return err
 	}
 	pos, e := r.CaptureConsistentSnapshotWithMetadata(ctx, capture)
 	if e != nil {
@@ -422,19 +525,19 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 	snapshotPosition := cdc.Position{File: pos.File, Pos: pos.Pos, GTID: pos.GTID}
 	appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "info", "已获取一致快照起始位点: "+formatIncrementalPosition(snapshotPosition))
 	cfg := configFromIncremental(j, src, dst)
-	if e = cdc.SaveTargetBootstrapRecord(ctx, cfg, cdc.BootstrapRecord{SourceSchema: snapshot, State: "snapshot_in_progress", Position: snapshotPosition, LocatorStrategyVersion: cdc.LocatorStrategyVersion}); e != nil {
+	saveBootstrap := cdc.SaveTargetBootstrapRecord
+	if j.CheckpointManaged {
+		saveBootstrap = cdc.InitializeTargetBootstrapRecord
+	}
+	if e = saveBootstrap(ctx, cfg, cdc.BootstrapRecord{SourceSchema: snapshot, State: "snapshot_in_progress", Position: snapshotPosition, LocatorStrategyVersion: cdc.LocatorStrategyVersion}); e != nil {
 		return fmt.Errorf("保存全量快照待完成位点失败: %w", e)
 	}
-	if dst.DBType == "dameng" {
-		b, err := json.Marshal(snapshot)
-		if err != nil {
-			return err
-		}
-		j.SourceSchemaJSON = string(b)
-		j.SourceSchemaVersion = snapshot.Version
-		if err = store.UpdateIncrementalJob(j.JobID, map[string]any{"source_schema_version": snapshot.Version, "source_schema_json": string(b)}); err != nil {
-			return err
-		}
+	schemaFields := map[string]any{}
+	if e = applySourceSchemaFields(j, snapshot, schemaFields); e != nil {
+		return e
+	}
+	if e = store.UpdateIncrementalJob(j.JobID, schemaFields); e != nil {
+		return e
 	}
 	j.BootstrapState = "snapshot_in_progress"
 	j.PendingFile, j.PendingPos, j.PendingGTID = pos.File, pos.Pos, pos.GTID
@@ -499,17 +602,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 		}
 	}
 
-	var tableInfos []cdc.TableInfo
-	if dst.DBType == "dameng" {
-		tableInfos, e = snapshot.TableInfos(j.SrcDatabase, expectedTables)
-	} else {
-		sourceDB, err := cdc.OpenSource(cfg.SourceDSN)
-		if err != nil {
-			return err
-		}
-		tableInfos, e = cdc.LoadExactTables(ctx, sourceDB, cfg.SourceDatabase, expectedTables)
-		sourceDB.Close()
-	}
+	tableInfos, e := snapshot.TableInfos(j.SrcDatabase, expectedTables)
 	if e != nil {
 		return fmt.Errorf("读取 CDC 表元数据失败: %w", e)
 	}
@@ -533,7 +626,7 @@ func runIncrementalBootstrap(ctx context.Context, j *store.IncrementalMigrationJ
 			review.LocatorStrategies = append(review.LocatorStrategies, strategy)
 		}
 	}
-	if dst.DBType == "dameng" && len(review.EffectiveTables) > 0 {
+	if len(review.EffectiveTables) > 0 {
 		review.SourceSchema, e = snapshot.Select(j.SrcDatabase, review.EffectiveTables)
 		if e != nil {
 			return e
@@ -680,6 +773,7 @@ func strictBootstrapFailure(report datamigrate.MigrationReport, expectedTables [
 func configFromIncremental(j *store.IncrementalMigrationJob, src, dst *store.Connection) cdc.Config {
 	req := incrementalRequest{SrcDatabase: j.SrcDatabase, TargetSchema: j.TargetSchema, MigrateMode: j.MigrateMode, TableFilter: j.TableFilter, LowerCaseNames: j.LowerCaseNames, ServerID: j.ServerID, StartGTID: j.StartGTID, StartFile: j.StartFile, StartPosition: j.StartPosition}
 	cfg := incrementalConfig(req, j.JobID, src, dst)
+	cfg.ManagedCheckpoint = j.CheckpointManaged
 	_ = json.Unmarshal([]byte(j.SourceSchemaJSON), &cfg.SourceSchema)
 	cfg.KeylessChangePolicy = j.KeylessChangePolicy
 	cfg.LocatorStrategyVersion = j.LocatorStrategyVersion
@@ -786,7 +880,12 @@ func applyReviewBootstrapRecord(j *store.IncrementalMigrationJob, record cdc.Boo
 }
 
 func runCDC(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection) error {
+	return runCDCFromStart(ctx, j, src, dst, false)
+}
+
+func runCDCFromStart(ctx context.Context, j *store.IncrementalMigrationJob, src, dst *store.Connection, fresh bool) error {
 	cfg := configFromIncremental(j, src, dst)
+	cfg.RequireExistingCheckpoint = j.CheckpointManaged && !fresh
 	baseI, baseU, baseD, baseS, baseW := j.InsertCount, j.UpdateCount, j.DeleteCount, j.SkippedCount, j.WarningCount
 	var mu sync.Mutex
 	var criticalPersistenceErr error
@@ -859,13 +958,24 @@ func GetIncrementalBootstrapReview(c *gin.Context) {
 	if !ok {
 		return
 	}
+	var storedReview cdc.BootstrapReview
+	hasStoredReview := j.BootstrapReport != "" && json.Unmarshal([]byte(j.BootstrapReport), &storedReview) == nil
 	dst, e := store.GetConnection(j.DstConnID)
 	if e != nil {
+		if hasStoredReview {
+			c.JSON(200, storedReview)
+			return
+		}
 		c.JSON(400, gin.H{"error": "目标连接已删除"})
 		return
 	}
-	reviewCfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames}
+	reviewCfg := cdc.Config{JobID: j.JobID, TargetDSN: buildDSN(dst), TargetDBType: dst.DBType, TargetSchema: j.TargetSchema, LowerCaseNames: j.LowerCaseNames,
+		ManagedCheckpoint: j.CheckpointManaged, RequireExistingCheckpoint: hasStoredReview}
 	record, exists, e := cdc.LoadTargetBootstrapRecord(c.Request.Context(), reviewCfg)
+	if hasStoredReview && (e != nil || !exists) {
+		c.JSON(200, storedReview)
+		return
+	}
 	if e != nil {
 		c.JSON(500, gin.H{"error": "读取目标 bootstrap checkpoint 失败: " + e.Error()})
 		return
@@ -883,8 +993,8 @@ func GetIncrementalBootstrapReview(c *gin.Context) {
 		return
 	}
 	review := cdc.BootstrapReview{BootstrapRecord: record, RequestedCount: len(record.EffectiveTables) + len(record.ExcludedTables)}
-	if j.BootstrapReport != "" {
-		_ = json.Unmarshal([]byte(j.BootstrapReport), &review)
+	if hasStoredReview {
+		review = storedReview
 		review.BootstrapRecord = record
 	}
 	// The live checkpoint position advances after CDC starts, while the review
@@ -915,8 +1025,8 @@ func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
-		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
+	if message := incrementalSchemaError(j); message != "" {
+		c.JSON(409, gin.H{"error": message})
 		return
 	}
 	if j.Status != "paused_bootstrap_review" && j.BootstrapState != "completed" {
@@ -931,6 +1041,10 @@ func AcceptIncrementalBootstrapExclusions(c *gin.Context) {
 	dst, e := store.GetConnection(j.DstConnID)
 	if e != nil {
 		c.JSON(400, gin.H{"error": "目标连接已删除"})
+		return
+	}
+	if e = checkIncrementalRecovery(c.Request.Context(), j, src, dst); e != nil {
+		c.JSON(409, gin.H{"error": e.Error()})
 		return
 	}
 	cfg := configFromIncremental(j, src, dst)
@@ -1036,7 +1150,7 @@ func PrepareIncrementalCutover(c *gin.Context) {
 		c.JSON(502, gin.H{"error": "读取最终位点失败: " + e.Error()})
 		return
 	}
-	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"running", "catching_up"}, map[string]any{"status": "cutting_over", "phase": "cutting_over", "cutover_file": boundary.File, "cutover_position": boundary.Pos, "cutover_gtid": boundary.GTID, "validation_state": "pending", "summary": "已锁定最终位点，源库必须继续保持停写"})
+	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"running", "catching_up"}, map[string]any{"status": "cutting_over", "phase": "cutting_over", "cutover_file": boundary.File, "cutover_position": boundary.Pos, "cutover_gtid": boundary.GTID, "validation_state": "pending", "validation_json": "", "content_validation_state": "pending", "summary": "已锁定最终位点，源库和目标库必须继续保持停写"})
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
@@ -1046,9 +1160,9 @@ func PrepareIncrementalCutover(c *gin.Context) {
 		return
 	}
 	if !cdc.Registry.RequestCutover(j.JobID, boundary) {
-		rolledBack, _ := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"cutting_over"}, map[string]any{"status": j.Status, "phase": j.Phase, "cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": "", "summary": "准备切换已取消，请刷新状态"})
+		rolledBack, _ := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"cutting_over"}, map[string]any{"status": j.Status, "phase": j.Phase, "cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": "", "content_validation_state": "", "summary": "准备切换已取消，请刷新状态"})
 		if !rolledBack {
-			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": ""})
+			_ = store.UpdateIncrementalJob(j.JobID, map[string]any{"cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": "", "content_validation_state": ""})
 		}
 		c.JSON(409, gin.H{"error": "任务已正在暂停或停止，请刷新状态"})
 		return
@@ -1058,8 +1172,19 @@ func PrepareIncrementalCutover(c *gin.Context) {
 }
 
 type completeCutoverRequest struct {
-	AcknowledgeWarnings   bool `json:"acknowledge_warnings"`
-	AcknowledgeExclusions bool `json:"acknowledge_exclusions"`
+	AcknowledgeWarnings          bool `json:"acknowledge_warnings"`
+	AcknowledgeExclusions        bool `json:"acknowledge_exclusions"`
+	AcknowledgeContentValidation bool `json:"acknowledge_content_validation"`
+}
+
+const (
+	contentValidationPassed              = "passed"
+	contentValidationNeedsAcknowledgment = "needs_acknowledgment"
+	contentValidationWaived              = "waived"
+)
+
+func incrementalCutoverHasWarnings(j *store.IncrementalMigrationJob) bool {
+	return j.SkippedCount > 0 || j.WarningCount > 0 || j.ExcludedCount > 0
 }
 
 func StopIncremental(c *gin.Context) {
@@ -1071,9 +1196,21 @@ func StopIncremental(c *gin.Context) {
 		c.JSON(409, gin.H{"error": "必须先停止源库写入并执行“准备切换”，待追平和校验通过后才能完成切换"})
 		return
 	}
+	waiveContent := j.ContentValidationState == contentValidationNeedsAcknowledgment
+	if j.ValidationState != "passed" || (j.ContentValidationState != contentValidationPassed && !waiveContent) {
+		c.JSON(409, gin.H{"error": "本次切换缺少完整的校验结果，请取消切换后重新准备切换"})
+		return
+	}
 	var req completeCutoverRequest
-	_ = c.ShouldBindJSON(&req)
-	if j.Status == "ready_with_warnings" && !req.AcknowledgeWarnings {
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(400, gin.H{"error": "切换确认请求格式无效"})
+		return
+	}
+	if waiveContent && !req.AcknowledgeContentValidation {
+		c.JSON(409, gin.H{"error": "内容校验存在差异或无法完成，必须单独确认豁免后才能完成切换"})
+		return
+	}
+	if incrementalCutoverHasWarnings(j) && !req.AcknowledgeWarnings {
 		c.JSON(409, gin.H{"error": "存在同步警告，必须明确确认风险后才能完成切换"})
 		return
 	}
@@ -1092,6 +1229,11 @@ func StopIncremental(c *gin.Context) {
 		return
 	}
 	cfg := configFromIncremental(j, src, dst)
+	if e = checkIncrementalTargetOwner(c.Request.Context(), cfg); e != nil {
+		c.JSON(409, gin.H{"error": e.Error()})
+		return
+	}
+	cfg.RequireExistingCheckpoint = true
 	boundary := cdc.Position{File: j.CutoverFile, Pos: j.CutoverPos, GTID: j.CutoverGTID}
 	checkpoint, exists, e := cdc.LoadTargetCheckpoint(c.Request.Context(), cfg)
 	if e != nil {
@@ -1102,7 +1244,7 @@ func StopIncremental(c *gin.Context) {
 		c.JSON(409, gin.H{"error": "目标 checkpoint 尚未到达切换边界，禁止完成切换", "boundary": boundary, "checkpoint": checkpoint})
 		return
 	}
-	db, e := cdc.OpenSource(cfg.SourceDSN)
+	db, e := sql.Open("mysql", cfg.SourceDSN)
 	if e != nil {
 		c.JSON(502, gin.H{"error": e.Error()})
 		return
@@ -1118,13 +1260,25 @@ func StopIncremental(c *gin.Context) {
 		return
 	}
 	now := time.Now()
-	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{j.Status}, map[string]any{"status": "stopped", "phase": "completed", "last_error": "", "summary": "切换边界复核通过，CDC 已完成", "finished_at": &now})
+	fields := map[string]any{"status": "stopped", "phase": "completed", "last_error": "", "summary": "切换边界复核通过，CDC 已完成", "finished_at": &now}
+	if waiveContent {
+		fields["content_validation_state"] = contentValidationWaived
+		fields["content_validation_waived_by"] = middleware.GetCurrentUserID(c)
+		fields["content_validation_waived_at"] = &now
+		fields["summary"] = "内容校验已人工豁免，切换完成"
+	}
+	updated, e := store.CompleteIncrementalCutover(j, fields)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
 		return
 	}
 	if !updated {
 		c.JSON(409, gin.H{"error": "任务状态已变化，请刷新后重试"})
+		return
+	}
+	releaseIncrementalTarget(c.Request.Context(), j, src, dst)
+	if waiveContent {
+		c.JSON(200, gin.H{"message": "内容校验已人工豁免，切换完成"})
 		return
 	}
 	c.JSON(200, gin.H{"message": "增量迁移已安全完成"})
@@ -1153,8 +1307,12 @@ func CancelIncrementalCutover(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "目标连接已删除"})
 			return
 		}
+		if e = checkIncrementalRecovery(c.Request.Context(), j, src, dst); e != nil {
+			c.JSON(409, gin.H{"error": e.Error()})
+			return
+		}
 	}
-	fields := map[string]any{"cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": "", "validation_json": "", "last_error": "", "status": "running", "phase": "running", "summary": "已取消切换，继续持续同步"}
+	fields := map[string]any{"cutover_file": "", "cutover_position": 0, "cutover_gtid": "", "validation_state": "", "validation_json": "", "content_validation_state": "", "last_error": "", "status": "running", "phase": "running", "summary": "已取消切换，继续持续同步"}
 	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"cutting_over", "ready_to_cutover", "ready_with_warnings", "cutover_blocked"}, fields)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})
@@ -1215,6 +1373,13 @@ func AbortIncremental(c *gin.Context) {
 			c.JSON(409, gin.H{"error": "任务状态已变化，请刷新后重试"})
 			return
 		}
+		if j.CheckpointManaged {
+			src, srcErr := store.GetConnection(j.SrcConnID)
+			dst, dstErr := store.GetConnection(j.DstConnID)
+			if srcErr == nil && dstErr == nil {
+				releaseIncrementalTarget(c.Request.Context(), j, src, dst)
+			}
+		}
 		if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
 			appendIncrementalLifecycleLog(j.JobID, "snapshot_init", "warn", "用户已放弃未完成的全量任务")
 		}
@@ -1229,8 +1394,8 @@ func ResumeIncremental(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
-		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
+	if message := incrementalSchemaError(j); message != "" {
+		c.JSON(409, gin.H{"error": message})
 		return
 	}
 	if cdc.Registry.Running(j.JobID) {
@@ -1253,6 +1418,10 @@ func ResumeIncremental(c *gin.Context) {
 	dst, e := store.GetConnection(j.DstConnID)
 	if e != nil {
 		c.JSON(400, gin.H{"error": "目标连接已删除"})
+		return
+	}
+	if e = checkIncrementalRecovery(c.Request.Context(), j, src, dst); e != nil {
+		c.JSON(409, gin.H{"error": e.Error()})
 		return
 	}
 	if j.StartMode == "full_then_cdc" && !j.BootstrapDone {
@@ -1305,8 +1474,8 @@ func AckIncrementalDDL(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if j.DstDBType == "dameng" && j.SourceSchemaVersion != cdc.SourceSchemaVersion {
-		c.JSON(409, gin.H{"error": cdc.LegacyDamengSchemaMessage})
+	if message := incrementalSchemaError(j); message != "" {
+		c.JSON(409, gin.H{"error": message})
 		return
 	}
 	if cdc.Registry.Running(j.JobID) {
@@ -1327,34 +1496,33 @@ func AckIncrementalDDL(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "目标连接已删除"})
 		return
 	}
+	if e = checkIncrementalRecovery(c.Request.Context(), j, src, dst); e != nil {
+		c.JSON(409, gin.H{"error": e.Error()})
+		return
+	}
 	cfg := configFromIncremental(j, src, dst)
 	p := cdc.Position{File: j.BlockingFile, Pos: j.BlockingPos, GTID: j.BlockingGTID}
 	fields := map[string]any{"blocking_ddl": "", "blocking_file": "", "blocking_position": 0, "blocking_gtid": "", "checkpoint_file": p.File, "checkpoint_position": p.Pos, "checkpoint_gtid": p.GTID, "status": "initializing", "last_error": ""}
-	if dst.DBType == "dameng" {
-		record, err := cdc.AcknowledgeDamengDDL(c.Request.Context(), cfg, p)
-		if err != nil {
-			c.JSON(409, gin.H{"error": err.Error()})
-			return
-		}
-		if err = applySourceSchemaFields(j, record.SourceSchema, fields); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-		locators, err := json.Marshal(record.LocatorStrategies)
-		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-		j.LocatorStrategiesJSON = string(locators)
-		fields["locator_strategies_json"] = string(locators)
-		primary, unique, full := locatorStrategyCounts(record.LocatorStrategies)
-		fields["primary_locator_count"], fields["unique_locator_count"], fields["full_row_locator_count"] = primary, unique, full
-		p = record.Position
-		fields["checkpoint_file"], fields["checkpoint_position"], fields["checkpoint_gtid"] = p.File, p.Pos, p.GTID
-	} else if e = cdc.AcknowledgeDDL(c.Request.Context(), cfg, p); e != nil {
-		c.JSON(500, gin.H{"error": e.Error()})
+	record, err := cdc.AcknowledgeDDLRecord(c.Request.Context(), cfg, p)
+	if err != nil {
+		c.JSON(409, gin.H{"error": err.Error()})
 		return
 	}
+	if err = applySourceSchemaFields(j, record.SourceSchema, fields); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	locators, err := json.Marshal(record.LocatorStrategies)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	j.LocatorStrategiesJSON = string(locators)
+	fields["locator_strategies_json"] = string(locators)
+	primary, unique, full := locatorStrategyCounts(record.LocatorStrategies)
+	fields["primary_locator_count"], fields["unique_locator_count"], fields["full_row_locator_count"] = primary, unique, full
+	p = record.Position
+	fields["checkpoint_file"], fields["checkpoint_position"], fields["checkpoint_gtid"] = p.File, p.Pos, p.GTID
 	updated, e := store.UpdateIncrementalJobIfStatus(j.JobID, []string{"paused_ddl"}, fields)
 	if e != nil {
 		c.JSON(500, gin.H{"error": e.Error()})

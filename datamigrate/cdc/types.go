@@ -25,6 +25,8 @@ type TableInfo struct {
 	LocatorColumns     []string          `json:"locator_columns"`
 	LocatorWarning     string            `json:"locator_warning,omitempty"`
 	UniqueIndexes      []UniqueIndexInfo `json:"-"`
+	InboundForeignKeys []foreignKey      `json:"-"`
+	ForeignKeysKnown   bool              `json:"-"`
 }
 
 const LocatorStrategyVersion = 1
@@ -71,6 +73,9 @@ type TargetTableIssue struct {
 
 type Config struct {
 	SourceSchema SourceSchemaSnapshot
+	// ManagedCheckpoint enables the API task's durable checkpoint and schema owner guards.
+	ManagedCheckpoint         bool
+	RequireExistingCheckpoint bool
 
 	JobID                  string
 	SourceDSN              string

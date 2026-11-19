@@ -312,7 +312,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestDiscardLegacyDamengPreservesOtherTargetsAndReports(t *testing.T) {
+func TestDiscardLegacyIncrementalJobsPreservesCurrentTasksAndReports(t *testing.T) {
 	setupTestDB(t)
 	for _, tc := range []struct {
 		id, dbtype string
@@ -320,24 +320,45 @@ func TestDiscardLegacyDamengPreservesOtherTargetsAndReports(t *testing.T) {
 		status     string
 	}{
 		{"old-dm", "dameng", 0, "paused_ddl"}, {"new-dm", "dameng", 1, "paused_manual"},
-		{"pg", "postgres", 0, "paused_manual"}, {"done-dm", "dameng", 0, "stopped"},
+		{"old-pg", "postgres", 0, "paused_manual"}, {"new-pg", "gaussdb", 1, "paused_manual"},
+		{"done-dm", "dameng", 0, "stopped"}, {"done-pg", "postgres", 0, "stopped"},
 	} {
 		require.NoError(t, CreateIncrementalJob(&IncrementalMigrationJob{JobID: tc.id, DstConnID: 1, TargetSchema: tc.id, DstDBType: tc.dbtype, SourceSchemaVersion: tc.version, LocatorStrategyVersion: 1, Status: tc.status, BootstrapReport: "retained report"}))
 	}
 	require.NoError(t, DiscardLegacyIncrementalJobs())
-	old, err := GetIncrementalJob("old-dm")
-	require.NoError(t, err)
-	require.Equal(t, "aborted", old.Status)
-	require.Equal(t, "retained report", old.BootstrapReport)
-	occupied, err := HasOpenIncrementalTarget(1, "old-dm")
-	require.NoError(t, err)
-	require.False(t, occupied)
-	for _, id := range []string{"new-dm", "pg"} {
+	for _, id := range []string{"old-dm", "old-pg"} {
+		job, err := GetIncrementalJob(id)
+		require.NoError(t, err)
+		require.Equal(t, "aborted", job.Status)
+		require.Equal(t, "retained report", job.BootstrapReport)
+		occupied, err := HasOpenIncrementalTarget(1, id)
+		require.NoError(t, err)
+		require.False(t, occupied)
+	}
+	for _, id := range []string{"new-dm", "new-pg"} {
 		job, err := GetIncrementalJob(id)
 		require.NoError(t, err)
 		require.Equal(t, "paused_manual", job.Status)
 	}
-	done, err := GetIncrementalJob("done-dm")
-	require.NoError(t, err)
-	require.Equal(t, "stopped", done.Status)
+	for _, id := range []string{"done-dm", "done-pg"} {
+		job, err := GetIncrementalJob(id)
+		require.NoError(t, err)
+		require.Equal(t, "stopped", job.Status)
+	}
+}
+
+func TestActiveIncrementalConnectionEndpointGuard(t *testing.T) {
+	setupTestDB(t)
+	conn := &Connection{Name: "target", DBType: "postgres", Host: "db.example", Port: 5432, Database: "db", Username: "cdc", Password: "old"}
+	require.NoError(t, CreateConnection(conn))
+	job := &IncrementalMigrationJob{JobID: "connection-guard", DstConnID: conn.ID, Status: "paused_manual"}
+	require.NoError(t, CreateIncrementalJob(job))
+	for field, value := range map[string]any{"db_type": "dameng", "host": "another.example", "port": 5433, "database": "other"} {
+		require.ErrorIs(t, UpdateConnection(conn.ID, map[string]any{field: value}), ErrConnectionInUse)
+	}
+	require.ErrorIs(t, DeleteConnection(conn.ID), ErrConnectionInUse)
+	require.NoError(t, UpdateConnection(conn.ID, map[string]any{"name": "renamed", "username": "new-cdc", "password": "new"}))
+	require.NoError(t, UpdateIncrementalJob(job.JobID, map[string]any{"status": "aborted"}))
+	require.NoError(t, UpdateConnection(conn.ID, map[string]any{"host": "another.example"}))
+	require.NoError(t, DeleteConnection(conn.ID))
 }

@@ -78,13 +78,13 @@
         <a-radio value="incremental_only">从指定位点开始</a-radio>
       </a-radio-group>
       <template #extra>
-        全量快照会长时间保持一致性读事务，但全局读锁仅用于建立快照和记录起始位点。binlog 保留时间必须覆盖全量耗时、追赶耗时和安全余量；即使未启用自动清理，迁移期间也不能人工执行 PURGE BINARY LOGS。
+        建立快照时会短暂获取全局读锁，同时记录起始位点和所选表结构。binlog 保留时间必须覆盖全量耗时、追赶耗时和安全余量。迁移期间请保留所需的 binlog 文件。
       </template>
     </a-form-item>
 
-    <a-alert v-if="isDamengTarget" type="warning" style="margin-bottom: 16px">
-      达梦增量暂不支持压缩事务和显式 XA，遇到时停止并保留检查点。修改配置不会改变历史 binlog。
-      全量复制期间，所选源表的结构变更需等待快照结束；历史增量起点若跨越结构变更，会拒绝启动。
+    <a-alert type="warning" style="margin-bottom: 16px">
+      遇到压缩事务、显式 XA 或同步范围内的部分行镜像时，任务会停止并保留检查点。修改配置只对随后生成的 binlog 生效。
+      全量复制期间，所选表的结构变更需等待快照结束。从历史位点开始时，系统会核验事务边界和源结构变更。
     </a-alert>
 
     <a-form-item v-if="form.start_mode === 'full_then_cdc'" label="全量失败处理">

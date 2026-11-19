@@ -51,12 +51,12 @@ export function unsafeBootstrap(job: IncrementalJob) {
   return job.start_mode === 'full_then_cdc' && !job.bootstrap_completed && ['paused_restart', 'failed'].includes(job.status)
 }
 
-export function legacyDamengSchema(job: IncrementalJob) {
-  return job.dst_db_type === 'dameng' && job.source_schema_version !== 1
+export function legacyIncrementalSchema(job: IncrementalJob) {
+  return job.source_schema_version !== 1
 }
 
 export function resumable(job: IncrementalJob) {
-  return !legacyDamengSchema(job) && ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(job.status) && job.locator_strategy_version === 1
+  return !legacyIncrementalSchema(job) && ['paused_manual', 'paused_restart', 'failed', 'paused_row_conflict'].includes(job.status) && job.locator_strategy_version === 1
 }
 
 export function preparable(status: string) {
@@ -67,8 +67,17 @@ export function cancelable(status: string) {
   return ['cutting_over', 'ready_to_cutover', 'ready_with_warnings', 'cutover_blocked'].includes(status)
 }
 
-export function completable(status: string) {
-  return ['ready_to_cutover', 'ready_with_warnings'].includes(status)
+export function completable(job: IncrementalJob) {
+  return ['ready_to_cutover', 'ready_with_warnings'].includes(job.status) && job.validation_state === 'passed'
+    && (job.content_validation_state === 'passed' || cutoverContentNeedsAcknowledgment(job))
+}
+
+export function cutoverContentNeedsAcknowledgment(job: IncrementalJob) {
+  return job.content_validation_state === 'needs_acknowledgment'
+}
+
+export function cutoverHasWarnings(job: IncrementalJob) {
+  return job.skipped_count > 0 || job.warning_count > 0 || job.excluded_table_count > 0
 }
 
 export function abortable(status: string) {

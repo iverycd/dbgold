@@ -21,7 +21,7 @@
           <div class="title-line">
             <h1>增量迁移任务</h1>
             <a-tag :color="incrementalStatusColor(job.status)">
-              {{ job.status !== 'stopped' && (job.locator_strategy_version !== 1 || legacyDamengSchema(job)) ? '版本升级后已废弃' : incrementalStatusText(job.status) }}
+              {{ job.status !== 'stopped' && (job.locator_strategy_version !== 1 || legacyIncrementalSchema(job)) ? '版本升级后已废弃' : incrementalStatusText(job.status) }}
             </a-tag>
             <span v-if="refreshing" class="refreshing"><icon-loading /> 正在刷新</span>
           </div>
@@ -35,12 +35,12 @@
         <div class="task-actions">
           <a-button v-if="pausable(job)" :loading="acting" @click="pause">暂停</a-button>
           <a-button v-if="resumable(job)" type="primary" :loading="acting" @click="resume">恢复任务</a-button>
-          <a-button v-if="job.status === 'paused_ddl' && !legacyDamengSchema(job)" type="primary" :loading="acting" @click="ack">确认 DDL</a-button>
+          <a-button v-if="job.status === 'paused_ddl' && !legacyIncrementalSchema(job)" type="primary" :loading="acting" @click="ack">确认 DDL</a-button>
           <a-popconfirm v-if="preparable(job.status)" content="仅当整个源 MySQL 实例已停写、目标库也无业务写入时才能继续。确认？" @ok="prepare">
             <a-button type="primary" :loading="acting">准备切换</a-button>
           </a-popconfirm>
           <a-button v-if="cancelable(job.status)" :loading="acting" @click="cancelCutover">取消切换</a-button>
-          <a-popconfirm v-if="completable(job.status)" :content="completeConfirmText" @ok="complete">
+          <a-popconfirm v-if="completable(job)" :content="completeConfirmText" @ok="confirmComplete">
             <a-button type="primary" status="success" :loading="acting">完成切换</a-button>
           </a-popconfirm>
           <a-popconfirm v-if="abortable(job.status)" content="放弃后不能恢复，目标端数据不会自动删除。确认放弃？" @ok="abort">
@@ -142,7 +142,8 @@
                   <div><dt>当前阶段</dt><dd>{{ job.phase || '—' }}</dd></div>
                   <div><dt>全量完成</dt><dd>{{ job.bootstrap_completed ? '是' : '否' }}</dd></div>
                   <div><dt>启动模式</dt><dd>{{ job.start_mode === 'full_then_cdc' ? '全量 + 增量' : '仅增量' }}</dd></div>
-                  <div><dt>校验状态</dt><dd>{{ validationStateText }}</dd></div>
+                  <div><dt>行数及切换条件</dt><dd>{{ validationStateText }}</dd></div>
+                  <div v-if="job.content_validation_state"><dt>内容校验</dt><dd>{{ contentStateText }}</dd></div>
                   <div><dt>创建时间</dt><dd>{{ formatIncrementalDate(job.created_at) }}</dd></div>
                   <div><dt>完成时间</dt><dd>{{ formatIncrementalDate(job.finished_at) }}</dd></div>
                 </dl>
@@ -243,14 +244,18 @@
           </a-tab-pane>
 
           <a-tab-pane key="validation" title="最终校验">
-            <div class="tab-toolbar"><div><h2>最终行数校验</h2><p>切换前核对源端与目标端的数据一致性。</p></div></div>
-            <a-table v-if="validationRows.length" :data="validationRows" size="small" :pagination="false" :scroll="{ x: 820, y: 480 }">
+            <div class="tab-toolbar"><div><h2>切换校验结果</h2><p>{{ contentStateText }}</p></div></div>
+            <a-alert v-if="job.content_validation_waived_at" type="warning" class="inline-alert">
+              用户 #{{ job.content_validation_waived_by }} 于 {{ formatIncrementalDate(job.content_validation_waived_at) }} 确认豁免内容校验，原始结果见下表。
+            </a-alert>
+            <a-table v-if="validationRows.length" :data="validationRows" row-key="table" size="small" :pagination="{ pageSize: 10 }" :scroll="{ x: 960, y: 480 }">
               <template #columns>
-                <a-table-column title="表" data-index="table" :width="240" />
-                <a-table-column title="源库" data-index="source" :width="140" />
-                <a-table-column title="目标库" data-index="target" :width="140" />
-                <a-table-column title="结果" :width="110"><template #cell="{ record }"><a-tag :color="record.match ? 'green' : 'red'">{{ record.match ? '一致' : '不一致' }}</a-tag></template></a-table-column>
-                <a-table-column title="错误"><template #cell="{ record }"><span class="error-wrap">{{ record.error || '—' }}</span></template></a-table-column>
+                <a-table-column title="表" data-index="table" :width="190" />
+                <a-table-column title="源库行数" data-index="source" :width="100" />
+                <a-table-column title="目标行数" data-index="target" :width="100" />
+                <a-table-column title="行数" :width="95"><template #cell="{ record }"><a-tag :color="record.match ? 'green' : 'red'">{{ record.match ? '一致' : '未通过' }}</a-tag></template></a-table-column>
+                <a-table-column title="内容" :width="115"><template #cell="{ record }"><a-tag v-if="record.content" :color="record.content.status === 'passed' ? 'green' : 'orange'">{{ contentResultLabel(record.content.status) }}</a-tag><span v-else>—</span></template></a-table-column>
+                <a-table-column title="详细结果"><template #cell="{ record }"><span class="error-wrap">{{ validationRowDetail(record) }}</span></template></a-table-column>
               </template>
             </a-table>
             <a-empty v-else :description="validationEmptyText" />
@@ -264,7 +269,7 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Message } from '@arco-design/web-vue'
+import { Message, Modal } from '@arco-design/web-vue'
 import IncrementalMigrationLogPanel from '@/components/IncrementalMigrationLogPanel.vue'
 import { copyText } from '@/utils/clipboard'
 import MigrationConnectionRoute from '@/components/MigrationConnectionRoute.vue'
@@ -290,6 +295,8 @@ import {
   bootstrapStageText,
   cancelable,
   completable,
+  cutoverContentNeedsAcknowledgment,
+  cutoverHasWarnings,
   formatIncrementalDate,
   incrementalStatusColor,
   incrementalStatusText,
@@ -297,11 +304,18 @@ import {
   positionText,
   preparable,
   resumable,
-  legacyDamengSchema,
+  legacyIncrementalSchema,
   unsafeBootstrap,
 } from '@/utils/incrementalJob'
 
-interface ValidationRow { table: string; source: number; target: number; match: boolean; error?: string }
+interface ValidationRow {
+  table: string
+  source: number
+  target: number
+  match: boolean
+  error?: string
+  content?: { status: string; missing_rows: number; extra_rows: number; changed_rows: number; duplicate_keys: number; error?: string }
+}
 interface FailedObjectRow extends BootstrapFailedObject { key: string }
 interface RiskItem { key: string; level: 'warning' | 'danger'; title: string; description: string; detail?: string }
 
@@ -338,9 +352,9 @@ let disposed = false
 let requestRunning = false
 
 const jobID = computed(() => String(route.params.jobId || ''))
-const completeConfirmText = computed(() => job.value?.status === 'ready_with_warnings'
-  ? `存在同步警告或 ${job.value?.excluded_table_count || 0} 张排除表，确认已核对并接受当前迁移范围？`
-  : '确认源库仍保持停写并完成迁移？')
+const completeConfirmText = computed(() => job.value && cutoverHasWarnings(job.value)
+  ? `请确认源库和目标库仍停写，且已核对同步警告及 ${job.value.excluded_table_count} 张排除表。`
+  : '确认源库和目标库仍保持停写？')
 const canExportFailedDDL = computed(() => !!job.value && (
   job.value.failed_object_count > 0 || (bootstrapReview.value?.excluded_tables.length || 0) > 0 || (bootstrapReview.value?.warnings.length || 0) > 0
 ))
@@ -370,6 +384,23 @@ const validationRows = computed<ValidationRow[]>(() => {
 })
 const validationStateText = computed(() => ({ pending: '等待校验', running: '校验中', passed: '已通过', failed: '失败', mismatch: '存在不一致' }[job.value?.validation_state || ''] || job.value?.validation_state || '未开始'))
 const validationEmptyText = computed(() => job.value?.validation_state ? `当前校验状态：${validationStateText.value}` : '任务尚未进入最终校验阶段')
+const contentStateText = computed(() => {
+  if (job.value?.status === 'cutover_blocked' && job.value.content_validation_state === 'pending') {
+    return '行数或切换条件未通过，未进行内容校验'
+  }
+  return { pending: '等待内容校验', running: '正在进行完整内容校验', passed: '完整内容校验通过', needs_acknowledgment: '内容有差异或无法完成校验', waived: '内容校验已人工豁免' }[job.value?.content_validation_state || ''] || (validationRows.value.length ? '历史行数校验' : '尚未进行内容校验')
+})
+
+function contentResultLabel(status: string) {
+  return ({ passed: '一致', mismatch: '有差异', unsupported: '无法校验', error: '校验失败', cancelled: '未完成', incomplete: '未完成' } as Record<string, string>)[status] || status
+}
+
+function validationRowDetail(record: ValidationRow) {
+  if (record.error || record.content?.error) return record.error || record.content?.error
+  if (record.content?.status !== 'mismatch') return '—'
+  const { missing_rows, extra_rows, changed_rows, duplicate_keys } = record.content
+  return `缺失 ${missing_rows} · 多余 ${extra_rows} · 字段变化 ${changed_rows} · 重复键 ${duplicate_keys}`
+}
 
 const failedObjects = computed<FailedObjectRow[]>(() => {
   const rows = bootstrapReview.value?.failed_objects?.length
@@ -388,7 +419,7 @@ const risks = computed<RiskItem[]>(() => {
   })
   if (unsafeBootstrap(job.value)) items.push({ key: 'bootstrap', level: 'danger', title: '全量完成状态不安全', description: '恢复前会检查目标 Checkpoint；没有完成位点时任务将拒绝恢复。' })
   if (job.value.locator_strategy_version !== 1) items.push({ key: 'legacy', level: 'warning', title: '旧版定位策略任务已废弃', description: '该任务不能恢复，目标表、Checkpoint、日志和迁移数据均未自动删除。' })
-  if (legacyDamengSchema(job.value)) items.push({ key: 'legacy-schema', level: 'warning', title: '旧版达梦任务需要重建', description: '该任务未保存可恢复的源表结构快照，请重新建立全量或增量起点。目标数据、检查点和历史报告均保留。' })
+  if (job.value.status !== 'stopped' && legacyIncrementalSchema(job.value)) items.push({ key: 'legacy-schema', level: 'warning', title: '旧版增量任务需要重建', description: '该任务未保存可恢复的源表结构快照，请重新建立全量或增量起点。' })
   if (job.value.last_error) items.push({ key: 'last-error', level: 'danger', title: '最近一次错误', description: '请按错误详情处理；若提示历史事件不受支持或源结构无法确认，需要重新建立起点。', detail: job.value.last_error })
   if (job.value.status === 'paused_row_conflict') items.push({
     key: 'row-conflict', level: 'danger', title: `表 ${job.value.conflict_table || '—'} 发生行定位冲突`,
@@ -396,7 +427,8 @@ const risks = computed<RiskItem[]>(() => {
     detail: `位点：${positionText(job.value.conflict_file, job.value.conflict_position, job.value.conflict_gtid)}\n旧行摘要：${job.value.conflict_before_hash || '—'}\n${job.value.conflict_error || ''}`,
   })
   if (job.value.blocking_ddl) items.push({ key: 'blocking-ddl', level: 'warning', title: '检测到待处理 DDL', description: '核对并在目标端手工处理后，再确认继续增量同步。', detail: job.value.blocking_ddl })
-  if (job.value.status === 'ready_with_warnings') items.push({ key: 'cutover-warning', level: 'warning', title: '切换前仍有风险项', description: `当前包含 ${job.value.warning_count || 0} 条警告和 ${job.value.excluded_table_count || 0} 张排除表，请核对范围后再完成切换。` })
+  if (job.value.status === 'ready_with_warnings' && cutoverHasWarnings(job.value)) items.push({ key: 'cutover-warning', level: 'warning', title: '切换前仍有同步警告', description: `当前包含 ${job.value.warning_count || 0} 条警告和 ${job.value.excluded_table_count || 0} 张排除表，请核对范围后再完成切换。` })
+  if (job.value.status === 'ready_with_warnings' && cutoverContentNeedsAcknowledgment(job.value)) items.push({ key: 'content-warning', level: 'warning', title: '内容校验未通过', description: '请查看最终校验结果。继续切换需要另行确认豁免。' })
   return items
 })
 
@@ -483,7 +515,25 @@ const resume = () => act(() => resumeIncrementalJob(job.value!.job_id), '任务�
 const ack = () => act(() => acknowledgeIncrementalDDL(job.value!.job_id), 'DDL 已确认')
 const prepare = () => act(() => prepareIncrementalCutover(job.value!.job_id), '已锁定最终位点，正在追赶和校验')
 const cancelCutover = () => act(() => cancelIncrementalCutover(job.value!.job_id), '已取消切换并继续同步')
-const complete = () => act(() => stopIncrementalJob(job.value!.job_id, job.value!.status === 'ready_with_warnings', job.value!.excluded_table_count > 0), '迁移闭环已安全完成')
+function confirmComplete() {
+  const reviewed = job.value
+  if (!reviewed || !completable(reviewed)) return
+  const complete = (waive: boolean) => act(
+    () => stopIncrementalJob(reviewed.job_id, cutoverHasWarnings(reviewed), reviewed.excluded_table_count > 0, waive),
+    waive ? '内容校验已人工豁免，切换完成' : '切换完成',
+  )
+  if (!cutoverContentNeedsAcknowledgment(reviewed)) return complete(false)
+  activeTab.value = 'validation'
+  Modal.confirm({
+    title: '确认豁免内容校验',
+    content: '部分表内容有差异或无法完成校验。确认接受这些结果并继续切换？',
+    maskClosable: false,
+    okText: '确认豁免并切换',
+    cancelText: '查看校验结果',
+    okButtonProps: { status: 'danger' },
+    onOk: () => complete(true),
+  })
+}
 const abort = () => act(() => abortIncrementalJob(job.value!.job_id), '任务已放弃')
 
 async function acceptReview() {
