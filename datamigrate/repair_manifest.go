@@ -169,7 +169,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		tables = nil
 		seen := map[string]bool{}
 		for _, t := range m.cfg.TableNames {
-			if !seen[t] {
+			if !seen[t] && (!m.isOscarDameng() || m.partitionState == nil || !m.partitionState.blocked[t]) {
 				tables = append(tables, t)
 				seen[t] = true
 			}
@@ -358,6 +358,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 				return
 			}
 			o.Error = e.Error()
+			if m.isOscarDameng() {
+				o.SourceDDL = m.oscarSourceTableDDL(ctx, t)
+			}
 			if m.isOracleDameng() {
 				if m.dmBlocked == nil {
 					m.dmBlocked = map[string]bool{}
@@ -375,7 +378,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return kind == "views"
 		}
 		if m.cfg.Content == "data_only" {
-			return (m.isOracleDameng() || m.isOraclePGSQLServer()) && kind == "sequences"
+			return (m.isOracleDameng() || m.isOraclePGSQLServer() || m.isOscarDameng()) && kind == "sequences"
 		}
 		return !m.cfg.objectMode() || slices.Contains(m.cfg.Objects, kind)
 	}
@@ -522,7 +525,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					owner = m.cfg.TargetSchema
 				}
 				var ss []dialect.Statement
-				if len(active) > 0 && v.Unsupported == "" && m.cfg.Content != "data_only" {
+				if len(active) > 0 && v.Unsupported == "" && m.cfg.Content != "data_only" && !m.isOscarDameng() {
 					ss = m.writer.Dialect().SequenceStatements(m.cfg.TargetSchema, v, owner)
 				}
 				var dependencies []string
@@ -544,7 +547,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracleDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL() || m.oracleMySQL != nil || m.isOscarMySQL()) {
+	if want("foreign_keys") && (m.cfg.Mode != "include" || m.cfg.objectMode() || m.isSQLServerDameng() || m.isOracleDameng() || m.isOracle() || m.isSQLServer() || m.isPGMySQL() || m.oracleMySQL != nil || m.isOscarMySQL() || m.isOscarDameng()) {
 		finishStage = startRepairPreparationStage(m.log, "收集外键")
 		if values, e := m.sourceForeignKeys(ctx); e == nil {
 			for _, v := range values {
@@ -555,6 +558,9 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					continue
 				}
 				v = m.scopeSQLServerForeignKey(v)
+				if m.isOscarDameng() {
+					v = m.checkOscarDamengForeignKey(v)
+				}
 				src, ref, originalName := v.TableName, v.RefTable, v.ConstraintName
 				if m.isOraclePGSQLServer() && !selected[ref] && v.Unsupported == "" {
 					v.Unsupported = fmt.Sprintf("引用表 %s 未纳入迁移范围", ref)
@@ -571,12 +577,13 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 					v.RefColumns[i] = m.targetColumn(ref, c)
 				}
 				o := repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, SourceTable: src, SourceName: originalName, TargetName: v.ConstraintName, ForeignKey: &v, Dependencies: []string{repairID("table", v.RefTable, v.RefTable)}}
-				if (m.isOscarMySQL() || m.isOraclePGSQLServer()) && v.Unsupported != "" {
+				if (m.isOscarMySQL() || m.isOraclePGSQLServer() || m.isOscarDameng()) && v.Unsupported != "" {
 					o.Error = v.Unsupported
+					o.DiagnosticOnly = m.isOscarDameng()
 					add(o, nil)
 					continue
 				}
-				add(o, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v))
+				add(o, m.migrationForeignKeyStatements(v))
 			}
 		} else {
 			if m.stopOracleDamengTask(ctx, e) {
@@ -620,7 +627,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 	}
 	if want("views") && m.isOraclePGSQLServer() {
 		m.recordSQLServerViewManifest(ctx, m.cfg.ViewNames, selected)
-	} else if want("views") {
+	} else if want("views") && !m.isOscarDameng() {
 		finishStage = startRepairPreparationStage(m.log, "收集视图")
 		var values []source.ViewInfo
 		var viewErr error
@@ -1026,6 +1033,11 @@ func (m *Migrator) repairSequence(ctx context.Context, v source.SequenceInfo, ow
 			return w.ExecuteOscarMySQLAutoIncrement(c, v, ss, start)
 		})
 	}
+	if m.isOscarDameng() {
+		return m.captureSequenceCall(ctx, v, nil, func(c context.Context) error {
+			return m.writer.CreateSequence(c, v, owner)
+		})
+	}
 	if v.OracleMySQL != nil && m.writer.DBType() == "mysql" {
 		w, ok := m.writer.(oracleMySQLAutoWriter)
 		if !ok {
@@ -1112,7 +1124,7 @@ func (m *Migrator) captureSequenceCall(ctx context.Context, v source.SequenceInf
 	return err
 }
 func (m *Migrator) repairFK(ctx context.Context, v source.FKInfo) error {
-	return m.captureRepairCall(ctx, repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, TargetName: v.ConstraintName, ForeignKey: &v}, m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, v), func(c context.Context) error { return m.writer.CreateForeignKey(c, v) })
+	return m.captureRepairCall(ctx, repair.Object{Kind: "foreign_key", Name: v.ConstraintName, Table: v.TableName, TargetName: v.ConstraintName, ForeignKey: &v}, m.migrationForeignKeyStatements(v), func(c context.Context) error { return m.writer.CreateForeignKey(c, v) })
 }
 func (m *Migrator) repairComment(ctx context.Context, v source.CommentInfo) error {
 	ss, err := m.prepareComment(ctx, v)

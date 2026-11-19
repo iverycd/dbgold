@@ -205,6 +205,11 @@
             </div>
           </a-tab-pane>
 
+          <a-tab-pane v-if="report?.warnings?.length" key="warnings">
+            <template #title>迁移告警（{{ report.warnings.length }}）</template>
+            <div class="tab-content"><MigrationWarningsTable :warnings="report.warnings" /></div>
+          </a-tab-pane>
+
           <a-tab-pane v-if="report" key="validation" title="数据内容校验">
             <div class="tab-content"><DataValidationPanel :report="report.dataValidation" :enabled="job.validate_data" /></div>
           </a-tab-pane>
@@ -255,6 +260,7 @@
 
 <script setup lang="ts">
 import MigrationRowCountPanel from '@/components/MigrationRowCountPanel.vue'
+import MigrationWarningsTable from '@/components/MigrationWarningsTable.vue'
 import { indexMigrationDataIssues, rowCountEntries, summarizeRowCounts } from '@/utils/migrationDataIssues'
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -262,7 +268,7 @@ import PartitionPreflightPanel from './PartitionPreflightPanel.vue'
 import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import CompatibilityFunctionsPanel from '@/components/CompatibilityFunctionsPanel.vue'
 import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrementPanel.vue'
-import { reportCategories, migrationOverviewRows, formatReportCategories, formatReportRowCounts, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary, migrationPGPreflight, preflightStatusLabel } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, formatReportCategories, formatReportRowCounts, formatReportWarnings, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, migrationTimingSummary, migrationPGPreflight, preflightStatusLabel } from '@/utils/migrationReport'
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
@@ -425,6 +431,7 @@ async function exportReport() {
   const lines = ['单次迁移报告', `Job ID: ${current.job_id}`, ...formatMigrationTiming(current), `导出时间: ${new Date().toLocaleString('zh-CN')}`, '']
   for (const line of formatAutoRepairs(report.value.auto_repairs)) lines.push(line)
   if (savedPGPreflight.value) lines.push('=== 兼容预检与计划 ===', JSON.stringify(savedPGPreflight.value, null, 2), '')
+  for (const line of formatReportWarnings(report.value.warnings)) lines.push(line)
   for (const line of formatReportCategories(report.value)) lines.push(line)
   if (report.value.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(report.value.native_schema, null, 2), '')
   if (report.value.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(report.value.partition_migration, null, 2), '')

@@ -233,7 +233,7 @@ func (w *DaMengWriter) PrepareOracleDameng(ctx context.Context, infos []*source.
 }
 
 func (w *DaMengWriter) probeOracleDMTimestamp(ctx context.Context, p int64, zoned bool) error {
-	if p < 7 || p > 9 {
+	if p < 0 || p > 9 {
 		return fmt.Errorf("时间精度 %d 不在支持范围", p)
 	}
 	value := "2024-01-02 03:04:05." + "123456789"[:p] + strings.Repeat("0", 9-int(p))

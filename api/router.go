@@ -89,6 +89,9 @@ func NewRouterWithOptions(options RouterOptions) (*gin.Engine, error) {
 		authed.GET("/query/history", handler.ListQueryHistory)
 
 		authed.GET("/schema/export-routines", handler.ExportRoutines)
+		authed.GET("/schema/compare/supported-pairs", handler.GetSchemaComparePairs)
+		authed.POST("/schema/compare", handler.CompareTableSchemas)
+		authed.POST("/schema/compare/apply", handler.ApplyTableSchemaChanges)
 
 		authed.GET("/migration/data-migrate/supported-pairs", handler.GetSupportedPairs)
 		authed.POST("/migration/data-migrate", handler.StartDataMigration)

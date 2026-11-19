@@ -210,7 +210,7 @@ FROM V_SYS_INDEX_STATISTICS WHERE TABLE_SCHEM=? ORDER BY TABLE_NAME,INDEX_NAME,O
 		direction, _ := row[6].(string)
 		filter, _ := row[7].(string)
 		if col == "" || filter != "" || kind == 2 || direction != "" && direction != "A" && direction != "D" {
-			idx.Unsupported = "神通表达式、部分或哈希索引无法等价转换为 MySQL 普通索引"
+			idx.Unsupported = "神通表达式、部分或哈希索引无法等价转换为普通索引"
 		}
 		idx.Columns = append(idx.Columns, col)
 		idx.Descending = append(idx.Descending, direction == "D")
@@ -286,7 +286,7 @@ ORDER BY FKTABLE_NAME,FK_NAME,KEY_SEQ`, r.schema)
 			case refSchema != r.schema:
 				fk.Unsupported = "神通跨 Schema 外键没有目标对象的确定映射"
 			case !delOK || !updOK || deferrability != 7:
-				fk.Unsupported = "神通外键的动作或延迟校验语义无法在 MySQL 中等价保留"
+				fk.Unsupported = "目标外键无法等价保留神通引用动作或延迟校验语义"
 			}
 			keys = append(keys, fk)
 		}

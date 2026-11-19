@@ -7,6 +7,7 @@ export interface SupportedPair {
   supports_check_constraints?: boolean
   supports_full_schema?: boolean
   supports_triggers?: boolean
+  supports_view_migration?: boolean
   source: string
   target: string
 }
@@ -267,7 +268,7 @@ export interface MigrationReport {
   trigger_adaptation?: TriggerAdaptationReport
  compatibility_functions?: CompatibilityFunctionsReport
 	 auto_repairs?: AutoRepair[]
-	 warnings?: { table: string; column: string; reason: string; count: number }[]
+	 warnings?: { table: string; column: string; reason: string; count: number; source_ddl?: string }[]
   preflight?: PGMySQLPreflight
   pg_oracle_preflight?: PGOraclePreflight
   cross_preflight?: CrossPreflight

@@ -221,7 +221,7 @@
                   </a-form-item>
                   <a-row :gutter="16">
                     <a-col :span="8">
-                      <a-form-item :label="useMySQLStream ? '每批行数' : '每页行数'">
+                      <a-form-item :label="useMySQLStream || isOscarDameng ? '每批行数' : '每页行数'">
                         <a-input-number v-model="dataMigrate.pageSize" :min="1000" :max="500000" :step="1000" style="width: 100%" />
                       </a-form-item>
                     </a-col>
@@ -230,7 +230,7 @@
                         <a-input-number v-model="dataMigrate.maxParallel" :min="1" :max="50" style="width: 100%" />
                       </a-form-item>
                     </a-col>
-                    <a-col :span="8">
+                    <a-col v-if="!isOscarDameng" :span="8">
                       <a-form-item :label="useMySQLStream ? '表内写入并发数' : '表内分页并发数'">
                         <a-input-number v-model="dataMigrate.intraTableParallel" :min="1" :max="20" style="width: 100%" />
                       </a-form-item>
@@ -245,16 +245,16 @@
                     <a-col v-if="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle'" :span="12">
                       <span class="adv-check">{{ selectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                     </a-col>
-                    <a-col v-if="!isDamengNative && !dataIsOscarMySQL" :span="12">
+                    <a-col v-if="!isDamengNative && !dataOmitsOwnerAndDistribution" :span="12">
                       <a-checkbox v-model="dataMigrate.changeOwner" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                     </a-col>
-                    <a-col v-if="!isDamengNative" :span="12">
+                    <a-col v-if="!isDamengNative && !isOscarDameng" :span="12">
                       <a-checkbox v-model="dataMigrate.charInLength" :disabled="selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">char 长度单位（CHAR）</a-checkbox>
                     </a-col>
-                    <a-col v-if="!isDamengNative" :span="12">
+                    <a-col v-if="!isDamengNative && !isOscarDameng" :span="12">
                       <a-checkbox :disabled="selectedDst?.db_type === 'sqlserver'" v-model="dataMigrate.useNvarchar2" class="adv-check">{{ selectedSrc?.db_type === 'oracle' && selectedDst?.db_type === 'dameng' ? '使用 NVARCHAR(n CHAR)' : '使用 nvarchar2' }}</a-checkbox>
                     </a-col>
-                    <a-col v-if="!isDamengNative && !dataIsOscarMySQL" :span="12">
+                    <a-col v-if="!isDamengNative && !dataOmitsOwnerAndDistribution" :span="12">
                       <a-checkbox v-model="dataMigrate.distributed" :disabled="selectedDst?.db_type === 'oscar' || selectedDst?.db_type === 'oracle' || selectedDst?.db_type === 'sqlserver'" class="adv-check">分布式模式（GaussDB 建表时设置 HASH 分布键，唯一键按需使用 GSI）</a-checkbox>
                     </a-col>
                     <a-col :span="24">
@@ -267,7 +267,7 @@
                     </a-col>
                   </a-row>
 
-                  <template v-if="!isDamengNative"><div class="adv-section-title">视图剥离模式名</div>
+                  <template v-if="!isDamengNative && !isOscarDameng"><div class="adv-section-title">视图剥离模式名</div>
                   <a-input
                     v-model="dataMigrate.stripViewSchemas"
                     placeholder="逗号分隔，如 financeplatform_3.0, otherdb"
@@ -873,10 +873,10 @@
                 <a-col v-if="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle'" :span="12">
                   <span class="adv-check">{{ omSelectedDst?.db_type === 'oracle' ? 'Oracle' : 'Oscar' }} 对象名统一转大写</span>
                 </a-col>
-                <a-col v-if="!objectIsOscarMySQL" :span="12">
+                <a-col v-if="!objectOmitsOwnerAndDistribution" :span="12">
                   <a-checkbox v-model="objMigrate.changeOwner" :disabled="omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">更改对象 owner 为 Schema 同名角色</a-checkbox>
                 </a-col>
-                <a-col v-if="!objectIsOscarMySQL" :span="12">
+                <a-col v-if="!objectOmitsOwnerAndDistribution" :span="12">
                   <a-checkbox v-model="objMigrate.distributed" :disabled="omSelectedDst?.db_type === 'oscar' || omSelectedDst?.db_type === 'oracle' || omSelectedDst?.db_type === 'sqlserver'" class="adv-check">GaussDB 分布式（按实际分布键选择普通索引或 GSI）</a-checkbox>
                 </a-col>
               </a-row>
@@ -1171,7 +1171,10 @@ const selectedDst = computed(() =>
 function isOscarMySQL(source?: Connection, destination?: Connection): boolean {
   return source?.db_type === 'oscar' && destination?.db_type === 'mysql'
 }
-const dataIsOscarMySQL = computed(() => isOscarMySQL(selectedSrc.value, selectedDst.value))
+function oscarOmitsOwnerAndDistribution(source?: Connection, destination?: Connection): boolean {
+  return source?.db_type === 'oscar' && (destination?.db_type === 'mysql' || destination?.db_type === 'dameng')
+}
+const dataOmitsOwnerAndDistribution = computed(() => oscarOmitsOwnerAndDistribution(selectedSrc.value, selectedDst.value))
 const canSelectMySQLReadStrategy = computed(() => selectedSrc.value?.db_type === 'mysql' && selectedDst.value?.db_type === 'gaussdb' && dataMigrate.content !== 'schema_only')
 const canSelectDamengWriteStrategy = computed(() => selectedSrc.value?.db_type === 'mysql' && selectedDst.value?.db_type === 'dameng' && dataMigrate.content !== 'schema_only')
 watch([canSelectDamengWriteStrategy, () => dataMigrate.srcConnId, () => dataMigrate.srcDatabase, () => dataMigrate.dstConnId], () => {
@@ -1187,6 +1190,7 @@ function sourceUsesSchema(connection?: Connection): boolean {
 }
 
 const isDamengNative = computed(() => selectedSrc.value?.db_type === 'dameng' && selectedDst.value?.db_type === 'dameng')
+const isOscarDameng = computed(() => selectedSrc.value?.db_type === 'oscar' && selectedDst.value?.db_type === 'dameng')
 watch(isDamengNative, enabled => {
   if (!enabled) return
   Object.assign(dataMigrate, { mode: 'all', filter: '', content: 'both', migrateTriggers: true, lowerCaseNames: false, charInLength: false, useNvarchar2: false, distributed: false, changeOwner: false, stripViewSchemas: '' })
@@ -1540,8 +1544,12 @@ function vmCheckPairSupport() {
   const src = connections.value.find((c) => c.id === viewMigrate.srcConnId)
   const dst = connections.value.find((c) => c.id === viewMigrate.dstConnId)
   if (!src || !dst) return
-  const supported = supportedPairs.value.some((p) => p.source === src.db_type && p.target === dst.db_type)
-  viewMigrate.unsupportedMsg = src.db_type === 'dameng' && dst.db_type === 'dameng' ? '达梦同库迁移请使用 Schema 全对象迁移' : supported ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的视图迁移`
+  const pair = supportedPairs.value.find((p) => p.source === src.db_type && p.target === dst.db_type)
+  if (src.db_type === 'dameng' && dst.db_type === 'dameng') {
+    viewMigrate.unsupportedMsg = '达梦同库迁移请使用 Schema 全对象迁移'
+  } else {
+    viewMigrate.unsupportedMsg = pair && pair.supports_view_migration !== false ? '' : `当前不支持 ${src.db_type} → ${dst.db_type} 的视图迁移`
+  }
 }
 
 async function vmLoadSrcDatabases(connId: number) {
@@ -1585,7 +1593,7 @@ function vmClearSelection() {
 }
 
 async function handleMigrateViews() {
-  if (databaseSelectionBlocked('views')) return
+  if (viewMigrate.unsupportedMsg || databaseSelectionBlocked('views')) return
   if (viewMigrate.dstConnId && !viewMigrate.dstSchema && vmSelectedDst.value?.db_type !== 'oracle') {
     Message.error('请选择目标 Schema')
     return
@@ -1661,7 +1669,7 @@ const objLogContainer = ref<HTMLElement | null>(null)
 
 const omSelectedSrc = computed(() => connections.value.find((c) => c.id === objMigrate.srcConnId))
 const omSelectedDst = computed(() => connections.value.find((c) => c.id === objMigrate.dstConnId))
-const objectIsOscarMySQL = computed(() => isOscarMySQL(omSelectedSrc.value, omSelectedDst.value))
+const objectOmitsOwnerAndDistribution = computed(() => oscarOmitsOwnerAndDistribution(omSelectedSrc.value, omSelectedDst.value))
 
 const objectSupportsTriggers = computed(() => supportedPairs.value.some(pair => pair.source === omSelectedSrc.value?.db_type && pair.target === omSelectedDst.value?.db_type && pair.supports_triggers))
 const objectSupportsChecks = computed(() => supportedPairs.value.some(pair => pair.source === omSelectedSrc.value?.db_type && pair.target === omSelectedDst.value?.db_type && pair.supports_check_constraints))
@@ -1792,8 +1800,8 @@ async function startObjectMigration() {
       src_database: objMigrate.srcDatabase || undefined,
       target_schema: objMigrate.dstSchema || undefined,
       lower_case_names: objMigrate.lowerCaseNames,
-      change_owner: !objectIsOscarMySQL.value && objMigrate.changeOwner,
-      distributed: !objectIsOscarMySQL.value && objMigrate.distributed,
+      change_owner: !objectOmitsOwnerAndDistribution.value && objMigrate.changeOwner,
+      distributed: !objectOmitsOwnerAndDistribution.value && objMigrate.distributed,
     })
     objMigrate.currentJobId = res.data.job_id
     objMigrate.logs.push('[INFO] 迁移任务已创建，正在连接日志流…')
@@ -2093,17 +2101,17 @@ return {
       validate_data: dataMigrate.validateData,
       page_size: dataMigrate.pageSize,
       max_parallel: dataMigrate.maxParallel,
-      intra_table_parallel: dataMigrate.intraTableParallel,
+      intra_table_parallel: isOscarDameng.value ? 1 : dataMigrate.intraTableParallel,
       ...(useMySQLStream.value ? { mysql_read_strategy: 'stream' as const } : {}),
       ...(canSelectDamengWriteStrategy.value ? { dameng_write_strategy: dataMigrate.damengWriteStrategy } : {}),
       lower_case_names: !isDamengNative.value && dataMigrate.lowerCaseNames,
-      char_in_length: !isDamengNative.value && dataMigrate.charInLength,
-      use_nvarchar2: !isDamengNative.value && dataMigrate.useNvarchar2,
-      distributed: !isDamengNative.value && !dataIsOscarMySQL.value && dataMigrate.distributed,
-      change_owner: !isDamengNative.value && !dataIsOscarMySQL.value && dataMigrate.changeOwner,
+      char_in_length: isOscarDameng.value || !isDamengNative.value && dataMigrate.charInLength,
+      use_nvarchar2: !isDamengNative.value && !isOscarDameng.value && dataMigrate.useNvarchar2,
+      distributed: !isDamengNative.value && !dataOmitsOwnerAndDistribution.value && dataMigrate.distributed,
+      change_owner: !isDamengNative.value && !dataOmitsOwnerAndDistribution.value && dataMigrate.changeOwner,
       src_database: dataMigrate.srcDatabase,
       target_schema: dataMigrate.dstSchema || undefined,
-      strip_view_schemas: isDamengNative.value ? undefined : dataMigrate.stripViewSchemas || undefined,
+      strip_view_schemas: isDamengNative.value || isOscarDameng.value ? undefined : dataMigrate.stripViewSchemas || undefined,
       src_max_open_conns: dataMigrate.srcMaxOpenConns || undefined,
       src_max_idle_conns: dataMigrate.srcMaxIdleConns || undefined,
       src_conn_max_lifetime: dataMigrate.srcConnMaxLifetime || undefined,

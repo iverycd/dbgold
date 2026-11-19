@@ -54,6 +54,7 @@ function loadMigrationView(payloads, setup = {}) {
   return loadSource(`${descriptor.scriptSetup.content}
     export { connections, srcConnections, dataMigrate, viewMigrate, objMigrate,
       startDataMigration, handleMigrateViews, startObjectMigration,
+      checkPairSupport, vmCheckPairSupport, omCheckPairSupport, vmCanMigrate,
       loadSrcDatabases, vmLoadSrcDatabases, omLoadSrcDatabases,
       loadDstSchemas, vmLoadDstSchemas, omLoadDstSchemas };`, id => {
     switch (id) {
@@ -77,7 +78,7 @@ function loadMigrationView(payloads, setup = {}) {
         },
       }
       case '@/api/migration': return {
-        getSupportedPairs: async () => ({ data: [{ source: 'oscar', target: 'mysql' }] }),
+        getSupportedPairs: async () => ({ data: setup.supportedPairs ?? [{ source: 'oscar', target: 'mysql' }] }),
         startDataMigration: submit, migrateViews: submit, startObjectMigration: submit,
         preflightDataMigration: async payload => {
           setup.preflightRequests?.push(payload)
@@ -133,6 +134,63 @@ test('Oscar uses an explicit source schema for MySQL data, view and object migra
     assert.deepEqual(schemaRequests, [1, 1, 1, 1])
     assert.equal(preflightRequests.length, 1)
     assert.equal(preflightRequests[0].src_database, 'MixedSchema')
+  } finally {
+    scope.stop()
+  }
+})
+
+test('Oscar to Dameng submits data and table objects while disabling standalone views', async () => {
+  const scope = effectScope()
+  try {
+    const payloads = [], preflightRequests = []
+    const connections = [
+      { id: 1, db_type: 'oscar', database: 'OSRDB' },
+      { id: 2, db_type: 'dameng', database: 'DM' },
+    ]
+    let mount
+    const page = scope.run(() => loadMigrationView(payloads, {
+      connections, preflightRequests,
+      supportedPairs: [{ source: 'oscar', target: 'dameng', supports_view_migration: false }],
+      onMounted: callback => { mount = callback },
+    }))
+    await mount()
+    for (const [state, loadSource, loadTarget, check, submit] of [
+      [page.dataMigrate, page.loadSrcDatabases, page.loadDstSchemas, page.checkPairSupport, page.startDataMigration],
+      [page.objMigrate, page.omLoadSrcDatabases, page.omLoadDstSchemas, page.omCheckPairSupport, page.startObjectMigration],
+    ]) {
+      state.srcConnId = 1
+      state.dstConnId = 2
+      await loadSource(1)
+      await loadTarget(2)
+      assert.deepEqual(Array.from(state.srcDatabases), ['MixedSchema', 'MIXEDSCHEMA'])
+      state.srcDatabase = 'MixedSchema'
+      state.dstSchema = 'schema_b'
+      state.changeOwner = true
+      state.distributed = true
+      if ('selected' in state) state.selected = ['sample']
+      if ('objects' in state) state.objects = ['primary_keys']
+      check()
+      assert.equal(state.unsupportedMsg, '')
+      const before = payloads.length
+      await submit()
+      assert.equal(payloads.length, before + 1)
+      assert.equal(payloads.at(-1).src_database, 'MixedSchema')
+      assert.equal(payloads.at(-1).target_schema, 'schema_b')
+      assert.equal(payloads.at(-1).change_owner, false)
+      assert.equal(payloads.at(-1).distributed, false)
+    }
+    assert.equal(preflightRequests.length, 1)
+    assert.equal(preflightRequests[0].src_database, 'MixedSchema')
+    page.viewMigrate.srcConnId = 1
+    page.viewMigrate.dstConnId = 2
+    page.viewMigrate.srcDatabase = 'MixedSchema'
+    page.viewMigrate.dstSchema = 'schema_b'
+    page.viewMigrate.selected = ['SampleView']
+    page.vmCheckPairSupport()
+    assert.match(page.viewMigrate.unsupportedMsg, /oscar → dameng.*视图/)
+    assert.equal(page.vmCanMigrate.value, false)
+    await page.handleMigrateViews()
+    assert.equal(payloads.length, 2)
   } finally {
     scope.stop()
   }

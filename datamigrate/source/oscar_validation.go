@@ -39,12 +39,20 @@ func (r *OscarReader) OpenValidationScan(ctx context.Context, table string, cols
 }
 
 func (r *OscarReader) OpenPartitionValidationScan(ctx context.Context, table string, location validation.PartitionLocation, cols []validation.Column) (validation.RowStream, error) {
-	spec, err := r.PartitionMetadata(ctx, table)
+	from, err := r.oscarValidationPartition(ctx, table, location)
 	if err != nil {
 		return nil, err
 	}
+	return r.openOscarValidation(ctx, table, from, cols)
+}
+
+func (r *OscarReader) oscarValidationPartition(ctx context.Context, table string, location validation.PartitionLocation) (string, error) {
+	spec, err := r.PartitionMetadata(ctx, table)
+	if err != nil {
+		return "", err
+	}
 	if spec == nil || spec.Unsupported != "" || location.Native || location.Name == "" {
-		return nil, fmt.Errorf("神通源表 %s 缺少可核验的原生叶分区身份", table)
+		return "", fmt.Errorf("神通源表 %s 缺少可核验的原生叶分区身份", table)
 	}
 	var from string
 	err = oscarVisitLeaves(spec, false, func(p Partition, nested bool) error {
@@ -55,12 +63,12 @@ func (r *OscarReader) OpenPartitionValidationScan(ctx context.Context, table str
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if from == "" {
-		return nil, fmt.Errorf("神通源表 %s 的原生叶分区 %s 发生变化", table, location.Name)
+		return "", fmt.Errorf("神通源表 %s 的原生叶分区 %s 发生变化", table, location.Name)
 	}
-	return r.openOscarValidation(ctx, table, from, cols)
+	return from, nil
 }
 
 func (r *OscarReader) openOscarValidation(ctx context.Context, table, from string, cols []validation.Column) (validation.RowStream, error) {
@@ -101,6 +109,8 @@ type oscarValidationCursor struct {
 	id     uint64
 	width  int
 	bits   []int
+	fetch  func(context.Context, uint64, int, int) ([][]any, bool, error)
+	adjust func([][]any) error
 	rows   [][]any
 	done   bool
 }
@@ -117,9 +127,19 @@ func (s *oscarValidationCursor) Next(ctx context.Context) ([]any, error) {
 			return nil, io.EOF
 		}
 		var err error
-		s.rows, s.done, err = s.reader.bridge.FetchCursor(ctx, s.id, oscarCursorRows, oscarCursorBytes)
+		fetch := s.fetch
+		if fetch == nil {
+			fetch = s.reader.bridge.FetchCursor
+		}
+		s.rows, s.done, err = fetch(ctx, s.id, oscarCursorRows, oscarCursorBytes)
 		if err != nil {
 			return nil, err
+		}
+		if s.adjust != nil {
+			if err := s.adjust(s.rows); err != nil {
+				s.rows = nil
+				return nil, err
+			}
 		}
 		if len(s.rows) == 0 {
 			if s.done {

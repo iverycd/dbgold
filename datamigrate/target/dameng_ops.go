@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/typemap"
 	"dbgold/datamigrate/valueconv"
@@ -24,6 +25,11 @@ func (w *DaMengWriter) CopyData(ctx context.Context, table string, cols []string
 func (w *DaMengWriter) copyData(ctx context.Context, table string, cols, colTypes []string, rows [][]any, mysqlBatch bool) (retErr error) {
 	if len(rows) == 0 {
 		return nil
+	}
+	if w.srcType == "oscar" {
+		if err := w.prepareOscarDamengLoad(ctx, table, cols, colTypes, rows); err != nil {
+			return err
+		}
 	}
 	oracleFloatKinds := make([]string, len(cols))
 	var oracleRows [][]any
@@ -98,9 +104,12 @@ func (w *DaMengWriter) copyData(ctx context.Context, table string, cols, colType
 		if w.srcType == "oracle" && i < len(colTypes) {
 			placeholders[i] = valueconv.OracleDamengPlaceholder(colTypes[i])
 		}
+		if w.srcType == "oscar" {
+			placeholders[i] = valueconv.OscarDamengPlaceholder(colTypes[i])
+		}
 	}
 	insert := "INSERT INTO"
-	if w.srcType == "oracle" {
+	if w.srcType == "oracle" || w.srcType == "oscar" {
 		insert = "INSERT /*+ MY_STRICT_TABLES(7) */ INTO"
 	}
 	insertSQL := fmt.Sprintf(`%s %s (%s) VALUES (%s)`, insert,
@@ -148,6 +157,15 @@ func (w *DaMengWriter) writeScalarRows(ctx context.Context, tx *sql.Tx, insertSQ
 			mysqlScalarRows++
 		case "oracle":
 			conv = oracleRows[rowIndex]
+		case "oscar":
+			conv = make([]any, len(row))
+			for i, value := range row {
+				var err error
+				conv[i], err = valueconv.OscarDameng(value, colTypes[i])
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", table, cols[i], err)
+				}
+			}
 		case "sqlserver":
 			if len(colTypes) != len(cols) {
 				return fmt.Errorf("表 %s 缺少源列类型", table)
@@ -217,6 +235,9 @@ func (w *DaMengWriter) tableHasIdentity(ctx context.Context, table string) (bool
 
 // CreateSequence reports every identity continuation failure to the job.
 func (w *DaMengWriter) CreateSequence(ctx context.Context, seq source.SequenceInfo, owner string) error {
+	if w.srcType == "oscar" {
+		return w.VerifyOscarDamengIdentity(ctx, seq)
+	}
 	if seq.Native != nil {
 		return w.createOracleDamengSequence(ctx, seq, owner)
 	}
@@ -236,6 +257,12 @@ func (w *DaMengWriter) CreateIndex(ctx context.Context, idx source.IndexInfo) er
 }
 
 func (w *DaMengWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) error {
+	if w.srcType == "oscar" {
+		if err := dialect.ValidateOscarDamengForeignKey(fk); err != nil {
+			return err
+		}
+		return w.execStatements(ctx, dialect.OscarDamengForeignKeyStatements(w.dia, w.schema, fk))
+	}
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, fk))
 }
 

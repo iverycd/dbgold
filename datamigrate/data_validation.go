@@ -17,6 +17,7 @@ type frozenValidationTable struct {
 	target             string // physical destination name when different from objName(name)
 	metadata           validation.Table
 	err                error
+	unsupported        string
 	rebasedRowIDs      map[string]bool // only direct MV outputs with a proven completed native baseline
 	note               string
 	appendBaseline     *validation.AppendBaseline
@@ -82,7 +83,7 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 		if frozen.err == nil {
 			m.freezeSQLServerAppendContent(ctx, &frozen)
 		}
-		if frozen.err == nil && m.isOscarMySQL() {
+		if frozen.err == nil && (m.isOscarMySQL() || m.isOscarDameng()) {
 			m.freezeOscarAppendContent(ctx, &frozen)
 		}
 		m.validationTables = append(m.validationTables, frozen)
@@ -130,13 +131,21 @@ func (m *Migrator) validateDataContent(ctx context.Context, report *MigrationRep
 			table.Status, table.Error = validation.StatusUnsupported, "源库或目标库不支持原值内容读取"
 		case frozen.err != nil:
 			table.Status, table.Error = validation.StatusError, "冻结内容校验范围失败: "+frozen.err.Error()
+		case frozen.unsupported != "":
+			table.Status, table.Error = validation.StatusUnsupported, frozen.unsupported
 		default:
 			if _, copied := m.validationCopied.Load(frozen.name); !copied {
 				table.Status, table.Error = validation.StatusError, "该表数据迁移未完成，无法完成内容校验"
 			} else {
 				plan, err := m.dataValidationPlan(ctx, dst, frozen)
+				var unsupported string
+				if err == nil && m.isOscarDameng() {
+					unsupported = oscarDamengUnverifiableColumns(plan)
+				}
 				if err != nil {
 					table.Status, table.Error = validation.StatusError, err.Error()
+				} else if unsupported != "" {
+					table.Status, table.Error = validation.StatusUnsupported, unsupported
 				} else {
 					m.log.Infof("开始内容校验 [%s]", frozen.name)
 					if len(plan.SourceColumns) == 0 && len(frozen.rebasedRowIDs) > 0 {

@@ -15,10 +15,11 @@ import (
 )
 
 type MigrationWarning struct {
-	Table  string `json:"table"`
-	Column string `json:"column"`
-	Reason string `json:"reason"`
-	Count  int64  `json:"count"`
+	Table     string `json:"table"`
+	Column    string `json:"column"`
+	Reason    string `json:"reason"`
+	Count     int64  `json:"count"`
+	SourceDDL string `json:"source_ddl,omitempty"`
 }
 
 // OracleColumn is read from ALL_TAB_COLUMNS, also for data-only migration.

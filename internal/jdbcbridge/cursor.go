@@ -2,6 +2,7 @@ package jdbcbridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -86,6 +87,37 @@ func (m *Manager) OpenCursor(ctx context.Context, session uint64, query string) 
 	e.string(query)
 	b, err := m.requestExisting(ctx, opCursorOpen, e.Bytes())
 	if err != nil {
+		return 0, err
+	}
+	return newDecoder(b).uint64()
+}
+
+// OpenOscarDamengCursor uses the Oscar driver's native string representation
+// for the selected zero-based columns, leaving the existing codecs in place
+// for fixed-point numbers, payload streams, and other ordinary values.
+func (m *Manager) OpenOscarDamengCursor(ctx context.Context, session uint64, query string, textColumns []int) (uint64, error) {
+	if len(textColumns) == 0 {
+		return m.OpenCursor(ctx, session, query)
+	}
+	if len(textColumns) > 65536 {
+		return 0, fmt.Errorf("too many Oscar text cursor columns")
+	}
+	e := &encoder{}
+	e.uint64(session)
+	e.string(query)
+	e.uint32(uint32(len(textColumns)))
+	for _, i := range textColumns {
+		if i < 0 || i >= 65536 {
+			return 0, fmt.Errorf("invalid Oscar text cursor column %d", i)
+		}
+		e.uint32(uint32(i))
+	}
+	b, err := m.requestExisting(ctx, opOscarDamengCursorOpen, e.Bytes())
+	if err != nil {
+		var remote *BridgeError
+		if errors.As(err, &remote) && remote.Message == fmt.Sprintf("unsupported operation %d", opOscarDamengCursorOpen) {
+			return 0, fmt.Errorf("Oscar JDBC Bridge JAR 版本旧，达梦迁移需要部署当前程序附带的 JAR: %w", err)
+		}
 		return 0, err
 	}
 	return newDecoder(b).uint64()

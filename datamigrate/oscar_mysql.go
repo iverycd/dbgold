@@ -203,6 +203,12 @@ func (m *Migrator) freezeOscarAppendContent(ctx context.Context, frozen *frozenV
 		return
 	}
 	plan, err := m.dataValidationPlan(ctx, dst, *frozen)
+	if err == nil && m.isOscarDameng() {
+		frozen.unsupported = oscarDamengUnverifiableColumns(plan)
+		if frozen.unsupported != "" {
+			return
+		}
+	}
 	if err == nil {
 		frozen.appendBaseline, err = validation.CaptureAppendBaseline(ctx, dst, plan)
 	}
@@ -235,9 +241,16 @@ func (m *Migrator) oscarAppendReady(ctx context.Context, table string) error {
 	return nil
 }
 
-func recoverOscarMySQLRows(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error, ops recoveryOps, result *repair.RecoveryResult) error {
-	stream, ok := r.(oscarTableStream)
-	if !ok {
+func recoverOscarRows(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error, ops recoveryOps, result *repair.RecoveryResult) error {
+	var stream func(context.Context, string, int, func([]string, []string, [][]any) error) error
+	if w.DBType() == "dameng" {
+		if reader, ok := r.(oscarDamengTableStream); ok {
+			stream = reader.StreamOscarDamengTable
+		}
+	} else if reader, ok := r.(oscarTableStream); ok {
+		stream = reader.StreamOscarTable
+	}
+	if stream == nil {
 		return fmt.Errorf("神通源库缺少固定游标读取能力")
 	}
 	start := func() error {
@@ -259,7 +272,7 @@ func recoverOscarMySQLRows(ctx context.Context, r source.Reader, w target.Writer
 	if pageSize <= 0 {
 		pageSize = 2000
 	}
-	err := stream.StreamOscarTable(ctx, p.SourceTable, pageSize, func(cols, types []string, rows [][]any) error {
+	err := stream(ctx, p.SourceTable, pageSize, func(cols, types []string, rows [][]any) error {
 		if err := checkRecoveryPageColumns(p, cols); err != nil {
 			return err
 		}

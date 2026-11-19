@@ -36,10 +36,26 @@ func resolveChangeOwner(targetType string, requested *bool) bool {
 }
 
 func resolveOwnerAndDistribution(src, dst string, changeOwner, distributed bool) (bool, bool) {
-	if src == "oscar" && dst == "mysql" {
+	if src == "oscar" && (dst == "mysql" || dst == "dameng") {
 		return false, false
 	}
 	return changeOwner, distributed
+}
+
+func validateViewMigration(src, dst string) error {
+	if isDamengNativePair(src, dst) {
+		return fmt.Errorf("达梦同库迁移请使用 Schema 全对象迁移，不支持仅迁移视图")
+	}
+	if isOscarDamengPair(src, dst) {
+		return fmt.Errorf("神通 → 达梦暂不支持单独迁移视图")
+	}
+	return nil
+}
+
+func normalizeOscarDamengRequest(req *startDataMigrationRequest) {
+	req.LowerCaseNames, req.CharInLength, req.UseNvarchar2 = false, true, false
+	req.StripViewSchemas = ""
+	req.IntraTableParallel = 1
 }
 
 // Native DM8 migration preserves the complete schema rather than table subsets.

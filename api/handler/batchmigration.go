@@ -454,6 +454,11 @@ func runBatch(batchID string, ownerID uint, rows []batchRow, opts batchOptions) 
 			enabled := true
 			rowOpts.MigrateTriggers = &enabled
 		}
+		if isOscarDamengPair(r.SrcDBType, r.DstDBType) {
+			rowOpts.LowerCaseNames, rowOpts.CharInLength, rowOpts.UseNvarchar2 = false, true, false
+			rowOpts.StripViewSchemas = ""
+			rowOpts.IntraTableParallel = 1
+		}
 		// 批次被取消时，剩余子任务直接标记为 cancelled，不再执行
 		if b, err := store.GetBatchMigration(batchID); err == nil && b.Status == "cancelled" {
 			break

@@ -28,6 +28,7 @@ type SupportedPair struct {
 	Target                   string `json:"target"`
 	SupportsTriggers         bool   `json:"supports_triggers"`
 	SupportsFullSchema       bool   `json:"supports_full_schema"`
+	SupportsViewMigration    bool   `json:"supports_view_migration"`
 }
 
 // supportedPairs 列出后端已实现的迁移组合，新增实现时在此追加
@@ -97,6 +98,7 @@ var supportedPairs = []SupportedPair{
 	{Source: "sqlserver", Target: "mysql"},
 	{Source: "dameng", Target: "mysql"},
 	{Source: "oscar", Target: "mysql"},
+	{Source: "oscar", Target: "dameng"},
 	{Source: "postgres", Target: "dameng"},
 	{Source: "gaussdb", Target: "dameng"},
 	{Source: "highgo", Target: "dameng"},
@@ -115,11 +117,13 @@ func GetSupportedPairs(c *gin.Context) {
 	pairs := append([]SupportedPair(nil), supportedPairs...)
 	for i := range pairs {
 		pairs[i].SupportsTriggers = supportsTriggerMigration(pairs[i].Source, pairs[i].Target)
+		pairs[i].SupportsViewMigration = validateViewMigration(pairs[i].Source, pairs[i].Target) == nil
 	}
 	c.JSON(http.StatusOK, pairs)
 }
 
 func isDamengNativePair(src, dst string) bool { return src == "dameng" && dst == "dameng" }
+func isOscarDamengPair(src, dst string) bool  { return src == "oscar" && dst == "dameng" }
 
 func isOraclePGSQLServerPair(src, dst string) bool {
 	return dst == "sqlserver" && (src == "oracle" || src == "dameng" || source.IsPGFamily(src))
@@ -226,6 +230,9 @@ func StartDataMigration(c *gin.Context) {
 		req.LowerCaseNames = false
 		req.CharInLength = true
 		req.Distributed = false
+	}
+	if isOscarDamengPair(srcConn.DBType, dstConn.DBType) {
+		normalizeOscarDamengRequest(&req)
 	}
 	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
 		if err := normalizeDamengNativeRequest(&req); err != nil {
@@ -568,7 +575,7 @@ func StartObjectMigration(c *gin.Context) {
 		return
 	}
 
-	if dstConn.DBType == "oracle" {
+	if dstConn.DBType == "oracle" || isOscarDamengPair(srcConn.DBType, dstConn.DBType) {
 		req.LowerCaseNames = false
 		req.Distributed = false
 	}
@@ -864,7 +871,14 @@ func buildSrcReaderContext(ctx context.Context, conn *store.Connection, srcDatab
 	case "oscar":
 		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		return source.NewOscarContext(connectCtx, dsn, conn.Username, conn.Password, srcDatabase, pool)
+		reader, err := source.NewOscarContext(connectCtx, dsn, conn.Username, conn.Password, srcDatabase, pool)
+		if err != nil {
+			return nil, err
+		}
+		if len(targetTypes) > 0 && targetTypes[0] == "dameng" {
+			return source.WrapOscarForDameng(reader), nil
+		}
+		return reader, nil
 	case "postgres", "highgo", "vastbase", "gbase", "seabox", "kingbase":
 		// PG 兼容库共用元数据读取逻辑；HighGo 使用专用驱动。迁移单元是库内 schema，
 		// srcDatabase 即目标 schema，DSN 的 dbname 不变。
@@ -1039,8 +1053,8 @@ func MigrateViews(c *gin.Context) {
 		return
 	}
 
-	if isDamengNativePair(srcConn.DBType, dstConn.DBType) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "达梦同库迁移请使用 Schema 全对象迁移，不支持仅迁移视图"})
+	if err := validateViewMigration(srcConn.DBType, dstConn.DBType); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

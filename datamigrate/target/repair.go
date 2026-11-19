@@ -223,6 +223,16 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if obj.Schema == "" || obj.Schema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
+	if dm, ok := w.(*DaMengWriter); ok && dm.srcType == "oscar" && !repairDefinitionEdited(obj) {
+		if obj.ForeignKey != nil {
+			if err := dialect.ValidateOscarDamengForeignKey(*obj.ForeignKey); err != nil {
+				return out, err
+			}
+		}
+		if repairKind(obj.Kind) == "sequence" && obj.Sequence != nil {
+			return out, dm.VerifyOscarDamengIdentity(ctx, *obj.Sequence)
+		}
+	}
 	generatedUnique := obj.Index != nil && obj.Index.PGUniqueConstraint
 	if generatedUnique && !gaussIndex {
 		if err := ValidatePGUniqueConstraintRepair(obj, units, w.DBType()); err != nil {

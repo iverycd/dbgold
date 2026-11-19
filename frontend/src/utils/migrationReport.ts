@@ -291,6 +291,17 @@ function appendReportDDL(lines: string[], label: string, ddl: string) {
   for (const line of ddl.split('\n')) lines.push(`      ${line}`)
 }
 
+export function formatReportWarnings(warnings: MigrationReport['warnings']): string[] {
+  if (!warnings?.length) return []
+  const lines = ['=== 迁移告警 ===']
+  for (const warning of warnings) {
+    lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
+    if (warning.source_ddl?.trim()) lines.push('  源端 DDL', warning.source_ddl)
+  }
+  lines.push('')
+  return lines
+}
+
 export function formatReportRowCounts(report: MigrationReport): string[] {
   const index = indexMigrationDataIssues(report)
   const entries = rowCountEntries(report, index)

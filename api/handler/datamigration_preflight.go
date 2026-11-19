@@ -77,6 +77,15 @@ func PreflightDataMigration(c *gin.Context) {
 			return
 		}
 	}
+	if len(req.ViewNames) > 0 {
+		if err := validateViewMigration(src.DBType, dst.DBType); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if isOscarDamengPair(src.DBType, dst.DBType) {
+		normalizeOscarDamengRequest(&req.startDataMigrationRequest)
+	}
 	reader, err := buildSrcReaderContext(c.Request.Context(), src, req.SrcDatabase, source.ConnPoolConfig{}, dst.DBType)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})

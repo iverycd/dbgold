@@ -154,11 +154,11 @@
                     <a-option value="off">MySQL 触发器：全部关闭</a-option>
                   </a-select>
                   <a-checkbox v-model="options.lower_case_names">对象名转小写（Oscar、Oracle 始终转大写）</a-checkbox>
-                  <a-checkbox v-if="!onlyOscarMySQLRows" v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
+                  <a-checkbox v-if="!onlyOscarRowsWithoutOwnerOrDistribution" v-model="options.change_owner">更改对象 owner 为 Schema 同名角色（不含 Oscar、Oracle）</a-checkbox>
                   <a-checkbox v-if="validateResult.rows.some(row => row.supported && row.dst_db_type === 'oscar')" v-model="options.oscar_change_owner">Oscar：更改对象 owner 为 Schema 同名角色</a-checkbox>
                   <a-checkbox v-model="options.char_in_length">char 长度单位（CHAR，Oracle 固定启用）</a-checkbox>
                   <a-checkbox v-model="options.use_nvarchar2">使用 nvarchar2</a-checkbox>
-                  <a-checkbox v-if="!onlyOscarMySQLRows" v-model="options.distributed">分布式模式（Oracle 不适用）</a-checkbox>
+                  <a-checkbox v-if="!onlyOscarRowsWithoutOwnerOrDistribution" v-model="options.distributed">分布式模式（Oracle 不适用）</a-checkbox>
                 </a-space>
                 <a-alert v-if="options.validate_data" type="info" style="margin-top: 12px">全量读取各迁移对的源库与目标库，比对数据内容并记录差异，会增加耗时。请停止两端业务写入，直至迁移与校验结束。</a-alert>
               </a-form>
@@ -336,9 +336,9 @@ const exclusionKinds = [
   { value: 'view', label: '视图' }, { value: 'routine', label: '函数/过程' }, { value: 'trigger', label: '触发器' }, { value: 'sequence', label: '独立序列' },
 ]
 const nativeDamengRows = computed(() => (validateResult.value?.rows ?? []).filter(row => row.supported && row.src_db_type === 'dameng' && row.dst_db_type === 'dameng'))
-const onlyOscarMySQLRows = computed(() => {
+const onlyOscarRowsWithoutOwnerOrDistribution = computed(() => {
   const rows = validateResult.value?.rows.filter(row => row.supported) ?? []
-  return rows.length > 0 && rows.every(row => row.src_db_type === 'oscar' && row.dst_db_type === 'mysql')
+  return rows.length > 0 && rows.every(row => row.src_db_type === 'oscar' && (row.dst_db_type === 'mysql' || row.dst_db_type === 'dameng'))
 })
 const canSelectDamengWriteStrategy = computed(() =>
   options.migrate_content !== 'schema_only' &&

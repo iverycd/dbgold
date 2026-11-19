@@ -38,6 +38,10 @@ func PreviewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	return previewRecovery(ctx, r, w, cfg, obj, related, mapping, defaultRecoveryOps())
 }
 func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, obj repair.Object, related []repair.Object, mapping map[string]string, ops recoveryOps) (repair.RecoveryPreview, error) {
+	oscarDameng := r.DBType() == "oscar" && w.DBType() == "dameng"
+	if oscarDameng {
+		r = source.WrapOscarForDameng(r)
+	}
 	p := repair.RecoveryPreview{ObjectID: obj.ID, SourceTable: obj.SourceTable, TargetTable: obj.Table, Warnings: []string{"补迁使用当前源数据；执行期间源表和目标表必须停止写入。"}, Related: []repair.Object{}}
 	if r.DBType() == "oscar" && w.DBType() == "mysql" {
 		if _, err := configureOscarMySQL(ctx, w); err != nil {
@@ -94,6 +98,9 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			return p, fmt.Errorf("读取源分区定义: %w", e)
 		}
 		if current != nil || obj.PartitionPlan != nil {
+			if oscarDameng {
+				return p, fmt.Errorf("神通到达梦仅支持普通表补迁")
+			}
 			if obj.PartitionPlan == nil {
 				return p, fmt.Errorf("旧账本缺少分区快照，请创建新的分区迁移任务")
 			}
@@ -151,6 +158,11 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			currentSource[i].SQLServerDeferredDefault = false
 		}
 	}
+	if oscarDameng {
+		// The derived continuation seed and last observed value can advance
+		// since the migration. The identity definition still has to match.
+		savedSource, currentSource = oscarDamengIdentityShape(savedSource), oscarDamengIdentityShape(currentSource)
+	}
 	if len(savedSource) > 0 && !recoverySourceColumnsMatch(r.DBType(), savedSource, currentSource) {
 		return p, fmt.Errorf("源表结构已偏离迁移快照，请重新核对并创建迁移任务")
 	}
@@ -172,6 +184,15 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	}
 	if err = validateRecoveryColumns(p.SourceColumns, p.TargetColumns, p.ColumnMapping); err != nil {
 		return p, err
+	}
+	if oscarDameng {
+		mapped := slices.Clone(p.SourceColumns)
+		for i := range mapped {
+			mapped[i].Name = p.ColumnMapping[mapped[i].Name]
+		}
+		if err = validateOscarDamengExisting(ctx, w, &source.TableDDLInfo{TableName: p.TargetTable, Columns: mapped}); err != nil {
+			return p, err
+		}
 	}
 	if sqlServerCross {
 		if setter, ok := w.(sourceTypeSetter); ok {
@@ -286,14 +307,17 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 			return p, err
 		}
 	}
-	if !p.DataRequired && cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus == "succeeded" && p.SourceRows != p.TargetRows {
+	if !p.DataRequired && cfg.Content != "schema_only" && !cfg.objectMode() && len(cfg.ViewNames) == 0 && obj.DataStatus == "succeeded" && p.SourceRows != p.TargetRows && !(oscarDameng && cfg.Content == "data_only") {
 		return p, fmt.Errorf("已完成的数据行数发生变化，请核对后另行恢复数据")
 	}
 	for _, o := range related {
 		if o.Status == "succeeded" {
 			continue
 		}
-		candidate := regenerateRepairCandidate(w, cfg, obj, o, p.ColumnMapping)
+		candidate := o
+		if !oscarDameng || !o.DiagnosticOnly && o.Sequence == nil {
+			candidate = regenerateRepairCandidate(w, cfg, obj, o, p.ColumnMapping)
+		}
 		if (r.DBType() == "oracle" || r.DBType() == "oscar") && w.DBType() == "mysql" && candidate.Comment != nil && candidate.Comment.ColumnName != "" {
 			planner, ok := w.(preparedCommentWriter)
 			if !ok {
@@ -343,7 +367,7 @@ func sqlServerRawRecoveryColumns(cols []source.ColumnInfo) []source.ColumnInfo {
 }
 
 func recoveryName(cfg Config, dst, src, s string) string {
-	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) {
+	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) || src == "oscar" && dst == "dameng" {
 		return strings.ToUpper(s)
 	}
 	if cfg.LowerCaseNames {
@@ -435,6 +459,9 @@ func RunRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	return runRecovery(ctx, r, w, cfg, p, truncate, progress, defaultRecoveryOps())
 }
 func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview, truncate bool, progress func(repair.RecoveryResult) error, ops recoveryOps) (res repair.RecoveryResult, err error) {
+	if r.DBType() == "oscar" && w.DBType() == "dameng" {
+		r = source.WrapOscarForDameng(r)
+	}
 	res = repair.RecoveryResult{Status: "running", DataStatus: "running", SourceRows: p.SourceRows, TargetRows: p.TargetRows}
 	finish := func(e error) (repair.RecoveryResult, error) {
 		if e == nil {
@@ -519,8 +546,8 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 		if e = recoverCrossRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
 			return finish(e)
 		}
-	} else if r.DBType() == "oscar" && w.DBType() == "mysql" {
-		if e = recoverOscarMySQLRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
+	} else if r.DBType() == "oscar" && (w.DBType() == "mysql" || w.DBType() == "dameng") {
+		if e = recoverOscarRows(ctx, r, w, cfg, p, truncate, progress, ops, &res); e != nil {
 			return finish(e)
 		}
 	} else {
@@ -666,6 +693,19 @@ func runRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg Conf
 	return finish(nil)
 }
 func RecoverySequences(ctx context.Context, r source.Reader, w target.Writer, cfg Config, p repair.RecoveryPreview) ([]source.SequenceInfo, error) {
+	if r.DBType() == "oscar" && w.DBType() == "dameng" {
+		var sequences []source.SequenceInfo
+		for _, col := range p.SourceColumns {
+			if col.IdentityInfo != nil {
+				name := p.ColumnMapping[col.Name]
+				if name == "" {
+					return nil, fmt.Errorf("自增列 %s 无目标映射", col.Name)
+				}
+				sequences = append(sequences, source.SequenceInfo{TableName: p.TargetTable, ColumnName: name, StartValue: col.IdentityInfo.Seed, IdentityInfo: col.IdentityInfo})
+			}
+		}
+		return sequences, nil
+	}
 	if w.DBType() == "oracle" && (r.DBType() == "dameng" || r.DBType() == "sqlserver") {
 		return p.CrossOracleSequences, nil
 	}

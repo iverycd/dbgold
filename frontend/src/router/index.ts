@@ -19,6 +19,7 @@ const router = createRouter({
     { path: '/connections', component: ConnectionsView },
     { path: '/query', component: () => import('@/views/QueryCenterView.vue') },
     { path: '/migration', component: MigrationView },
+    { path: '/schema-compare', component: () => import('@/views/SchemaCompareView.vue') },
     { path: '/batch-migration', component: BatchMigrationView },
     { path: '/history', component: HistoryView },
     { path: '/history/data/:jobId', component: () => import('@/views/DataMigrationJobDetailView.vue') },

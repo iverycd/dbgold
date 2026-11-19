@@ -199,15 +199,7 @@
           </MigrationRepairPanel>
         </a-tab-pane>
         <a-tab-pane v-if="report.warnings?.length" key="warnings" title="迁移告警">
-          <a-alert type="warning" style="margin-bottom: 12px">报告记录迁移告警及需要人工处理的对象。数据转换数量仅统计已提交的分页。</a-alert>
-          <a-table :data="report.warnings" :pagination="{ pageSize: 10 }" size="small">
-            <template #columns>
-              <a-table-column title="表或 Schema" data-index="table" />
-              <a-table-column title="列或对象" data-index="column" />
-              <a-table-column title="原因" data-index="reason" />
-              <a-table-column title="数量" data-index="count" :width="100" />
-            </template>
-          </a-table>
+          <MigrationWarningsTable :warnings="report.warnings" />
         </a-tab-pane>
       </a-tabs>
       <a-modal v-if="originalFailuresVisible" v-model:visible="originalFailuresVisible" title="原始失败原因" :mask-closable="false"
@@ -243,6 +235,7 @@
 
 <script setup lang="ts">
 import MigrationRowCountPanel from '@/components/MigrationRowCountPanel.vue'
+import MigrationWarningsTable from '@/components/MigrationWarningsTable.vue'
 import { indexMigrationDataIssues, rowCountEntries, summarizeRowCounts } from '@/utils/migrationDataIssues'
 import MigrationRepairPanel from '@/components/MigrationRepairPanel.vue'
 import MigrationTimingSummary from '@/components/MigrationTimingSummary.vue'
@@ -251,7 +244,7 @@ import OracleMySQLAutoIncrementPanel from '@/components/OracleMySQLAutoIncrement
 import DataValidationPanel from '@/components/DataValidationPanel.vue'
 import AutoRepairPanel from '@/components/AutoRepairPanel.vue'
 import { formatAutoRepairs, groupAutoRepairs } from '@/utils/autoRepairs'
-import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, formatReportRowCounts, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel, migrationPGPreflight } from '@/utils/migrationReport'
+import { reportCategories, migrationOverviewRows, originalFailureDetails, formatReportCategories, formatReportRowCounts, formatReportWarnings, nativeSchemaNeedsAttention, dataValidationLabel, dataValidationNeedsAttention, formatDataValidation, formatMigrationTiming, preflightStatusLabel, migrationPGPreflight } from '@/utils/migrationReport'
 import type { RepairFocusTarget, RepairSummary } from '@/utils/migrationRepair'
 import PGPreflightPanel from './PGMySQLPreflightPanel.vue'
 import DamengNativePreflightPanel from './DamengNativePreflightPanel.vue'
@@ -421,11 +414,7 @@ async function exportReport() {
     const preflight = migrationPGPreflight(r)
     if (preflight) { lines.push('=== 兼容预检与计划 ===', JSON.stringify(preflight, null, 2), '') }
     if (r.partition_migration) lines.push('=== 分区迁移计划、名称映射与逐叶核验 ===', JSON.stringify(r.partition_migration, null, 2), '')
-    if (r.warnings?.length) {
-      lines.push('=== 迁移告警 ===')
-      for (const warning of r.warnings) lines.push(`${warning.table}.${warning.column}: ${warning.reason}（${warning.count}）`)
-      lines.push('')
-    }
+    for (const line of formatReportWarnings(r.warnings)) lines.push(line)
     for (const line of formatReportCategories(r)) lines.push(line)
     if (r.native_schema) lines.push('=== 达梦全对象清单、预检与核对 ===', JSON.stringify(r.native_schema, null, 2), '')
 

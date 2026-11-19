@@ -106,15 +106,10 @@ func (w *DaMengWriter) prepareOracleDMLoadColumns(ctx context.Context, table str
 		}
 		cache.tables[tableKey] = actual
 	}
-	if text && !cache.charsetKnown {
-		var charset int
-		if err := w.db.QueryRowContext(ctx, oracleDMLoadCharsetSQL).Scan(&charset); err != nil {
-			return nil, fmt.Errorf("读取达梦写入字符集: %w", err)
+	if text {
+		if _, err := w.damengLoadCharsetLocked(ctx); err != nil {
+			return nil, err
 		}
-		if charset < 0 || charset > 2 {
-			return nil, fmt.Errorf("不支持的达梦写入字符集 %d", charset)
-		}
-		cache.charset, cache.charsetKnown = charset, true
 	}
 	for i, name := range cols {
 		col := actual[strings.ToUpper(name)]
@@ -125,6 +120,24 @@ func (w *DaMengWriter) prepareOracleDMLoadColumns(ctx context.Context, table str
 		result[i] = col
 	}
 	return result, nil
+}
+
+func (w *DaMengWriter) damengLoadCharsetLocked(ctx context.Context) (int, error) {
+	if w.oracleDM.load == nil {
+		w.oracleDM.load = &oracleDMLoadCache{}
+	}
+	cache := w.oracleDM.load
+	if !cache.charsetKnown {
+		var charset int
+		if err := w.db.QueryRowContext(ctx, oracleDMLoadCharsetSQL).Scan(&charset); err != nil {
+			return 0, fmt.Errorf("读取达梦写入字符集: %w", err)
+		}
+		if charset < 0 || charset > 2 {
+			return 0, fmt.Errorf("不支持的达梦写入字符集 %d", charset)
+		}
+		cache.charset, cache.charsetKnown = charset, true
+	}
+	return cache.charset, nil
 }
 
 func oracleDMEncodedBytes(value string, charset int) (int64, error) {

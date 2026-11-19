@@ -98,6 +98,20 @@ async function exportedText(h) {
 }
 
 for (const view of views) {
+  test(`${view} exports warnings and preserves optional source DDL`, async () => {
+    const h = harness(view)
+    try {
+      const sourceDDL = 'CREATE TRIGGER T\nBEFORE INSERT ON ORDERS;'
+      h.page.report.value.warnings = [
+        { table: 'ORDERS', column: 'LABEL', reason: '空字符串转 NULL', count: 3 },
+        { table: 'SOURCE', column: 'T', reason: '触发器需手工适配', count: 1, source_ddl: sourceDDL },
+      ]
+      const text = await exportedText(h)
+      assert.match(text, /ORDERS.LABEL: 空字符串转 NULL（3）/)
+      assert.ok(text.includes(`SOURCE.T: 触发器需手工适配（1）\n  源端 DDL\n${sourceDDL}`))
+    } finally { h.stop() }
+  })
+
   test(`${view} reports eight count differences, links the named table and preserves original counts in exports`, async () => {
     const h = harness(view)
     try {

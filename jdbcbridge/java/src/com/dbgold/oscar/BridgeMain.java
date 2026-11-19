@@ -81,6 +81,7 @@ public final class BridgeMain {
     private static final int BOUND_CURSOR_OPEN = 21;
     private static final int MIGRATION_COLUMNS = 22;
     private static final int MIGRATION_CURSOR_FETCH = 23;
+    private static final int OSCAR_DAMENG_CURSOR_OPEN = 24;
 
     private static final int NULL = 0;
     private static final int BOOL = 1;
@@ -222,7 +223,10 @@ public final class BridgeMain {
                     describeTable(requestId, body.readLong(), readString(body), readString(body));
                     return;
                 case CURSOR_OPEN:
-                    openCursor(requestId, body.readLong(), readString(body), null);
+                    openCursor(requestId, body.readLong(), readString(body), null, null);
+                    return;
+                case OSCAR_DAMENG_CURSOR_OPEN:
+                    openOscarDamengCursor(requestId, body);
                     return;
                 case BOUND_CURSOR_OPEN:
                     openBoundCursor(requestId, body);
@@ -446,10 +450,25 @@ public final class BridgeMain {
         if (count < 0 || count > 256) throw new SQLException("too many Oscar cursor parameters");
         String[] args = new String[count];
         for (int i = 0; i < count; i++) args[i] = readString(body);
-        openCursor(requestId, sessionId, sql, args);
+        openCursor(requestId, sessionId, sql, args, null);
     }
 
-    private void openCursor(final long requestId, long sessionId, String sql, String[] args) throws Exception {
+    private void openOscarDamengCursor(long requestId, DataInputStream body) throws Exception {
+        long sessionId = body.readLong();
+        String sql = readString(body);
+        int count = body.readInt();
+        if (count <= 0 || count > 65536) throw new SQLException("invalid Oscar text cursor column count");
+        Set<Integer> columns = new HashSet<Integer>();
+        for (int i = 0; i < count; i++) {
+            int column = body.readInt();
+            if (column < 0 || column >= 65536 || !columns.add(column)) {
+                throw new SQLException("invalid or duplicate Oscar text cursor column");
+            }
+        }
+        openCursor(requestId, sessionId, sql, null, columns);
+    }
+
+    private void openCursor(final long requestId, long sessionId, String sql, String[] args, Set<Integer> textColumns) throws Exception {
         Session s = session(sessionId);
         PooledConnection holder = s.pool.acquire();
         Statement statement = null;
@@ -468,7 +487,7 @@ public final class BridgeMain {
             rows = args == null ? statement.executeQuery(sql) : ((PreparedStatement) statement).executeQuery();
             if (Thread.currentThread().isInterrupted()) throw new SQLException("validation cursor cancelled");
             final long id = nextCursor.getAndIncrement();
-            Cursor cursor = new Cursor(id, requestId, s, holder, statement, rows);
+            Cursor cursor = new Cursor(id, requestId, s, holder, statement, rows, textColumns);
             owned = cursor;
             cursors.put(id,cursor);
             if (Thread.currentThread().isInterrupted()) throw new SQLException("validation cursor cancelled");
@@ -533,6 +552,23 @@ public final class BridgeMain {
             default: throw new SQLException("JDBC type " + type + " has no lossless validation serializer");
         }
     }
+
+    private static void writeNativeTextCursorValue(DataOutputStream out, ResultSet rows, int column, int type, int limit) throws Exception {
+        String value = type == Types.CLOB || type == Types.NCLOB
+                ? readBoundedText(rows.getCharacterStream(column), limit)
+                : rows.getString(column);
+        if (value == null) {
+            if (!rows.wasNull()) throw new SQLException("Oscar JDBC returned no text for a non-null value");
+            out.writeByte(NULL);
+            return;
+        }
+        if (value.length() > limit) throw new SQLException("Oscar JDBC text value exceeds the " + limit + " byte cursor row budget");
+        byte[] bytes = validationUTF8(value);
+        if (bytes.length > limit) throw new SQLException("Oscar JDBC text value exceeds the " + limit + " byte cursor row budget");
+        out.writeByte(STRING);
+        out.writeInt(bytes.length);
+        out.write(bytes);
+    }
     private void fetchCursor(final long requestId, long id, int maxRows, int maxBytes) throws Exception {
         fetchCursorWithRowLimit(requestId, id, maxRows, maxBytes, maxBytes);
     }
@@ -559,7 +595,12 @@ public final class BridgeMain {
                         ByteArrayOutputStream bytes=new ByteArrayOutputStream(); DataOutputStream out=new DataOutputStream(bytes);
                         int count=c.metadata.getColumnCount(); out.writeInt(count);
                         for (int i = 1; i <= count; i++) {
-                            writeCursorValue(out, c.rows, i, c.metadata.getColumnType(i), rowBudget);
+                            int type = c.metadata.getColumnType(i);
+                            if (c.nativeTextColumns != null && c.nativeTextColumns[i - 1]) {
+                                writeNativeTextCursorValue(out, c.rows, i, type, rowBudget);
+                            } else {
+                                writeCursorValue(out, c.rows, i, type, rowBudget);
+                            }
                             if (bytes.size() + 5 > rowBudget) throw new SQLException("Oscar JDBC row exceeds the " + rowBudget + " byte cursor row budget");
                         }
                         row=bytes.toByteArray();
@@ -1075,7 +1116,25 @@ public final class BridgeMain {
     private static final class PrimaryColumn { final String name; final int ordinal; PrimaryColumn(String name,int ordinal){this.name=name;this.ordinal=ordinal;} }
     private static final class Cursor {
         final long id,openingRequest; final Session session; final PooledConnection holder; final Statement statement; final ResultSet rows; final ResultSetMetaData metadata; byte[] pending; boolean done;
-        Cursor(long id,long openingRequest,Session session,PooledConnection holder,Statement statement,ResultSet rows)throws SQLException{this.id=id;this.openingRequest=openingRequest;this.session=session;this.holder=holder;this.statement=statement;this.rows=rows;this.metadata=rows.getMetaData();}
+        final boolean[] nativeTextColumns;
+
+        Cursor(long id, long openingRequest, Session session, PooledConnection holder,
+               Statement statement, ResultSet rows, Set<Integer> textColumns) throws SQLException {
+            this.id = id;
+            this.openingRequest = openingRequest;
+            this.session = session;
+            this.holder = holder;
+            this.statement = statement;
+            this.rows = rows;
+            this.metadata = rows.getMetaData();
+            this.nativeTextColumns = textColumns == null ? null : new boolean[metadata.getColumnCount()];
+            if (textColumns != null) {
+                for (int column : textColumns) {
+                    if (column >= nativeTextColumns.length) throw new SQLException("Oscar text cursor column outside result set");
+                    nativeTextColumns[column] = true;
+                }
+            }
+        }
     }
 
     private static final class Batch {

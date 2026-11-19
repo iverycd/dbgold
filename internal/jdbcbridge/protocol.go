@@ -39,6 +39,7 @@ const (
 	opBoundCursorOpen
 	opMigrationColumns
 	opMigrationCursorFetch
+	opOscarDamengCursorOpen
 )
 
 const (

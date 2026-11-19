@@ -24,7 +24,7 @@ DBGold 是一款集迁移执行、过程查看与结果核对于一体的数据�
 | SQL Server | PostgreSQL 内核系列、达梦、Oracle、MySQL、神通 | 暂不支持 |
 | 达梦 | PostgreSQL 内核系列、Oracle、SQL Server、MySQL、达梦、神通 | 暂不支持 |
 | PostgreSQL 内核系列 | MySQL、Oracle、SQL Server、达梦 | 暂不支持 |
-| 神通（Oscar） | MySQL | 暂不支持 |
+| 神通（Oscar） | MySQL、达梦 | 暂不支持 |
 
 - **系列范围：** PostgreSQL 内核系列包括 PostgreSQL、GaussDB、SeaBox、HighGo（瀚高）、Vastbase（海量数据库）、GBase（PG 兼容）、Kingbase（人大金仓）。
 - **适用范围：** 具体可迁移对象以页面选项为准。使用增量迁移前，进入 **迁移生成 → 增量迁移**，点击 **运行预检**，按提示完成设置和权限准备，预检通过后再启动任务。

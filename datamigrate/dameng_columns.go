@@ -121,7 +121,13 @@ func (m *Migrator) prepareDamengColumns(ctx context.Context, tables []string, re
 			p, err = m.planDamengTable(ctx, table)
 		}
 		if err == nil && (m.cfg.Content == "data_only" || m.cfg.objectMode()) {
-			err = m.validateDamengMapping(ctx, p)
+			if m.isOscarDameng() {
+				info := *p.target
+				info.TableName = m.objName(table)
+				err = validateOscarDamengExisting(ctx, m.writer, &info)
+			} else {
+				err = m.validateDamengMapping(ctx, p)
+			}
 		}
 		if err != nil {
 			if m.stopOracleDamengTask(ctx, err) {
@@ -132,6 +138,11 @@ func (m *Migrator) prepareDamengColumns(ctx context.Context, tables []string, re
 			result := objectResultForError(table, "", err)
 			if m.isOracleDameng() {
 				result.Stage = "preflight"
+			}
+			if m.isOscarDameng() {
+				m.blockMigrationTable(table, "preflight", err)
+				result.Stage = "preflight"
+				result.SourceDDL = m.oscarSourceTableDDL(ctx, table)
 			}
 			report.Tables.Items = append(report.Tables.Items, result)
 			m.log.Errorf("达梦列名预检 [%s]: %v", table, err)

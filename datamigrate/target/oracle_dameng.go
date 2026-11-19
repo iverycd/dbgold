@@ -10,6 +10,15 @@ import (
 	"dbgold/datamigrate/typemap"
 )
 
+const damengExistingColumnsSQL = `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.CHAR_LENGTH,0),NVL(c.DATA_LENGTH,0),NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),c.NULLABLE,CASE WHEN c.CHAR_USED='C' OR sc.SCALE IN (7,8) THEN 'C' ELSE NVL(c.CHAR_USED,'B') END,CASE WHEN sc.INFO2 & 0x01=0x01 THEN 1 ELSE 0 END FROM ALL_TAB_COLUMNS c JOIN ALL_OBJECTS o ON o.object_name=c.TABLE_NAME AND o.owner=c.OWNER JOIN SYS.SYSCOLUMNS sc ON sc.id=o.object_id AND sc.name=c.COLUMN_NAME WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`
+
+type damengExistingColumn struct {
+	name, kind                     string
+	chars, bytes, precision, scale int64
+	nullable, units                string
+	identity                       int
+}
+
 // ValidateOracleDamengCapabilities retains the optional preflight interface used
 // by older callers. Preparation probes only features used by the selected columns.
 func (w *DaMengWriter) ValidateOracleDamengCapabilities(ctx context.Context, infos []*source.TableDDLInfo) error {
@@ -20,20 +29,14 @@ func (w *DaMengWriter) ValidateOracleDamengCapabilities(ctx context.Context, inf
 // modes. Alias spellings are accepted only when the effective family and
 // capacity preserve the source values.
 func (w *DaMengWriter) ValidateOracleDamengExisting(ctx context.Context, info *source.TableDDLInfo, opt dialect.TypeOpt) error {
-	rows, err := w.db.QueryContext(ctx, `SELECT c.COLUMN_NAME,c.DATA_TYPE,NVL(c.CHAR_LENGTH,0),NVL(c.DATA_LENGTH,0),NVL(c.DATA_PRECISION,0),NVL(c.DATA_SCALE,0),c.NULLABLE,CASE WHEN c.CHAR_USED='C' OR sc.SCALE IN (7,8) THEN 'C' ELSE NVL(c.CHAR_USED,'B') END,CASE WHEN sc.INFO2 & 0x01=0x01 THEN 1 ELSE 0 END FROM ALL_TAB_COLUMNS c JOIN ALL_OBJECTS o ON o.object_name=c.TABLE_NAME AND o.owner=c.OWNER JOIN SYS.SYSCOLUMNS sc ON sc.id=o.object_id AND sc.name=c.COLUMN_NAME WHERE c.OWNER=? AND c.TABLE_NAME=? ORDER BY c.COLUMN_ID`, w.schema, strings.ToUpper(info.TableName))
+	rows, err := w.db.QueryContext(ctx, damengExistingColumnsSQL, w.schema, strings.ToUpper(info.TableName))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	type targetColumn struct {
-		name, kind                     string
-		chars, bytes, precision, scale int64
-		nullable, units                string
-		identity                       int
-	}
-	actual := map[string]targetColumn{}
+	actual := map[string]damengExistingColumn{}
 	for rows.Next() {
-		var c targetColumn
+		var c damengExistingColumn
 		if err := rows.Scan(&c.name, &c.kind, &c.chars, &c.bytes, &c.precision, &c.scale, &c.nullable, &c.units, &c.identity); err != nil {
 			return err
 		}

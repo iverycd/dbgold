@@ -90,10 +90,17 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 			}
 		}
 		dmType := d.MapType(col, srcType, opt)
+		if srcType == "oscar" {
+			var err error
+			dmType, err = typemap.OscarToDamengChecked(col)
+			if err != nil {
+				return nil, err
+			}
+		}
 		colDef := fmt.Sprintf(`%s %s`, d.QuoteIdent(columnName(col.Name)), dmType)
 		if col.Extra == "auto_increment" {
 			// 达梦 Oracle 兼容模式自增列:允许显式插入(导入原 id),种子先填 1
-			if srcType == "sqlserver" && col.IdentityInfo != nil {
+			if (srcType == "sqlserver" || srcType == "oscar") && col.IdentityInfo != nil {
 				colDef += fmt.Sprintf(" IDENTITY(%d, %d)", col.IdentityInfo.Seed, col.IdentityInfo.Increment)
 			} else {
 				colDef += " IDENTITY(1, 1)"
@@ -116,6 +123,12 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 				colDef += clause
 			} else if srcType == "sqlserver" {
 				clause, err := tsqldameng.Default(*col.Default)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
+				}
+				colDef += clause
+			} else if srcType == "oscar" {
+				clause, err := oscarDamengDefault(col, dmType)
 				if err != nil {
 					return nil, fmt.Errorf("%s.%s: %w", info.TableName, col.Name, err)
 				}

@@ -133,7 +133,7 @@ func (r *OscarReader) closeCursor(id uint64) error {
 	return r.bridge.CloseCursor(ctx, id)
 }
 
-func (r *OscarReader) scan(ctx context.Context, query string, args []string, fetchRows int, data bool, consume func([][]any) error) (retErr error) {
+func (r *OscarReader) scan(ctx context.Context, query string, args []string, fetchRows int, data bool, consume func([][]any) error) error {
 	var id uint64
 	var err error
 	if len(args) == 0 {
@@ -144,11 +144,15 @@ func (r *OscarReader) scan(ctx context.Context, query string, args []string, fet
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, r.closeCursor(id)) }()
 	fetch := r.bridge.FetchCursor
 	if data {
 		fetch = r.bridge.FetchMigrationCursor
 	}
+	return r.scanOpenedCursor(ctx, id, fetchRows, fetch, consume)
+}
+
+func (r *OscarReader) scanOpenedCursor(ctx context.Context, id uint64, fetchRows int, fetch func(context.Context, uint64, int, int) ([][]any, bool, error), consume func([][]any) error) (retErr error) {
+	defer func() { retErr = errors.Join(retErr, r.closeCursor(id)) }()
 	for {
 		rows, done, err := fetch(ctx, id, fetchRows, oscarCursorBytes)
 		if err != nil {

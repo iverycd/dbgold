@@ -100,7 +100,12 @@ func CalibrateRecovery(ctx context.Context, w Writer, table string, sequences []
 		case "oracle":
 			e = calibrateOracle(ctx, w.(*OracleWriter), s)
 		case "dameng":
-			e = calibrateDameng(ctx, w.(*DaMengWriter), s)
+			dm := w.(*DaMengWriter)
+			if dm.srcType == "oscar" {
+				e = dm.VerifyOscarDamengIdentity(ctx, s)
+			} else {
+				e = calibrateDameng(ctx, dm, s)
+			}
 		default:
 			e = fmt.Errorf("目标 %s 尚不能可靠检查自增绑定，请单独核验", w.DBType())
 		}

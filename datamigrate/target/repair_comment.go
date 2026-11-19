@@ -47,24 +47,48 @@ func GenerateRepairComment(ctx context.Context, w Writer, cm source.CommentInfo)
 	if _, err = conn.ExecContext(ctx, "SET SESSION sql_mode='', sql_quote_show_create=1"); err != nil {
 		return nil, err
 	}
-	var shown, ddl string
-	if err = conn.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualified).Scan(&shown, &ddl); err != nil {
-		return nil, err
-	}
-	if shown != cm.TableName {
-		var caseMode int
-		if err = conn.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&caseMode); err != nil {
-			return nil, fmt.Errorf("核验 MySQL 目标表大小写规则: %w", err)
-		}
-		if (caseMode != 1 && caseMode != 2) || !strings.EqualFold(shown, cm.TableName) {
-			return nil, fmt.Errorf("SHOW CREATE 返回的目标表身份不一致")
-		}
-	}
-	definition, err := repairMySQLColumnComment(ddl, shown, cm.ColumnName, cm.Comment)
+	statement, err := PrepareMySQLColumnComment(ctx, conn, schema, cm.TableName, cm.ColumnName, cm.Comment)
 	if err != nil {
 		return nil, err
 	}
-	return []dialect.Statement{{SQL: "ALTER TABLE " + qualified + " MODIFY COLUMN " + definition}}, nil
+	return []dialect.Statement{{SQL: statement}}, nil
+}
+
+// PrepareMySQLColumnComment reads the full definition from the supplied session.
+// The session must use sql_mode=” and sql_quote_show_create=1 while reading;
+// execution of the returned statement requires NO_BACKSLASH_ESCAPES.
+func PrepareMySQLColumnComment(ctx context.Context, conn interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, schema, table, column, comment string) (string, error) {
+	statement, _, err := InspectMySQLColumnComment(ctx, conn, schema, table, column, comment)
+	return statement, err
+}
+
+// InspectMySQLColumnComment also returns the current comment for callers that
+// compare a frozen preview against the definition under a target table lock.
+func InspectMySQLColumnComment(ctx context.Context, conn interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, schema, table, column, comment string) (string, string, error) {
+	qualified := dialect.NewMySQL().QualifyTable(schema, table)
+	var shown, ddl string
+	if err := conn.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualified).Scan(&shown, &ddl); err != nil {
+		return "", "", err
+	}
+	if shown != table {
+		var caseMode int
+		if err := conn.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&caseMode); err != nil {
+			return "", "", fmt.Errorf("核验 MySQL 目标表大小写规则: %w", err)
+		}
+		if (caseMode != 1 && caseMode != 2) || !strings.EqualFold(shown, table) {
+			return "", "", fmt.Errorf("SHOW CREATE 返回的目标表身份不一致")
+		}
+	}
+	var old string
+	definition, err := rewriteMySQLColumnComment(ddl, shown, column, comment, &old)
+	if err != nil {
+		return "", "", err
+	}
+	return "ALTER TABLE " + qualified + " MODIFY COLUMN " + definition, old, nil
 }
 
 type repairMySQLToken struct {
@@ -185,6 +209,11 @@ func repairMySQLTokens(s string) ([]repairMySQLToken, error) {
 }
 
 func repairMySQLColumnComment(ddl, table, column, comment string) (string, error) {
+	var old string
+	return rewriteMySQLColumnComment(ddl, table, column, comment, &old)
+}
+
+func rewriteMySQLColumnComment(ddl, table, column, comment string, oldComment *string) (string, error) {
 	ts, err := repairMySQLTokens(ddl)
 	if err != nil {
 		return "", err
@@ -219,6 +248,7 @@ func repairMySQLColumnComment(ddl, table, column, comment string) (string, error
 				return "", fmt.Errorf("SHOW CREATE 列 COMMENT 不明确")
 			}
 			commentIndex = i + 1
+			*oldComment = cols[commentIndex].value
 		}
 	}
 	var out strings.Builder

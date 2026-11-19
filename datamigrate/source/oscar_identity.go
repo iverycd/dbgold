@@ -133,25 +133,30 @@ func oscarSequenceDefault(raw string) (string, string) {
 	return "", ""
 }
 
-func (r *OscarReader) readSequenceNext(ctx context.Context, owner, name string, targetMaximum int64) (int64, error) {
+type oscarSequenceState struct {
+	start, step, maximum, last int64
+	cycle, called              bool
+}
+
+func (r *OscarReader) readOscarSequenceState(ctx context.Context, owner, name string) (state oscarSequenceState, _ error) {
 	// Inspect the native sequence relation directly. Unlike NEXTVAL(), this
 	// read does not change the source high water mark or consume a value.
 	rows, err := r.query(ctx, `SELECT c.RELKIND FROM SYS_CLASS c JOIN SYS_NAMESPACE n ON n.OID=c.RELNAMESPACE
 WHERE n.NSPNAME=? AND c.RELNAME=?`, owner, name)
 	if err != nil {
-		return 0, err
+		return state, err
 	}
 	kind, err := oscarSingleText(rows)
 	if err != nil || kind != "S" {
-		return 0, fmt.Errorf("神通序列 %s.%s 的原生对象身份不明确", owner, name)
+		return state, fmt.Errorf("神通序列 %s.%s 的原生对象身份不明确", owner, name)
 	}
 	rows, err = r.query(ctx, "SELECT START_VALUE,INCREMENT_BY,MAX_VALUE,IS_CYCLED,LAST_VALUE,IS_CALLED FROM "+
 		oscarQuoteIdent(owner)+"."+oscarQuoteIdent(name))
 	if err != nil {
-		return 0, fmt.Errorf("读取神通序列 %s.%s 的只读状态: %w", owner, name, err)
+		return state, fmt.Errorf("读取神通序列 %s.%s 的只读状态: %w", owner, name, err)
 	}
 	if len(rows) != 1 || len(rows[0]) != 6 {
-		return 0, fmt.Errorf("神通序列 %s.%s 的只读状态不完整", owner, name)
+		return state, fmt.Errorf("神通序列 %s.%s 的只读状态不完整", owner, name)
 	}
 	row := rows[0]
 	start, startErr := oscarInteger(row[0])
@@ -160,8 +165,19 @@ WHERE n.NSPNAME=? AND c.RELNAME=?`, owner, name)
 	cycle, cycleErr := oscarBoolean(row[3])
 	last, lastErr := oscarInteger(row[4])
 	called, calledErr := oscarBoolean(row[5])
-	if startErr != nil || stepErr != nil || limitErr != nil || cycleErr != nil || lastErr != nil || calledErr != nil ||
-		start <= 0 || step != 1 || cycle || maximum < targetMaximum || last < start || last > targetMaximum || called && last == targetMaximum {
+	if startErr != nil || stepErr != nil || limitErr != nil || cycleErr != nil || lastErr != nil || calledErr != nil {
+		return state, fmt.Errorf("神通序列 %s.%s 的只读状态无效", owner, name)
+	}
+	return oscarSequenceState{start: start, step: step, maximum: maximum, last: last, cycle: cycle, called: called}, nil
+}
+
+func (r *OscarReader) readSequenceNext(ctx context.Context, owner, name string, targetMaximum int64) (int64, error) {
+	state, err := r.readOscarSequenceState(ctx, owner, name)
+	if err != nil {
+		return 0, err
+	}
+	start, step, maximum, last, cycle, called := state.start, state.step, state.maximum, state.last, state.cycle, state.called
+	if start <= 0 || step != 1 || cycle || maximum < targetMaximum || last < start || last > targetMaximum || called && last == targetMaximum {
 		return 0, fmt.Errorf("神通序列 %s.%s 的起点、步长、上界、循环或当前值不能等价转换为 MySQL AUTO_INCREMENT", owner, name)
 	}
 	if called {

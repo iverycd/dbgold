@@ -20,6 +20,10 @@
           <template #icon><icon-thunderbolt /></template>
           迁移生成
         </a-menu-item>
+        <a-menu-item key="/schema-compare">
+          <template #icon><icon-branch /></template>
+          结构比对
+        </a-menu-item>
         <a-menu-item key="/batch-migration">
           <template #icon><icon-import /></template>
           批量迁移
@@ -131,6 +135,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/connections': '连接管理',
   '/query': '查询中心',
   '/migration': '迁移生成',
+  '/schema-compare': '结构比对',
   '/batch-migration': '批量迁移',
   '/history': '任务中心',
   '/users': '用户管理',

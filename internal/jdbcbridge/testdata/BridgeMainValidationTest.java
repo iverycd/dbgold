@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.sql.*;
 import java.util.Map;
 import java.util.ArrayDeque;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
@@ -18,10 +19,13 @@ public final class BridgeMainValidationTest {
         return Proxy.newProxyInstance(kind.getClassLoader(),new Class<?>[]{kind},handler);
     }
     private static ResultSet rows(final String[] values) {
+        return rows(values, Types.VARCHAR);
+    }
+    private static ResultSet rows(final String[] values, final int type) {
         final int[] pos={-1};
         final ResultSetMetaData meta=(ResultSetMetaData)proxy(ResultSetMetaData.class,new InvocationHandler(){public Object invoke(Object p,Method m,Object[] a){
             if(m.getName().equals("getColumnCount"))return 1;
-            if(m.getName().equals("getColumnType"))return Types.VARCHAR;
+            if(m.getName().equals("getColumnType"))return type;
             return null;
         }});
         return (ResultSet)proxy(ResultSet.class,new InvocationHandler(){public Object invoke(Object p,Method m,Object[] a){
@@ -29,6 +33,7 @@ public final class BridgeMainValidationTest {
             if(n.equals("next"))return ++pos[0]<values.length;
             if(n.equals("getMetaData"))return meta;
             if(n.equals("getObject")||n.equals("getString"))return values[pos[0]];
+            if(n.equals("wasNull"))return values[pos[0]] == null;
             if(n.equals("getCharacterStream"))return new StringReader(values[pos[0]]);
             if(n.equals("getBigDecimal"))return new BigDecimal(values[pos[0]]);
             if(n.equals("close")){closed++;return null;}
@@ -82,19 +87,47 @@ public final class BridgeMainValidationTest {
         Field cursorsField=main.getDeclaredField("cursors");cursorsField.setAccessible(true);Map<Long,Object> cursors=(Map<Long,Object>)cursorsField.get(bridge);
         String value=new String(new char[100]).replace('\0','x');
         queryResult[0]=rows(new String[]{value,value});
-        Method open=method(main,"openCursor",long.class,long.class,String.class,String[].class);
-        open.invoke(bridge,42L,9L,"SELECT MiXeD FROM s.T",null);check(cursors.size()==1,"open cursor retained");frames.reset();
+        Method open=method(main,"openCursor",long.class,long.class,String.class,String[].class,Set.class);
+        open.invoke(bridge,42L,9L,"SELECT MiXeD FROM s.T",null,null);check(cursors.size()==1,"open cursor retained");frames.reset();
         Method fetch=method(main,"fetchCursor",long.class,long.class,int.class,int.class);
         fetch.invoke(bridge,1L,1L,100,130);DataInputStream response=new DataInputStream(new ByteArrayInputStream(frames.toByteArray()));int frame=response.readInt();check(frame<150,"byte budget");response.skipBytes(11);check(!response.readBoolean(),"first fetch incomplete");check(response.readInt()==1,"byte budget must split rows");
         frames.reset();fetch.invoke(bridge,2L,1L,100,130);response=new DataInputStream(new ByteArrayInputStream(frames.toByteArray()));response.readInt();response.skipBytes(11);check(response.readBoolean(),"second fetch complete");check(response.readInt()==1,"pending row retained");check(cursors.isEmpty(),"completed cursor released");
         idle.clear();
-        Object large=construct(cursorType,new Class<?>[]{long.class,long.class,sessionType,holderType,Statement.class,ResultSet.class},2L,43L,session,holder,statement,rows(new String[]{value}));cursors.put(2L,large);
+        Class<?>[] cursorArgs = {long.class,long.class,sessionType,holderType,Statement.class,ResultSet.class,Set.class};
+        Object large=construct(cursorType,cursorArgs,2L,43L,session,holder,statement,rows(new String[]{value}),null);cursors.put(2L,large);
         boolean rejected=false;try{fetch.invoke(bridge,3L,2L,100,32);}catch(InvocationTargetException e){rejected=e.getCause() instanceof SQLException;}check(rejected,"oversized row must fail");check(cursors.isEmpty(),"failed cursor released");
         idle.clear();
-        Object cancelled=construct(cursorType,new Class<?>[]{long.class,long.class,sessionType,holderType,Statement.class,ResultSet.class},3L,44L,session,holder,statement,rows(new String[]{value}));cursors.put(3L,cancelled);method(main,"cancelRequest",long.class).invoke(bridge,44L);for(int i=0;i<100&&!cursors.isEmpty();i++)Thread.sleep(10);check(cursors.isEmpty(),"cancelled opening request releases cursor");
-        idle.clear();idle.push(holder);queryResult[0]=rows(new String[]{value});frames.reset();open.invoke(bridge,45L,9L,"SELECT MiXeD FROM s.T",null);
+        Object cancelled=construct(cursorType,cursorArgs,3L,44L,session,holder,statement,rows(new String[]{value}),null);cursors.put(3L,cancelled);method(main,"cancelRequest",long.class).invoke(bridge,44L);for(int i=0;i<100&&!cursors.isEmpty();i++)Thread.sleep(10);check(cursors.isEmpty(),"cancelled opening request releases cursor");
+        idle.clear();idle.push(holder);queryResult[0]=rows(new String[]{value});frames.reset();open.invoke(bridge,45L,9L,"SELECT MiXeD FROM s.T",null,null);
         // Cursor IDs are independent of manual test cursor IDs; the second open is 2.
         method(main,"closeCursor",long.class).invoke(bridge,2L);check(cursors.isEmpty(),"explicit close releases cursor");
+
+        queryResult[0] = rows(new String[]{"001", null, ""}, Types.OTHER);
+        frames.reset();
+        payload.reset();
+        DataOutputStream request = new DataOutputStream(payload);
+        request.writeLong(9L);
+        byte[] sql = "SELECT MiXeD FROM s.T".getBytes("UTF-8");
+        request.writeInt(sql.length);
+        request.write(sql);
+        request.writeInt(1);
+        request.writeInt(0);
+        method(main, "openOscarDamengCursor", long.class, DataInputStream.class).invoke(
+                bridge, 46L, new DataInputStream(new ByteArrayInputStream(payload.toByteArray())));
+        check(cursors.size() == 1, "native text cursor retained");
+        frames.reset();
+        fetch.invoke(bridge, 4L, 3L, 4, 130);
+        response = new DataInputStream(new ByteArrayInputStream(frames.toByteArray()));
+        response.readInt();
+        response.skipBytes(11);
+        check(response.readBoolean() && response.readInt() == 3, "native text fetch completed");
+        check(response.readInt() == 1 && response.readByte() == 6 && response.readInt() == 3, "native text length");
+        byte[] bits = new byte[3];
+        response.readFully(bits);
+        check(new String(bits, "UTF-8").equals("001"), "leading zeroes preserved");
+        check(response.readInt() == 1 && response.readByte() == 0, "native null preserved");
+        check(response.readInt() == 1 && response.readByte() == 6 && response.readInt() == 0, "native empty value preserved");
+
         // Regression: Statement.cancel does nothing and fetch only exits after
         // Future.cancel interrupts ResultSet.next. The input thread must not
         // synchronously wait for the cursor monitor before sending interrupt.
@@ -106,7 +139,7 @@ public final class BridgeMainValidationTest {
             if(m.getName().equals("next")){entered.countDown();try{new CountDownLatch(1).await();}catch(InterruptedException expected){}return false;}
             if(m.getName().equals("close")){closed++;return null;}return null;
         }});
-        Object waiting=construct(cursorType,new Class<?>[]{long.class,long.class,sessionType,holderType,Statement.class,ResultSet.class},4L,77L,session,holder,statement,blocking);cursors.put(4L,waiting);
+        Object waiting=construct(cursorType,cursorArgs,4L,77L,session,holder,statement,blocking,null);cursors.put(4L,waiting);
         final Object targetBridge=bridge;final Method targetFetch=fetch;
         FutureTask<Void> future=new FutureTask<Void>(new Runnable(){public void run(){try{targetFetch.invoke(targetBridge,99L,4L,100,130);}catch(Exception e){throw new RuntimeException(e);}}},null);
         Field requestsField=main.getDeclaredField("requests");requestsField.setAccessible(true);((Map<Long,Future<?>>)requestsField.get(bridge)).put(99L,future);

@@ -109,14 +109,15 @@ func TestGenericPartitionPreflightAcceptsSupportedPairWithoutCreatingJob(t *test
 }
 
 func TestBatchOptionalSourceSchemaDoesNotReadFirstColumn(t *testing.T) {
-	for _, input := range []struct{ label, dbType, port, database string }{
-		{"postgres", "postgres", "5432", "app"},
-		{"ShenTong", "oscar", "2003", "OSRDB"},
+	for _, input := range []struct{ label, dbType, port, database, target, targetPort string }{
+		{"postgres", "postgres", "5432", "app", "mysql", "3306"},
+		{"ShenTong", "oscar", "2003", "OSRDB", "mysql", "3306"},
+		{"ShenTong", "oscar", "2003", "OSRDB", "dameng", "5236"},
 	} {
-		t.Run(input.dbType, func(t *testing.T) {
+		t.Run(input.dbType+"/"+input.target, func(t *testing.T) {
 			f := excelize.NewFile()
 			defer f.Close()
-			values := []string{input.label, "127.0.0.1", input.port, input.database, "reader", "pw", "mysql", "127.0.0.1", "3306", "target", "writer", "pw", "target"}
+			values := []string{input.label, "127.0.0.1", input.port, input.database, "reader", "pw", input.target, "127.0.0.1", input.targetPort, "target", "writer", "pw", "target"}
 			for i, h := range batchHeaders {
 				cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 				require.NoError(t, f.SetCellValue("Sheet1", cell, h))

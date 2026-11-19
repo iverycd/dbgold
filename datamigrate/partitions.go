@@ -253,7 +253,7 @@ func (m *Migrator) preparePartitionsWithProgress(ctx context.Context, progress f
 			if batchMySQL && ctx.Err() != nil {
 				return fatal(ctx.Err())
 			}
-			if m.isOscarMySQL() && isMigrationTaskError(e) {
+			if (m.isOscarMySQL() || m.isOscarDameng()) && isMigrationTaskError(e) {
 				m.stopMigrationTask(ctx, e)
 				return fatal(e)
 			}
@@ -266,6 +266,10 @@ func (m *Migrator) preparePartitionsWithProgress(ctx context.Context, progress f
 		s.hasPartitions = true
 		entry.Source = source.ClonePartitionSpec(spec)
 		entry.Status = "ready"
+		if m.isOscarDameng() {
+			m.blockPartitionTable(entry, fmt.Errorf("神通到达梦仅迁移普通表，分区表需要手工迁移"))
+			continue
+		}
 		if m.cfg.MigrationPurpose == "cdc" {
 			m.blockPartitionTable(entry, fmt.Errorf("本期分区保留能力不支持 CDC 首次全量导入及增量路由"))
 			continue
@@ -299,7 +303,7 @@ func (m *Migrator) preparePartitionsWithProgress(ctx context.Context, progress f
 			progress(PartitionCheckProgress{Stage: "target", Checked: total, Total: total})
 		}
 	}
-	if s.hasPartitions {
+	if s.hasPartitions && !m.isOscarDameng() {
 		inspector, available := m.writer.(target.PartitionInspector)
 		if !available {
 			for _, t := range p.Tables {
@@ -860,7 +864,16 @@ func (m *Migrator) finishPartitions(ctx context.Context, report *MigrationReport
 			}
 			report.Tables.Total++
 			report.Tables.Failed++
-			report.Tables.Items = append(report.Tables.Items, ObjectResult{Name: t.SourceTable, Stage: "preflight", Error: t.Error})
+			result := ObjectResult{Name: t.SourceTable, Stage: "preflight", Error: t.Error}
+			if m.isOscarDameng() {
+				if t.Source != nil {
+					result.SourceDDL = t.Source.SourceDDL
+				}
+				if result.SourceDDL == "" {
+					result.SourceDDL = m.oscarSourceTableDDL(ctx, t.SourceTable)
+				}
+			}
+			report.Tables.Items = append(report.Tables.Items, result)
 			continue
 		}
 		if t.Plan == nil {
