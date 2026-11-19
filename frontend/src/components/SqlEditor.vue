@@ -29,6 +29,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
+  'selection-change': [hasSelection: boolean]
   execute: [sql: string]
 }>()
 
@@ -41,13 +42,19 @@ function languageExtension() {
   return sql({ dialect: props.dialect === 'mysql' ? MySQL : PostgreSQL })
 }
 
+function selectedSQL(state: EditorState): string {
+  const { from, to } = state.selection.main
+  return from === to ? '' : state.sliceDoc(from, to).trim()
+}
+
 function selectedOrCurrentSQL(state: EditorState): string {
-  const selection = state.sliceDoc(state.selection.main.from, state.selection.main.to).trim()
+  const selection = selectedSQL(state)
   if (selection) return selection
   const text = state.doc.toString()
   const cursor = state.selection.main.head
   let start = 0
-  let end = text.length
+  let previousStatement = ''
+  let hasContent = false
   let quote = ''
   let lineComment = false
   let blockComment = false
@@ -85,21 +92,25 @@ function selectedOrCurrentSQL(state: EditorState): string {
     }
     if (ch === "'" || ch === '"' || ch === '`') {
       quote = ch
+      hasContent = true
       continue
     }
     if (ch === ';') {
-      if (i < cursor) start = i + 1
-      else {
-        end = i + 1
-        break
-      }
+      const statement = hasContent ? text.slice(start, i + 1).trim() : ''
+      if (i >= cursor) return statement
+      if (statement) previousStatement = statement
+      start = i + 1
+      hasContent = false
+    } else if (!hasContent && !/\s/.test(ch)) {
+      hasContent = true
     }
   }
-  return text.slice(start, end).trim()
+  return hasContent ? text.slice(start).trim() : previousStatement
 }
 
 function getExecutableSQL(): string {
-  return view ? (props.executionMode === 'document' ? view.state.doc.toString().trim() : selectedOrCurrentSQL(view.state)) : props.modelValue.trim()
+  if (!view) return props.modelValue.trim()
+  return props.executionMode === 'document' ? view.state.doc.toString().trim() : selectedOrCurrentSQL(view.state)
 }
 
 function formatSQL(): void {
@@ -117,6 +128,13 @@ defineExpose({ getExecutableSQL })
 
 onMounted(() => {
   if (!editorHost.value) return
+  const executeKeymap = keymap.of([{
+    key: 'Mod-Enter',
+    run: () => {
+      emit('execute', getExecutableSQL())
+      return true
+    },
+  }])
   view = new EditorView({
     parent: editorHost.value,
     state: EditorState.create({
@@ -133,15 +151,14 @@ onMounted(() => {
             return true
           },
         }])),
-        keymap.of([{
-          key: 'Mod-Enter',
-          run: (stateView) => {
-            emit('execute', props.executionMode === 'document' ? stateView.state.doc.toString().trim() : selectedOrCurrentSQL(stateView.state))
-            return true
-          },
-        }]),
+        // Document editors retain CodeMirror's default blank-line shortcut.
+        props.executionMode === 'document' ? executeKeymap : Prec.highest(executeKeymap),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) emit('update:modelValue', update.state.doc.toString())
+          if (update.docChanged || update.selectionSet) {
+            const hasSelection = Boolean(selectedSQL(update.state))
+            if (hasSelection !== Boolean(selectedSQL(update.startState))) emit('selection-change', hasSelection)
+          }
         }),
         EditorView.theme({
           '&': { height: '100%', fontSize: '13px' },
@@ -152,6 +169,7 @@ onMounted(() => {
       ],
     }),
   })
+  emit('selection-change', Boolean(selectedSQL(view.state)))
 })
 
 watch(() => props.modelValue, (value) => {

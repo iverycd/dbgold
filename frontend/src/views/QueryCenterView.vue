@@ -1,12 +1,12 @@
 <template>
-  <div class="query-center">
-    <aside class="object-panel">
+  <div ref="workbenchRef" class="query-center" :class="{ 'sidebar-open': sidebarOpen }">
+    <aside id="query-object-panel" class="object-panel" aria-label="对象浏览器" tabindex="-1">
       <div class="panel-heading">
         <div>
           <div class="panel-title">对象浏览器</div>
           <div class="panel-subtitle">选择连接并浏览数据库对象</div>
         </div>
-        <a-button size="mini" :disabled="!currentTab.connectionId" :loading="metadataLoading" @click="refreshMetadata">
+        <a-button size="mini" aria-label="刷新对象" title="刷新对象" :disabled="!activeConnection" :loading="metadataLoading" @click="loadNamespaces">
           <template #icon><icon-refresh /></template>
         </a-button>
       </div>
@@ -31,20 +31,21 @@
           :placeholder="namespaceLabel"
           allow-search
           size="small"
-          :loading="metadataLoading"
-          :disabled="!currentTab.connectionId"
+          :loading="namespaceStatus === 'loading'"
+          :disabled="namespaceStatus !== 'ready' || !namespaces.length"
           @change="onNamespaceChange"
         >
           <a-option v-for="name in namespaces" :key="name" :value="name">{{ name }}</a-option>
         </a-select>
-        <a-input v-model="objectSearch" size="small" allow-clear placeholder="搜索表、视图或字段">
+        <a-input v-model="objectSearch" size="small" allow-clear placeholder="搜索对象或已加载字段">
           <template #prefix><icon-search /></template>
         </a-input>
       </div>
 
       <div class="object-tree">
-        <a-empty v-if="!currentTab.connectionId" description="请先选择连接" />
-        <a-spin v-else-if="metadataLoading" />
+        <a-spin v-if="metadataLoading" />
+        <a-empty v-else-if="!activeConnection" description="请先选择连接" />
+        <a-alert v-else-if="metadataError" type="error">{{ metadataError }}</a-alert>
         <template v-else>
           <div v-for="group in objectGroups" :key="group.type" class="object-group">
             <div class="group-title">
@@ -53,7 +54,7 @@
               <span>{{ group.items.length }}</span>
             </div>
             <div v-for="object in group.items" :key="object.type + ':' + object.name" class="object-entry">
-              <button class="object-row" @click="toggleObject(object)" @dblclick="insertObjectName(object.name)">
+              <button class="object-row" :aria-expanded="expandedObjects.has(objectKey(object))" @click="toggleObject(object)" @dblclick="insertObjectName(object.name)">
                 <icon-down v-if="expandedObjects.has(objectKey(object))" />
                 <icon-right v-else />
                 <span :title="object.name">{{ object.name }}</span>
@@ -75,12 +76,14 @@
             </div>
           </div>
           <a-empty v-if="objects.length === 0" description="当前命名空间暂无表或视图" />
+          <a-empty v-else-if="!objectGroups.length" description="没有匹配的对象或已加载字段" />
         </template>
       </div>
     </aside>
+    <div class="object-panel-backdrop" aria-hidden="true" @click="toggleSidebar"></div>
 
-    <section class="workspace">
-      <div class="editor-card">
+    <section ref="workspaceRef" class="workspace" :style="{ '--query-editor-height': editorHeight }">
+      <div id="query-editor-panel" class="editor-card">
         <div class="tab-strip">
           <button
             v-for="tab in tabs"
@@ -108,26 +111,41 @@
 
         <div class="query-toolbar">
           <div class="connection-summary">
+            <a-button
+              size="small"
+              class="toggle-objects"
+              :aria-expanded="sidebarOpen"
+              aria-controls="query-object-panel"
+              :aria-label="sidebarOpen ? '收起对象浏览器' : '展开对象浏览器'"
+              :title="sidebarOpen ? '收起对象浏览器' : '展开对象浏览器'"
+              @click="toggleSidebar"
+            >
+              <template #icon><icon-storage /></template>
+            </a-button>
             <a-tag v-if="activeConnection" :color="getDbTypeColor(activeConnection.db_type)" size="small">
               {{ getDbTypeLabel(activeConnection.db_type) }}
             </a-tag>
-            <span>{{ activeConnection?.name || '未选择连接' }}</span>
-            <span v-if="currentTab.namespace" class="namespace-path">/ {{ currentTab.namespace }}</span>
-            <a-tag v-if="activeConnection?.env" size="small">{{ activeConnection.env }}</a-tag>
+            <span class="connection-name" :title="activeConnection?.name">{{ activeConnection?.name || '未选择连接' }}</span>
+            <span v-if="currentTab.namespace" class="namespace-path" :title="currentTab.namespace">/ {{ currentTab.namespace }}</span>
+            <a-tag v-if="activeConnection?.env" class="query-environment" :color="isProductionEnvironment(activeConnection.env) ? 'red' : undefined" size="small">
+              {{ environmentLabel(activeConnection.env) }}
+            </a-tag>
           </div>
-          <a-space>
+          <div class="query-actions">
             <span class="shortcut">⌘/Ctrl + Enter</span>
             <a-button
               type="primary"
               size="small"
+              class="execute-button"
               :loading="executing"
-              :disabled="!currentTab.connectionId || !currentTab.sql.trim() || anyExecuting"
+              :disabled="!canExecute"
+              @mousedown.prevent
               @click="executeFromToolbar"
             >
               <template #icon><icon-play-arrow /></template>
-              执行
+              {{ hasSQLSelection ? '执行选区' : '执行当前语句' }}
             </a-button>
-          </a-space>
+          </div>
         </div>
 
         <div class="editor-area">
@@ -136,18 +154,37 @@
             v-model="currentTab.sql"
             :key="currentTab.id"
             :dialect="activeDialect"
+            @selection-change="hasSQLSelection = $event"
             @execute="runQuery"
           />
         </div>
       </div>
 
-      <div class="result-card">
+      <div
+        class="workspace-divider"
+        role="separator"
+        tabindex="0"
+        aria-label="调整 SQL 编辑器和结果区高度"
+        aria-controls="query-editor-panel"
+        aria-orientation="horizontal"
+        :aria-valuemin="separatorMin"
+        :aria-valuemax="separatorMax"
+        :aria-valuenow="separatorValue"
+        @pointerdown="resizeOnPointer"
+        @keydown="resizeOnKey"
+      ></div>
+
+      <div :key="currentTab.id" class="result-card">
         <div class="result-tabs">
-          <button :class="{ active: resultTab === 'result' }" @click="resultTab = 'result'">执行结果</button>
-          <button :class="{ active: resultTab === 'history' }" @click="openHistory">
-            执行历史
-          </button>
-          <div class="result-meta">
+          <div class="result-tab-buttons">
+            <button :class="{ active: resultTab === 'result' }" @click="resultTab = 'result'">执行结果</button>
+            <button :class="{ active: resultTab === 'history' }" @click="openHistory">执行历史</button>
+          </div>
+          <div v-if="resultTab === 'result' && currentRuntime.source" class="result-meta">
+            <span class="result-source" :title="sourceLabel(currentRuntime.source)">{{ sourceLabel(currentRuntime.source) }}</span>
+            <a-tag class="query-environment" :color="isProductionEnvironment(currentRuntime.source.env) ? 'red' : undefined" size="small">
+              {{ environmentLabel(currentRuntime.source.env) }}
+            </a-tag>
             <template v-if="lastResult">
               <span>{{ lastResult.duration_ms }} ms</span>
               <span v-if="lastResult.kind === 'rows'">{{ lastResult.row_count }} 行</span>
@@ -161,26 +198,35 @@
             {{ executionError }}
           </a-alert>
           <a-alert v-else-if="lastResult?.kind === 'rows' && lastResult.truncated" type="warning">
-            结果已达到 1000 行上限，仅展示前 1000 行。
+            已达到返回上限，当前结果仅包含前 {{ lastResult.row_count }} 行。
           </a-alert>
           <div v-if="executing" class="result-empty"><a-spin tip="正在执行 SQL…" /></div>
-          <div v-else-if="lastResult?.kind === 'rows'" class="result-grid-wrap">
+          <div v-else-if="lastResult?.kind === 'rows' && !lastResult.rows.length" class="result-empty">
+            <icon-check-circle />
+            <span>查询成功，返回 0 行</span>
+          </div>
+          <div v-else-if="lastResult?.kind === 'rows'" ref="resultGridRef" class="result-grid-wrap">
             <table class="result-grid">
               <thead>
                 <tr>
-                  <th class="row-number">#</th>
-                  <th v-for="(column, index) in lastResult.columns" :key="index">
+                  <th class="row-number" scope="col">#</th>
+                  <th v-for="(column, index) in lastResult.columns" :key="index" scope="col">
                     <span>{{ column.name }}</span>
                     <small>{{ column.type }}</small>
                   </th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(row, rowIndex) in lastResult.rows" :key="rowIndex">
-                  <td class="row-number">{{ rowIndex + 1 }}</td>
-                  <td v-for="(value, columnIndex) in row" :key="columnIndex" :title="displayValue(value)">
-                    <span v-if="value === null" class="null-value">NULL</span>
-                    <span v-else>{{ displayValue(value) }}</span>
+                <tr v-for="(row, rowIndex) in pageRows" :key="resultOffset + rowIndex">
+                  <th class="row-number" scope="row">{{ resultOffset + rowIndex + 1 }}</th>
+                  <td v-for="(value, columnIndex) in row" :key="columnIndex">
+                    <button
+                      type="button"
+                      class="result-cell"
+                      :class="{ 'null-value': value === null }"
+                      :aria-label="'查看第 ' + (resultOffset + rowIndex + 1) + ' 行的 ' + lastResult.columns[columnIndex]?.name"
+                      @click="openDetail(lastResult.columns[columnIndex]?.name, displayValue(value))"
+                    >{{ displayValue(value) }}</button>
                   </td>
                 </tr>
               </tbody>
@@ -197,27 +243,47 @@
             <icon-code-square />
             <span>执行 SQL 后，结果会显示在这里</span>
           </div>
+          <div v-if="lastResult?.kind === 'rows' && lastResult.rows.length > PAGE_SIZE" class="result-pagination">
+            <a-pagination
+              :current="currentRuntime.resultPage"
+              :page-size="PAGE_SIZE"
+              :total="lastResult.rows.length"
+              :show-page-size="false"
+              simple
+              size="small"
+              @change="changeResultPage"
+            />
+          </div>
         </div>
 
         <div v-else class="history-content">
           <div class="history-toolbar">
-            <a-radio-group v-if="isAdmin" v-model="historyScope" size="small" type="button" @change="loadHistory">
+            <a-radio-group v-if="isAdmin" v-model="historyScope" size="small" type="button">
               <a-radio value="mine">我的记录</a-radio>
               <a-radio value="all">全部记录</a-radio>
             </a-radio-group>
-            <span v-else>最近 50 条执行记录</span>
+            <span v-else>最近 {{ HISTORY_LIMIT }} 条执行记录</span>
             <a-button size="mini" :loading="historyLoading" @click="loadHistory">
               <template #icon><icon-refresh /></template>
               刷新
             </a-button>
           </div>
-          <a-table :data="history" :loading="historyLoading" :pagination="false" row-key="id" size="small">
+          <a-table
+            class="history-table"
+            :data="history"
+            :loading="historyLoading"
+            :pagination="{ current: historyPage, pageSize: PAGE_SIZE, showPageSize: false, size: 'small' }"
+            :scroll="{ x: isAdmin && historyScope === 'all' ? 940 : 840 }"
+            :scrollbar="false"
+            row-key="id"
+            size="small"
+            @page-change="historyPage = $event"
+          >
             <template #columns>
               <a-table-column title="状态" :width="76">
                 <template #cell="{ record }">
-                  <a-tag :color="record.status === 'success' ? 'green' : 'red'" size="small">
-                    {{ record.status === 'success' ? '成功' : '失败' }}
-                  </a-tag>
+                  <a-tag v-if="record.status === 'success'" color="green" size="small">成功</a-tag>
+                  <button v-else type="button" class="history-failure" @click="showHistoryError(record)">失败详情</button>
                 </template>
               </a-table-column>
               <a-table-column v-if="isAdmin && historyScope === 'all'" title="用户" data-index="username" :width="100" />
@@ -252,15 +318,20 @@
       title="确认执行风险 SQL"
       :mask-closable="false"
       :footer="false"
-      width="560px"
+      width="min(560px, calc(100vw - 32px))"
       @cancel="clearPendingConfirmation"
     >
       <a-alert :type="confirmation?.risk_level === 'dangerous' ? 'error' : 'warning'">
         {{ confirmation?.risk_level === 'dangerous' ? '该语句可能修改数据库结构或执行高风险操作。' : '该语句会修改数据库数据。' }}
       </a-alert>
       <div class="confirm-context">
-        <span>连接：<strong>{{ confirmation?.connection_name }}</strong></span>
-        <span>语句类型：{{ confirmation?.statement_type?.toUpperCase() }}</span>
+        <template v-if="pendingExecution">
+          <strong>{{ sourceLabel(pendingExecution.source) }}</strong>
+          <a-tag class="query-environment" :color="isProductionEnvironment(pendingExecution.source.env) ? 'red' : undefined" size="small">
+            {{ environmentLabel(pendingExecution.source.env) }}
+          </a-tag>
+        </template>
+        <span>{{ confirmation?.statement_type?.toUpperCase() }}</span>
       </div>
       <pre class="confirm-sql">{{ pendingSQL }}</pre>
       <div v-if="confirmation?.confirmation_mode === 'type_connection_name'" class="typed-confirm">
@@ -268,11 +339,11 @@
         <a-input v-model="confirmationText" placeholder="输入连接名称以确认" />
       </div>
       <div class="modal-actions">
-        <a-button @click="confirmationVisible = false">取消</a-button>
+        <a-button @click="clearPendingConfirmation">取消</a-button>
         <a-button
           type="primary"
           status="danger"
-          :loading="confirmationExecuting"
+          class="confirm-execute-button"
           :disabled="confirmation?.confirmation_mode === 'type_connection_name' && confirmationText !== confirmation.connection_name"
           @click="confirmAndExecute"
         >
@@ -280,11 +351,27 @@
         </a-button>
       </div>
     </a-modal>
+
+    <a-modal
+      :visible="Boolean(detail)"
+      :title="detail?.title"
+      :mask-closable="false"
+      :footer="false"
+      width="min(640px, calc(100vw - 32px))"
+      @cancel="detail = null"
+    >
+      <pre v-if="detail?.text" class="query-detail-content">{{ detail.text }}</pre>
+      <a-empty v-else description="空字符串" />
+      <div class="modal-actions">
+        <a-button @click="detail = null">关闭</a-button>
+        <a-button type="primary" class="execute-button" @click="copyDetail">复制内容</a-button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { AxiosError } from 'axios'
 import SqlEditor from '@/components/SqlEditor.vue'
@@ -302,7 +389,9 @@ import {
   type QueryResult,
 } from '@/api/query'
 import { getDbTypeColor, getDbTypeLabel } from '@/utils/dbType'
+import { copyText } from '@/utils/clipboard'
 import { useAuthStore } from '@/stores/auth'
+import { useQueryWorkspace } from '@/composables/useQueryWorkspace'
 
 interface QueryTab {
   id: string
@@ -314,27 +403,47 @@ interface QueryTab {
 
 interface TabRuntimeState {
   result: QueryResult | null
+  source: ExecutionSource | null
+  resultPage: number
   error: string
   resultPane: 'result' | 'history'
   executing: boolean
 }
 
+interface ExecutionSource {
+  connectionId: number
+  connectionName: string
+  env: string
+  dbType: string
+  namespace: string
+}
+
 interface PendingExecution {
   tabId: string
-  connectionId: number
-  namespace: string
+  source: ExecutionSource
   sql: string
 }
 
 const SESSION_KEY = 'dbgold-query-center-tabs-v1'
+const PAGE_SIZE = 10
+const HISTORY_LIMIT = 50
+const {
+  workbenchRef, workspaceRef, sidebarOpen, editorHeight, separatorValue, separatorMin, separatorMax,
+  toggleSidebar, resizeOnPointer, resizeOnKey,
+} = useQueryWorkspace()
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const connections = ref<Connection[]>([])
+const connectionsLoaded = ref(false)
 const envFilter = ref<string>()
 const namespaces = ref<string[]>([])
 const objects = ref<QueryObject[]>([])
 const objectSearch = ref('')
-const metadataLoading = ref(false)
+const namespaceStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const objectsLoading = ref(false)
+const metadataLoading = computed(() => namespaceStatus.value === 'loading' || objectsLoading.value)
+const metadataError = ref('')
+let metadataGeneration = 0
 const columnsByObject = reactive<Record<string, QueryColumn[]>>({})
 const columnsLoading = reactive(new Set<string>())
 const expandedObjects = reactive(new Set<string>())
@@ -346,20 +455,27 @@ const tabRuntime = reactive<Record<string, TabRuntimeState>>({
   [initialTab.id]: createTabRuntime(),
 })
 const editorRef = ref<InstanceType<typeof SqlEditor> | null>(null)
+const hasSQLSelection = ref(false)
+const resultGridRef = ref<HTMLElement | null>(null)
 const runningTabId = ref<string | null>(null)
 const history = ref<QueryAudit[]>([])
 const historyLoading = ref(false)
 const historyScope = ref<'mine' | 'all'>('mine')
+const historyPage = ref(1)
+let historyGeneration = 0
 const confirmationVisible = ref(false)
 const confirmation = ref<ConfirmationRequired | null>(null)
 const confirmationText = ref('')
 const pendingExecution = ref<PendingExecution | null>(null)
+const detail = ref<{ title: string; text: string } | null>(null)
 
 const currentTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0])
 const currentRuntime = computed(() => ensureTabRuntime(activeTabId.value))
-const lastResult = computed({
-  get: () => currentRuntime.value.result,
-  set: (value: QueryResult | null) => { currentRuntime.value.result = value },
+const lastResult = computed(() => currentRuntime.value.result)
+const resultOffset = computed(() => (currentRuntime.value.resultPage - 1) * PAGE_SIZE)
+const pageRows = computed(() => {
+  const result = lastResult.value
+  return result?.kind === 'rows' ? result.rows.slice(resultOffset.value, resultOffset.value + PAGE_SIZE) : []
 })
 const executionError = computed({
   get: () => currentRuntime.value.error,
@@ -372,11 +488,10 @@ const resultTab = computed({
 const executing = computed(() => currentRuntime.value.executing)
 const anyExecuting = computed(() => runningTabId.value !== null)
 const pendingSQL = computed(() => pendingExecution.value?.sql ?? '')
-const confirmationExecuting = computed(() => {
-  const tabId = pendingExecution.value?.tabId
-  return tabId ? (tabRuntime[tabId]?.executing ?? false) : false
-})
 const activeConnection = computed(() => connections.value.find((conn) => conn.id === currentTab.value?.connectionId))
+const canExecute = computed(() =>
+  Boolean(activeConnection.value) && namespaceStatus.value === 'ready' && !anyExecuting.value && !confirmationVisible.value,
+)
 const activeDialect = computed<'mysql' | 'postgres' | 'gaussdb'>(() => {
   const type = activeConnection.value?.db_type
   return type === 'mysql' || type === 'gaussdb' ? type : 'postgres'
@@ -407,7 +522,7 @@ function makeTab(overrides: Partial<QueryTab> = {}): QueryTab {
 }
 
 function createTabRuntime(): TabRuntimeState {
-  return { result: null, error: '', resultPane: 'result', executing: false }
+  return { result: null, source: null, resultPage: 1, error: '', resultPane: 'result', executing: false }
 }
 
 function ensureTabRuntime(tabId: string): TabRuntimeState {
@@ -464,61 +579,64 @@ function closeTab(id: string) {
 }
 
 async function onConnectionChange(value: unknown) {
-  if (!currentTab.value || typeof value !== 'number') return
+  if (typeof value !== 'number' || currentTab.value.connectionId === value) return
   currentTab.value.connectionId = value
   currentTab.value.namespace = ''
   await loadNamespaces()
 }
 
 async function onNamespaceChange(value: unknown) {
-  if (!currentTab.value || typeof value !== 'string') return
+  if (namespaceStatus.value !== 'ready' || typeof value !== 'string' || !namespaces.value.includes(value)) return
   currentTab.value.namespace = value
   await loadObjects()
 }
 
 async function loadNamespaces() {
+  const generation = ++metadataGeneration
   const tab = currentTab.value
-  if (!tab?.connectionId) return
-  metadataLoading.value = true
-  objects.value = []
+  const conn = activeConnection.value
   namespaces.value = []
   clearObjectState()
+  if (!connectionsLoaded.value || !conn) {
+    namespaceStatus.value = 'idle'
+    return
+  }
+  namespaceStatus.value = 'loading'
   try {
-    const { data } = await listQueryNamespaces(tab.connectionId)
+    const { data } = await listQueryNamespaces(conn.id)
+    if (generation !== metadataGeneration) return
     namespaces.value = data
-    const conn = connections.value.find((item) => item.id === tab.connectionId)
-    const preferred = tab.namespace || (conn?.db_type === 'mysql' ? conn.database : 'public')
+    const preferred = tab.namespace || (conn.db_type === 'mysql' ? conn.database : 'public')
     tab.namespace = data.includes(preferred) ? preferred : (data[0] ?? '')
-    if (tab.namespace) await loadObjects(false)
+    namespaceStatus.value = 'ready'
   } catch (error) {
-    Message.error(errorMessage(error, '加载数据库命名空间失败'))
-  } finally {
-    metadataLoading.value = false
+    if (generation !== metadataGeneration) return
+    namespaceStatus.value = 'error'
+    metadataError.value = errorMessage(error, '加载数据库命名空间失败')
+    return
   }
+  if (tab.namespace) await loadObjects(generation)
 }
 
-async function loadObjects(showLoading = true) {
-  const tab = currentTab.value
-  if (!tab?.connectionId || !tab.namespace) return
-  if (showLoading) metadataLoading.value = true
+async function loadObjects(generation = ++metadataGeneration) {
+  const { connectionId, namespace } = currentTab.value
   clearObjectState()
+  if (!connectionId || !namespace) return
+  objectsLoading.value = true
   try {
-    const { data } = await listQueryObjects(tab.connectionId, tab.namespace)
-    objects.value = data
+    const { data } = await listQueryObjects(connectionId, namespace)
+    if (generation === metadataGeneration) objects.value = data
   } catch (error) {
-    Message.error(errorMessage(error, '加载对象列表失败'))
+    if (generation === metadataGeneration) metadataError.value = errorMessage(error, '加载对象列表失败')
   } finally {
-    if (showLoading) metadataLoading.value = false
+    if (generation === metadataGeneration) objectsLoading.value = false
   }
-}
-
-async function refreshMetadata() {
-  if (!currentTab.value?.connectionId) return
-  await loadNamespaces()
 }
 
 function clearObjectState() {
   objects.value = []
+  objectsLoading.value = false
+  metadataError.value = ''
   expandedObjects.clear()
   columnsLoading.clear()
   Object.keys(columnsByObject).forEach((key) => delete columnsByObject[key])
@@ -535,15 +653,17 @@ async function toggleObject(object: QueryObject) {
     return
   }
   expandedObjects.add(key)
-  if (columnsByObject[key] || !currentTab.value?.connectionId) return
+  const { connectionId, namespace } = currentTab.value
+  if (columnsByObject[key] || columnsLoading.has(key) || !connectionId || !namespace) return
+  const generation = metadataGeneration
   columnsLoading.add(key)
   try {
-    const { data } = await listQueryColumns(currentTab.value.connectionId, currentTab.value.namespace, object.name)
-    columnsByObject[key] = data
+    const { data } = await listQueryColumns(connectionId, namespace, object.name)
+    if (generation === metadataGeneration) columnsByObject[key] = data
   } catch (error) {
-    Message.error(errorMessage(error, '加载字段失败'))
+    if (generation === metadataGeneration) Message.error(errorMessage(error, '加载字段失败'))
   } finally {
-    columnsLoading.delete(key)
+    if (generation === metadataGeneration) columnsLoading.delete(key)
   }
 }
 
@@ -574,52 +694,61 @@ function executeFromToolbar() {
 }
 
 async function runQuery(sql: string, confirmed = false, confirmationInput = '', source?: PendingExecution) {
-  const tab = currentTab.value
-  const target: PendingExecution | null = source ?? (tab?.connectionId ? {
-    tabId: tab.id,
-    connectionId: tab.connectionId,
-    namespace: tab.namespace,
+  if (anyExecuting.value || (!source && confirmationVisible.value)) return
+  if (!sql.trim()) {
+    Message.warning('当前没有可执行的 SQL')
+    return
+  }
+  const conn = activeConnection.value
+  if (!source && (!conn || namespaceStatus.value !== 'ready')) {
+    Message.warning(conn ? '请先完成数据库或 Schema 加载' : '请先选择数据库连接')
+    return
+  }
+  const target = source ?? (conn && {
+    tabId: currentTab.value.id,
+    source: {
+      connectionId: conn.id,
+      connectionName: conn.name,
+      env: conn.env,
+      dbType: conn.db_type,
+      namespace: currentTab.value.namespace,
+    },
     sql,
-  } : null)
-  if (!target || !sql.trim() || anyExecuting.value || !tabs.value.some((item) => item.id === target.tabId)) return
+  })
+  if (!target || !tabRuntime[target.tabId]) return
   const runtime = ensureTabRuntime(target.tabId)
   runningTabId.value = target.tabId
   runtime.executing = true
   runtime.error = ''
   runtime.resultPane = 'result'
-  if (!confirmed) runtime.result = null
+  runtime.result = null
+  runtime.resultPage = 1
+  runtime.source = target.source
   try {
     const { data } = await executeQuery({
-      connection_id: target.connectionId,
-      namespace: target.namespace,
+      connection_id: target.source.connectionId,
+      namespace: target.source.namespace,
       sql: target.sql,
       confirmed,
       confirmation_text: confirmationInput,
     })
-    if (!tabs.value.some((item) => item.id === target.tabId) || !tabRuntime[target.tabId]) return
-    tabRuntime[target.tabId].result = data
-    confirmationVisible.value = false
-    pendingExecution.value = null
-    await loadHistory()
+    if (tabRuntime[target.tabId] !== runtime) return
+    runtime.result = data
+    if (confirmed) clearPendingConfirmation()
   } catch (error) {
-    if (!tabs.value.some((item) => item.id === target.tabId) || !tabRuntime[target.tabId]) return
+    if (tabRuntime[target.tabId] !== runtime) return
     const axiosError = error as AxiosError<ConfirmationRequired & { audit_id?: number }>
-    if (axiosError.response?.status === 409 && axiosError.response.data.code === 'confirmation_required') {
+    if (axiosError?.response?.status === 409 && axiosError.response.data?.code === 'confirmation_required') {
       confirmation.value = axiosError.response.data
       pendingExecution.value = target
       confirmationText.value = ''
       confirmationVisible.value = true
     } else {
-      tabRuntime[target.tabId].error = errorMessage(error, 'SQL 执行失败')
-      if (confirmed) {
-        confirmation.value = null
-        confirmationText.value = ''
-        pendingExecution.value = null
-      }
-      await loadHistory()
+      runtime.error = errorMessage(error, 'SQL 执行失败')
+      if (confirmed) clearPendingConfirmation()
     }
   } finally {
-    if (tabRuntime[target.tabId]) tabRuntime[target.tabId].executing = false
+    if (tabRuntime[target.tabId] === runtime) runtime.executing = false
     if (runningTabId.value === target.tabId) runningTabId.value = null
   }
 }
@@ -630,6 +759,8 @@ async function confirmAndExecute() {
     clearPendingConfirmation()
     return
   }
+  if (anyExecuting.value || (confirmation.value?.confirmation_mode === 'type_connection_name'
+    && confirmationText.value !== confirmation.value.connection_name)) return
   confirmationVisible.value = false
   await runQuery(pending.sql, true, confirmationText.value, pending)
 }
@@ -647,14 +778,21 @@ async function openHistory() {
 }
 
 async function loadHistory() {
+  const generation = ++historyGeneration
+  const scope = historyScope.value
   historyLoading.value = true
   try {
-    const { data } = await listQueryHistory({ scope: historyScope.value, limit: 50 })
-    history.value = data
+    const { data } = await listQueryHistory({ scope, limit: HISTORY_LIMIT })
+    if (generation !== historyGeneration) return
+    const records = data ?? []
+    history.value = records
+    historyPage.value = Math.min(historyPage.value, Math.max(1, Math.ceil(records.length / PAGE_SIZE)))
   } catch (error) {
-    if (resultTab.value === 'history') Message.error(errorMessage(error, '加载执行历史失败'))
+    if (generation === historyGeneration && resultTab.value === 'history') {
+      Message.error(errorMessage(error, '加载执行历史失败'))
+    }
   } finally {
-    historyLoading.value = false
+    if (generation === historyGeneration) historyLoading.value = false
   }
 }
 
@@ -676,13 +814,50 @@ function displayValue(value: unknown) {
   return String(value)
 }
 
+function changeResultPage(page: number) {
+  currentRuntime.value.resultPage = page
+  if (resultGridRef.value) resultGridRef.value.scrollTop = 0
+}
+
+function sourceLabel(source: ExecutionSource) {
+  const namespace = source.namespace || (source.dbType === 'mysql' ? '默认数据库' : '默认 Schema')
+  return source.connectionName + ' / ' + namespace
+}
+
+function isProductionEnvironment(env: string) {
+  return /生产|prod/i.test(env)
+}
+
+function environmentLabel(env: string) {
+  if (isProductionEnvironment(env) && env !== '生产') return '生产 · ' + env
+  return env || '环境未标记'
+}
+
+function openDetail(title: string | undefined, text: string) {
+  detail.value = { title: title || '单元格内容', text }
+}
+
+function showHistoryError(record: QueryAudit) {
+  openDetail('执行失败详情', record.error || '暂无错误详情')
+}
+
+async function copyDetail() {
+  if (!detail.value) return
+  try {
+    await copyText(detail.value.text)
+    Message.success('已复制内容')
+  } catch {
+    Message.error('复制失败')
+  }
+}
+
 function formatDate(value: string) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
 
 function errorMessage(error: unknown, fallback: string) {
   const axiosError = error as AxiosError<{ error?: string }>
-  return axiosError.response?.data?.error || fallback
+  return axiosError?.response?.data?.error || fallback
 }
 
 function restoreSession() {
@@ -705,14 +880,18 @@ watch([tabs, activeTabId], () => {
   sessionStorage.setItem(SESSION_KEY, JSON.stringify({ tabs: tabs.value, activeTabId: activeTabId.value }))
 }, { deep: true })
 
-watch(activeTabId, async () => {
+watch(activeTabId, () => {
   ensureTabRuntime(activeTabId.value)
-  if (currentTab.value?.connectionId) await loadNamespaces()
-  else {
-    namespaces.value = []
-    clearObjectState()
-  }
-})
+  hasSQLSelection.value = false
+  void loadNamespaces()
+  if (resultTab.value === 'history') void loadHistory()
+}, { flush: 'sync' })
+
+watch(historyScope, () => {
+  history.value = []
+  historyPage.value = 1
+  void loadHistory()
+}, { flush: 'sync' })
 
 onMounted(async () => {
   restoreSession()
@@ -726,22 +905,24 @@ onMounted(async () => {
         tab.namespace = ''
       }
     })
-    if (!currentTab.value.connectionId && connections.value[0]) currentTab.value.connectionId = connections.value[0].id
-    if (currentTab.value.connectionId) await loadNamespaces()
+    if (!currentTab.value.connectionId && !currentTab.value.sql.trim() && connections.value[0]) {
+      currentTab.value.connectionId = connections.value[0].id
+    }
+    connectionsLoaded.value = true
+    await loadNamespaces()
   } catch (error) {
     Message.error(errorMessage(error, '加载连接列表失败'))
   }
 })
+
+onBeforeUnmount(() => {
+  metadataGeneration += 1
+  historyGeneration += 1
+})
 </script>
 
+<style scoped src="@/styles/query-workspace.css"></style>
 <style scoped>
-.query-center {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 14px;
-  height: calc(100vh - 112px);
-  min-height: 620px;
-}
 .object-panel,
 .editor-card,
 .result-card {
@@ -752,7 +933,7 @@ onMounted(async () => {
   overflow: hidden;
 }
 .object-panel { display: flex; flex-direction: column; min-width: 0; }
-.panel-heading { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); }
+.panel-heading { display: flex; justify-content: space-between; align-items: center; padding: 14px; border-bottom: 1px solid var(--border); }
 .panel-title { font-size: 14px; font-weight: 600; }
 .panel-subtitle { margin-top: 3px; color: var(--fg-muted); font-size: 11px; }
 .connection-controls { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); background: var(--bg-surface2); }
@@ -772,50 +953,85 @@ onMounted(async () => {
 .column-type { margin-left: auto; color: var(--fg-muted); font-family: var(--font-mono); font-size: 10px; }
 .column-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border-strong); }
 .pk-icon { color: #F59E0B; }
-.workspace { display: grid; grid-template-rows: minmax(300px, 48%) minmax(250px, 52%); gap: 14px; min-width: 0; min-height: 0; }
 .editor-card, .result-card { display: flex; flex-direction: column; min-height: 0; }
-.tab-strip { height: 38px; display: flex; align-items: flex-end; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--bg-surface2); overflow-x: auto; }
+.tab-strip { flex: 0 0 38px; display: flex; align-items: flex-end; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--bg-surface2); overflow-x: auto; }
 .query-tab, .add-tab { height: 32px; border: 0; background: transparent; color: var(--fg-muted); cursor: pointer; }
 .query-tab { display: flex; align-items: center; gap: 7px; min-width: 110px; max-width: 180px; padding: 0 10px; border-radius: 6px 6px 0 0; border: 1px solid transparent; font-size: 12px; }
 .query-tab.active { background: #fff; color: var(--fg-primary); border-color: var(--border); border-bottom-color: #fff; font-weight: 500; }
 .status-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); }
 .status-mark.dirty { background: var(--accent); }
 .tab-close { margin-left: auto; display: inline-flex; align-items: center; }
-.add-tab { width: 34px; }
-.query-toolbar { min-height: 46px; display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.add-tab { flex: 0 0 34px; }
+.query-toolbar { flex-shrink: 0; min-height: 44px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .connection-summary { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--fg-secondary); font-size: 12px; }
+.connection-summary > .arco-tag, .toggle-objects { flex-shrink: 0; }
+.connection-name, .namespace-path, .result-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-name { font-weight: 600; }
 .namespace-path { color: var(--fg-muted); }
-.shortcut { color: var(--fg-muted); font-size: 11px; }
+.query-environment.arco-tag-red { color: #991b1b; background: #fee2e2; }
+.query-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.shortcut { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
+.execute-button.arco-btn-primary:not(:disabled) { background: #15803d !important; border-color: #15803d !important; box-shadow: none !important; }
+.execute-button.arco-btn-primary:not(:disabled):hover { background: #166534 !important; border-color: #166534 !important; }
+.execute-button.arco-btn-primary:disabled,
+.confirm-execute-button.arco-btn-primary:disabled { background: var(--bg-muted) !important; border-color: var(--border) !important; color: var(--fg-muted) !important; box-shadow: none !important; }
+.confirm-execute-button.arco-btn-primary:not(:disabled) { background: #b91c1c !important; border-color: #b91c1c !important; box-shadow: none !important; }
+.confirm-execute-button.arco-btn-primary:not(:disabled):hover { background: #991b1b !important; border-color: #991b1b !important; }
 .editor-area { flex: 1; min-height: 0; }
-.result-tabs { min-height: 42px; display: flex; align-items: flex-end; padding: 0 12px; border-bottom: 1px solid var(--border); }
-.result-tabs > button { height: 42px; padding: 0 16px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); cursor: pointer; }
-.result-tabs > button.active { color: var(--accent-indigo); border-bottom-color: var(--accent-indigo); font-weight: 600; }
-.result-meta { margin-left: auto; height: 42px; display: flex; align-items: center; gap: 14px; color: var(--fg-muted); font-size: 11px; }
-.result-content, .history-content { flex: 1; min-height: 0; overflow: auto; position: relative; }
-.result-content > .arco-alert { margin: 10px; }
-.result-empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-muted); }
-.result-empty > svg { font-size: 32px; color: var(--border-strong); }
-.result-grid-wrap { height: 100%; overflow: auto; }
-.result-grid { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-family: var(--font-mono); font-size: 11px; }
-.result-grid th, .result-grid td { min-width: 120px; max-width: 360px; padding: 7px 10px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
-.result-grid th { position: sticky; top: 0; z-index: 1; background: var(--bg-surface2); color: var(--fg-secondary); font-family: var(--font-sans); }
-.result-grid th small { display: block; margin-top: 2px; color: var(--fg-muted); font-size: 9px; font-weight: 400; }
-.result-grid .row-number { min-width: 48px; width: 48px; color: var(--fg-muted); text-align: right; background: var(--bg-surface2); }
-.null-value { color: #94A3B8; font-style: italic; }
-.command-result { height: 100%; display: flex; align-items: center; justify-content: center; gap: 14px; color: var(--accent); }
+.result-tabs { flex-shrink: 0; min-height: 39px; display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; padding: 0 10px; border-bottom: 1px solid var(--border); }
+.result-tab-buttons { display: flex; align-self: stretch; }
+.result-tab-buttons > button { min-height: 39px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); cursor: pointer; white-space: nowrap; }
+.result-tab-buttons > button.active { color: var(--accent-indigo); border-bottom-color: var(--accent-indigo); font-weight: 600; }
+.result-meta { flex: 1; min-width: min(100%, 245px); min-height: 30px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--fg-muted); font-size: 12px; }
+.result-meta > :not(.result-source) { flex-shrink: 0; white-space: nowrap; }
+.result-source { color: var(--fg-secondary); }
+.result-content, .history-content { flex: 1; min-height: 0; }
+.result-content { display: flex; flex-direction: column; overflow: hidden; }
+.result-content > .arco-alert { flex: 0 0 auto; width: auto; max-height: 65%; overflow: auto; margin: 8px 10px; }
+.result-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-muted); }
+.result-empty > svg { font-size: 28px; color: var(--fg-muted); }
+.result-grid-wrap { flex: 1; min-height: 0; overflow: auto; }
+.result-grid { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; color: var(--fg-primary); font: 12px var(--font-mono); }
+.result-grid th, .result-grid td { min-width: 108px; max-width: 300px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); white-space: nowrap; text-align: left; }
+.result-grid th { overflow: hidden; text-overflow: ellipsis; padding: 6px 10px; }
+.result-grid td { padding: 0; }
+.result-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--bg-surface2); color: var(--fg-secondary); font-family: var(--font-sans); }
+.result-grid th small { display: block; margin-top: 2px; color: var(--fg-muted); font-size: 10px; font-weight: 400; }
+.result-grid .row-number { position: sticky; left: 0; z-index: 1; min-width: 42px; width: 42px; color: var(--fg-muted); text-align: right; background: var(--bg-surface2); font-weight: 500; }
+.result-grid thead .row-number { z-index: 3; }
+.result-grid tbody tr:nth-child(even) td { background: var(--bg-surface2); }
+.result-grid tbody tr:hover td { background: var(--accent-indigo-dim); }
+.result-cell { display: block; width: 100%; min-height: 30px; padding: 5px 10px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.result-cell:hover { color: var(--accent-indigo); }
+.result-cell:focus-visible { outline: 2px solid var(--accent-indigo); outline-offset: -2px; }
+.result-cell.null-value { color: var(--fg-muted); font-style: italic; }
+.result-pagination { flex: 0 0 auto; display: flex; justify-content: flex-end; padding: 5px 10px; border-top: 1px solid var(--border); }
+.command-result { flex: 1; display: flex; align-items: center; justify-content: center; gap: 14px; color: #15803d; }
 .command-result > svg { font-size: 34px; }
 .command-result div { display: flex; flex-direction: column; gap: 4px; }
 .command-result span { color: var(--fg-muted); font-size: 12px; }
-.history-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; color: var(--fg-muted); font-size: 12px; }
+.history-content { display: flex; flex-direction: column; overflow: hidden; }
+.history-toolbar { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--bg-surface); color: var(--fg-muted); font-size: 12px; }
+.history-table { flex: 1; min-height: 0; box-shadow: none !important; }
+.history-table :deep(.arco-table-container) { flex: 1; min-height: 0; }
+.history-table :deep(.arco-table-content) { overflow: auto; }
+.history-table :deep(thead th) { position: sticky; top: 0; z-index: 1; }
+.history-table :deep(.arco-table-pagination) { flex: 0 0 auto; margin: 0; padding: 5px 10px; border-top: 1px solid var(--border); }
+.history-failure { border: 0; padding: 0; background: transparent; color: #b91c1c; font: inherit; cursor: pointer; white-space: nowrap; }
+.history-failure:hover { text-decoration: underline; }
 .history-connection { display: flex; flex-direction: column; }
 .history-connection small { color: var(--fg-muted); }
 .history-sql { display: block; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-secondary); }
-.confirm-context { display: flex; gap: 20px; margin: 14px 0 8px; color: var(--fg-secondary); font-size: 12px; }
+.confirm-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0 8px; color: var(--fg-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .confirm-sql { max-height: 180px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #0F172A; color: #E2E8F0; font: 12px/1.6 var(--font-mono); white-space: pre-wrap; }
 .typed-confirm { display: grid; gap: 7px; margin-top: 14px; color: var(--fg-secondary); font-size: 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.query-detail-content { max-height: min(55vh, 480px); overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface2); color: var(--fg-primary); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 1100px) {
-  .query-center { grid-template-columns: 240px minmax(0, 1fr); }
   .shortcut { display: none; }
+}
+@media (max-width: 520px) {
+  .connection-summary > .arco-tag:first-of-type { display: none; }
+  .query-toolbar { flex-wrap: wrap; }
 }
 </style>

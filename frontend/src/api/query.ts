@@ -95,4 +95,4 @@ export const listQueryHistory = (params: {
   status?: string
   before_id?: number
   limit?: number
-} = {}) => api.get<QueryAudit[]>('/query/history', { params })
+} = {}) => api.get<QueryAudit[] | null>('/query/history', { params })

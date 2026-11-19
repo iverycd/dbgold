@@ -96,7 +96,7 @@ test('formatting is one undo step separate from typing before and after it', () 
 
 const descriptor = parse(readFileSync(new URL('../src/components/SqlEditor.vue', import.meta.url), 'utf8')).descriptor
 function editor(initialProps) {
-  const lifecycle = {}, messages = [], emitted = [], props = Vue.reactive(initialProps)
+  const lifecycle = {}, messages = [], emitted = [], selectionChanges = [], props = Vue.reactive(initialProps)
   let view
   class TestView {
     static theme = EditorView.theme
@@ -104,16 +104,23 @@ function editor(initialProps) {
     static editable = EditorView.editable
     constructor(config) { this.state = config.state; view = this }
     dispatch = (spec) => {
-      const transaction = spec.state ? spec : this.state.update(spec)
+      const startState = this.state
+      const transaction = spec.state ? spec : startState.update(spec)
       this.state = transaction.state
-      for (const listener of this.state.facet(EditorView.updateListener)) listener({ docChanged: transaction.docChanged, state: this.state })
+      for (const listener of this.state.facet(EditorView.updateListener)) {
+        listener({ docChanged: transaction.docChanged, selectionSet: !!transaction.selection, startState, state: this.state })
+      }
     }
     focus() {}
     destroy() {}
   }
   const context = {
     exports: {}, defineProps: () => props, defineExpose() {},
-    defineEmits: () => (event, value) => { emitted.push([event, value]); if (event === 'update:modelValue') props.modelValue = value },
+    defineEmits: () => (event, value) => {
+      if (event === 'selection-change') selectionChanges.push(value)
+      else emitted.push([event, value])
+      if (event === 'update:modelValue') props.modelValue = value
+    },
     require: id => {
       if (id === 'vue') return { ...Vue, onMounted: fn => { lifecycle.mount = fn }, onBeforeUnmount() {} }
       if (id === '@codemirror/view') return { ...require(id), EditorView: TestView }
@@ -125,7 +132,8 @@ function editor(initialProps) {
   vm.runInNewContext(transpile(`${descriptor.scriptSetup.content}\nexport { editorHost, formatSQL, getExecutableSQL };`), context)
   context.exports.editorHost.value = {}
   lifecycle.mount()
-  return { ...context.exports, view, messages, props, emitted, shortcut: () => view.state.facet(keymap).flat().find(binding => binding.key === 'Mod-Shift-f').run(view) }
+  const runShortcut = key => view.state.facet(keymap).flat().find(binding => binding.key === key).run(view)
+  return { ...context.exports, view, messages, props, emitted, selectionChanges, runShortcut, shortcut: () => runShortcut('Mod-Shift-f') }
 }
 
 test('editor button command and shortcut update only their unit and support undo', async () => {
@@ -194,5 +202,61 @@ test('read-only editor locks user edits and formatting while a repair request is
     assert.equal(e.view.state.facet(EditorView.editable), true)
     e.formatSQL()
     assert.equal(e.emitted.length, 1)
+  } finally { scope.stop() }
+})
+
+test('toolbar and execution shortcut both resolve the final statement after its semicolon', () => {
+  const scope = Vue.effectScope()
+  try {
+    const first = "SELECT ';' AS delimiter;"
+    const final = 'SELECT 2;'
+    const modelValue = `${first}\n${final}\n\n-- trailing comment ;\n`
+    const e = scope.run(() => editor({ modelValue, dialect: 'postgres' }))
+    const finalEnd = modelValue.indexOf(final) + final.length
+    for (const cursor of [0, first.length, finalEnd - 1, finalEnd, finalEnd + 1, modelValue.length]) {
+      const expected = cursor === 0 ? first : final
+      e.view.dispatch({ selection: EditorSelection.cursor(cursor) })
+      assert.equal(e.getExecutableSQL(), expected)
+      assert.equal(e.runShortcut('Mod-Enter'), true)
+      assert.deepEqual(e.emitted.at(-1), ['execute', expected])
+    }
+  } finally { scope.stop() }
+})
+
+test('selection status tracks executable text, and the selection takes priority in statement mode', () => {
+  const scope = Vue.effectScope()
+  try {
+    const first = 'SELECT 1;'
+    const second = 'SELECT 2;'
+    const modelValue = `${first}\n${second}`
+    const e = scope.run(() => editor({ modelValue, dialect: 'postgres' }))
+    assert.deepEqual(e.selectionChanges, [false])
+    e.view.dispatch({ selection: EditorSelection.range(0, first.length) })
+    assert.deepEqual(e.selectionChanges, [false, true])
+    assert.equal(e.getExecutableSQL(), first)
+    e.runShortcut('Mod-Enter')
+    assert.deepEqual(e.emitted.at(-1), ['execute', first])
+    e.view.dispatch({ selection: EditorSelection.range(first.length, first.length + 1) })
+    assert.deepEqual(e.selectionChanges, [false, true, false])
+    assert.equal(e.getExecutableSQL(), second)
+    e.runShortcut('Mod-Enter')
+    assert.deepEqual(e.emitted.at(-1), ['execute', second])
+  } finally { scope.stop() }
+})
+
+test('comment-only input has no current statement, and document mode keeps its full SQL', () => {
+  const scope = Vue.effectScope()
+  try {
+    const comments = '-- comment ;\n/* more ; */\n'
+    const empty = scope.run(() => editor({ modelValue: comments, dialect: 'postgres' }))
+    assert.equal(empty.getExecutableSQL(), '')
+    empty.runShortcut('Mod-Enter')
+    assert.deepEqual(empty.emitted.at(-1), ['execute', ''])
+    const modelValue = 'SELECT 1;\nSELECT 2;'
+    const script = scope.run(() => editor({ modelValue, dialect: 'postgres', executionMode: 'document' }))
+    script.view.dispatch({ selection: EditorSelection.range(0, 9) })
+    assert.equal(script.getExecutableSQL(), modelValue)
+    script.runShortcut('Mod-Enter')
+    assert.deepEqual(script.emitted.at(-1), ['update:modelValue', 'SELECT 1;\n\nSELECT 2;'])
   } finally { scope.stop() }
 })

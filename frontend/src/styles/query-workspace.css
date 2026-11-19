@@ -1,0 +1,92 @@
+.query-center {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+}
+
+.query-center.sidebar-open {
+  grid-template-columns: clamp(224px, 22vw, 270px) minmax(0, 1fr);
+}
+
+.query-center:not(.sidebar-open) > .object-panel,
+.object-panel-backdrop {
+  display: none;
+}
+
+.workspace {
+  --query-divider-height: 14px;
+  display: grid;
+  grid-template-rows: var(--query-editor-height, calc((100% - var(--query-divider-height)) * 0.44)) var(--query-divider-height) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-divider {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.workspace-divider::before {
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  content: '';
+}
+
+.workspace-divider:hover::before,
+.workspace-divider:active::before,
+.workspace-divider:focus-visible::before {
+  background: var(--accent-indigo);
+}
+
+.workspace-divider:focus-visible {
+  outline: 2px solid var(--accent-indigo);
+  outline-offset: -2px;
+}
+
+.editor-area :deep(.sql-editor),
+.object-tree {
+  min-height: 0;
+}
+
+@media (max-width: 1100px) {
+  .query-center.sidebar-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .query-center > .object-panel {
+    position: absolute;
+    z-index: 3;
+    inset: 0 auto 0 0;
+    width: min(300px, calc(100% - 24px));
+    box-shadow: var(--shadow-md);
+  }
+
+  .query-center.sidebar-open > .object-panel-backdrop {
+    position: absolute;
+    z-index: 2;
+    inset: 0;
+    display: block;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: rgba(15, 23, 42, 0.3);
+  }
+}
+
+@media (max-height: 420px) {
+  .query-center {
+    height: max(100%, 310px);
+  }
+}
