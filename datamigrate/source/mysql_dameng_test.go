@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -47,4 +48,25 @@ func TestMySQLDamengReadPreservesZeroDates(t *testing.T) {
 		{"2024-02-29 12:34:56.123456", nil},
 	}, rows)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLViewsReadRawForNativeAndDamengTargets(t *testing.T) {
+	const body = "select to_days(now()), '%Y', convert(abc using utf8mb4) from `Mixed.Db`.`MyTable`"
+	for _, dst := range []string{"mysql", "dameng", ""} {
+		t.Run(dst, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlOscarViewsQuery)).WithArgs("Mixed.Db").WillReturnRows(
+				sqlmock.NewRows([]string{"TABLE_NAME", "VIEW_DEFINITION"}).AddRow("Hidden", nil).AddRow("MyView", body))
+			r := &MySQLReader{db: db, dbName: "Mixed.Db"}
+			views, err := r.GetViewsForTarget(t.Context(), dst)
+			require.NoError(t, err)
+			require.Len(t, views, 2)
+			require.Contains(t, views[0].Unsupported, "SHOW VIEW")
+			require.Equal(t, "MyView", views[1].ViewName)
+			require.Equal(t, body, views[1].Definition)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }

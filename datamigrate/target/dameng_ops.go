@@ -14,6 +14,7 @@ import (
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/typemap"
 	"dbgold/datamigrate/valueconv"
+	"gitee.com/chunanyong/dm"
 )
 
 // CopyData 在单个页面事务中逐行执行参数化 INSERT。
@@ -271,6 +272,18 @@ func (w *DaMengWriter) CreateForeignKey(ctx context.Context, fk source.FKInfo) e
 
 func (w *DaMengWriter) CreateComment(ctx context.Context, cm source.CommentInfo) error {
 	return w.execStatements(ctx, w.dia.CommentStatements(w.schema, cm))
+}
+
+// SupportsViewUUID checks the connected DM build. Older DM8 releases only
+// provide NEWID, which has the same hyphenated layout with uppercase letters.
+func (w *DaMengWriter) SupportsViewUUID(ctx context.Context) (bool, error) {
+	var value string
+	err := w.db.QueryRowContext(ctx, "SELECT UUID() FROM DUAL").Scan(&value)
+	var dmErr *dm.DmError
+	if errors.As(err, &dmErr) && dmErr.ErrCode == -2207 {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (w *DaMengWriter) CreateView(ctx context.Context, view source.ViewInfo) error {

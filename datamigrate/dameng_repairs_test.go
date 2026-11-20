@@ -257,7 +257,8 @@ func TestMySQLDamengViewPreservesNullComparison(t *testing.T) {
 	require.Len(t, w.views, 1)
 	view := w.views[0]
 	require.Equal(t, "jyjtest6", view.ViewName)
-	require.Equal(t, r.views[0].Definition, view.Definition)
+	require.Contains(t, view.Definition, `"WYCESHI"."YEARFLAG" != NULL`)
+	require.Contains(t, view.Definition, `"WYCC"."OPERATEUSERBASEOUGUID" = "WYCESHI"."OPERATEUSERBASEOUGUID"`)
 }
 
 func TestDamengObjectOnlyExternalReference(t *testing.T) {
@@ -277,7 +278,12 @@ func TestDamengViewCreationKeepsOriginalColumnReference(t *testing.T) {
 		r.views = []source.ViewInfo{{ViewName: "V", Definition: "SELECT t.RowId AS SavedId FROM T t"}}
 		report := m.Run(context.Background())
 		require.Zero(t, report.Views.Failed)
-		require.Equal(t, r.views[0].Definition, w.views[0].Definition)
+		if kind == "mysql" {
+			require.Contains(t, w.views[0].Definition, `"T"."ROWID" AS "SAVEDID"`)
+		} else {
+			require.Equal(t, r.views[0].Definition, w.views[0].Definition)
+		}
+		fullDDL := w.views[0].Definition
 		w.views = nil
 		w.validationErr = fmt.Errorf("目标缺少 ROW_ID_2")
 		vm := NewMigrator(r, w, &Job{LogCh: make(chan string, 1024)}, m.cfg)
@@ -285,7 +291,7 @@ func TestDamengViewCreationKeepsOriginalColumnReference(t *testing.T) {
 		require.Len(t, out, 1)
 		require.Empty(t, out[0].Error)
 		require.Len(t, w.views, 1)
-		require.Equal(t, r.views[0].Definition, w.views[0].Definition)
+		require.Equal(t, fullDDL, w.views[0].Definition)
 	}
 }
 
@@ -353,7 +359,7 @@ func TestMySQLDamengUnionUsesRepairDDL(t *testing.T) {
 	require.Equal(t, 2, report.Views.Failed)
 	require.Len(t, report.Views.Items, 2)
 	require.Equal(t, []string{initial["InvalidView"], initial["AppElement"]}, w.attempts)
-	require.Contains(t, initial["AppElement"], r.views[2].Definition)
+	require.Contains(t, initial["AppElement"], `SELECT "E"."ID" AS "ITEM" FROM "ELEMENT" AS "E" UNION ALL SELECT "E"."ID" FROM "ELEMENT" AS "E"`)
 	for _, result := range report.Views.Items {
 		require.Equal(t, initial[result.SourceName], result.DDL)
 		if result.SourceName == "InvalidView" {

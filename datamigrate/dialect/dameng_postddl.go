@@ -231,8 +231,7 @@ func (d *DaMengDialect) ForeignKeyStatements(schema string, fk source.FKInfo) []
 	return []Statement{{SQL: sql}}
 }
 
-// ViewStatements 达梦视图 DDL。注意:MySQL 视图定义为 MySQL 方言,
-// 在达梦下可能因函数/语法差异执行失败,失败由上层记入 report(已知限制)。
+// ViewStatements wraps the prepared target SELECT in a schema-qualified CREATE.
 func (d *DaMengDialect) ViewStatements(schema string, view source.ViewInfo) []Statement {
 	columns := ""
 	if len(view.Columns) > 0 {

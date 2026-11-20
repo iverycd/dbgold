@@ -1711,6 +1711,9 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 
 // prepareView applies target dialect and schema settings once for migration and repair.
 func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.ViewInfo, error) {
+	if m.reader.DBType() == "mysql" && (m.writer.DBType() == "mysql" || m.writer.DBType() == "dameng") {
+		return m.prepareMySQLView(ctx, v)
+	}
 	if m.isSQLServerDameng() || m.isOracleDameng() || m.isOscarDameng() {
 		return m.prepareDamengView(v)
 	}

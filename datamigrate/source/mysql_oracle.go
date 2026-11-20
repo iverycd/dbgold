@@ -188,9 +188,10 @@ func (r *MySQLReader) oracleForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *MySQLReader) GetViewsForTarget(ctx context.Context, target string) ([]ViewInfo, error) {
-	if target != "oracle" && target != "oscar" {
-		return r.GetViews(ctx)
+	if IsPGFamily(target) {
+		return r.getPGViews(ctx)
 	}
+	rawView := target != "oracle" && target != "oscar"
 	rows, err := r.queryContext(ctx, `SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME`, r.dbName)
 	if err != nil {
 		return nil, err
@@ -202,6 +203,11 @@ func (r *MySQLReader) GetViewsForTarget(ctx context.Context, target string) ([]V
 		var def sql.NullString
 		if err = rows.Scan(&v.ViewName, &def); err != nil {
 			return nil, err
+		}
+		if rawView && (!def.Valid || strings.TrimSpace(def.String) == "") {
+			v.Unsupported = "源视图定义不可读，请检查 SHOW VIEW 权限"
+			out = append(out, v)
+			continue
 		}
 		if !def.Valid || target == "oscar" && strings.TrimSpace(def.String) == "" {
 			return nil, fmt.Errorf("视图 %s 定义不可读，请检查 SHOW VIEW 权限", v.ViewName)
@@ -216,7 +222,7 @@ func (r *MySQLReader) GetViewsForTarget(ctx context.Context, target string) ([]V
 		return nil, err
 	}
 	rows.Close()
-	if target == "oscar" {
+	if rawView || target == "oscar" {
 		return out, nil
 	}
 	for i := range out {

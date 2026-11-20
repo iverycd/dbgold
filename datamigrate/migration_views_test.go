@@ -26,7 +26,8 @@ func TestSelectedViewsUseSourceQueryForBusinessViewNames(t *testing.T) {
 	require.Len(t, w.views, len(m.cfg.ViewNames))
 	require.Len(t, report.RepairManifest.Objects, len(m.cfg.ViewNames))
 	for i, view := range w.views {
-		require.Equal(t, body, view.Definition)
+		require.Equal(t, body, report.RepairManifest.Objects[i].SourceDDL)
+		require.Equal(t, `SELECT 1 AS "ID" UNION ALL SELECT 2 AS "ID"`, view.Definition)
 		require.Equal(t, dialect.JoinSQL(w.Dialect().ViewStatements(m.cfg.TargetSchema, view)), report.RepairManifest.Objects[i].DDL)
 	}
 }

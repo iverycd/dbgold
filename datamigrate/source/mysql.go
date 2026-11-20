@@ -829,6 +829,11 @@ func (r *MySQLReader) GetForeignKeys(ctx context.Context) ([]FKInfo, error) {
 }
 
 func (r *MySQLReader) GetViews(ctx context.Context) ([]ViewInfo, error) {
+	// Target-independent callers (including the view picker) read the catalog verbatim.
+	return r.GetViewsForTarget(ctx, "")
+}
+
+func (r *MySQLReader) getPGViews(ctx context.Context) ([]ViewInfo, error) {
 	// 在 MySQL 端做基础清理：去反引号、去 schema 前缀、去 convert/using utf8mb4
 	rows, err := r.queryContext(ctx,
 		`SELECT table_name,
