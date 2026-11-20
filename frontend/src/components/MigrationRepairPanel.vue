@@ -263,31 +263,11 @@
       <div class="modal-actions"><a-button @click="bindingVisible = false">取消</a-button><a-button type="primary" :loading="saving" :disabled="busy || !bindingForm.dst_conn_id || !!(binding?.legacy && !binding.configured && !bindingForm.config.Content)" @click="saveBinding">核验并保存绑定</a-button></div>
     </a-modal>
 
-    <a-modal v-model:visible="recoveryVisible" :mask-closable="false" :width="920" title="接续此表迁移" :footer="false" @close="invalidatePreview">
-      <a-alert type="warning">补迁读取当前源数据。请在执行期间停止源表和目标表写入。导入中断后保留已提交数据；非空表必须确认清空重导。</a-alert>
-      <p v-if="recoveryObject">源表 {{ recoveryObject.object.source_name || recoveryObject.object.table || recoveryObject.object.name }} → 目标 {{ qualified(recoveryObject.object) }}</p>
-      <a-form :model="recoveryForm" layout="vertical">
-        <a-form-item label="源列 → 目标列映射">
-          <div class="mapping-list"><div v-for="source in Object.keys(recoveryForm.mapping)" :key="source" class="mapping-row"><code>{{ source }}</code><span>→</span><a-input v-model="recoveryForm.mapping[source]" placeholder="目标列原始名称" @input="invalidatePreview" /></div><span v-if="!Object.keys(recoveryForm.mapping).length" class="muted">先获取预览，读取源列及默认映射。</span></div>
-        </a-form-item>
-        <a-form-item label="此次接续的关联对象"><div class="related-list"><a-checkbox v-for="record in relatedCandidates" :key="record.object.id" v-model="recoveryForm.related[record.object.id]" @change="invalidatePreview">{{ repairKind(record.object.kind) }} · {{ qualified(record.object) }}（{{ repairStatus(record.object.status) }}）</a-checkbox><span v-if="!relatedCandidates.length" class="muted">无待执行关联对象</span></div></a-form-item>
-      </a-form>
-      <a-button :loading="previewing" :disabled="!!mappingError(recoveryForm.mapping)" @click="loadPreview">{{ recoveryPlan ? '重新生成预览' : '检查列映射并生成预览' }}</a-button>
-      <p v-if="mappingError(recoveryForm.mapping)" class="error-text">{{ mappingError(recoveryForm.mapping) }}</p>
-      <template v-if="recoveryPlan">
-        <dl class="preview-facts"><div><dt>源表</dt><dd>{{ recoveryPlan.preview.source_table }}（{{ recoveryPlan.preview.source_rows }} 行）</dd></div><div><dt>目标表</dt><dd>{{ recoveryPlan.preview.qualified_target }}（{{ recoveryPlan.preview.target_rows }} 行）</dd></div><div><dt>数据步骤</dt><dd>{{ recoveryPlan.preview.data_required ? '完整导入此表数据' : '数据无需重导，仅处理确认的关联对象' }}</dd></div></dl>
-        <a-alert v-for="warning in recoveryPlan.preview.warnings" :key="warning" type="warning">{{ warning }}</a-alert>
-        <a-alert v-if="recoveryPlan.preview.related?.some(object => object.requires_review)" type="warning">部分关联对象因列映射变化需要逐项复核草稿。保存复核后重新生成接续预览。</a-alert>
-        <a-collapse v-if="recoveryPlan.preview.related?.length"><a-collapse-item v-for="object in recoveryPlan.preview.related" :key="object.id" :header="`${repairKind(object.kind)} · ${qualified(object)}${object.requires_review ? ' · 需要复核' : ''}`"><a-button v-if="object.requires_review" size="small" @click="reviewRelated(object.id)">编辑并复核此对象</a-button><pre class="sql-preview">{{ (object.units || []).map(unit => unit.sql).join('\n\n') || object.ddl }}</pre></a-collapse-item></a-collapse>
-        <a-form :model="recoveryForm" layout="vertical">
-          <a-form-item v-if="recoveryPlan.preview.data_required && recoveryPlan.preview.target_rows > 0" label="目标表已有数据">
-            <div><a-checkbox v-model="recoveryForm.truncate">清空本表后完整重导，保留修复后的结构</a-checkbox><p>请输入目标完整表名 <strong>{{ recoveryPlan.preview.qualified_target }}</strong></p><a-input v-model="recoveryForm.confirmation" placeholder="逐字输入上方完整表名" /></div>
-          </a-form-item>
-          <a-form-item label="执行前确认"><a-space direction="vertical"><a-checkbox v-model="recoveryForm.sourceQuiesced">源表已停止写入</a-checkbox><a-checkbox v-model="recoveryForm.targetQuiesced">目标表已停止写入</a-checkbox><a-checkbox v-model="recoveryForm.reviewed">已核对列映射和以上关联对象 DDL</a-checkbox></a-space></a-form-item>
-        </a-form>
-      </template>
-      <div class="modal-actions"><a-button @click="recoveryVisible = false">关闭</a-button><a-button type="primary" :disabled="!canRecover" :loading="submitting" @click="confirmRecovery">确认接续迁移</a-button></div>
-    </a-modal>
+    <TableRecoveryModal v-if="recoveryObject" :key="recoveryObject.object.id" :visible="recoveryVisible"
+      :object="recoveryObject.object" :form="recoveryForm" :choices="relatedChoices" :preview="recoveryPlan?.preview"
+      :issue="recoveryIssue" :error="recoveryError" :busy="busy" :previewing="previewing" :submitting="submitting"
+      @close="closeRecovery" @invalidate="invalidatePreview" @preview="loadPreview" @review="reviewRelated" @confirm="confirmRecovery"
+    />
 
     <a-drawer v-model:visible="historyVisible" :width="760" title="修复执行历史" :footer="false">
       <a-button size="small" :loading="loadingHistory" @click="refreshHistory">刷新历史</a-button>
@@ -311,7 +291,8 @@ import { Message } from '@arco-design/web-vue'
 import { getDataMigrationJob, type DataMigrationJob, type MigrationReport } from '@/api/migration'
 import { listConnections, type Connection } from '@/api/connections'
 import { bindRepairConnections, cancelRepairAttempt, executeRepair, getRepairAttempt, listRepairAttempts, listRepairs, previewRecovery, previewTriggerRepairPlan, saveTriggerRepairPlan, refreshSequenceRepairPlan, refreshIndexRepairPlan, saveRepairDraft, startRecovery, type TriggerRepairPlan, type RepairAttempt, type RepairBinding, type RepairConfig, type RepairObject, type RepairRecord, type RepairUnit, type RecoveryPlan } from '@/api/migrationRepair'
-import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, canRetryManualTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, isManualPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, presentRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairCountDifference, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import { attemptRunning, canEditRepairDDL, canExecuteRepairDDL, canRegenerateTriggerPlan, canRetryMySQLPGTrigger, canRetryMySQLDamengTrigger, canRetryManualTrigger, isMySQLPGTrigger, isMySQLDamengTrigger, isGeneratedMySQLTrigger, isManualPGTrigger, cloneRepairUnits, cloneRepairExecutionUnits, formatRepairHistory, firstRecoveryIssue, qualifiedRepairName as qualified, recoveryUnavailableReason, type RecoveryForm, presentRepairRecords, hasRepairDDL, isTableRepair, mappingError, matchesRepairDisplayFilter, matchingRepairRecords, needsRepairDisplayAttention, repairAttemptKind, repairAttemptStatus, repairCategories, repairCountDifference, repairDisplayErrors, repairDisplayStatuses, repairExecutionStatus, repairKind, repairStatus, repairVerificationStatus, unitCommitted, type RepairCategory, type RepairDisplayRow, type RepairFilter, type RepairFocusTarget, type RepairSummary } from '@/utils/migrationRepair'
+import TableRecoveryModal from './TableRecoveryModal.vue'
 import { getDbTypeLabel } from '@/utils/dbType'
 import { formatSQLText } from '@/utils/sqlFormatting'
 import { batchIneligibleReason, batchBindingKey, buildRepairBatch, createRepairBatchQueue, type RepairBatchItem } from '@/utils/migrationRepairBatch'
@@ -357,7 +338,8 @@ const connections = ref<Connection[]>([])
 const bindingForm = reactive({ src_conn_id: undefined as number | undefined, dst_conn_id: undefined as number | undefined, source_database: '', source_schema: '', config: { Content: 'both', MigrateTriggers: false, PageSize: 1000, LowerCaseNames: false, CharInLength: false, UseNvarchar2: false, Distributed: false, ChangeOwner: false, TargetSchema: '', Objects: [] } as RepairConfig })
 const recoveryVisible = ref(false)
 const recoveryObject = ref<RepairRecord | null>(null)
-const recoveryForm = reactive({ mapping: {} as Record<string, string>, related: {} as Record<string, boolean>, truncate: false, confirmation: '', sourceQuiesced: false, targetQuiesced: false, reviewed: false })
+const recoveryError = ref('')
+const recoveryForm = reactive<RecoveryForm>({ mapping: {}, related: {}, truncate: false, confirmation: '', sourceQuiesced: false, targetQuiesced: false, reviewed: false })
 const recoveryPlan = ref<RecoveryPlan | null>(null)
 const recoveryKey = ref('')
 const returnToRecovery = ref(false)
@@ -438,25 +420,30 @@ const emptyDescription = computed(() => error.value ? '修复状态未知，请�
 const summary = computed<RepairSummary>(() => ({ jobID: props.jobID, state: error.value ? 'unknown' : loading.value ? 'loading' : 'ready', repaired: stats.value.repaired, review: stats.value.review, attention: displayRecords.value.filter(needsRepairDisplayAttention).length }))
 const sourceConnections = computed(() => connections.value.filter(conn => !job.value?.src_db_type || conn.db_type === job.value.src_db_type))
 const targetConnections = computed(() => connections.value.filter(conn => !job.value?.dst_db_type || conn.db_type === job.value.dst_db_type))
-const relatedCandidates = computed(() => {
-  const object = recoveryObject.value?.object
-  return object ? records.value.filter(record => record.object.id !== object.id && !isTableRepair(record.object) && !isManualPGTrigger(record.object) && !unitCommitted(record.object.status) && (record.object.table === (object.table || object.name) || record.object.dependencies?.includes(object.id))) : []
+const relatedChoices = computed(() => {
+  const table = recoveryObject.value?.object
+  if (!table) return []
+  return records.value.filter(({ object }) => {
+    if (object.id === table.id || isTableRepair(object) || unitCommitted(object.status)) return false
+    const sameTable = object.table && (object.table === table.target_name || object.table === table.name)
+    const sameSchema = !object.schema || !table.schema || object.schema === table.schema
+    return object.dependencies?.includes(table.id) || (sameTable && sameSchema)
+  }).map(({ object }) => ({ object, reason: recoveryUnavailableReason(object) }))
 })
+const relatedCandidates = computed(() => relatedChoices.value.filter(choice => !choice.reason))
+const selectedRelatedIDs = computed(() => relatedCandidates.value.filter(({ object }) => recoveryForm.related[object.id]).map(({ object }) => object.id))
 const historyObjectIDs = computed(() => {
   if (!historyObjectID.value) return null
   const row = displayRecords.value.find(record => record.members.some(member => member.object.id === historyObjectID.value))
   return new Set(row ? row.members.map(member => member.object.id) : [historyObjectID.value])
 })
 const visibleAttempts = computed(() => attempts.value.filter(attempt => !historyObjectIDs.value || historyObjectIDs.value.has(attempt.object_id)))
-const canRecover = computed(() => {
-  const preview = recoveryPlan.value?.preview
-  return !!preview && !(preview.related || []).some(object => object.requires_review) && !busy.value && !previewing.value && !mappingError(recoveryForm.mapping) && recoveryForm.sourceQuiesced && recoveryForm.targetQuiesced && recoveryForm.reviewed && (!preview.data_required || preview.target_rows === 0 || recoveryForm.truncate && recoveryForm.confirmation === preview.qualified_target)
-})
+const recoveryIssue = computed(() => firstRecoveryIssue(recoveryForm, recoveryPlan.value?.preview))
+const canRecover = computed(() => !!recoveryPlan.value && !recoveryIssue.value && !busy.value && !previewing.value)
 const current = (scope: number, id: string) => !disposed && scope === epoch && id === props.jobID
 const errorText = (e: any) => e?.response?.data?.error || e?.message || '请求失败，请重试'
 function showError(e: unknown) { error.value = errorText(e); Message.error(error.value) }
 function statusColor(status: string) { return unitCommitted(status) ? 'green' : attemptRunning(status) ? 'blue' : status === 'failed' ? 'red' : status === 'not_required' ? 'gray' : 'orange' }
-function qualified(object: RepairObject) { return object.schema ? `${object.schema}.${object.target_name}` : object.target_name }
 function primaryRecord(row: RepairDisplayRow): RepairRecord { return row.members.find(member => member.object.id === row.object.id)! }
 function openErrorDetails(row: RepairDisplayRow) { errorObjectID.value = row.object.id; errorDetailsVisible.value = true }
 function closeErrorDetails() { errorDetailsVisible.value = false; errorObjectID.value = '' }
@@ -883,23 +870,36 @@ async function saveBinding() {
   } catch (e) { if (current(scope, id)) showError(e) }
   finally { if (current(scope, id)) saving.value = false }
 }
-function invalidatePreview() { previewSerial++; recoveryPlan.value = null; recoveryForm.reviewed = false; recoveryKey.value = ''; previewing.value = false }
+function invalidatePreview() {
+  previewSerial++
+  recoveryPlan.value = null
+  recoveryKey.value = ''
+  recoveryError.value = ''
+  recoveryForm.reviewed = false
+  recoveryForm.truncate = false
+  recoveryForm.confirmation = ''
+  previewing.value = false
+}
+function closeRecovery() {
+  recoveryVisible.value = false
+  invalidatePreview()
+}
 function openRecovery(record: RepairRecord) {
   if (batchRunning.value || batchPreparing.value || batchPreviewVisible.value) return
   returnToRecovery.value = false
   invalidatePreview(); recoveryObject.value = record
   recoveryForm.mapping = { ...(record.object.column_mapping || {}) }
   recoveryForm.related = Object.fromEntries(relatedCandidates.value.map(item => [item.object.id, false]))
-  recoveryForm.truncate = false; recoveryForm.confirmation = ''; recoveryForm.sourceQuiesced = false; recoveryForm.targetQuiesced = false
+  recoveryForm.sourceQuiesced = false; recoveryForm.targetQuiesced = false
   recoveryVisible.value = true
   void loadPreview()
 }
 async function loadPreview() {
-  if (batchRunning.value || batchPreparing.value || !recoveryObject.value || previewing.value) return
+  if (busy.value || !recoveryObject.value || previewing.value || recoveryIssue.value?.field === 'mapping') return
   const scope = epoch, id = props.jobID, objectID = recoveryObject.value.object.id, serial = ++previewSerial
-  previewing.value = true; recoveryPlan.value = null; recoveryForm.reviewed = false
+  recoveryError.value = ''; previewing.value = true; recoveryPlan.value = null; recoveryForm.reviewed = false
   try {
-    const result = (await previewRecovery(id, objectID, { version: recoveryObject.value.version, ...(Object.keys(recoveryForm.mapping).length ? { column_mapping: recoveryForm.mapping } : {}), related_object_ids: Object.entries(recoveryForm.related).filter(([, enabled]) => enabled).map(([objectID]) => objectID) })).data
+    const result = (await previewRecovery(id, objectID, { version: recoveryObject.value.version, ...(Object.keys(recoveryForm.mapping).length ? { column_mapping: { ...recoveryForm.mapping } } : {}), related_object_ids: selectedRelatedIDs.value })).data
     if (!current(scope, id) || serial !== previewSerial || !recoveryVisible.value) return
     await refresh()
     if (!current(scope, id) || serial !== previewSerial || !recoveryVisible.value) return
@@ -907,24 +907,34 @@ async function loadPreview() {
     recoveryForm.mapping = { ...result.preview.column_mapping }
     recoveryPlan.value = result; recoveryKey.value = newKey()
     if (!result.preview.data_required || result.preview.target_rows === 0) { recoveryForm.truncate = false; recoveryForm.confirmation = '' }
-  } catch (e) { if (current(scope, id) && serial === previewSerial) showError(e) }
+  } catch (e) {
+    if (current(scope, id) && serial === previewSerial) {
+      recoveryError.value = errorText(e)
+      showError(e)
+    }
+  }
   finally { if (current(scope, id) && serial === previewSerial) previewing.value = false }
 }
 function reviewRelated(objectID: string) {
   const record = records.value.find(item => item.object.id === objectID)
   if (!record) { Message.error('关联对象已变化，请刷新后重新预览'); return }
-  returnToRecovery.value = true; recoveryVisible.value = false; invalidatePreview(); openEditor(record)
+  returnToRecovery.value = true; closeRecovery(); openEditor(record)
 }
 async function confirmRecovery() {
   if (!canRecover.value || !recoveryObject.value || !recoveryPlan.value || submitting.value) return
   const scope = epoch, id = props.jobID, objectID = recoveryObject.value.object.id
   const truncate = recoveryPlan.value.preview.data_required && recoveryPlan.value.preview.target_rows > 0 && recoveryForm.truncate
-  submitting.value = true
+  recoveryError.value = ''; submitting.value = true
   try {
     const attempt = (await startRecovery(id, objectID, { token: recoveryPlan.value.token, request_id: recoveryKey.value, confirmed: true, source_quiesced: recoveryForm.sourceQuiesced, target_quiesced: recoveryForm.targetQuiesced, truncate, confirmation_text: truncate ? recoveryForm.confirmation : undefined })).data
     if (!current(scope, id)) return
     recoveryVisible.value = false; activeAttempt.value = attempt; await pollAttempt(attempt.id, scope, id)
-  } catch (e) { if (current(scope, id)) showError(e) }
+  } catch (e) {
+    if (current(scope, id)) {
+      recoveryError.value = errorText(e)
+      showError(e)
+    }
+  }
   finally { if (current(scope, id)) submitting.value = false }
 }
 async function refreshHistory() {
@@ -951,6 +961,15 @@ defineExpose({ exportHistory, focusObject })
 watch(summary, value => emit('summary-change', value), { immediate: true })
 watch(errorDetailRecord, value => { if (!value) closeErrorDetails() })
 watch(loading, value => { if (!value) void applyPendingFocus() })
+watch(relatedCandidates, choices => {
+  if (!recoveryVisible.value) return
+  const eligible = new Set(choices.map(({ object }) => object.id))
+  const removed = Object.keys(recoveryForm.related).filter(id => recoveryForm.related[id] && !eligible.has(id))
+  if (!removed.length) return
+  for (const id of removed) delete recoveryForm.related[id]
+  invalidatePreview()
+  recoveryError.value = '关联对象状态已变化，已移除不可选对象，请重新生成预览'
+})
 watch([filter, keyword], () => { page.value = 1; clearBatchSelection() }, { flush: 'sync' })
 watch(() => visibleRecords.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length / 10))) })
 watch([draftUnits, () => mappingForm.values], () => {
@@ -1071,14 +1090,10 @@ onUnmounted(() => {
 .repair-editor-footer { display: flex; flex-direction: column; gap: 12px; text-align: left; }
 .repair-editor-footer .modal-actions { margin-top: 0; }
 .editor-mapping { margin-top: 16px; }
-.mapping-list, .related-list { width: 100%; display: grid; gap: 8px; }
+.mapping-list { width: 100%; display: grid; gap: 8px; }
 .mapping-row { display: grid; grid-template-columns: minmax(100px, 1fr) 20px minmax(120px, 1fr); gap: 8px; align-items: center; }
 .editable-mapping { grid-template-columns: minmax(100px, 1fr) 20px minmax(120px, 1fr) 50px; }
 .mapping-row code { overflow-wrap: anywhere; }
-.preview-facts { padding: 12px; background: var(--color-fill-1); }
-.preview-facts > div { display: flex; flex-wrap: wrap; gap: 16px; padding: 5px 0; }
-.preview-facts dt { min-width: 80px; color: var(--color-text-3); }
-.preview-facts dd { margin: 0; overflow-wrap: anywhere; }
 .history-attempt { margin: 16px 0; padding-bottom: 12px; border-bottom: 1px solid var(--color-border-2); }
 @container (max-width: 767px) {
   .repair-filters { flex-basis: 100%; }

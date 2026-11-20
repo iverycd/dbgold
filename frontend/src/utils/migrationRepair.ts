@@ -1,4 +1,4 @@
-import type { RepairAttempt, RepairObject, RepairRecord, RepairUnit } from '@/api/migrationRepair'
+import type { RecoveryPreview, RepairAttempt, RepairObject, RepairRecord, RepairUnit } from '@/api/migrationRepair'
 import { indexMigrationDataIssues, issuesForRepairRow, formatRowCountDetail, issueLabels, type MigrationTableEvidence } from './migrationDataIssues'
 import type { MigrationReport, ObjectResult } from '@/api/migration'
 
@@ -139,11 +139,58 @@ export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
   if (canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object)) units.forEach(unit => { unit.selected = true })
   return units
 }
+function inspectMapping(mapping: Record<string, string>) {
+  const columns = Object.entries(mapping)
+  const empty = columns.findIndex(([, target]) => !target.trim())
+  if (empty >= 0) return { index: empty, error: '每个源列都需要指定目标列', detail: `请为源列 ${columns[empty][0]} 指定目标列` }
+  const sources = new Map<string, string>()
+  for (const [index, [source, target]] of columns.entries()) {
+    if (sources.has(target)) return { index, error: '多个源列不能映射到同一个目标列', detail: `源列 ${sources.get(target)} 和 ${source} 都映射到了 ${target}，请修改映射` }
+    sources.set(target, source)
+  }
+}
 export function mappingError(mapping: Record<string, string>): string {
-  const targets = Object.values(mapping)
-  if (targets.some(target => !target.trim())) return '每个源列都需要指定目标列'
-  if (new Set(targets).size !== targets.length) return '多个源列不能映射到同一个目标列'
-  return ''
+  return inspectMapping(mapping)?.error || ''
+}
+
+export function qualifiedRepairName(object: RepairObject) {
+  return object.schema ? `${object.schema}.${object.target_name}` : object.target_name
+}
+
+export function recoveryUnavailableReason(object: RepairObject) {
+  if (isManualPGTrigger(object)) return '请在对象修复弹窗单独提交手工触发器'
+  if (['unknown', 'unverified', 'running'].includes(object.status)) return repairStatus(object.status)
+  const unit = object.units?.find(unit => unit.status === 'unknown' || unit.status === 'running')
+  return unit ? `执行单元${repairStatus(unit.status)}` : ''
+}
+
+export interface RecoveryForm {
+  mapping: Record<string, string>
+  related: Record<string, boolean>
+  truncate: boolean
+  confirmation: string
+  sourceQuiesced: boolean
+  targetQuiesced: boolean
+  reviewed: boolean
+}
+export interface RecoveryIssue {
+  field: 'mapping' | 'reviewDDL' | 'truncate' | 'confirmation' | 'sourceQuiesced' | 'targetQuiesced' | 'reviewed'
+  message: string
+  index?: number
+}
+export function firstRecoveryIssue(form: RecoveryForm, preview?: RecoveryPreview): RecoveryIssue | undefined {
+  const mapping = inspectMapping(form.mapping)
+  if (mapping) return { field: 'mapping', message: mapping.detail, index: mapping.index }
+  if (!preview) return
+  const reviewIndex = preview.related?.findIndex(object => object.requires_review) ?? -1
+  if (reviewIndex >= 0) return { field: 'reviewDDL', message: `请先复核关联对象 ${qualifiedRepairName(preview.related[reviewIndex])} 的 DDL`, index: reviewIndex }
+  if (preview.data_required && preview.target_rows > 0) {
+    if (!form.truncate) return { field: 'truncate', message: '请确认清空目标表后完整重导' }
+    if (form.confirmation !== preview.qualified_target) return { field: 'confirmation', message: `请输入目标完整表名 ${preview.qualified_target}` }
+  }
+  if (!form.sourceQuiesced) return { field: 'sourceQuiesced', message: '请确认源表已停止写入' }
+  if (!form.targetQuiesced) return { field: 'targetQuiesced', message: '请确认目标表已停止写入' }
+  if (!form.reviewed) return { field: 'reviewed', message: '请确认已核对列映射和关联对象 DDL' }
 }
 export function formatRepairHistory(records: RepairRecord[], attempts: RepairAttempt[], report?: MigrationReport | null): string[] {
   const lines = ['','=== 对象修复记录（原始迁移结果保留） ===']

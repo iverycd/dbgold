@@ -6,7 +6,7 @@ import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as Vue from 'vue'
-import { parse, compileStyle } from '@vue/compiler-sfc'
+import { parse, compileScript, compileStyle } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
@@ -29,8 +29,11 @@ function loadBatchUtils(timers) {
   return context.exports
 }
 const descriptor = parse(readFileSync(new URL('../src/components/MigrationRepairPanel.vue', import.meta.url), 'utf8')).descriptor
+const recoveryDescriptor = parse(readFileSync(new URL('../src/components/TableRecoveryModal.vue', import.meta.url), 'utf8')).descriptor
+const recoveryContext = { exports: {}, require: id => id === 'vue' ? Vue : utils }
+vm.runInNewContext(transpile(compileScript(recoveryDescriptor, { id: 'table-recovery', inlineTemplate: true }).content), recoveryContext)
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, editorVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
-const renderFields = 'emit, loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
+const renderFields = 'emit, loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, relatedChoices, recoveryError, recoveryIssue, closeRecovery, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -322,15 +325,16 @@ test('focus waits for loading and task changes clear pending navigation and old 
   } finally { scope.stop() }
 })
 
-async function renderPanel(p, onRender, onEditor, onTooltip) {
+async function renderPanel({ inspectRecovery, ...p }, onRender, onEditor, onTooltip) {
   const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
   const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
   const app = Vue.createSSRApp({
     setup: () => ({ ...p, ...utils, getDbTypeLabel: value => value === 'gaussdb' ? 'GaussDB' : value }),
     render(...args) { const tree = render.apply(this, args); onRender?.(tree); return tree },
   })
+  app.component('TableRecoveryModal', recoveryContext.exports.default)
   const passthrough = { setup: (_, { slots }) => () => Vue.h('div', slots.default?.()) }
-  for (const name of ['a-textarea', 'a-space', 'a-button', 'a-alert', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
+  for (const name of ['a-textarea', 'a-space', 'a-pagination', 'a-button', 'a-alert', 'a-spin', 'a-select', 'a-option', 'a-input-search', 'a-collapse', 'a-collapse-item', 'a-checkbox', 'a-form', 'a-form-item', 'a-input', 'a-input-number', 'a-switch']) app.component(name, passthrough)
   app.component('a-tooltip', { props: ['trigger'], setup: (props, { slots }) => () => {
     const children = slots.default?.()
     onTooltip?.({ trigger: props.trigger, children, content: slots.content?.() })
@@ -339,7 +343,12 @@ async function renderPanel(p, onRender, onEditor, onTooltip) {
   app.component('a-tag', { props: ['color'], setup: (props, { slots }) => () => Vue.h('span', { 'data-status-color': props.color }, slots.default?.()) })
   app.component('icon-info-circle', { setup: () => () => Vue.h('svg', { 'aria-hidden': 'true' }) })
   app.component('a-empty', Arco.Empty)
-  for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots }) => () => props.visible ? Vue.h('div', [slots.default?.(), slots.footer?.()]) : null })
+  for (const name of ['a-modal', 'a-drawer']) app.component(name, { props: ['visible'], setup: (props, { slots, attrs }) => () => {
+    if (!props.visible) return null
+    const tree = Vue.h('div', [...slots.default?.() || [], ...slots.footer?.() || []])
+    if (attrs.title === '接续此表迁移') inspectRecovery?.(tree)
+    return tree
+  } })
   app.component('a-table-column', { setup: () => () => null })
   app.component('a-table', {
     props: ['data'],
@@ -1335,6 +1344,93 @@ test('stale recovery previews cannot authorize changed mappings', async () => {
     assert.equal(p.recoveryPlan.value, null)
     assert.equal(p.canRecover.value, false)
     assert.equal(p.recoveryForm.mapping.id, 'renamed')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('recovery bulk controls select across pages and omit ineligible IDs from the preview', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const mapping = Object.fromEntries(Array.from({ length: 50 }, (_, i) => ['source' + i, 'target' + i]))
+    const table = record({ status: 'succeeded', column_mapping: mapping })
+    const related = Array.from({ length: 36 }, (_, i) => record({
+      id: 'item' + i, kind: i < 12 ? 'index' : 'comment', name: 'item' + i, target_name: 'item' + i, table: 'Orders',
+      status: i === 0 ? 'unknown' : 'blocked', units: [unit('ddl', i === 1 ? 'running' : 'pending')],
+    }))
+    const requests = []
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => ({ data: { objects: [table, ...related], binding: { configured: true } } }),
+      previewRecovery: async (_job, _id, req) => {
+        requests.push(req)
+        return { data: { token: 'preview', preview: { column_mapping: mapping, related: related.filter(row => req.related_object_ids.includes(row.object.id)).map(row => row.object) } } }
+      },
+    }))
+    await tick(); p.openRecovery(table); await flush()
+    assert.deepEqual([...requests[0].related_object_ids], [])
+    let controls
+    const render = () => renderPanel({ ...p, inspectRecovery: tree => {
+      controls = {
+        bulk: findNodes(tree, node => node.props?.class === 'bulk-actions')[0].children,
+        indexes: findNodes(tree, node => node.key === '索引')[0],
+      }
+    } })
+    assert.match(await render(), /已选 0 \/ 可选 34/)
+    controls.bulk[0].props.onClick()
+    assert.equal(p.recoveryPlan.value, null)
+    let html = await render()
+    assert.match(html, /已选 34 \/ 可选 34/)
+    assert.match(html, /不可选 · 执行单元执行中/)
+    assert.equal(html.match(/class="mapping-row"/g)?.length, 10)
+    assert.equal(html.match(/class="choice-row"/g)?.length, 10)
+    controls.indexes.props.onChange(false)
+    assert.match(await render(), /已选 24 \/ 可选 34/)
+    assert.equal(requests.length, 1, 'selection edits do not send preview requests')
+    await p.loadPreview()
+    assert.deepEqual([...requests[1].related_object_ids], related.slice(12).map(({ object }) => object.id))
+    html = await render()
+    assert.equal(html.match(/class="ddl-row"/g)?.length, 10)
+    controls.bulk[1].props.onClick()
+    assert.match(await render(), /已选 0 \/ 可选 34/)
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('recovery guides the operator to the offending field and submits the reviewed preview only once', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const requests = []
+    let accept
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      startRecovery: (_job, _id, request) => { requests.push(request); return new Promise(resolve => { accept = resolve }) },
+      getRepairAttempt: async () => ({ data: { id: 'attempt', kind: 'recovery', status: 'running', units: [] } }),
+    }))
+    await tick()
+    p.recoveryObject.value = record()
+    const related = Array.from({ length: 23 }, (_, i) => record({ target_name: 'item' + i, requires_review: i === 22 }).object)
+    p.recoveryPlan.value = { token: 'reviewed', preview: { data_required: true, target_rows: 1, qualified_target: 'public.Orders', related } }
+    p.recoveryForm.mapping = { a: 'id', b: 'id' }
+    assert.equal(p.recoveryIssue.value.index, 1)
+    assert.match(p.recoveryIssue.value.message, /a 和 b 都映射到了 id/)
+    p.recoveryForm.mapping.b = ' '
+    assert.match(p.recoveryIssue.value.message, /请为源列 b 指定目标列/)
+    p.recoveryForm.mapping.b = 'name'
+    assert.equal(p.recoveryIssue.value.field, 'reviewDDL')
+    assert.equal(p.recoveryIssue.value.index, 22)
+    p.recoveryPlan.value.preview.related[22].requires_review = false
+    for (const [field, value] of Object.entries({ truncate: true, confirmation: 'public.Orders', sourceQuiesced: true, targetQuiesced: true, reviewed: true })) {
+      assert.equal(p.recoveryIssue.value.field, field)
+      await p.confirmRecovery()
+      assert.equal(requests.length, 0)
+      p.recoveryForm[field] = value
+    }
+    const pending = p.confirmRecovery()
+    assert.equal(p.submitting.value, true)
+    await p.confirmRecovery()
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].token, 'reviewed')
+    accept({ data: { id: 'attempt', kind: 'recovery', status: 'running', units: [] } })
+    await pending
+    assert.equal(p.submitting.value, false)
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
