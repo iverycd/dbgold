@@ -161,6 +161,9 @@ func TestGenericMigrationContinuesAcrossSourceAndPGTargetFamilies(t *testing.T) 
 					require.Equal(t, 1, report.Indexes.Failed)
 					require.Len(t, w.sequences, 2)
 					require.Len(t, w.comments, 2)
+					for _, cm := range w.comments {
+						require.NotEqual(t, "broken", cm.TableName)
+					}
 					require.Len(t, w.fks, 1)
 					require.Equal(t, "healthy_fk", w.fks[0].ConstraintName)
 					require.Len(t, w.views, 1)
@@ -248,12 +251,35 @@ func TestGenericPostDDLRespectsBlockedPartitionDependencies(t *testing.T) {
 	bad := &PartitionTableResult{SourceTable: "Broken", TargetTable: "broken", Error: "unsupported partition", Status: "blocked"}
 	m.partitionState = &partitionRunState{tables: map[string]*PartitionTableResult{"Broken": bad}, blocked: map[string]bool{"Broken": true}, preflight: &PartitionPreflight{Tables: []*PartitionTableResult{bad}}}
 	report := newMigrationReport()
-	m.createPostDDL(context.Background(), &report, []string{"A", "Z"}, r.tables)
+	m.createPostDDL(context.Background(), &report, []string{"A", "Z"}, r.tables, map[string]bool{"A": true, "Z": true})
 	require.Len(t, w.views, 1)
 	require.Equal(t, "healthyview", w.views[0].ViewName)
 	require.Equal(t, 1, report.PrimaryKeys.Failed)
 	require.Equal(t, 1, report.Indexes.Failed)
+	require.Equal(t, 1, report.Comments.Failed)
+	require.Equal(t, "dependency", report.Comments.Items[0].Stage)
 	require.Equal(t, 2, report.Views.Failed)
 	require.Equal(t, 1, report.Constraints.Failed)
 	require.False(t, m.migrationTableBlocked("Broken"), "partition accounting stays with its preflight")
+}
+
+func TestPendingCommentRepairAfterDataFailure(t *testing.T) {
+	for _, stage := range []string{"data", "validation"} {
+		t.Run(stage, func(t *testing.T) {
+			m, _ := newTestMigrator(&mockReader{}, &mockWriter{})
+			m.blockMigrationTable("Orders", stage, errors.New("row failed"))
+			m.blockMigrationObject(ObjectRef{Kind: "comment", Table: "Orders", Name: "Orders.Bad"}, errors.New("invalid column"))
+			objects := []repair.Object{
+				{ID: "table", Kind: "table", SourceName: "Orders", Status: "succeeded"},
+				{ID: "ok", Kind: "comment", SourceTable: "Orders", SourceName: "Orders.ID", Dependencies: []string{"table"}, Status: "pending"},
+				{ID: "bad", Kind: "comment", SourceTable: "Orders", SourceName: "Orders.Bad", Dependencies: []string{"table"}, Status: "pending"},
+			}
+			m.reconcileMigrationFailures(objects)
+			require.Equal(t, "failed", objects[0].DataStatus)
+			require.Equal(t, "pending", objects[1].Status)
+			require.Empty(t, objects[1].Error)
+			require.Equal(t, "blocked", objects[2].Status)
+			require.Contains(t, objects[2].Error, "invalid column")
+		})
+	}
 }

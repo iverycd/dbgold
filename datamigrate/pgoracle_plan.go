@@ -30,6 +30,7 @@ type PGOraclePreflight struct {
 	PartitionPreflight             *PartitionPreflight    `json:"partition_preflight,omitempty"`
 	tables                         []source.PGTable
 	blocked                        map[ObjectRef]error
+	createdTables                  map[string]bool
 	dependencies                   map[ObjectRef][]ObjectRef
 	sourceDDL                      map[ObjectRef]string
 	sequences                      map[ObjectRef]*pgoracle.SequencePlan
@@ -88,12 +89,18 @@ func (p *PGOraclePreflight) dependencyError(ref ObjectRef, seen map[ObjectRef]bo
 	if p.excluded(ref) {
 		return fmt.Errorf("依赖对象 %s 已排除", ref.Name)
 	}
-	if ref.Table != "" {
-		if e := p.blocked[tableRef(ref.Table)]; e != nil {
+	// A data error may block the owner's table ref after its CREATE succeeded.
+	owner := tableRef(ref.Table)
+	commentOnCreatedTable := ref.Kind == "comment" && p.createdTables[ref.Table]
+	if ref.Table != "" && !commentOnCreatedTable {
+		if e := p.blocked[owner]; e != nil {
 			return e
 		}
 	}
 	for _, dep := range p.dependencies[ref] {
+		if commentOnCreatedTable && dep == owner {
+			continue
+		}
 		if e := p.dependencyError(dep, seen); e != nil {
 			return fmt.Errorf("依赖 %s: %w", dep.Name, e)
 		}

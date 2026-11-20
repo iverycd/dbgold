@@ -21,6 +21,9 @@ func TestPGOracleRunIsolatesFirstAndMiddleTableDDLFailure(t *testing.T) {
 		for _, stage := range []string{"DROP", "CREATE"} {
 			t.Run(broken+"/"+stage, func(t *testing.T) {
 				r, w, m := pgOracleFixture("AFirst", "MMiddle", "ZLast")
+				for i := range r.snapshot.Tables {
+					r.snapshot.Tables[i].Info.Comment = "table description"
+				}
 				w.createFailure, w.createFailureStage = strings.ToUpper(broken), stage
 				report := m.Run(context.Background())
 				require.True(t, report.HasFailures())
@@ -34,6 +37,10 @@ func TestPGOracleRunIsolatesFirstAndMiddleTableDDLFailure(t *testing.T) {
 				require.EqualValues(t, 2, w.counts["ZLAST"])
 				require.Equal(t, 2, report.PrimaryKeys.Success)
 				require.Equal(t, 1, report.PrimaryKeys.Failed)
+				require.Equal(t, 2, report.Comments.Success)
+				require.Equal(t, 1, report.Comments.Failed)
+				require.Equal(t, "dependency", report.Comments.Items[0].Stage)
+				require.NotContains(t, w.objects, "comment:"+strings.ToUpper(broken))
 				require.Contains(t, report.Tables.Items[0].DDL, `"APP"."`+strings.ToUpper(broken)+`"`)
 				require.Equal(t, "dependency", report.PrimaryKeys.Items[0].Stage)
 				for _, table := range []string{"AFirst", "MMiddle", "ZLast"} {
@@ -48,7 +55,10 @@ func TestPGOracleRunIsolatesFirstAndMiddleTableDDLFailure(t *testing.T) {
 }
 
 func TestPGOracleRunRetainsCommittedPageAndContinuesLaterTable(t *testing.T) {
-	_, w, m := pgOracleFixture("ABroken", "ZHealthy")
+	r, w, m := pgOracleFixture("ABroken", "ZHealthy")
+	r.snapshot.Tables[0].Info.Comment = "table description"
+	r.snapshot.Tables[0].Info.Columns[0].Comment = "column description"
+	m.cfg.CaptureRepair = true
 	w.copyFailure, w.copyFailurePage = "ABROKEN", 2
 	report := m.Run(context.Background())
 	require.True(t, report.HasFailures())
@@ -64,6 +74,19 @@ func TestPGOracleRunRetainsCommittedPageAndContinuesLaterTable(t *testing.T) {
 	require.Len(t, report.RowCounts, 1)
 	require.Equal(t, "ZHEALTHY", report.RowCounts[0].Table)
 	require.True(t, report.RowCounts[0].Match)
+	require.Equal(t, 2, report.Comments.Success)
+	require.Contains(t, w.objects, "comment:ABROKEN")
+	require.Contains(t, w.objects, "comment:ABROKEN.ID")
+	var comments int
+	for _, object := range report.RepairManifest.Objects {
+		if object.Kind == "comment" {
+			comments++
+			require.Equal(t, "succeeded", object.Status)
+			require.Len(t, object.Units, 1)
+			require.Equal(t, "succeeded", object.Units[0].Status)
+		}
+	}
+	require.Equal(t, 2, comments)
 }
 
 func TestPGOracleRunTaskErrorsStopFollowingMutation(t *testing.T) {

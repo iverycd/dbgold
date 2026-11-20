@@ -600,7 +600,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		report.Tables.Total = len(tables)
 		m.logPreparationComplete(ctx)
 		m.log.Info("=== 创建所选对象 ===")
-		m.createPostDDL(ctx, &report, tables, allTables)
+		m.createPostDDL(ctx, &report, tables, allTables, nil)
 		m.createMySQLPGTriggers(ctx, &report)
 		elapsed := time.Since(start).Round(time.Second)
 		m.log.Donef("对象迁移完成,耗时 %s", elapsed)
@@ -788,7 +788,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		if m.isSQLServerDameng() || m.isOscarMySQL() || m.isOscarDameng() {
 			originalObjects := m.cfg.Objects
 			m.cfg.Objects = []string{"sequences"}
-			m.createPostDDL(ctx, &report, tables, allTables)
+			m.createPostDDL(ctx, &report, tables, allTables, nil)
 			m.cfg.Objects = originalObjects
 		}
 		if m.isOracleDameng() {
@@ -796,7 +796,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		}
 	} else {
 		m.log.Info("=== Phase 3: 创建序列、索引、外键、视图 ===")
-		m.createPostDDL(ctx, &report, tables, allTables)
+		m.createPostDDL(ctx, &report, tables, allTables, completed)
 	}
 	if ctx.Err() != nil {
 		return report
@@ -898,7 +898,7 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 		}
 		original := m.cfg.Objects
 		m.cfg.Objects = []string{"sequences"}
-		m.createPostDDL(ctx, &report, tables, allTables)
+		m.createPostDDL(ctx, &report, tables, allTables, nil)
 		m.cfg.Objects = original
 	}
 	m.createMySQLPGTriggers(ctx, &report)
@@ -1196,7 +1196,8 @@ pageLoop:
 
 // createPostDDL 串行创建主键、序列、索引、外键、视图，并填充 report。
 // tables 为本次迁移的表列表，allTables 为源库全部表列表（用于 exclude 模式推算被排除的表）。
-func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, tables []string, allTables []string) {
+// createdTables 记录本次建表成功的源表，供注释使用。仅对象模式传 nil，沿用已有表的预检结果。
+func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, tables, allTables []string, createdTables map[string]bool) {
 	// tableSet: 本次要迁移的表集合
 	tableSet := make(map[string]bool, len(tables))
 	selectedSet := make(map[string]bool, len(tables))
@@ -1652,6 +1653,10 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 
 	// 注释(表注释 + 列注释)。Oracle -> MySQL 在此时读取目标完整列定义。
 	if want("comments") {
+		commentTables := createdTables
+		if commentTables == nil {
+			commentTables = tableSet
+		}
 		readStarted := time.Now()
 		comments, err := m.reader.GetComments(ctx)
 		m.logCommentRead(time.Since(readStarted), len(comments), err)
@@ -1665,7 +1670,7 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			defer m.startCommentCreationStats(ctx, &report.Comments, time.Now)()
 			matched := 0
 			for _, cm := range comments {
-				if tableSet[cm.TableName] {
+				if commentTables[cm.TableName] {
 					matched++
 				}
 			}
@@ -1674,14 +1679,14 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 				if ctx.Err() != nil {
 					return
 				}
-				if !tableSet[cm.TableName] {
+				if !commentTables[cm.TableName] {
 					if selectedSet[cm.TableName] {
 						report.Comments.Total++
 						name := m.objName(cm.TableName)
 						if cm.ColumnName != "" {
 							name += "." + m.targetColumn(cm.TableName, cm.ColumnName)
 						}
-						blocked(&report.Comments, name, cm.TableName, "依赖表 "+cm.TableName+" 迁移失败")
+						blocked(&report.Comments, name, cm.TableName, "依赖表 "+cm.TableName+" 的结构迁移失败")
 					}
 					continue
 				}
@@ -1703,10 +1708,13 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 					}
 					m.log.Errorf("创建注释失败 [%s]: %v", name, err)
 					report.Comments.Failed++
+					stage := "execute"
+					if preparationErr != nil {
+						stage = "preflight"
+					}
 					report.Comments.Items = append(report.Comments.Items, ObjectResult{
-						Name:  name,
-						DDL:   ddl,
-						Error: err.Error(),
+						Name: name, Table: cm.TableName, TargetTable: cmCopy.TableName,
+						Stage: stage, DDL: ddl, Error: err.Error(),
 					})
 				} else {
 					m.log.DDLf("创建注释 %s ... OK", name)

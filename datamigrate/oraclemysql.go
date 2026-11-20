@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -611,6 +612,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 			}
 		}
 	}
+	createdTables := maps.Clone(s.postEligible)
 	if m.cfg.Content != "schema_only" {
 		m.copyOracleMySQLTables(ctx, activeTables, &report)
 	}
@@ -619,7 +621,7 @@ func (m *Migrator) runOracleMySQL(ctx context.Context) (report MigrationReport) 
 		return
 	}
 	m.log.Info("=== Phase 3: 创建主键、索引和外键 ===")
-	m.createPostDDL(ctx, &report, tables, all)
+	m.createPostDDL(ctx, &report, tables, all, createdTables)
 	if ctx.Err() != nil {
 		return
 	}

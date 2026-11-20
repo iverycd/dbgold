@@ -629,7 +629,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		w.ConfigureCrossOracle(p.info)
 	}
 	m.logPreparationComplete(ctx)
-	completed := map[string]bool{}
+	schemaReady := map[string]bool{}
 	if !m.cfg.objectMode() && m.cfg.Content != "data_only" {
 		m.log.Info("=== 创建 Oracle 表结构 ===")
 		for _, t := range p.tables {
@@ -652,7 +652,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				return report
 			}
 			if e != nil {
-				if !m.protectRetainedMigrationTables(ctx, p.tables, &report, completed) {
+				if !m.protectRetainedMigrationTables(ctx, p.tables, &report, schemaReady) {
 					return report
 				}
 				for _, table := range p.tables {
@@ -662,7 +662,7 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 				}
 			}
 			if e == nil {
-				completed[t] = true
+				schemaReady[t] = true
 				for _, warning := range p.warnings {
 					if warning.Table == m.objName(t) {
 						report.Warnings = append(report.Warnings, warning)
@@ -746,7 +746,11 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 		d := m.writer.Dialect().(*dialect.OracleDialect)
 		sourceTables := map[string]string{}
 		for _, table := range p.tables {
-			sourceTables[m.objName(table)] = table
+			targetTable := m.objName(table)
+			sourceTables[targetTable] = table
+			if m.cfg.objectMode() && !failed[targetTable] {
+				schemaReady[table] = true
+			}
 		}
 		recordIndex := func(category *CategoryReport, i source.IndexInfo) {
 			ddl, stage := "", "execute"
@@ -828,17 +832,22 @@ func (m *Migrator) runOracle(ctx context.Context) (report MigrationReport) {
 			if ctx.Err() != nil {
 				return report
 			}
-			if failed[c.TableName] {
-				report.Comments.Total++
-				m.recordBlockedObject(&report.Comments, c.TableName+"."+c.ColumnName, sourceTables[c.TableName], "依赖表 "+c.TableName+" 迁移失败")
-				continue
-			}
-			e := m.repairComment(ctx, c)
 			name := c.TableName
 			if c.ColumnName != "" {
 				name += "." + c.ColumnName
 			}
+			sourceTable := sourceTables[c.TableName]
+			if !schemaReady[sourceTable] {
+				report.Comments.Total++
+				m.recordBlockedObject(&report.Comments, name, sourceTable, "依赖表 "+c.TableName+" 的结构迁移失败")
+				continue
+			}
+			e := m.repairComment(ctx, c)
 			m.recordOracleResult(&report.Comments, name, dialect.JoinSQL(d.CommentStatements(m.cfg.TargetSchema, c)), e)
+			if e != nil {
+				item := &report.Comments.Items[len(report.Comments.Items)-1]
+				item.Table, item.Stage = sourceTable, "execute"
+			}
 			if m.stopMigrationTask(ctx, e) {
 				return report
 			}

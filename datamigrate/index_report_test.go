@@ -58,7 +58,7 @@ func runIndexReport(r *indexReportReader, w *indexReportWriter) MigrationReport 
 	m.cfg.LowerCaseNames = true
 	m.cfg.Objects = []string{"indexes"}
 	report := newMigrationReport()
-	m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders", "Excluded"})
+	m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders", "Excluded"}, nil)
 	return report
 }
 

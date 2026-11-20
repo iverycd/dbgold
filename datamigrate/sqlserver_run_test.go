@@ -146,12 +146,17 @@ func TestSQLServerMigrationModes(t *testing.T) {
 func TestSQLServerFailureStopsOnlyItsTable(t *testing.T) {
 	r, w, m := sqlServerFixture()
 	w.copyErr = "Orders"
+	r.comments = append(r.comments, source.CommentInfo{TableName: "Orders", Comment: "table description"})
 	report := m.Run(context.Background())
 	require.Equal(t, 1, report.Data.Failed)
 	require.Equal(t, 1, report.Data.Success)
 	require.Equal(t, 1, r.reads["Orders"])
 	require.Equal(t, 1, report.Views.Failed)
 	require.Contains(t, report.Data.Items[0].Error, "之前提交的数据可能保留")
+	require.Equal(t, 2, report.Comments.Success)
+	for _, comment := range r.comments {
+		require.Contains(t, w.sql, dialect.JoinSQL(w.dia.CommentStatements("dbo", comment)))
+	}
 }
 func TestSQLServerUnsupportedTablePreserved(t *testing.T) {
 	r, w, m := sqlServerFixture()
@@ -163,6 +168,9 @@ func TestSQLServerUnsupportedTablePreserved(t *testing.T) {
 	require.Contains(t, report.Tables.Items[0].Error, "json")
 	require.True(t, m.migrationTableBlocked("Orders"))
 	require.False(t, m.migrationTableBlocked("Items"))
+	require.Equal(t, 1, report.Comments.Failed)
+	require.Equal(t, "dependency", report.Comments.Items[0].Stage)
+	require.NotContains(t, strings.Join(w.sql, "\n"), "MS_Description")
 }
 func TestSQLServerExternalDependencyDoesNotStopIndependentTable(t *testing.T) {
 	_, w, m := sqlServerFixture()

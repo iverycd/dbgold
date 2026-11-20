@@ -522,3 +522,17 @@ func TestOracleConversionErrorsIncludePageAndColumn(t *testing.T) {
 		require.ErrorContains(t, err, "列 ID 页内第 1 行")
 	}
 }
+
+func TestOracleCommentsAfterDataWriteFailure(t *testing.T) {
+	r, w, m := oracleMigrationFixture()
+	r.comments = append(r.comments, source.CommentInfo{TableName: "Orders", Comment: "订单"})
+	m.reader, m.writer = &oraclePagingReader{r}, &oraclePagingWriter{w}
+	m.cfg.PageSize, m.cfg.MaxParallel = 1, 1
+	report := m.Run(t.Context())
+	require.Equal(t, 2, report.Tables.Success)
+	require.Equal(t, 2, report.Data.Failed)
+	require.Equal(t, 2, report.Comments.Success)
+	require.Equal(t, 2, report.PrimaryKeys.Failed)
+	require.Contains(t, w.sql, `COMMENT ON COLUMN "APP"."ORDERS"."ID" IS 'Keep中文MiXeD'`)
+	require.Contains(t, w.sql, `COMMENT ON TABLE "APP"."ORDERS" IS '订单'`)
+}

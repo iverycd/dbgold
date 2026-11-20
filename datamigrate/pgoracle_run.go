@@ -75,7 +75,7 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 	}
 	m.freezeDataValidation(ctx, validationTables)
 	objects := slices.Clone(p.Objects)
-	completed := map[string]bool{}
+	p.createdTables = map[string]bool{}
 	order := map[string]int{"table": 0, "index": 1, "check": 1, "sequence": 2, "foreign_key": 3, "view": 4, "comment": 5, "trigger": 6}
 	sort.SliceStable(objects, func(i, j int) bool { return order[objects[i].Stage] < order[objects[j].Stage] })
 	failObject := func(o PlannedObject, stage string, e error) error {
@@ -117,7 +117,7 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 				return e
 			}
 			if o.Object.Kind == "table" {
-				if !m.protectRetainedMigrationTables(ctx, validationTables, nil, completed) {
+				if !m.protectRetainedMigrationTables(ctx, validationTables, nil, p.createdTables) {
 					return context.Cause(ctx)
 				}
 				for _, table := range validationTables {
@@ -132,7 +132,7 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 		c.Total++
 		c.Success++
 		if o.Object.Kind == "table" {
-			completed[o.Object.Name] = true
+			p.createdTables[o.Object.Name] = true
 		}
 		if o.Object.Kind == "view" {
 			c.Items = append(c.Items, ObjectResult{ObjectKind: "view", Name: o.Object.Name, SourceName: o.Object.Name, TargetName: o.Target, TargetSchema: m.cfg.TargetSchema, DDL: dialect.JoinSQL(o.Statements)})

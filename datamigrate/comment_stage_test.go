@@ -93,7 +93,7 @@ func TestCommentStageStatsPreservesExecutionAndCancellation(t *testing.T) {
 			m, job := newTestMigrator(reader, writer)
 			m.cfg.Objects = []string{"comments"}
 			report := newMigrationReport()
-			m.createPostDDL(ctx, &report, []string{"Orders"}, []string{"Orders", "Excluded"})
+			m.createPostDDL(ctx, &report, []string{"Orders"}, []string{"Orders", "Excluded"}, nil)
 			require.Len(t, writer.calls, test.calls)
 			require.Equal(t, test.success, report.Comments.Success)
 			require.Equal(t, test.failed, report.Comments.Failed)

@@ -145,7 +145,7 @@ func TestOracleMySQLCommentTruncationAndDeferredInventory(t *testing.T) {
 			require.Empty(t, comment.Units)
 			require.Equal(t, min(length, 1024), utf8.RuneCountInString(comment.Comment.Comment))
 			report := newMigrationReport()
-			m.createPostDDL(context.Background(), &report, []string{"MixedCase"}, []string{"MixedCase"})
+			m.createPostDDL(context.Background(), &report, []string{"MixedCase"}, []string{"MixedCase"}, nil)
 			m.finishRepair(context.Background(), &report)
 			require.Equal(t, 1, report.Comments.Success)
 			require.Equal(t, original, r.comments[0].Comment)
@@ -201,6 +201,8 @@ func TestOracleMySQLCommentFailuresRemainRecoverable(t *testing.T) {
 	require.True(t, write.Units[0].Selected)
 	require.Equal(t, w.executed[0], write.Units[0].SQL)
 	require.Equal(t, w.executed[0], report.Comments.Items[1].DDL)
+	require.Equal(t, "preflight", report.Comments.Items[0].Stage)
+	require.Equal(t, "execute", report.Comments.Items[1].Stage)
 	require.Equal(t, 1024, utf8.RuneCountInString(write.Comment.Comment))
 	require.Equal(t, "succeeded", seen["MixedCase.ID"].Status)
 }
@@ -211,7 +213,7 @@ func TestOracleMySQLCommentDependencyAndCancellation(t *testing.T) {
 	m.cfg.Objects = []string{"comments"}
 	m.dmBlocked = map[string]bool{"MixedCase": true}
 	report := newMigrationReport()
-	m.createPostDDL(context.Background(), &report, []string{"MixedCase"}, []string{"MixedCase", "Excluded"})
+	m.createPostDDL(context.Background(), &report, []string{"MixedCase"}, []string{"MixedCase", "Excluded"}, nil)
 	require.Equal(t, 1, report.Comments.Total)
 	require.Equal(t, 1, report.Comments.Failed)
 	require.Empty(t, w.prepared)
@@ -221,10 +223,44 @@ func TestOracleMySQLCommentDependencyAndCancellation(t *testing.T) {
 	defer cancel()
 	w.onExecute = cancel
 	report = newMigrationReport()
-	m.createPostDDL(ctx, &report, []string{"MixedCase"}, []string{"MixedCase"})
+	m.createPostDDL(ctx, &report, []string{"MixedCase"}, []string{"MixedCase"}, nil)
 	require.Len(t, w.prepared, 1)
 	require.Len(t, w.executed, 1)
 	require.Equal(t, 1, report.Comments.Total)
+}
+
+func TestOracleMySQLCommentsDependOnTableCreation(t *testing.T) {
+	for _, failure := range []string{"create", "copy", "row_count"} {
+		t.Run(failure, func(t *testing.T) {
+			m, r, w := oracleCommentFixture(t)
+			m.cfg.Content, m.cfg.CaptureRepair = "both", true
+			r.rows["MixedCase"] = [][]any{{int64(1)}}
+			r.comments = []source.CommentInfo{{TableName: "MixedCase", Comment: "表"}, {TableName: "MixedCase", ColumnName: "ID", Comment: "列"}}
+			switch failure {
+			case "create":
+				w.createFail = "MixedCase"
+			case "copy":
+				w.copyFail = "MixedCase"
+			case "row_count":
+				w.counts["MixedCase"] = 1
+			}
+			report := m.Run(t.Context())
+			require.True(t, report.HasFailures())
+			require.Equal(t, 2, report.Comments.Total)
+			if failure == "create" {
+				require.Equal(t, 2, report.Comments.Failed)
+				require.Equal(t, "dependency", report.Comments.Items[0].Stage)
+				require.Empty(t, w.prepared)
+				require.Empty(t, w.executed)
+				return
+			}
+			require.Equal(t, 1, report.Data.Failed)
+			require.Equal(t, 2, report.Comments.Success)
+			require.Len(t, w.executed, 2)
+			require.Equal(t, r.comments, w.prepared)
+			require.Equal(t, 1, report.PrimaryKeys.Failed)
+		})
+	}
 }
 
 func TestOracleMySQLRecoveryCommentRegeneration(t *testing.T) {

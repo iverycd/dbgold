@@ -96,7 +96,7 @@ func TestMySQLDamengIndexCreationOrderPreservesOtherPairs(t *testing.T) {
 			m, _ := newTestMigrator(r, w)
 			m.cfg.TargetSchema, m.cfg.Objects = "APP", []string{"primary_keys", "indexes"}
 			report := newMigrationReport()
-			m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders", "Excluded"})
+			m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders", "Excluded"}, nil)
 
 			var names []string
 			for _, idx := range w.indexes {
@@ -167,7 +167,7 @@ func TestMySQLDamengFailedPrimaryKeyDoesNotSkipOrdinaryIndex(t *testing.T) {
 	m, _ := newTestMigrator(r, w)
 	m.cfg.TargetSchema, m.cfg.Objects = "APP", []string{"primary_keys", "indexes"}
 	report := newMigrationReport()
-	m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders"})
+	m.createPostDDL(context.Background(), &report, []string{"Orders"}, []string{"Orders"}, nil)
 
 	require.Equal(t, 1, report.PrimaryKeys.Failed)
 	require.Equal(t, 1, report.Indexes.Success)

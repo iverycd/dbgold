@@ -128,11 +128,12 @@ func (m *Migrator) reconcileMigrationFailures(objects []repair.Object) {
 		if !failed && o.ForeignKey != nil {
 			failure, failed = failedTarget[o.ForeignKey.RefTable]
 		}
+		dataFailure := failure.stage == "data" || failure.stage == "validation"
 		if o.Kind == "table" {
 			if !failed {
 				continue
 			}
-			if failure.stage == "data" || failure.stage == "validation" {
+			if dataFailure {
 				if o.DataStatus != "not_required" {
 					o.DataStatus = "failed"
 				}
@@ -145,6 +146,10 @@ func (m *Migrator) reconcileMigrationFailures(objects []repair.Object) {
 				}
 			}
 			continue
+		}
+		// A comment still pending at interruption may resume against the created table.
+		if o.Kind == "comment" && dataFailure {
+			failed = false
 		}
 		if err := m.tableState.objects[ObjectRef{Kind: o.Kind, Table: o.SourceTable, Name: o.SourceName}]; err != nil {
 			failure, failed = migrationTableFailure{err: err}, true

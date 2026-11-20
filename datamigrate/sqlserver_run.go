@@ -169,6 +169,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		report.Triggers.Total = count
 	}
 	rebuild := !m.cfg.objectMode() && m.cfg.Content != "data_only"
+	schemaReady := map[string]bool{}
 	ddl := map[string][]dialect.Statement{}
 	sourceInfo := map[string]*source.TableDDLInfo{}
 	for _, t := range tables {
@@ -216,6 +217,7 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				dia.Tables[targetTable.TableName] = targetTable
 				if !rebuild {
 					err = inspector.ValidateExisting(ctx, targetTable)
+					schemaReady[t] = err == nil
 				}
 			}
 		}
@@ -229,7 +231,6 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 		ddl[t] = ss
 	}
 	if rebuild {
-		completed := map[string]bool{}
 		selected := map[string]bool{}
 		for _, t := range tables {
 			if !failed[t] {
@@ -280,11 +281,11 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 					return report
 				}
 				blockTable(t, "execute", dialect.JoinSQL(ddl[t]), e)
-				if !m.protectRetainedMigrationTables(ctx, tables, &report, completed) {
+				if !m.protectRetainedMigrationTables(ctx, tables, &report, schemaReady) {
 					return report
 				}
 			} else {
-				completed[t] = true
+				schemaReady[t] = true
 				sqlServerResult(&report.Tables, t, dialect.JoinSQL(ddl[t]), nil)
 				m.log.DDLf("创建表 %s ... OK", t)
 			}
@@ -616,17 +617,28 @@ func (m *Migrator) runSQLServer(ctx context.Context) MigrationReport {
 				if !eligible(c.TableName) || m.sqlServerObjectExcluded("comment", c.TableName, c.TableName+"."+c.ColumnName) {
 					continue
 				}
-				err = dependency(c.TableName)
+				sourceTable := c.TableName
 				c.TableName = m.objName(c.TableName)
 				c.ColumnName = m.objName(c.ColumnName)
-				ss := dia.CommentStatements(m.cfg.TargetSchema, c)
-				if err == nil {
-					err = m.repairComment(ctx, c)
+				name := c.TableName
+				if c.ColumnName != "" {
+					name += "." + c.ColumnName
 				}
+				if !schemaReady[sourceTable] {
+					report.Comments.Total++
+					m.recordBlockedObject(&report.Comments, name, sourceTable, "依赖表 "+sourceTable+" 的结构迁移失败")
+					continue
+				}
+				ss := dia.CommentStatements(m.cfg.TargetSchema, c)
+				err = m.repairComment(ctx, c)
 				if m.stopMigrationTask(ctx, err) {
 					return report
 				}
-				sqlServerResult(&report.Comments, c.TableName+"."+c.ColumnName, dialect.JoinSQL(ss), err)
+				sqlServerResult(&report.Comments, name, dialect.JoinSQL(ss), err)
+				if err != nil {
+					item := &report.Comments.Items[len(report.Comments.Items)-1]
+					item.Table, item.Stage = sourceTable, "execute"
+				}
 			}
 		}
 	}

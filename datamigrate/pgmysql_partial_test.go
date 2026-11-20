@@ -79,6 +79,8 @@ func TestPGRuntimeTableFailureContinuesIndependentObjects(t *testing.T) {
 			require.NoError(t, err)
 			defer db.Close()
 			bad, good := pgPartialTable("Bad", "int4"), pgPartialTable("Good", "int4")
+			good.Info.Comment = "inline table description"
+			good.Info.Columns[0].Comment = "inline column description"
 			bad.Checks = []source.PGObject{{Kind: "check", Table: "Bad", Name: "bad_check", Definition: "CHECK (id > 0)"}}
 			good.Checks = []source.PGObject{{Kind: "check", Table: "Good", Name: "good_check", Definition: "CHECK (id > 0)"}}
 			r := &pgPlanReader{snapshot: &source.PGSnapshot{Profile: source.PGProfile{Schema: "public"}, Tables: []source.PGTable{bad, good}, Views: []source.ViewInfo{{ViewName: "BadView", Columns: []source.ColumnInfo{{Name: "id", DataType: "int4"}}, Definition: `SELECT id FROM "Bad"`}, {ViewName: "GoodView", Columns: []source.ColumnInfo{{Name: "id", DataType: "int4"}}, Definition: `SELECT id FROM "Good"`}}}}
@@ -104,6 +106,10 @@ func TestPGRuntimeTableFailureContinuesIndependentObjects(t *testing.T) {
 			require.Equal(t, 1, report.Views.Success)
 			require.Equal(t, 1, report.Views.Failed)
 			sql := strings.Join(w.calls, "\n")
+			require.Equal(t, 2, report.Comments.Total)
+			require.Equal(t, 2, report.Comments.Success)
+			require.Equal(t, 1, strings.Count(sql, good.Info.Comment))
+			require.Equal(t, 1, strings.Count(sql, good.Info.Columns[0].Comment))
 			require.Contains(t, sql, "good_check")
 			require.NotContains(t, sql, "bad_check")
 			require.Contains(t, sql, "GoodView")
