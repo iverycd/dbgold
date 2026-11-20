@@ -42,3 +42,31 @@ func TestMappedViews(t *testing.T) {
 		require.Error(t, err, raw)
 	}
 }
+
+func TestViewComparisonOperators(t *testing.T) {
+	const selectPrefix = `SELECT 'keep <> and < >' AS "tag<>" FROM t WHERE t.flag`
+	const viewHeader = "CREATE VIEW dbo.V AS "
+	catalog := map[string][]MappedColumn{"T": {{Source: "flag", Target: "FLAG"}}}
+
+	for _, tc := range []struct{ source, target string }{
+		{"<>", "<>"}, {"!=", "<>"}, {"<=", "<="}, {">=", ">="},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			query := selectPrefix + tc.source + "7"
+			mapped, err := MappedView(query, "APP", "", false, catalog)
+			require.NoError(t, err)
+			sqlServer, _, err := View(viewHeader+query, "APP")
+			require.NoError(t, err)
+			for _, sql := range []string{mapped.SQL, sqlServer} {
+				require.Contains(t, sql, `'keep <> and < >' AS "TAG<>"`)
+				require.Contains(t, sql, `"T"."FLAG" `+tc.target+" 7")
+			}
+		})
+	}
+
+	query := selectPrefix + " < > 7"
+	_, err := MappedView(query, "APP", "", false, catalog)
+	require.ErrorContains(t, err, "视图 SELECT 解析失败")
+	_, _, err = View(viewHeader+query, "APP")
+	require.ErrorContains(t, err, "视图 SELECT 解析失败")
+}

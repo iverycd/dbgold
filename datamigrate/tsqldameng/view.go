@@ -85,6 +85,15 @@ func tokenize(s string) ([]token, error) {
 			i += len(literal)
 			continue
 		}
+		// Tokens are rejoined with spaces before parsing. Keep each comparison operator intact.
+		if i+1 < len(s) {
+			switch op := s[i : i+2]; op {
+			case "<>", "!=", "<=", ">=":
+				out = append(out, token{text: op})
+				i += 2
+				continue
+			}
+		}
 		if strings.ContainsRune("()+-*/%,.=<>!;", rune(s[i])) {
 			out = append(out, token{s[i : i+1], false})
 			i++

@@ -11,9 +11,58 @@ import (
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/target"
+	"dbgold/datamigrate/validation"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMySQLDamengNumericPrimaryKeyPagination(t *testing.T) {
+	myDSN, dmDSN := os.Getenv("DBGOLD_MYSQL_SCAN_SOURCE_DSN"), os.Getenv("DBGOLD_MYSQL_SCAN_DM_DSN")
+	if myDSN == "" || dmDSN == "" {
+		t.Skip("requires disposable MySQL and DM test instances")
+	}
+	my, err := sql.Open("mysql", myDSN)
+	require.NoError(t, err)
+	t.Cleanup(func() { my.Close() })
+	dm, err := sql.Open("dm", dmDSN)
+	require.NoError(t, err)
+	t.Cleanup(func() { dm.Close() })
+
+	cfg, err := mysql.ParseDSN(myDSN)
+	require.NoError(t, err)
+	cfg.DBName = fmt.Sprintf("dbgold_pk23_%d", time.Now().UnixNano())
+	contentFixtureExec(t, my, "CREATE DATABASE "+cfg.DBName)
+	t.Cleanup(func() { contentFixtureExec(t, my, "DROP DATABASE "+cfg.DBName) })
+	table := cfg.DBName + ".ceshi123"
+	contentFixtureExec(t, my, "CREATE TABLE "+table+" (`23` INT PRIMARY KEY, note VARCHAR(32))")
+	contentFixtureExec(t, my, "INSERT INTO "+table+" VALUES (41,'forty-one'),(-7,'negative'),(99,'last'),(1,'one'),(12,'twelve')")
+	reader, err := source.NewMySQLForDameng(cfg.FormatDSN(), cfg.DBName, source.ConnPoolConfig{})
+	require.NoError(t, err)
+	defer reader.Close()
+
+	for _, workers := range []int{1, 3} {
+		t.Run(fmt.Sprintf("workers_%d", workers), func(t *testing.T) {
+			schema := fmt.Sprintf("DM_PK23_%d", time.Now().UnixNano())
+			createDMScanSchema(t, dm, schema)
+			writer, err := target.NewDaMeng(dmDSN, schema, target.ConnPoolConfig{})
+			require.NoError(t, err)
+			defer writer.Close()
+			job := &Job{LogCh: make(chan string, 1024)}
+			report := NewMigrator(reader, writer, job, Config{
+				Mode: "include", Filter: "ceshi123", Content: "both", TargetDBType: "dameng", TargetSchema: schema,
+				MaxParallel: 1, IntraTableParallel: workers, PageSize: 2, DamengWriteStrategy: "batch", ValidateData: true,
+			}).Run(t.Context())
+			require.False(t, report.HasFailures(), "migration logs: %v", drainLogs(job))
+			require.Equal(t, 1, report.Data.Success)
+			require.NotNil(t, report.DataValidation)
+			require.Len(t, report.DataValidation.Tables, 1)
+			check := report.DataValidation.Tables[0]
+			require.Equal(t, validation.StatusPassed, check.Status, "%+v", check)
+			require.EqualValues(t, 5, check.SourceRows)
+			require.EqualValues(t, 5, check.TargetRows)
+		})
+	}
+}
 
 // Opt-in: use a dedicated MySQL test database and a dedicated DM test schema.
 // The fixture table and newly installed compatibility routines are cleaned up.

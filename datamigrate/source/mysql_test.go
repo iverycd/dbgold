@@ -2,10 +2,48 @@ package source
 
 import (
 	"context"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/stretchr/testify/require"
 )
+
+func TestMySQLReadPageQuotesPrimaryKeys(t *testing.T) {
+	for _, tc := range []struct {
+		table string
+		keys  []string
+		query string
+	}{
+		{"ceshi123", []string{"23"},
+			"SELECT t.* FROM (SELECT `23` FROM `ceshi123` ORDER BY `23` LIMIT 2, 2) temp " +
+				"LEFT JOIN `ceshi123` t ON temp.`23` = t.`23`"},
+		{"Mix`Table", []string{"Shard`ID", "23"},
+			"SELECT t.* FROM (SELECT `Shard``ID`, `23` FROM `Mix``Table` ORDER BY `Shard``ID`, `23` LIMIT 2, 2) temp " +
+				"LEFT JOIN `Mix``Table` t ON temp.`Shard``ID` = t.`Shard``ID` AND temp.`23` = t.`23`"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			db, mock := partitionCatalogMock(t)
+			mock.ExpectQuery(regexp.QuoteMeta(tc.query)).WillReturnRows(sqlmock.NewRows(tc.keys))
+			keys := slices.Clone(tc.keys)
+			r := &MySQLReader{db: db}
+			columns, _, _, err := r.ReadPage(t.Context(), tc.table, keys, 2, 2)
+			require.NoError(t, err)
+			require.Equal(t, tc.keys, columns)
+			require.Equal(t, tc.keys, keys)
+		})
+	}
+}
+
+func TestMySQLCountRowsQuotesTable(t *testing.T) {
+	db, mock := partitionCatalogMock(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `Mix``Table`")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
+	count, err := (&MySQLReader{db: db}).CountRows(t.Context(), "Mix`Table")
+	require.NoError(t, err)
+	require.EqualValues(t, 5, count)
+}
 
 func TestNormalizeMySQLValues(t *testing.T) {
 	values := []interface{}{[]byte("text\x00value"), []byte{0, 1}, []byte{2}, int64(3)}

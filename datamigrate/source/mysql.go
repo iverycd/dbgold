@@ -413,18 +413,22 @@ func (r *MySQLReader) ReadPage(ctx context.Context, table string, pkCols []strin
 	if r.snapshotTx != nil && len(pkCols) == 0 {
 		return r.readSnapshotCursorPage(ctx, table, offset, limit)
 	}
+	quotedTable := mysqlOracleIdent(table)
 	var query string
 	if len(pkCols) > 0 {
-		pkList := strings.Join(pkCols, ", ")
+		quotedPKs := make([]string, len(pkCols))
 		joinConds := make([]string, len(pkCols))
 		for i, col := range pkCols {
-			joinConds[i] = fmt.Sprintf("temp.%s = t.%s", col, col)
+			quotedCol := mysqlOracleIdent(col)
+			quotedPKs[i] = quotedCol
+			joinConds[i] = fmt.Sprintf("temp.%s = t.%s", quotedCol, quotedCol)
 		}
+		pkList := strings.Join(quotedPKs, ", ")
 		query = fmt.Sprintf(
 			`SELECT t.* FROM (SELECT %s FROM %s ORDER BY %s LIMIT %d, %d) temp LEFT JOIN %s t ON %s`,
-			pkList, table, pkList, offset, limit, table, strings.Join(joinConds, " AND "))
+			pkList, quotedTable, pkList, offset, limit, quotedTable, strings.Join(joinConds, " AND "))
 	} else {
-		query = fmt.Sprintf(`SELECT * FROM %s LIMIT %d, %d`, table, offset, limit)
+		query = fmt.Sprintf(`SELECT * FROM %s LIMIT %d, %d`, quotedTable, offset, limit)
 	}
 	rows, err := r.queryContext(ctx, query)
 	if err != nil {
@@ -473,8 +477,7 @@ func (r *MySQLReader) readSnapshotCursorPage(ctx context.Context, table string, 
 		if offset != 0 {
 			return nil, nil, nil, fmt.Errorf("snapshot cursor for %s must start at offset 0", table)
 		}
-		quotedTable := "`" + strings.ReplaceAll(table, "`", "``") + "`"
-		rows, err := r.snapshotTx.QueryContext(ctx, "SELECT * FROM "+quotedTable)
+		rows, err := r.snapshotTx.QueryContext(ctx, "SELECT * FROM "+mysqlOracleIdent(table))
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -1109,13 +1112,12 @@ func (r *MySQLReader) GetTriggerCount(ctx context.Context) (int, error) {
 
 // CountRows 返回指定表的行数
 func (r *MySQLReader) CountRows(ctx context.Context, table string) (int64, error) {
+	quotedTable := mysqlOracleIdent(table)
 	if r.oracleTarget {
-		var count int64
-		err := r.queryRowContext(ctx, "SELECT COUNT(*) FROM "+mysqlOracleIdent(r.dbName)+"."+mysqlOracleIdent(table)).Scan(&count)
-		return count, err
+		quotedTable = mysqlOracleIdent(r.dbName) + "." + quotedTable
 	}
 	var count int64
-	err := r.queryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)).Scan(&count)
+	err := r.queryRowContext(ctx, "SELECT COUNT(*) FROM "+quotedTable).Scan(&count)
 	return count, err
 }
 

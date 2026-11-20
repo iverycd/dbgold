@@ -229,6 +229,40 @@ func TestDamengRepairViewsAndDependencies(t *testing.T) {
 	require.Contains(t, w.views[0].Definition, `"V"."ROW_ID_2"`)
 }
 
+func TestMySQLDamengMappedViewWithNullComparison(t *testing.T) {
+	r, w, m := repairFixture("mysql")
+	m.cfg.Content = "schema_only"
+	m.cfg.TargetSchema = "SZX_EXCHANGE"
+	// The fixture's existing ROWID columns activate column mapping for all views.
+	r.tables = append(r.tables, "wyceshi", "wycc")
+	joinColumn := source.ColumnInfo{Name: "operateuserbaseouguid", DataType: "varchar", Length: 36}
+	r.ddl["wyceshi"] = &source.TableDDLInfo{TableName: "wyceshi", Columns: []source.ColumnInfo{
+		{Name: "wycc", DataType: "int"}, {Name: "operatedate", DataType: "datetime"},
+		{Name: "yearflag", DataType: "int"}, joinColumn,
+	}}
+	r.ddl["wycc"] = &source.TableDDLInfo{TableName: "wycc", Columns: []source.ColumnInfo{
+		{Name: "b", DataType: "int"}, {Name: "dd", DataType: "int"}, {Name: "ee", DataType: "int"},
+		{Name: "rowguid", DataType: "varchar", Length: 36}, joinColumn,
+	}}
+	r.views = []source.ViewInfo{{ViewName: "jyjtest6", Definition: `
+		SELECT wycc.b AS b, wycc.dd AS dd, wycc.ee AS ee, wyceshi.wycc AS wycc,
+		       wyceshi.operatedate AS operatedate, wyceshi.operateuserbaseouguid AS operateuserbaseouguid,
+		       wycc.rowguid AS rowguid
+		FROM wyceshi CROSS JOIN wycc
+		WHERE ((wyceshi.yearflag <> NULL) AND (wycc.operateuserbaseouguid = wyceshi.operateuserbaseouguid))`}}
+
+	report := m.Run(context.Background())
+	require.Zero(t, report.Views.Failed, "%+v", report.Views.Items)
+	require.Equal(t, 1, report.Views.Success)
+	require.Len(t, w.views, 1)
+	view := w.views[0]
+	require.Equal(t, "jyjtest6", view.ViewName)
+	require.Contains(t, view.Definition, `"SZX_EXCHANGE"."WYCESHI" CROSS JOIN "SZX_EXCHANGE"."WYCC"`)
+	require.Contains(t, view.Definition, `"WYCESHI"."YEARFLAG" <> NULL`)
+	require.Contains(t, view.Definition, ` AND `)
+	require.Contains(t, view.Definition, `"WYCC"."OPERATEUSERBASEOUGUID" = "WYCESHI"."OPERATEUSERBASEOUGUID"`)
+}
+
 func TestDamengObjectOnlyExternalReference(t *testing.T) {
 	_, w, m := repairFixture("sqlserver")
 	m.cfg.Objects = []string{"foreign_keys"}

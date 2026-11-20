@@ -32,12 +32,12 @@ func TestMySQLDamengReadPreservesZeroDates(t *testing.T) {
 		sqlmock.NewColumn("At").OfType("DATETIME", []byte{}),
 		sqlmock.NewColumn("Text").OfType("VARCHAR", []byte{}),
 	}
-	mock.ExpectQuery("SELECT \\* FROM MixedTable LIMIT 0, 10").WillReturnRows(
+	mock.ExpectQuery("SELECT \\* FROM `Mixed``Table` LIMIT 0, 10").WillReturnRows(
 		sqlmock.NewRowsWithColumnDefinition(cols...).
 			AddRow([]byte("0000-00-00 00:00:00"), []byte("0000-00-00")).
 			AddRow([]byte("2024-00-01 12:34:56.123456"), []byte("unchanged")).
 			AddRow([]byte("2024-02-29 12:34:56.123456"), nil))
-	columns, types, rows, err := r.ReadPage(context.Background(), "MixedTable", nil, 0, 10)
+	columns, types, rows, err := r.ReadPage(context.Background(), "Mixed`Table", nil, 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"At", "Text"}, columns)
 	require.Equal(t, []string{"DATETIME", "VARCHAR"}, types)
