@@ -263,6 +263,11 @@ func (m *Migrator) preparePartitionsWithProgress(ctx context.Context, progress f
 		if spec == nil {
 			continue
 		}
+		if m.isMySQLDameng() {
+			// DM quotes the root table in uppercase. Catalog checks and leaf
+			// scans use the exact physical root, independently of leaf names.
+			entry.TargetTable = strings.ToUpper(entry.TargetTable)
+		}
 		s.hasPartitions = true
 		entry.Source = source.ClonePartitionSpec(spec)
 		entry.Status = "ready"

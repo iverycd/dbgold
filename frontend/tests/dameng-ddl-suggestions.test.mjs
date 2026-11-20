@@ -418,6 +418,24 @@ test('failure details render manual DDL, copy exactly the suggestion, and export
   } finally { scope.stop() }
 })
 
+test('data copy errors show and export a manual ALTER for the existing table', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const h = scope.run(harness)
+    const sql = 'ALTER TABLE "APP"."CG_WIDE" ENABLE USING LONG ROW;'
+    h.p.report.value = report({ name: 'cg_wide', error: '页内第 41 行: Error -2665: 记录超长', suggestion: '手动启用后接续迁移此表', suggested_ddl: sql }, 'data')
+    const html = await renderToString(h.app)
+    assert.match(html, /建议 DDL（手动执行）/)
+    assert.match(html, /页内第 41 行/)
+    await h.clicks.find(button => button.label === '复制建议 DDL').handler()
+    assert.deepEqual(h.copied, [sql])
+    h.p.exportReport()
+    const text = await h.downloads[0].text()
+    assert.ok(text.includes('建议 DDL（手动执行）'))
+    assert.ok(text.includes(sql))
+  } finally { scope.stop() }
+})
+
 test('old reports omit the suggestion section and remain exportable', async () => {
   const scope = Vue.effectScope()
   try {

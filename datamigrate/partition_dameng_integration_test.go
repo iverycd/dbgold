@@ -38,15 +38,13 @@ func TestMySQLDamengPartitionIntegration(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			name := fmt.Sprintf("DMP_%s_%d", method, time.Now().UnixNano())
 			schema := name
-			_, err := dm.ExecContext(ctx, "CREATE SCHEMA "+quote(schema)+" AUTHORIZATION SYSDBA")
-			require.NoError(t, err)
-			defer dm.ExecContext(context.Background(), "DROP SCHEMA "+quote(schema)+" CASCADE")
+			createDMScanSchema(t, dm, schema)
 			parts := []string{"LOW", "MIDDLE", "HIGH", "EMPTY"}
 			clause := "PARTITION BY RANGE (`K`) (PARTITION `LOW` VALUES LESS THAN (0),PARTITION `MIDDLE` VALUES LESS THAN (10),PARTITION `HIGH` VALUES LESS THAN (20),PARTITION `EMPTY` VALUES LESS THAN (MAXVALUE))"
 			if method == "LIST" {
 				clause = "PARTITION BY LIST (`K`) (PARTITION `LOW` VALUES IN (-1),PARTITION `MIDDLE` VALUES IN (0,9),PARTITION `HIGH` VALUES IN (10,11),PARTITION `EMPTY` VALUES IN (20))"
 			}
-			_, err = my.ExecContext(ctx, "CREATE TABLE `"+name+"` (`K` INT NOT NULL,`PAYLOAD` VARCHAR(80)) "+clause)
+			_, err := my.ExecContext(ctx, "CREATE TABLE `"+name+"` (`K` INT NOT NULL,`PAYLOAD` VARCHAR(80)) "+clause)
 			require.NoError(t, err)
 			defer my.ExecContext(context.Background(), "DROP TABLE IF EXISTS `"+name+"`")
 			_, err = my.ExecContext(ctx, "INSERT INTO `"+name+"` VALUES (-1,'负数'),(0,'边界'),(9,'中文'),(10,'高区'),(11,NULL)")

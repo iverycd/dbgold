@@ -120,6 +120,26 @@ func TestPartitionCompileRangeAndListProduceTargetNativeDDL(t *testing.T) {
 	}
 }
 
+func TestDamengLongRowFollowsPartitionDefinitions(t *testing.T) {
+	for _, movement := range []string{"enabled", "disabled", ""} {
+		info := compilerRangeFixture()
+		info.Partition.RowMovement = movement
+		info.Columns = append(info.Columns, source.ColumnInfo{Name: "Memo", DataType: "varchar", Length: 100})
+		base := compilerBase(t, info, "dameng")
+		plan, err := Compile(info, base, compilerProfile("dameng"), Options{SourceType: "mysql", TargetType: "dameng", TargetSchema: "Dst"})
+		require.NoError(t, err)
+		sql := plan.Statements[1].SQL
+		require.Equal(t, 1, strings.Count(sql, dialect.DamengLongRowStorage))
+		end := "\n) " + dialect.DamengLongRowStorage
+		if movement == "enabled" {
+			end += " ENABLE ROW MOVEMENT"
+		} else if movement == "disabled" {
+			end += " DISABLE ROW MOVEMENT"
+		}
+		require.True(t, strings.HasSuffix(sql, end), sql)
+	}
+}
+
 func TestPartitionCompileSQLServerPreservesNamesAsExplicitOrdinalMapping(t *testing.T) {
 	info := compilerRangeFixture()
 	plan, err := Compile(info, compilerBase(t, info, "sqlserver"), compilerProfile("sqlserver"), Options{SourceType: "mysql", TargetType: "sqlserver", TargetSchema: "Dst"})

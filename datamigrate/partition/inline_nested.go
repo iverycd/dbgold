@@ -1,14 +1,40 @@
 package partition
 
 import (
-	"dbgold/datamigrate/source"
 	"fmt"
 	"strings"
+
+	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/source"
 )
 
-func (c *compiler) inline(s *source.PartitionSpec, depth int) (string, error) {
+func (c *compiler) inlineTable(base string, s *source.PartitionSpec) (string, error) {
+	clause, err := c.inline(s)
+	if err != nil {
+		return "", err
+	}
+	base = strings.TrimSuffix(strings.TrimSpace(base), ";")
+	if c.opt.SourceType == "mysql" && c.opt.TargetType == "dameng" {
+		// The root STORAGE attribute follows the partition definitions and
+		// precedes ROW MOVEMENT. The dialect emits it as an exact suffix.
+		if columns, found := strings.CutSuffix(base, " "+dialect.DamengLongRowStorage); found {
+			base = columns
+			clause += " " + dialect.DamengLongRowStorage
+		}
+	}
+	if (c.profile.Features["row_movement_clause"] || s.Interval != nil) && s.RowMovement != "" {
+		if s.RowMovement == "enabled" {
+			clause += " ENABLE ROW MOVEMENT"
+		} else {
+			clause += " DISABLE ROW MOVEMENT"
+		}
+	}
+	return base + "\n" + clause, nil
+}
+
+func (c *compiler) inline(s *source.PartitionSpec) (string, error) {
 	if s.Interval != nil {
-		return c.inlineInterval(s, depth)
+		return c.inlineInterval(s)
 	}
 	var child *source.PartitionSpec
 	for _, p := range s.Partitions {
@@ -18,10 +44,7 @@ func (c *compiler) inline(s *source.PartitionSpec, depth int) (string, error) {
 		}
 	}
 	if child == nil {
-		return c.inlineFlat(s, depth)
-	}
-	if depth > 0 {
-		return "", fmt.Errorf("原生目标不能表达超过两级的分区层次")
+		return c.inlineFlat(s)
 	}
 	if c.profile.Features["inline_mysql"] && (baseMethod(s.Method) != "RANGE" && baseMethod(s.Method) != "LIST" || baseMethod(child.Method) != "HASH" && baseMethod(child.Method) != "KEY") {
 		return "", fmt.Errorf("MySQL 原生子分区只能在 RANGE/LIST 下使用 HASH/KEY，不能改变源子分区路由")
@@ -52,7 +75,7 @@ func (c *compiler) inline(s *source.PartitionSpec, depth int) (string, error) {
 		parent := source.ClonePartitionSpec(s)
 		parent.Partitions = []source.Partition{p}
 		parent.Partitions[0].Subpartition = nil
-		flat, e := c.inlineFlat(parent, 1)
+		flat, e := c.inlineFlat(parent)
 		if e != nil {
 			return "", e
 		}
@@ -61,7 +84,7 @@ func (c *compiler) inline(s *source.PartitionSpec, depth int) (string, error) {
 			return "", fmt.Errorf("父分区声明边界不完整")
 		}
 		definition := strings.TrimSuffix(strings.TrimPrefix(flat, prefix), "\n)")
-		sub, e := c.inlineFlat(p.Subpartition, 1)
+		sub, e := c.inlineFlat(p.Subpartition)
 		if e != nil {
 			return "", e
 		}
@@ -75,12 +98,5 @@ func (c *compiler) inline(s *source.PartitionSpec, depth int) (string, error) {
 		definitions = append(definitions, definition+" (\n    "+body+"\n  )")
 	}
 	clause := "PARTITION BY " + parentMethod + " (" + c.keys(s) + ") SUBPARTITION BY " + childMethod + " (" + c.keys(child) + ") (\n  " + strings.Join(definitions, ",\n  ") + "\n)"
-	if c.profile.Features["row_movement_clause"] && s.RowMovement != "" {
-		if s.RowMovement == "enabled" {
-			clause += " ENABLE ROW MOVEMENT"
-		} else {
-			clause += " DISABLE ROW MOVEMENT"
-		}
-	}
 	return clause, nil
 }

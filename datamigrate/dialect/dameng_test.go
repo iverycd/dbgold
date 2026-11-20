@@ -62,7 +62,7 @@ CREATE TABLE "APP"."USERS" (
   "NAME" VARCHAR2(100) NOT NULL,
   "AGE" INT DEFAULT '0',
   "CREATED" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)`
+) STORAGE(USING LONG ROW)`
 	if got := JoinSQL(stmts); got != want {
 		t.Errorf("dameng create table mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -90,13 +90,40 @@ CREATE TABLE "EPOINTBID_TP8_0_51_2_JS"."TABLE_01LIXIANGMINGXI" (
   "备注" VARCHAR2(1 CHAR),
   "立项单号" VARCHAR2(200 CHAR) NOT NULL DEFAULT '未编号',
   "状态代码" CHAR(8 CHAR)
-)`
+) STORAGE(USING LONG ROW)`
 	if got := JoinSQL(stmts); got != want {
 		t.Errorf("dameng zero-length character DDL mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 	for i, length := range []int64{0, 0, 0, 200, 8} {
 		if got := info.Columns[i].Length; got != length {
 			t.Errorf("source column %s length changed: got %d, want %d", info.Columns[i].Name, got, length)
+		}
+	}
+}
+
+func TestDamengLongRowUsesMappedMySQLType(t *testing.T) {
+	for _, tc := range []struct {
+		source, column string
+		opt            TypeOpt
+		want           bool
+	}{
+		{"mysql", "char", TypeOpt{}, false},
+		{"mysql", "char", TypeOpt{UseNvarchar2: true}, true},
+		{"mysql", "varchar", TypeOpt{CharInLength: true}, true},
+		{"mysql", "tinytext", TypeOpt{}, true},
+		{"mysql", "enum", TypeOpt{}, true},
+		{"mysql", "set", TypeOpt{}, true},
+		{"mysql", "longtext", TypeOpt{}, false},
+		{"mysql", "blob", TypeOpt{}, false},
+		{"oracle", "VARCHAR2", TypeOpt{}, false},
+	} {
+		info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "X", DataType: tc.column, Length: 32}}}
+		sql, err := NewDaMeng().CreateTableStatements("APP", info, tc.source, tc.opt, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.HasSuffix(sql[1].SQL, " "+DamengLongRowStorage); got != tc.want {
+			t.Errorf("%s/%s %+v: %s", tc.source, tc.column, tc.opt, sql[1].SQL)
 		}
 	}
 }

@@ -60,6 +60,11 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 	if p.TargetTable == "" {
 		p.TargetTable = obj.TargetName
 	}
+	if r.DBType() == "mysql" && w.DBType() == "dameng" {
+		// Historical ledgers can retain the original case. DM catalog
+		// predicates must match the name used by the target dialect.
+		p.TargetTable = strings.ToUpper(p.TargetTable)
+	}
 	schema, err := ops.schema(ctx, w)
 	if err != nil {
 		return p, err
@@ -367,7 +372,7 @@ func sqlServerRawRecoveryColumns(cols []source.ColumnInfo) []source.ColumnInfo {
 }
 
 func recoveryName(cfg Config, dst, src, s string) string {
-	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) || src == "oscar" && dst == "dameng" {
+	if dst == "oracle" || dst == "oscar" || oracleDamengUpperNames(src, dst) || (src == "oscar" || src == "mysql") && dst == "dameng" {
 		return strings.ToUpper(s)
 	}
 	if cfg.LowerCaseNames {

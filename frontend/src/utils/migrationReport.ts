@@ -239,6 +239,7 @@ export function reportCategories(report: MigrationReport) {
       failed: isTrigger ? 0 : category.failed,
       items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
         ...item, ...describeFailure(item, key, dataIssues),
+        suggestedDDLLabel: key === 'data' ? '建议 DDL（手动执行）' : '建议 DDL（手动创建）',
         repairKind: key.startsWith('native:') ? key.slice(7) : key,
         nameLabel: key === 'indexes' && failureStage(item) !== 'metadata' ? '索引名称：' : '',
         targetNameLabel: failureStage(item) === 'unsupported' ? '目标索引名称（计划）：' : '目标索引名称：',
@@ -392,7 +393,7 @@ export function formatReportCategories(report: MigrationReport): string[] {
         lines.push(`    建议列名：${rename.source} → ${rename.target}`)
       }
       if (item.suggested_ddl) {
-        appendReportDDL(lines, '    建议 DDL（手动创建）：', item.suggested_ddl)
+        appendReportDDL(lines, `    ${item.suggestedDDLLabel}：`, item.suggested_ddl)
       }
     }
   }

@@ -26,6 +26,9 @@ type DaMengDialect struct {
 	oracleDate bool
 }
 
+// DamengLongRowStorage lets DM move long variable-length strings off the row.
+const DamengLongRowStorage = "STORAGE(USING LONG ROW)"
+
 func (d *DaMengDialect) SetOracleDamengDate(enabled bool) { d.oracleDate = enabled }
 func (d *DaMengDialect) OracleDamengUsesDate() bool       { return d.oracleDate }
 
@@ -78,6 +81,7 @@ func (d *DaMengDialect) CreateTableStatements(schema string, info *source.TableD
 // and use already-normalized replacement columns without changing source metadata.
 func (d *DaMengDialect) createTableStatements(schema string, info *source.TableDDLInfo, srcType string, opt TypeOpt, name, columnName NameFunc) ([]Statement, error) {
 	var cols []string
+	var longRow bool
 	for _, col := range info.Columns {
 		if srcType == "oracle" {
 			if err := typemap.ValidateOracleDamengColumn(col); err != nil {
@@ -90,6 +94,9 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 			}
 		}
 		dmType := d.MapType(col, srcType, opt)
+		if srcType == "mysql" && (strings.HasPrefix(dmType, "VARCHAR2(") || strings.HasPrefix(dmType, "NVARCHAR2(")) {
+			longRow = true
+		}
 		if srcType == "oscar" {
 			var err error
 			dmType, err = typemap.OscarToDamengChecked(col)
@@ -156,6 +163,9 @@ func (d *DaMengDialect) createTableStatements(schema string, info *source.TableD
 	// 否则被其他表外键引用的表无法 DROP(残留旧表导致重建报"已存在")。
 	dropSQL := fmt.Sprintf(`DROP TABLE %s CASCADE CONSTRAINTS`, qn)
 	createSQL := fmt.Sprintf("CREATE TABLE %s (\n%s\n)", qn, strings.Join(cols, ",\n"))
+	if longRow {
+		createSQL += " " + DamengLongRowStorage
+	}
 	return []Statement{{SQL: dropSQL}, {SQL: createSQL}}, nil
 }
 

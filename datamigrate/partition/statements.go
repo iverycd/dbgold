@@ -65,7 +65,7 @@ func (c *compiler) pgChildren(schema, parent string, s *source.PartitionSpec) ([
 	return out, nil
 }
 
-func (c *compiler) inlineFlat(s *source.PartitionSpec, depth int) (string, error) {
+func (c *compiler) inlineFlat(s *source.PartitionSpec) (string, error) {
 	method := method(s.Method)
 	nativeMethod, methodErr := mysqlKeyMethodSQL(s)
 	if methodErr != nil {
@@ -126,13 +126,6 @@ func (c *compiler) inlineFlat(s *source.PartitionSpec, depth int) (string, error
 		defs = append(defs, def)
 	}
 	clause := "PARTITION BY " + nativeMethod + " (" + c.keys(s) + ") (\n  " + strings.Join(defs, ",\n  ") + "\n)"
-	if depth == 0 && c.profile.Features["row_movement_clause"] && s.RowMovement != "" {
-		if s.RowMovement == "enabled" {
-			clause += " ENABLE ROW MOVEMENT"
-		} else {
-			clause += " DISABLE ROW MOVEMENT"
-		}
-	}
 	return clause, nil
 }
 

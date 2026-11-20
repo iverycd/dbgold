@@ -190,7 +190,11 @@
         <a-alert v-if="sequencePlanMessage" type="info">{{ sequencePlanMessage }}</a-alert>
         <p v-if="editing.object.dependencies?.length">依赖：{{ dependencyNames(editing.object).join('、') }}</p>
         <p v-if="editing.object.foreign_key">引用：{{ editing.object.foreign_key.Columns.join(', ') }} → {{ editing.object.foreign_key.RefSchema }}.{{ editing.object.foreign_key.RefTable }} ({{ editing.object.foreign_key.RefColumns.join(', ') }})</p>
-        <a-collapse><a-collapse-item v-if="editing.object.source_ddl" key="source" header="源端定义（只读，仅供手工适配参考）"><pre class="sql-preview">{{ editing.object.source_ddl }}</pre></a-collapse-item><a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" header="建议 DDL（需显式采用或整理到对应执行单元）"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item><a-collapse-item key="original" header="原始目标 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || (canEditRepairDDL(editing.object) ? '未生成目标 DDL，请根据源端定义手动编写。' : '该记录没有可执行的对象 DDL。') }}</pre></a-collapse-item></a-collapse>
+        <a-collapse>
+          <a-collapse-item v-if="editing.object.source_ddl" key="source" header="源端定义（只读，仅供手工适配参考）"><pre class="sql-preview">{{ editing.object.source_ddl }}</pre></a-collapse-item>
+          <a-collapse-item v-if="editing.object.suggested_ddl" key="suggested" :header="editing.object.kind === 'data' ? '建议 DDL（手动执行）' : '建议 DDL（需显式采用或整理到对应执行单元）'"><pre class="sql-preview">{{ editing.object.suggested_ddl }}</pre></a-collapse-item>
+          <a-collapse-item key="original" header="原始目标 DDL（只读）"><pre class="sql-preview">{{ editing.object.ddl || (canEditRepairDDL(editing.object) ? '未生成目标 DDL，请根据源端定义手动编写。' : '该记录没有可执行的对象 DDL。') }}</pre></a-collapse-item>
+        </a-collapse>
         <div v-if="triggerPlanAvailable" class="editor-toolbar">
           <a-button size="small" :loading="refreshingTriggerPlan" :disabled="!canRefreshTriggerPlan" @click="refreshTriggerPlan">重新生成触发器方案</a-button>
           <span class="muted">读取当前源定义，核对后保存方案，再确认执行。</span>

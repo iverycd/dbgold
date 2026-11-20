@@ -264,10 +264,7 @@ func IntervalSQL(rule *source.PartitionInterval) (string, error) {
 	return raw, nil
 }
 
-func (c *compiler) inlineInterval(s *source.PartitionSpec, depth int) (string, error) {
-	if depth != 0 || s.Interval == nil {
-		return "", fmt.Errorf("INTERVAL 只支持冻结的根规则")
-	}
+func (c *compiler) inlineInterval(s *source.PartitionSpec) (string, error) {
 	expr, e := IntervalSQL(s.Interval)
 	if e != nil {
 		return "", e
@@ -287,13 +284,6 @@ func (c *compiler) inlineInterval(s *source.PartitionSpec, depth int) (string, e
 		return "", fmt.Errorf("INTERVAL 没有初始 RANGE")
 	}
 	clause := "PARTITION BY RANGE (" + c.keys(s) + ") INTERVAL (" + expr + ") (\n  " + strings.Join(defs, ",\n  ") + "\n)"
-	if s.RowMovement != "" {
-		if s.RowMovement == "enabled" {
-			clause += " ENABLE ROW MOVEMENT"
-		} else {
-			clause += " DISABLE ROW MOVEMENT"
-		}
-	}
 	return clause, nil
 }
 

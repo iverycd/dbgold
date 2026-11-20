@@ -59,7 +59,7 @@ func (m *Migrator) freezeDataValidation(ctx context.Context, tables []string) {
 		frozen := frozenValidationTable{name: table}
 		// DaMengDialect quotes the uppercase physical name. The validation
 		// scanner uses exact catalog names for both metadata and row reads.
-		if m.isMySQLDameng() && m.cfg.MigrationPurpose != "cdc" && !m.hasPartitionPlan(table) {
+		if m.isMySQLDameng() && m.cfg.MigrationPurpose != "cdc" {
 			frozen.target = strings.ToUpper(m.objName(table))
 		}
 		if err := m.migrationTableError(table); err != nil {

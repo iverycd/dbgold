@@ -182,6 +182,9 @@ func (w *DaMengWriter) writeScalarRows(ctx context.Context, tx *sql.Tx, insertSQ
 			conv = w.convertRow(row, colTypes)
 		}
 		if _, err := stmt.ExecContext(ctx, conv...); err != nil {
+			if w.srcType == "mysql" {
+				return fmt.Errorf("表 %s 页内第 %d 行: %w", table, rowIndex+1, err)
+			}
 			return err
 		}
 	}

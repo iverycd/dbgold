@@ -154,7 +154,7 @@
                     </template>
                   </div>
                   <div v-if="item.suggestion || item.suggested_ddl || item.column_renames?.length" class="failure-suggestion">
-                    <div class="ddl-header"><span>{{ item.suggested_ddl || item.column_renames?.length ? '建议 DDL（手动创建）' : '处理建议' }}</span></div>
+                    <div class="ddl-header"><span>{{ item.suggested_ddl || item.column_renames?.length ? item.suggestedDDLLabel : '处理建议' }}</span></div>
                     <a-alert v-if="item.suggestion" type="warning">{{ item.suggestion }}</a-alert>
                     <ul v-if="item.column_renames?.length" class="column-renames">
                       <li v-for="(rename, index) in item.column_renames" :key="index">

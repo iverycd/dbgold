@@ -758,7 +758,15 @@ func (m *Migrator) run(ctx context.Context) MigrationReport {
 				} else if !m.isOracleDameng() || ctx.Err() == nil {
 					firstErr := err.Error()
 					report.Data.Failed++
-					report.Data.Items = append(report.Data.Items, ObjectResult{Name: tbl, DDL: "", Error: firstErr})
+					item := ObjectResult{Name: tbl, Error: firstErr}
+					if m.isMySQLDameng() && copyIssueKind(err) == copyError {
+						schema := m.cfg.TargetSchema
+						if w, ok := m.writer.(interface{ EffectiveSchema() string }); ok {
+							schema = w.EffectiveSchema()
+						}
+						item.SuggestMySQLDamengLongRow(schema, m.objName(tbl), completed[tbl])
+					}
+					report.Data.Items = append(report.Data.Items, item)
 					report.addDataIssue(tbl, m.objName(tbl), copyIssueKind(err), firstErr)
 					dataFailed[tbl] = true
 					m.blockMigrationTable(tbl, "data", fmt.Errorf("%s", firstErr))

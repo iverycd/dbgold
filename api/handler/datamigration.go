@@ -1287,6 +1287,9 @@ func GetDataMigrationReport(c *gin.Context) {
 		return
 	}
 	body, err := enrichAutoRepairSourceTypes([]byte(r.ReportJSON))
+	if err == nil && dbJob.SrcDBType == "mysql" && dbJob.DstDBType == "dameng" {
+		body, err = enrichMySQLDamengLongRowReport(body, dbJob.DstSchema)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "报告格式错误"})
 		return

@@ -88,11 +88,7 @@ func Compile(info *source.TableDDLInfo, base []dialect.Statement, profile Profil
 		}
 		p.Rule = "native-declarative-partitions"
 	case profile.Features["inline_oracle"] || profile.Features["inline_mysql"] || profile.Features["inline_gauss"]:
-		var clause string
-		clause, err = c.inline(p.Target, 0)
-		if err == nil {
-			p.Statements[create].SQL = strings.TrimSuffix(strings.TrimSpace(p.Statements[create].SQL), ";") + "\n" + clause
-		}
+		p.Statements[create].SQL, err = c.inlineTable(p.Statements[create].SQL, p.Target)
 		p.Rule = "native-inline-partitions"
 	case profile.Features["native_sqlserver"]:
 		p.Statements, err = c.sqlServer(p.Statements, create, p.Target, root)
