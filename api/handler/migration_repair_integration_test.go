@@ -198,3 +198,99 @@ func TestRepairMySQLAPIIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "failed", unchanged.Status)
 }
+
+func TestMySQLSelectedViewsRepairJobIntegration(t *testing.T) {
+	dsn := os.Getenv("DBGOLD_REPAIR_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("set DBGOLD_REPAIR_MYSQL_DSN for disposable view databases")
+	}
+	cfg, err := mysql.ParseDSN(dsn)
+	require.NoError(t, err)
+	host, portString, err := net.SplitHostPort(cfg.Addr)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portString)
+	require.NoError(t, err)
+	db, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, store.InitWithError(&config.Config{SQLitePath: filepath.Join(t.TempDir(), "view-repair.db")}))
+
+	createConnection := func(prefix string) *store.Connection {
+		name := fmt.Sprintf("dbgold_%s_%d", prefix, time.Now().UnixNano())
+		_, err := db.Exec("CREATE DATABASE " + name)
+		require.NoError(t, err)
+		conn := &store.Connection{OwnerID: 1, Name: name, DBType: "mysql", Host: host, Port: port, Database: name, Username: cfg.User, Password: cfg.Passwd}
+		require.NoError(t, store.CreateConnection(conn))
+		return conn
+	}
+	src := createConnection("src")
+	defer db.Exec("DROP DATABASE " + src.Database)
+	dst := createConnection("dst")
+	defer db.Exec("DROP DATABASE " + dst.Database)
+	for _, stmt := range []string{
+		"CREATE TABLE " + src.Database + ".base (id INTEGER)",
+		"CREATE VIEW " + src.Database + ".broken AS SELECT id FROM " + src.Database + ".base",
+		"CREATE VIEW " + src.Database + ".good AS SELECT 42 AS answer",
+		"CREATE VIEW " + src.Database + ".unselected AS SELECT 0 AS unused",
+	} {
+		_, err = db.Exec(stmt)
+		require.NoError(t, err)
+	}
+	body := repairJSON(migrateViewsRequest{SrcConnID: src.ID, DstConnID: dst.ID, TargetSchema: dst.Database, ViewNames: []string{"broken", "good"}})
+	resp := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(resp)
+	c.Set("userID", uint(1))
+	c.Set("role", "user")
+	c.Request = httptest.NewRequest(http.MethodPost, "/migration/view-migrate", strings.NewReader(body))
+	MigrateViews(c)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+	var outcome struct {
+		JobID   string                     `json:"job_id"`
+		Results []datamigrate.ObjectResult `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &outcome))
+	require.NotEmpty(t, outcome.JobID)
+	require.Len(t, outcome.Results, 2)
+	job, err := store.GetDataMigrationJob(outcome.JobID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", job.Status)
+	require.Equal(t, dst.Database, job.DstSchema)
+	report, err := store.GetDataMigrationReport(job.JobID)
+	require.NoError(t, err)
+	var original datamigrate.MigrationReport
+	require.NoError(t, json.Unmarshal([]byte(report.ReportJSON), &original))
+	require.Equal(t, 1, original.Views.Success)
+	require.Equal(t, 1, original.Views.Failed)
+	var targetObjects string
+	require.NoError(t, db.QueryRow("SELECT GROUP_CONCAT(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA=?", dst.Database).Scan(&targetObjects))
+	require.Equal(t, "good", targetObjects)
+	ledger, _, err := repairObjects(job.JobID)
+	require.NoError(t, err)
+	require.Len(t, ledger, 2)
+	var failed repair.Object
+	for _, o := range ledger {
+		if o.TargetName == "broken" {
+			failed = o
+		}
+	}
+	require.Equal(t, "failed", failed.Status)
+	require.Len(t, failed.Units, 1)
+	require.Equal(t, failed.DDL, failed.Units[0].SQL)
+	_, err = db.Exec("CREATE TABLE " + dst.Database + ".base (id INTEGER)")
+	require.NoError(t, err)
+	path := "/jobs/" + job.JobID + "/repairs/" + failed.ID
+	saved := repairRequest(t, http.MethodPut, path, repairJSON(map[string]any{"version": 1, "units": failed.Units, "reviewed": true}), 1, SaveMigrationRepairDraft)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	started := repairRequest(t, http.MethodPost, path, repairJSON(map[string]any{"version": 2, "request_id": "unchanged-view", "confirmed": true}), 1, ExecuteMigrationRepair)
+	require.Equal(t, http.StatusAccepted, started.Code, started.Body.String())
+	var attempt store.MigrationRepairAttempt
+	require.Eventually(t, func() bool {
+		return store.DB.Where("job_id = ? AND request_id = ?", job.JobID, "unchanged-view").First(&attempt).Error == nil && attempt.Status != "running"
+	}, 10*time.Second, 10*time.Millisecond)
+	require.Equal(t, "succeeded", attempt.Status, attempt.Error)
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM "+dst.Database+".broken").Scan(&count))
+	after, err := store.GetDataMigrationReport(job.JobID)
+	require.NoError(t, err)
+	require.Equal(t, report.ReportJSON, after.ReportJSON)
+}

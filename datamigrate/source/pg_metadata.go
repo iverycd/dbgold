@@ -869,10 +869,10 @@ func (r *PostgresReader) readPGSnapshotForTarget(ctx context.Context, selected m
 				rows.Close()
 				return nil, fmt.Errorf("视图 %s 定义不可读取", v.ViewName)
 			}
-			snap.Objects = append(snap.Objects, PGObject{Kind: "view", Name: v.ViewName, Reason: "视图定义不可读取"})
-			continue
+			v.Unsupported = "视图定义不可读取"
+		} else {
+			v.Definition = strings.TrimRight(strings.TrimSpace(def.String), ";")
 		}
-		v.Definition = strings.TrimRight(strings.TrimSpace(def.String), ";")
 		snap.Views = append(snap.Views, v)
 	}
 	err = pgFinishOptionalRows(rows)
@@ -883,12 +883,15 @@ func (r *PostgresReader) readPGSnapshotForTarget(ctx context.Context, selected m
 		pgObjectMetadataFailure(snap, "view", "视图元数据", err)
 	}
 	for i := range snap.Views {
+		if snap.Views[i].Unsupported != "" {
+			continue
+		}
 		info, e := r.pgColumnsForTarget(ctx, snap.Views[i].ViewName, neutral)
 		if e != nil {
 			if !partial || failure.IsTaskError(e) {
 				return nil, e
 			}
-			snap.Objects = append(snap.Objects, PGObject{Kind: "view", Name: snap.Views[i].ViewName, Reason: e.Error()})
+			snap.Views[i].Unsupported = e.Error()
 			continue
 		}
 		snap.Views[i].Columns = info.Columns

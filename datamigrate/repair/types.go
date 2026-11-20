@@ -30,6 +30,8 @@ type Object struct {
 	PGOracleSequence      *pgoracle.SequencePlan `json:"pg_oracle_sequence,omitempty"`
 	GaussDBDistribution   []string               `json:"gaussdb_distribution,omitempty"`
 	PartitionPlan         *partition.Plan        `json:"partition_plan,omitempty"`
+	NativeViewDraft       *NativeViewDraft       `json:"native_view_draft,omitempty"`
+	NativeViewEditable    bool                   `json:"native_view_editable,omitempty"`
 	ManualTrigger         *ManualTriggerPlan     `json:"manual_trigger,omitempty"`
 	ManualTriggerEditable bool                   `json:"manual_trigger_editable,omitempty"` // Response capability only; never execution authority.
 	Native                *damengnative.Object   `json:"native,omitempty"`
@@ -234,7 +236,7 @@ func (o Object) TrustedNative() bool {
 			return false
 		}
 	}
-	return len(o.Units) > 0
+	return len(o.Units) > 0 && (o.NativeViewDraft == nil || o.trustedViewRevision())
 }
 
 type RecoveryPreview struct {

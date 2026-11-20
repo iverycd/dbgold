@@ -84,10 +84,11 @@ func TestPGOracleSnapshotKeepsRawChecksAndHealthyTables(t *testing.T) {
 	empty(`SELECT t.relname,i.relname FROM`)
 	empty(`SELECT t.relname,g.tgname`)
 	empty(`SELECT p.proname,oidvectortypes`)
-	empty(`SELECT c.relname,pg_get_viewdef`)
+	mock.ExpectQuery(`SELECT c.relname,pg_get_viewdef`).WithArgs("MiXeD").WillReturnRows(sqlmock.NewRows([]string{"name", "definition"}).AddRow("HiddenView", nil)).RowsWillBeClosed()
 	empty(`SELECT c.oid,n.nspname,c.relname`)
 	snap, err := r.ReadPGOracleSnapshot(context.Background(), nil)
 	require.NoError(t, err)
+	require.Equal(t, []ViewInfo{{ViewName: "HiddenView", Unsupported: "视图定义不可读取"}}, snap.Views)
 	require.Len(t, snap.Tables, 2)
 	require.NotEmpty(t, snap.Tables[0].Unsupported)
 	good := snap.Tables[1]

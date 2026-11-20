@@ -6,6 +6,9 @@ func repairDiagnostic(item ObjectResult) bool {
 	if item.Stage == "metadata" || item.Stage == "diagnostic" {
 		return true
 	}
+	if item.ObjectKind == "view" && item.Stage == "preflight" && item.SourceName != "" && item.TargetName != "" && item.TargetSchema != "" {
+		return false
+	}
 	// Older reports did not mark global failures with a stage. Only recognize
 	// their reserved labels when there is no executable object definition.
 	if item.DDL != "" || item.Table != "" || item.SuggestedDDL != "" {

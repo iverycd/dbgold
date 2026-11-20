@@ -19,6 +19,7 @@ import (
 	"dbgold/store"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // SupportedPair 表示一个支持的迁移组合
@@ -1118,41 +1119,17 @@ func MigrateViews(c *gin.Context) {
 		TargetDBType:     dstConn.DBType,
 		StripViewSchemas: stripSchemas,
 	}
-	schema, scopeErr := target.ResolveRepairSchema(ctx, writer)
-	if scopeErr != nil {
-		repairError(c, scopeErr)
-		return
-	}
-	cfg.TargetSchema = schema
-	if isOraclePGSQLServerPair(srcConn.DBType, dstConn.DBType) || isCrossOraclePair(srcConn.DBType, dstConn.DBType) {
-		runSQLServerViewJob(c, reader, writer, job, srcConn, dstConn, cfg, req)
-		return
-	}
-	scope := migrationScope(dstConn, schema)
-	scopeOwner := uuid.NewString()
-	if scopeErr = store.AcquireMigrationScope(scope, scopeOwner); scopeErr != nil {
-		repairError(c, scopeErr)
-		return
-	}
-	defer store.ReleaseMigrationScope(scope, scopeOwner)
-	m := datamigrate.NewMigrator(reader, writer, job, cfg)
-	results := m.MigrateViews(ctx, req.ViewNames)
-
-	response := gin.H{"results": results}
-	if compatibility := m.CompatibilityFunctions(); compatibility != nil {
-		response["compatibility_functions"] = compatibility
-	}
-	c.JSON(http.StatusOK, response)
+	runSelectedViewJob(c, reader, writer, job, srcConn, dstConn, cfg, req)
 }
 
-func runSQLServerViewJob(c *gin.Context, reader source.Reader, writer target.Writer, job *datamigrate.Job, srcConn, dstConn *store.Connection, cfg datamigrate.Config, req migrateViewsRequest) {
+func runSelectedViewJob(c *gin.Context, reader source.Reader, writer target.Writer, job *datamigrate.Job, srcConn, dstConn *store.Connection, cfg datamigrate.Config, req migrateViewsRequest) {
 	ctx := c.Request.Context()
 	cfg.ViewNames = slices.Clone(req.ViewNames)
 	cfg.Content = "schema_only"
 	dbJob := &store.DataMigrationJob{
 		OwnerID: middleware.GetCurrentUserID(c), JobID: uuid.NewString(), Status: "running",
 		SrcConnID: srcConn.ID, DstConnID: dstConn.ID, SrcDBType: srcConn.DBType, DstDBType: dstConn.DBType,
-		MigrateMode: cfg.Mode, MigrateObjects: "views", LowerCaseNames: cfg.LowerCaseNames, DstSchema: cfg.TargetSchema,
+		MigrateMode: cfg.Mode, MigrateObjects: "views", LowerCaseNames: cfg.LowerCaseNames, ChangeOwner: cfg.ChangeOwner, DstSchema: cfg.TargetSchema,
 		SrcConnName: srcConn.Name, SrcConnHost: srcConn.Host, SrcConnPort: srcConn.Port, SrcConnDatabase: srcConn.Database, SrcConnUsername: srcConn.Username,
 		DstConnName: dstConn.Name, DstConnHost: dstConn.Host, DstConnPort: dstConn.Port, DstConnDatabase: dstConn.Database, DstConnUsername: dstConn.Username,
 	}
@@ -1169,50 +1146,32 @@ func runSQLServerViewJob(c *gin.Context, reader source.Reader, writer target.Wri
 		return
 	}
 	defer release()
-	report := datamigrate.NewMigrator(reader, writer, job, cfg).Run(ctx)
-	payload, err := json.Marshal(report)
-	if err == nil {
-		err = store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: dbJob.JobID, ReportJSON: string(payload)})
-	}
-	if err != nil {
-		updateJobStatus(dbJob, "failed", err.Error())
-		repairError(c, err)
-		return
-	}
+	report, results := datamigrate.NewMigrator(reader, writer, job, cfg).RunSelectedViews(ctx)
 	status := "done"
 	if ctx.Err() != nil {
 		status = "cancelled"
 	} else if report.HasFailures() {
 		status = "failed"
 	}
-	updateJobStatus(dbJob, status, "")
-	results := append([]datamigrate.ObjectResult{}, report.Views.Items...)
-	results = append(results, report.Tables.Items...)
-	if len(results) == 0 && report.CrossPreflight != nil && !report.CrossPreflight.CanStart {
-		for _, i := range report.CrossPreflight.Issues {
-			if i.Severity == "error" {
-				results = append(results, datamigrate.ObjectResult{Name: i.Object.Name, SourceName: i.Object.Name, Error: i.Reason, SourceDDL: i.Definition, Stage: "preflight"})
+	payload, err := json.Marshal(report)
+	if err == nil {
+		err = store.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&store.DataMigrationReport{JobID: dbJob.JobID, ReportJSON: string(payload)}).Error; err != nil {
+				return err
 			}
-		}
+			return tx.Model(dbJob).Updates(map[string]any{"status": status, "finished_at": time.Now()}).Error
+		})
 	}
-	if report.Views.Total == len(cfg.ViewNames) && report.Views.Success > 0 {
-		failed := make(map[string]bool, len(results))
-		for _, item := range results {
-			failed[item.Name] = true
-		}
-		for _, name := range cfg.ViewNames {
-			if dstConn.DBType == "oracle" {
-				name = strings.ToUpper(name)
-			}
-			if cfg.LowerCaseNames {
-				name = strings.ToLower(name)
-			}
-			if !failed[name] {
-				results = append(results, datamigrate.ObjectResult{Name: name})
-			}
-		}
+	if err != nil {
+		updateJobStatus(dbJob, "failed", err.Error())
+		repairError(c, err)
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"results": results, "job_id": dbJob.JobID})
+	response := gin.H{"results": results, "job_id": dbJob.JobID}
+	if report.CompatibilityFunctions != nil {
+		response["compatibility_functions"] = report.CompatibilityFunctions
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // CancelDataMigration 取消运行中的迁移任务

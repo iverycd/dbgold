@@ -52,6 +52,29 @@ function report(indexes) {
   return result
 }
 
+test('view-only reports retain successful executions in the totals and show only failed views in failure details', () => {
+  const r = report(empty())
+  const success = { name: 'view_created', ddl: 'CREATE VIEW view_created AS SELECT 1', error: '' }
+  const failed = { name: 'view_failed', ddl: 'CREATE VIEW view_failed AS SELECT 2', stage: 'validation', error: 'target reports INVALID' }
+  for (const [items, failures] of [[[success], 0], [[success, failed], 1]]) {
+    r.views = { total: items.length, success: 1, failed: failures, items }
+    const rows = reportCategories(r)
+    const views = rows.find(row => row.key === 'views')
+    assert.equal(views.success, 1)
+    assert.equal(views.failed, failures)
+    assert.deepEqual([...views.items].map(item => item.name), failures ? ['view_failed'] : [])
+    assert.deepEqual([...migrationReportUtils.originalFailureDetails(rows)].map(entry => entry.name), failures ? ['view_failed'] : [])
+    const exported = formatReportCategories(r).join('\n')
+    assert.doesNotMatch(exported, /view_created/)
+    if (failures) {
+      assert.equal(views.items[0].stageLabel, '目标视图有效性校验失败')
+      assert.match(exported, /失败阶段：目标视图有效性校验失败/)
+      assert.match(exported, /CREATE VIEW view_failed AS SELECT 2/)
+    }
+    assert.equal(r.views.items[0], success)
+  }
+})
+
 test('original failure details include only failed compatibility routines and counted categories', () => {
   const r = report({ total: 4, success: 2, failed: 2, items: null })
   r.compatibility_functions = { total: 4, success: 2, created: 1, reused: 1, failed: 2, items: [

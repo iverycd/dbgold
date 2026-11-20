@@ -73,9 +73,6 @@ func (w *sqlServerRecordingWriter) RebuildDependencies(_ context.Context, tables
 func (w *sqlServerRecordingWriter) DropDependencies(context.Context, []dialect.Statement) error {
 	return nil
 }
-func (w *sqlServerRecordingWriter) ObjectExists(context.Context, string) (bool, error) {
-	return true, nil
-}
 func (w *sqlServerRecordingWriter) CopyData(ctx context.Context, t string, c, ct []string, rows [][]interface{}) error {
 	if t == w.copyErr {
 		return fmt.Errorf("bad data")
@@ -274,6 +271,35 @@ func TestSQLServerViewDependencyOrderingAndCycles(t *testing.T) {
 	}
 	require.Empty(t, w.sql)
 }
+
+type sqlServerMissingViewDependencyWriter struct {
+	*sqlServerRecordingWriter
+}
+
+func (w *sqlServerMissingViewDependencyWriter) CreateView(ctx context.Context, v source.ViewInfo) error {
+	if err := w.sqlServerRecordingWriter.CreateView(ctx, v); err != nil {
+		return err
+	}
+	return fmt.Errorf("Invalid object name 'dbo.ExternalOrders'")
+}
+
+func TestSQLServerViewReportsDatabaseErrorForExternalReference(t *testing.T) {
+	r, writer, m := sqlServerFixture()
+	m.writer = &sqlServerMissingViewDependencyWriter{writer}
+	m.cfg.CaptureRepair = true
+	m.cfg.ViewNames = []string{"OrdersView"}
+	r.views = []source.ViewInfo{{ViewName: "OrdersView", Definition: "SELECT * FROM ExternalOrders"}}
+
+	report, results := m.RunSelectedViews(context.Background())
+	require.Len(t, writer.sql, 1)
+	require.Len(t, results, 1)
+	require.Equal(t, "execute", results[0].Stage)
+	require.Contains(t, results[0].Error, "Invalid object name")
+	require.Equal(t, writer.sql[0], results[0].DDL)
+	require.Len(t, report.RepairManifest.Objects, 1)
+	require.Equal(t, results[0].DDL, report.RepairManifest.Objects[0].DDL)
+}
+
 func TestSQLServerBackendRejectsUnsupportedOptions(t *testing.T) {
 	_, w, m := sqlServerFixture()
 	m.cfg.UseNvarchar2 = true

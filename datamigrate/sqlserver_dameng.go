@@ -383,7 +383,7 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 			}
 		}
 		if !m.cfg.objectMode() && m.cfg.Mode != "include" {
-			views, e := m.reader.GetViews(ctx)
+			views, e := m.readViews(ctx)
 			if e != nil {
 				issue(&report.Views, "视图元数据", e)
 				return false
@@ -394,138 +394,13 @@ func (m *Migrator) preflightSQLServerDameng(ctx context.Context, tables []string
 					m.blockMigrationObject(ObjectRef{Kind: "view", Name: v.ViewName}, e)
 				}
 			}
-			validViews := []source.ViewInfo{}
-			for _, v := range views {
-				if e := m.migrationObjectError(ObjectRef{Kind: "view", Name: v.ViewName}); e != nil {
-					report.Views.Total++
-					report.Views.Failed++
-					report.Views.Items = append(report.Views.Items, ObjectResult{Name: v.ViewName, Stage: "preflight", Error: e.Error()})
-				} else {
-					validViews = append(validViews, v)
-				}
-			}
-			views = validViews
-			if m.hasDamengRenames() {
-				// Mapping-related view failures are isolated in post-DDL; valid
-				// tables must still be allowed to migrate.
-				snapshot.views = views
-			} else {
-				ordered, errs := m.prepareSQLServerDamengViews(views, selected)
-				for _, e := range errs {
-					report.Views.Total++
-					report.Views.Failed++
-					report.Views.Items = append(report.Views.Items, e)
-				}
-				snapshot.views = ordered
-			}
+			// Keep the original T-SQL definition until the shared view preparation
+			// builds the same target statement for the inventory and execution.
+			snapshot.views = views
 		}
 	}
 	if globalOK && ctx.Err() == nil {
 		m.reader = snapshot
 	}
 	return globalOK && ctx.Err() == nil
-}
-
-func (m *Migrator) prepareSQLServerDamengViews(views []source.ViewInfo, tables map[string]bool) ([]source.ViewInfo, []ObjectResult) {
-	pending := map[string]source.ViewInfo{}
-	deps := map[string][]string{}
-	errors := []ObjectResult{}
-	names := map[string]string{}
-	for _, v := range views {
-		key := strings.ToUpper(v.ViewName)
-		if err := tsqldameng.ValidName(v.ViewName); err != nil {
-			errors = append(errors, ObjectResult{Name: v.ViewName, Error: err.Error()})
-			continue
-		}
-		if prev, ok := names[key]; ok {
-			errors = append(errors, ObjectResult{Name: v.ViewName, Error: "大写命名冲突: " + prev})
-			continue
-		}
-		names[key] = v.ViewName
-		sql, refs, e := tsqldameng.View(v.Definition, m.cfg.TargetSchema)
-		if e != nil {
-			errors = append(errors, ObjectResult{Name: v.ViewName, DDL: v.Definition, Error: e.Error()})
-			continue
-		}
-		v.Definition = sql
-		pending[v.ViewName] = v
-		deps[v.ViewName] = refs
-	}
-	ordered := []source.ViewInfo{}
-	done := map[string]bool{}
-	for t := range tables {
-		done[strings.ToUpper(t)] = true
-	}
-	for len(pending) > 0 {
-		progressed := false
-		for _, original := range views {
-			v, ok := pending[original.ViewName]
-			if !ok {
-				continue
-			}
-			ready := true
-			for _, d := range deps[v.ViewName] {
-				if done[strings.ToUpper(d)] {
-					continue
-				}
-				if _, exists := names[strings.ToUpper(d)]; exists {
-					ready = false
-					break
-				}
-				if tables != nil {
-					ready = false
-					break
-				}
-			}
-			if ready {
-				ordered = append(ordered, v)
-				done[strings.ToUpper(v.ViewName)] = true
-				delete(pending, v.ViewName)
-				progressed = true
-			}
-		}
-		if !progressed {
-			for _, v := range views {
-				if _, ok := pending[v.ViewName]; ok {
-					errors = append(errors, ObjectResult{Name: v.ViewName, Error: "视图依赖循环、依赖不兼容视图或表不在迁移范围"})
-				}
-			}
-			break
-		}
-	}
-	return ordered, errors
-}
-
-func (m *Migrator) migrateSQLServerDamengViews(ctx context.Context, names []string) []ObjectResult {
-	if len(m.cfg.StripViewSchemas) > 0 {
-		return []ObjectResult{{Name: "视图模式", Error: "此组合不支持删除跨库/schema 前缀"}}
-	}
-	views, e := m.reader.GetViews(ctx)
-	if e != nil {
-		return []ObjectResult{{Name: "视图元数据", Error: e.Error()}}
-	}
-	selected := []source.ViewInfo{}
-	found := map[string]bool{}
-	for _, v := range views {
-		if slices.Contains(names, v.ViewName) {
-			selected = append(selected, v)
-			found[v.ViewName] = true
-		}
-	}
-	ordered, errs := m.prepareSQLServerDamengViews(selected, nil)
-	for _, n := range names {
-		if !found[n] {
-			errs = append(errs, ObjectResult{Name: n, Error: "不在 dbo 视图范围"})
-		}
-	}
-	results := append([]ObjectResult{}, errs...)
-	for _, v := range ordered {
-		ddl, e := m.createOneView(ctx, v)
-		result := ObjectResult{Name: m.objName(v.ViewName), DDL: ddl}
-		if e != nil {
-			result.Error = e.Error()
-		}
-		results = append(results, result)
-	}
-	return results
 }

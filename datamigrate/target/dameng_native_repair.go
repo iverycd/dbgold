@@ -19,6 +19,9 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 	if !check.TrustedNative() || obj.Schema != w.schema {
 		return out, fmt.Errorf("达梦原生修复计划已改变或不属于目标 schema")
 	}
+	if obj.NativeViewDraft != nil && obj.RequiresReview {
+		return out, fmt.Errorf("请核对并保存普通视图 DDL 后再执行")
+	}
 	selected := []int{}
 	for i := range out {
 		if out[i].Status == "succeeded" {
@@ -26,6 +29,9 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 			continue
 		}
 		if !out[i].Selected {
+			if obj.NativeViewDraft != nil {
+				return out, fmt.Errorf("普通视图的创建和编译步骤必须一同提交")
+			}
 			continue
 		}
 		if err := validateNativeObjectUnit(w.schema, *obj.Native, obj.Native.Units[i]); err != nil {
@@ -58,7 +64,13 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 					return out, fmt.Errorf("不确定事件状态必须在最终事件会话之前完成整组核对")
 				}
 			}
-			done, retry, err := w.reconcileNativeUnit(ctx, *obj.Native, i)
+			var done, retry bool
+			var err error
+			if obj.NativeViewDraft != nil {
+				done, retry, err = w.checkEditedNativeView(ctx, obj, i)
+			} else {
+				done, retry, err = w.reconcileNativeUnit(ctx, *obj.Native, i)
+			}
 			if err != nil {
 				return out, err
 			}
@@ -87,7 +99,9 @@ func (w *DaMengNativeWriter) executeNativeRepair(ctx context.Context, obj repair
 			return fmt.Errorf("保存原生执行前状态失败: %w", err)
 		}
 		var err error
-		if obj.ManualTrigger != nil {
+		if obj.NativeViewDraft != nil {
+			err = w.executeEditedNativeViewUnit(run, obj, i)
+		} else if obj.ManualTrigger != nil {
 			err = executeManualNativeTriggerUnit(run, w, obj, i)
 		} else {
 			err = damengnative.ExecuteUnit(run, w, *obj.Native, obj.Native.Units[i])

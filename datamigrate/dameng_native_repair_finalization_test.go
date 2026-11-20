@@ -158,3 +158,28 @@ func TestNativeManualTriggerFinalizationUsesOriginalSourceAndApprovedTarget(t *t
 		})
 	}
 }
+
+func TestEditedNativeViewVerifiesOriginalSourceAndSavedTarget(t *testing.T) {
+	r, w, objects := nativeFinalizationManifest(t)
+	const raw = `CREATE VIEW "Src"."V" AS SELECT A FROM "Src"."T"`
+	src := damengnative.Object{ID: "view", Kind: "view", Name: "V", Schema: "Src", Status: "VALID", Units: []damengnative.Unit{{SQL: raw, Phase: "after_data"}}}
+	r.snapshot.Objects = append(r.snapshot.Objects, src)
+	n := src
+	n.Schema = "Dst"
+	n.Units = []damengnative.Unit{{SQL: strings.ReplaceAll(raw, `"Src"`, `"Dst"`), Phase: "after_data"}}
+	original := repair.Object{Kind: n.Kind, ID: n.ID, Schema: n.Schema, TargetName: n.Name, Native: &n, NativeFingerprint: damengnative.Fingerprint(n), Status: "failed", DataStatus: "not_required", Units: []repair.Unit{{SQL: n.Units[0].SQL, OriginalSQL: n.Units[0].SQL, Status: "failed"}}}
+	const sql = `CREATE OR REPLACE VIEW "Dst"."V" AS SELECT 1 FROM DUAL`
+	edited, err := original.WithNativeViewDraft(sql, true)
+	require.NoError(t, err)
+	for i := range edited.Units {
+		edited.Units[i].Status = "succeeded"
+	}
+	edited.Status = "succeeded"
+	objects = append(objects, edited)
+	cfg := Config{Mode: "all", Content: "both", TargetSchema: "Dst"}
+	require.NoError(t, NativeRepairFinalizationReady(objects, "event"))
+	require.NoError(t, VerifyNativeRepairFinalization(context.Background(), r, w, cfg, objects))
+	require.Equal(t, sql, w.verifySnapshot.Objects[len(w.verifySnapshot.Objects)-1].Units[0].SQL)
+	r.snapshot.Objects[len(r.snapshot.Objects)-1].Units = []damengnative.Unit{{SQL: strings.Replace(raw, "SELECT A", "SELECT B", 1), Phase: "after_data"}}
+	require.ErrorContains(t, VerifyNativeRepairFinalization(context.Background(), r, w, cfg, objects), "已偏离")
+}

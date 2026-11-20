@@ -38,6 +38,10 @@ func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
 	m.log.Info("=== PG → MySQL 结构预检（只读，不扫描业务数据）===")
 	plan := m.PreflightPGMySQL(ctx)
 	report.Preflight = plan
+	if err := m.recordPGMySQLViewPlan(plan, &report.Views); err != nil {
+		m.stopMigrationTask(ctx, err)
+		return report
+	}
 	for _, table := range plan.tables {
 		ref := tableRef(table.Info.TableName)
 		if err := plan.blockedDependency(ref, map[ObjectRef]bool{}); err != nil {
@@ -133,7 +137,11 @@ func (m *Migrator) runPGMySQL(ctx context.Context) (report MigrationReport) {
 			if obj.Object.Table != "" {
 				detail = fmt.Sprintf("表 %s，已提交 %d 行；%s", obj.Object.Table, copiedCounts[obj.Object.Table], detail)
 			}
-			cat.Items = append(cat.Items, ObjectResult{Name: obj.Object.Name, DDL: dialect.JoinSQL(obj.Statements), Error: detail})
+			item := ObjectResult{Name: obj.Object.Name, DDL: dialect.JoinSQL(obj.Statements), Error: detail}
+			if obj.Object.Kind == "view" {
+				item.ObjectKind, item.SourceName, item.TargetName, item.TargetSchema, item.Stage = "view", obj.Object.Name, obj.Target, plan.Target.Database, "execute"
+			}
+			cat.Items = append(cat.Items, item)
 			m.log.Errorf("执行失败 [%s]: %v", obj.Object.Name, err)
 			return err
 		}

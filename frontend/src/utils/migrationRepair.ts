@@ -110,6 +110,7 @@ export function canRetryManualTrigger(object: RepairObject): boolean {
 export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object) || canRetryManualTrigger(object)
 
 export function canEditRepairDDL(object: RepairObject): boolean {
+  if (object.native_view_editable && object.kind === 'view' && object.native?.kind === 'view') return true
   if (object.kind === 'trigger') return !!object.manual_trigger_editable && !!object.schema?.trim() && !!object.target_name?.trim() && !!object.table?.trim()
   if (object.native || object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
   if (['table', 'tables', 'view', 'views', 'sequence', 'sequences', 'owner', 'distribution'].includes(object.kind)) return true

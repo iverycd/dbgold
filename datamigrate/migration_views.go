@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 )
 
@@ -233,13 +234,50 @@ func (s *migrationViewScanner) scan(start, end int, inherited map[string]bool, r
 	return nil
 }
 
-func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.ViewInfo, category *CategoryReport) {
+func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.ViewInfo, category *CategoryReport) []ObjectResult {
+	if len(views) == 0 {
+		return nil
+	}
 	byTarget := map[string]string{}
+	keyFor := func(name string) string {
+		if m.writer.DBType() == "dameng" {
+			return strings.ToUpper(name)
+		}
+		return m.migrationTargetNameKey(m.objName(name))
+	}
+	failedDM := map[string]string{}
+	for table, failed := range m.dmBlocked {
+		if failed {
+			failedDM[keyFor(table)] = table
+		}
+	}
+	var damengTables map[string]bool
+	if m.isOracleDameng() || m.isSQLServerDameng() {
+		// Tables and views share a physical namespace after unquoted names are
+		// folded. Discover collisions without planning or validating any columns.
+		tables, err := m.migrationTables(ctx)
+		if err != nil {
+			category.Failed++
+			result := ObjectResult{Name: "视图依赖表", Stage: "metadata", Error: err.Error()}
+			if m.stopMigrationTask(ctx, err) {
+				result.Stage = "task"
+			}
+			category.Items = append(category.Items, result)
+			return []ObjectResult{result}
+		}
+		damengTables = map[string]bool{}
+		for _, table := range tables {
+			damengTables[keyFor(table)] = true
+		}
+	}
 	for _, view := range views {
-		target := m.objName(view.ViewName)
-		key := m.migrationTargetNameKey(target)
+		key := keyFor(view.ViewName)
+		ref := ObjectRef{Kind: "view", Name: view.ViewName}
+		if damengTables[key] && m.migrationObjectError(ref) == nil {
+			m.blockMigrationObject(ref, fmt.Errorf("目标视图名与表名冲突: %s", key))
+		}
 		if previous, exists := byTarget[key]; exists {
-			err := fmt.Errorf("目标视图名冲突: %q 与 %q 均映射为 %q", previous, view.ViewName, target)
+			err := fmt.Errorf("目标视图名冲突: %q 与 %q 均映射为 %q", previous, view.ViewName, key)
 			for _, name := range []string{previous, view.ViewName} {
 				ref := ObjectRef{Kind: "view", Name: name}
 				if m.migrationObjectError(ref) == nil {
@@ -249,32 +287,52 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 		}
 		byTarget[key] = view.ViewName
 	}
+
+	results := make([]ObjectResult, 0, len(views))
+	record := func(v source.ViewInfo, stage, ddl string, err error) {
+		result := ObjectResult{Name: m.objName(v.ViewName), SourceName: v.ViewName, TargetName: m.objName(v.ViewName), TargetSchema: m.cfg.TargetSchema, DDL: ddl}
+		if err == nil {
+			category.Success++
+		} else {
+			result.Stage, result.Error, result.SourceDDL = stage, err.Error(), v.Definition
+			if stage == "dependency" {
+				if prepared, prepareErr := m.preparedMigrationView(ctx, v); prepareErr == nil {
+					result.DDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, prepared))
+				}
+			}
+			m.attachSQLServerViewIssue(&result, v, err)
+			m.blockMigrationObject(ObjectRef{Kind: "view", Name: v.ViewName}, err)
+			category.Failed++
+			category.Items = append(category.Items, result)
+		}
+		results = append(results, result)
+	}
+
 	dependencies := map[string][]string{}
-	pending := map[string]source.ViewInfo{}
+	pending := map[string]bool{}
 	for _, view := range views {
 		if err := m.migrationObjectError(ObjectRef{Kind: "view", Name: view.ViewName}); err != nil {
-			category.Failed++
-			category.Items = append(category.Items, ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "preflight", Error: err.Error()})
+			record(view, "preflight", "", err)
 			continue
 		}
-		deps, err := migrationViewDependencies(view.Definition, m.reader.DBType())
-		if err != nil {
-			m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, err)
-			category.Failed++
-			category.Items = append(category.Items, ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "preflight", Error: err.Error()})
-			continue
+		// Dependency discovery does not validate target SQL. An unfamiliar
+		// expression must not prevent the database from executing a target DDL.
+		deps, _ := migrationViewDependencies(view.Definition, m.reader.DBType())
+		dependencies[view.ViewName], pending[view.ViewName] = deps, true
+		if err := m.repairViewDependencies(view.ViewName, deps); err != nil {
+			record(view, "task", "", migrationTaskFailure{err})
+			m.stopMigrationTask(ctx, migrationTaskFailure{err})
+			return results
 		}
-		dependencies[view.ViewName], pending[view.ViewName] = deps, view
 	}
 	for len(pending) > 0 {
 		progress := false
-		for _, original := range views {
-			view, exists := pending[original.ViewName]
-			if !exists {
+		for _, view := range views {
+			if !pending[view.ViewName] {
 				continue
 			}
 			if ctx.Err() != nil {
-				return
+				return results
 			}
 			waiting := false
 			var blocked error
@@ -283,7 +341,11 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 					blocked = fmt.Errorf("依赖表 %s 迁移失败: %w", dep, err)
 					break
 				}
-				name, found := byTarget[m.migrationTargetNameKey(m.objName(dep))]
+				if table, failed := failedDM[keyFor(dep)]; failed {
+					blocked = fmt.Errorf("依赖表 %s 迁移失败", table)
+					break
+				}
+				name, found := byTarget[keyFor(dep)]
 				if m.isOscarMySQL() && !found {
 					for _, candidate := range byTarget {
 						if strings.EqualFold(candidate, dep) {
@@ -300,32 +362,24 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 						blocked = fmt.Errorf("依赖视图 %s 迁移失败: %w", dep, err)
 						break
 					}
-					if _, queued := pending[name]; queued {
-						waiting = true
-					}
+					waiting = waiting || pending[name]
 				}
 			}
 			if blocked != nil {
-				m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, blocked)
-				m.recordBlockedObject(category, m.objName(view.ViewName), "", blocked.Error())
+				record(view, "dependency", "", blocked)
 			} else if waiting {
 				continue
 			} else {
 				ddl, err := m.createOneView(ctx, view)
-				if err != nil {
-					m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, err)
-					category.Failed++
-					result := ObjectResult{Name: m.objName(view.ViewName), SourceName: view.ViewName, TargetName: m.objName(view.ViewName), Stage: "execute", DDL: ddl, Error: err.Error()}
-					if m.isOscarMySQL() {
-						result.SourceDDL = view.Definition
-					}
-					m.attachSQLServerViewIssue(&result, view, err)
-					category.Items = append(category.Items, result)
-					if m.stopMigrationTask(ctx, err) {
-						return
-					}
-				} else {
-					category.Success++
+				stage := "execute"
+				if isMigrationTaskError(err) {
+					stage = "task"
+				} else if err != nil && ddl == "" {
+					stage = "unsupported"
+				}
+				record(view, stage, ddl, err)
+				if m.stopMigrationTask(ctx, err) {
+					return results
 				}
 			}
 			delete(pending, view.ViewName)
@@ -333,16 +387,14 @@ func (m *Migrator) migrateIndependentViews(ctx context.Context, views []source.V
 		}
 		if !progress {
 			for _, view := range views {
-				if _, exists := pending[view.ViewName]; !exists {
-					continue
+				if pending[view.ViewName] {
+					record(view, "dependency", "", fmt.Errorf("视图依赖循环或依赖未完成"))
 				}
-				err := fmt.Errorf("视图依赖循环或依赖未完成")
-				m.blockMigrationObject(ObjectRef{Kind: "view", Name: view.ViewName}, err)
-				m.recordBlockedObject(category, m.objName(view.ViewName), "", err.Error())
 			}
-			return
+			break
 		}
 	}
+	return results
 }
 
 func (m *Migrator) preflightMigrationNames(tables []string) {

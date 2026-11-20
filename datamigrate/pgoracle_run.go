@@ -95,6 +95,9 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 			stage := "dependency"
 			if p.blocked[o.Object] != nil {
 				stage = "preflight"
+				if o.Object.Kind == "view" && !p.catalogViews[o.Object.Name] {
+					stage = "metadata"
+				}
 			}
 			return failObject(o, stage, e)
 		}
@@ -110,7 +113,11 @@ func (m *Migrator) runPGOracle(ctx context.Context) (report MigrationReport) {
 			if o.Object.Kind == "table" {
 				m.blockMigrationTable(o.Object.Name, "execute", e)
 			}
-			if saveErr := failObject(o, "execute", e); saveErr != nil {
+			stage := "execute"
+			if target.IsViewValidationError(e) {
+				stage = "validation"
+			}
+			if saveErr := failObject(o, stage, e); saveErr != nil {
 				return saveErr
 			}
 			if m.stopMigrationTask(ctx, e) {
@@ -425,7 +432,7 @@ func (m *Migrator) pgOracleRepairObject(p *PGOraclePreflight, o PlannedObject) r
 		obj.Status = "blocked"
 		obj.Error = e.Error()
 		obj.RequiresReview = true
-		obj.DiagnosticOnly = len(o.Statements) == 0
+		obj.DiagnosticOnly = len(o.Statements) == 0 && (o.Object.Kind != "view" || !p.catalogViews[o.Object.Name])
 	}
 	return obj
 }
@@ -469,7 +476,9 @@ func (m *Migrator) markPGOracleObjectFailure(p *PGOraclePreflight, o PlannedObje
 	x := &m.repairs.objects[i]
 	x.Error = err.Error()
 	x.RequiresReview = true
-	if stage == "dependency" || stage == "preflight" {
+	if stage == "preflight" && o.Object.Kind == "view" && !x.DiagnosticOnly && len(x.Units) == 0 {
+		x.Status = "failed"
+	} else if stage == "dependency" || stage == "preflight" {
 		x.Status = "blocked"
 		for j := range x.Units {
 			if x.Units[j].Status == "pending" {

@@ -100,6 +100,18 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 				}
 				manualTargets[object.ID] = *object.Native
 			}
+			if revision := object.NativeViewDraft; revision != nil {
+				if !object.TrustedNative() {
+					return fmt.Errorf("手工视图 %s 的冻结定义已改变", object.Name)
+				}
+				manualTargets[object.ID] = *object.Native
+				baseline.Native, baseline.NativeFingerprint = &revision.Original, revision.OriginalFingerprint
+				baseline.NativeViewDraft = nil
+				baseline.Units = nil
+				for _, unit := range revision.Original.Units {
+					baseline.Units = append(baseline.Units, repair.Unit{SQL: unit.SQL, OriginalSQL: unit.SQL})
+				}
+			}
 			frozen[object.ID] = baseline
 		}
 	}
@@ -113,7 +125,7 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 			return fmt.Errorf("源对象 %s 已偏离原生冻结清单", object.Name)
 		}
 		if _, manual := manualTargets[object.ID]; manual && (object.Name != original.Native.Name || object.Table != original.Native.Table || object.Status != original.Native.Status) {
-			return fmt.Errorf("源触发器 %s 的对象身份或启停状态已偏离原生冻结清单", object.Name)
+			return fmt.Errorf("源对象 %s 的身份或状态已偏离原生冻结清单", object.Name)
 		}
 		for _, unit := range object.Units {
 			mapped, _, rewriteErr := damengnative.RewriteUnit(unit, snapshot.Profile.Schema, destination.Profile.Schema)

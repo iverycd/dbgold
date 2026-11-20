@@ -466,7 +466,7 @@ test('view migration retains actual successes and failures when compatibility pr
   const results = [{ name: 'plain', error: '', ddl: 'CREATE VIEW plain AS SELECT 1' }, { name: 'dependent', error: 'function get_uuid does not exist', ddl: 'CREATE VIEW dependent AS SELECT get_uuid()' }]
   const p = scope.run(() => page(async () => assert.fail('no PG/MySQL preflight'), starts, errors, {
    warnings,
-   migrateViews: async request => { starts.push(request); return { data: { results, compatibility_functions: compatibility } } },
+   migrateViews: async request => { starts.push(request); return { data: { job_id: 'view-job', results, compatibility_functions: compatibility } } },
   }))
   p.connections.value = [{ id: 1, db_type: 'mysql' }, { id: 2, db_type: 'gaussdb' }]
   p.viewMigrate.srcConnId = 1; p.viewMigrate.dstConnId = 2; p.viewMigrate.dstSchema = 'app'
@@ -477,6 +477,7 @@ test('view migration retains actual successes and failures when compatibility pr
   assert.equal(p.viewMigrate.results.length, 2)
   assert.equal(p.viewMigrate.results[0].error, '')
   assert.equal(p.viewMigrate.compatibilityFunctions.failed, 2)
+  assert.equal(p.viewMigrate.jobId, 'view-job')
   assert.equal(errors.length, 0)
   assert.match(warnings[0], /视图迁移成功 1 个，失败 1 个/)
   assert.doesNotMatch(warnings[0], /未执行/)
@@ -539,3 +540,22 @@ for (const [source, target] of [['dameng', 'oracle'], ['dameng', 'sqlserver'], [
     } finally { scope.stop() }
   })
 }
+
+test('view-only preflight opens a repair job for selected view errors and still blocks global errors', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const starts = []
+    const viewIssue = { object: { kind: 'view', name: 'Broken' }, severity: 'error', reason: '需要目标 SQL' }
+    let issues = [viewIssue]
+    const p = scope.run(() => page(async () => ({ data: { ready: false, can_start: false, issues } }), starts))
+    p.connections.value = [{ id: 1, db_type: 'postgres' }, { id: 2, db_type: 'mysql' }]
+    Object.assign(p.viewMigrate, { srcConnId: 1, dstConnId: 2, srcDatabase: 'public', dstSchema: 'target' })
+    await Vue.nextTick()
+    p.viewMigrate.selected = ['Broken']
+    await p.handleMigrateViews()
+    assert.equal(starts.length, 1)
+    issues = [viewIssue, { object: { kind: 'target', name: 'target' }, severity: 'error', reason: '权限不足' }]
+    await p.handleMigrateViews()
+    assert.equal(starts.length, 1)
+  } finally { scope.stop() }
+})

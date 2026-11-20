@@ -134,7 +134,13 @@ func TestSQLServerDamengViewsOrderedAndAtomicPreflight(t *testing.T) {
 	r.views = []source.ViewInfo{{ViewName: "Good", Definition: "CREATE VIEW dbo.Good AS SELECT Id FROM dbo.Mixed"}, {ViewName: "Bad", Definition: "CREATE VIEW dbo.Bad AS SELECT TOP 1 Id FROM dbo.Mixed"}}
 	m = dmMigrator(r, w)
 	results := m.MigrateViews(context.Background(), []string{"Good", "Bad"})
-	require.NotEmpty(t, results[0].Error)
+	require.Len(t, results, 2)
+	require.Equal(t, "GOOD", results[0].Name)
+	require.Empty(t, results[0].Error)
+	require.Equal(t, "BAD", results[1].Name)
+	require.Contains(t, results[1].Error, "TOP")
+	require.Equal(t, r.views[1].Definition, results[1].SourceDDL)
+	require.Empty(t, results[1].DDL)
 	require.Len(t, w.views, 1)
 	require.Equal(t, "GOOD", w.views[0].ViewName)
 }

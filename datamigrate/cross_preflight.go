@@ -116,7 +116,7 @@ func (m *Migrator) PreflightCrossMigration(ctx context.Context) *CrossPreflight 
 				p.issue(ObjectRef{Kind: "metadata", Name: "视图"}, e.Error(), "", false)
 				return p
 			}
-			views = slices.DeleteFunc(views, func(v source.ViewInfo) bool {
+			views = slices.DeleteFunc(slices.Clone(views), func(v source.ViewInfo) bool {
 				return !slices.Contains(m.cfg.ViewNames, v.ViewName) || m.crossExcluded("view", "", v.ViewName)
 			})
 			for _, name := range m.cfg.ViewNames {
@@ -124,29 +124,13 @@ func (m *Migrator) PreflightCrossMigration(ctx context.Context) *CrossPreflight 
 					p.issue(ObjectRef{Kind: "view", Name: name}, "源视图不存在", "", false)
 				}
 			}
-			names := map[string]bool{}
 			failed := map[string]bool{}
-			for _, v := range views {
-				names[m.objName(v.ViewName)] = true
-			}
 			for _, v := range m.planOracleViews(views) {
 				if v.err == nil {
 					for _, dep := range v.deps {
 						if failed[m.objName(dep)] {
 							v.err = fmt.Errorf("依赖视图 %s 预检失败", dep)
 							break
-						}
-						if !names[m.objName(dep)] {
-							if w, ok := m.writer.(interface {
-								CrossOracleRelationExists(context.Context, string) (bool, error)
-							}); ok {
-								exists, e := w.CrossOracleRelationExists(ctx, m.objName(dep))
-								if e != nil {
-									v.err = e
-								} else if !exists {
-									v.err = fmt.Errorf("目标依赖对象 %s 不存在", dep)
-								}
-							}
 						}
 					}
 				}
@@ -160,7 +144,7 @@ func (m *Migrator) PreflightCrossMigration(ctx context.Context) *CrossPreflight 
 				}
 				ref := ObjectRef{Kind: "view", Name: v.sourceName}
 				if v.err != nil {
-					p.issue(ref, v.err.Error(), v.view.Definition, false)
+					p.issue(ref, v.err.Error(), v.sourceDDL, false)
 				} else {
 					p.CanStart = true
 					p.Objects = append(p.Objects, PlannedObject{Object: ref, Target: v.view.ViewName, Stage: "views", Statements: m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v.view)})
@@ -256,7 +240,7 @@ func (m *Migrator) PreflightCrossMigration(ctx context.Context) *CrossPreflight 
 			}
 			ref := ObjectRef{Kind: "view", Name: v.sourceName}
 			if v.err != nil {
-				p.issue(ref, v.err.Error(), v.view.Definition, false)
+				p.issue(ref, v.err.Error(), v.sourceDDL, false)
 			} else {
 				p.CanStart = true
 				p.Objects = append(p.Objects, PlannedObject{Object: ref, Target: v.view.ViewName, Stage: "views", Statements: m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v.view)})

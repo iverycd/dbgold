@@ -107,37 +107,6 @@ func (m *Migrator) migrationForeignKeyStatements(fk source.FKInfo) []dialect.Sta
 	return m.writer.Dialect().ForeignKeyStatements(m.cfg.TargetSchema, fk)
 }
 
-func (m *Migrator) oscarDamengViewResult(view source.ViewInfo) ObjectResult {
-	result := ObjectResult{ObjectKind: "view", Name: view.ViewName, SourceName: view.ViewName,
-		TargetName: m.objName(view.ViewName), TargetSchema: m.cfg.TargetSchema, SourceDDL: view.Definition,
-		Stage: "unsupported", Error: "神通到达梦的视图需要手工适配"}
-	if view.Unsupported != "" {
-		result.Error += "；" + view.Unsupported
-	}
-	if deps, err := migrationViewDependencies(view.Definition, "oscar"); err == nil {
-		for _, dep := range deps {
-			if failed := m.migrationTargetTableError(m.objName(dep)); failed != nil {
-				result.Stage, result.Error = "dependency", fmt.Sprintf("依赖表 %s 迁移失败: %v", dep, failed)
-				break
-			}
-		}
-	}
-	return result
-}
-
-func (m *Migrator) recordOscarDamengViews(views []source.ViewInfo, report *MigrationReport) {
-	for _, view := range views {
-		result := m.oscarDamengViewResult(view)
-		if result.Stage == "dependency" {
-			report.Views.Total++
-			report.Views.Failed++
-			report.Views.Items = append(report.Views.Items, result)
-			continue
-		}
-		m.oscarDamengManualWarning(report, view.ViewName, result.Error, result.SourceDDL)
-	}
-}
-
 func (m *Migrator) recordOscarDamengManualObjects(ctx context.Context, report *MigrationReport) {
 	r, ok := m.reader.(interface {
 		OscarManualObjects(context.Context) ([]source.OscarManualObject, error)

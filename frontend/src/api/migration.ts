@@ -135,7 +135,7 @@ export interface ObjectResult {
   target_table?: string
   target_schema?: string
   table?: string
-  stage?: 'metadata' | 'preflight' | 'unsupported' | 'execute' | 'dependency' | 'task'
+  stage?: 'metadata' | 'preflight' | 'unsupported' | 'execute' | 'validation' | 'dependency' | 'task'
   ddl: string
   source_ddl?: string
   error: string
@@ -559,7 +559,7 @@ export interface MigrateViewsRequest {
 
 // migrateViews 同步批量迁移选中的视图，返回每个视图的结果
 export const migrateViews = (data: MigrateViewsRequest) =>
-  api.post<{ results: ObjectResult[]; compatibility_functions?: CompatibilityFunctionsReport }>('/migration/view-migrate', data, { timeout: 300000 })
+  api.post<{ job_id: string; results: ObjectResult[]; compatibility_functions?: CompatibilityFunctionsReport }>('/migration/view-migrate', data, { timeout: 300000 })
 
 // ===== 对象迁移（主键/索引/序列/外键）=====
 

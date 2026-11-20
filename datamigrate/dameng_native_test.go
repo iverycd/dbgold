@@ -55,6 +55,7 @@ type nativeTestWriter struct {
 	batchSizes       []int
 	lifecycle        []string
 	verifyErr        error
+	verifyIssues     []damengnative.Issue
 	policyVerifyErr  error
 	verifySnapshot   *damengnative.Snapshot
 	mu               sync.Mutex
@@ -111,7 +112,7 @@ func (w *nativeTestWriter) NativeRecoveryState(context.Context, string) ([]damen
 func (w *nativeTestWriter) VerifyDamengNative(_ context.Context, snapshot *damengnative.Snapshot) ([]damengnative.Issue, error) {
 	w.lifecycle = append(w.lifecycle, "verify")
 	w.verifySnapshot = snapshot
-	return nil, w.verifyErr
+	return w.verifyIssues, w.verifyErr
 }
 func (w *nativeTestWriter) CountRows(context.Context, string) (int64, error) {
 	w.mu.Lock()
@@ -144,6 +145,40 @@ func TestDamengNativeRunPreservesNamesDataAndFrozenUnits(t *testing.T) {
 	require.Equal(t, "succeeded", saved.Objects[0].Status)
 	require.Equal(t, "succeeded", saved.Objects[0].DataStatus)
 	require.NotNil(t, saved.Objects[0].NativeTable)
+}
+
+func TestDamengNativeValidationFailureKeepsCommittedViewEditable(t *testing.T) {
+	m, r, w := nativeTestMigrator(Config{CaptureRepair: true, Mode: "all", Content: "both"})
+	view := damengnative.Object{
+		ID: "v", Kind: "view", Schema: "Src", Name: "V",
+		Units:      []damengnative.Unit{{SQL: `CREATE VIEW "Src"."V" AS SELECT 1 AS ID FROM DUAL`, Phase: "after_data"}},
+		CompileSQL: `ALTER VIEW "Src"."V" COMPILE`,
+	}
+	r.snapshot.Objects = append(r.snapshot.Objects, view)
+	w.verifyIssues = []damengnative.Issue{
+		{ObjectID: view.ID, Kind: view.Kind, Name: view.Name, Severity: "error", Reason: "目标对象编译状态为 INVALID"},
+		{ObjectID: view.ID, Kind: view.Kind, Name: view.Name, Severity: "error", Reason: "目标原生定义与冻结源定义不同"},
+	}
+	report := m.Run(t.Context())
+	require.Equal(t, 1, report.Views.Failed)
+	require.Len(t, report.Views.Items, 1)
+	require.Equal(t, "validation", report.Views.Items[0].Stage)
+	var item repair.Object
+	for _, o := range report.RepairManifest.Objects {
+		if o.ID == view.ID {
+			item = o
+		}
+	}
+	require.Equal(t, "failed", item.OriginalStatus)
+	require.Contains(t, item.OriginalError, "INVALID")
+	require.Contains(t, item.OriginalError, "冻结源定义不同")
+	require.True(t, item.CanEditNativeView())
+	require.Len(t, item.Units, 2)
+	require.True(t, item.AllUnitsSucceeded())
+	updated, err := item.WithNativeViewDraft(item.Units[0].SQL, true)
+	require.NoError(t, err)
+	require.Equal(t, "succeeded", updated.Units[0].Status)
+	require.Equal(t, "pending", updated.Units[1].Status)
 }
 
 func TestDamengNativePreflightFailuresNeverMutate(t *testing.T) {

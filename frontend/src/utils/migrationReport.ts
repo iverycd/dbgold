@@ -82,12 +82,14 @@ export function describeFailure(item: ObjectResult, category?: string, dataIssue
     : stage === 'task' ? '任务级错误，迁移已终止'
     : stage === 'unsupported' ? '不支持自动转换'
     : category === 'data' ? dataFailureLabel(item, dataIssues)
+    : stage === 'validation' ? (category === 'views' || category === 'native:view' ? '目标视图有效性校验失败' : '目标对象校验失败')
     : stage === 'execute' ? 'DDL 执行失败' : '失败阶段未记录'
   const emptyDDLMessage = stage === 'metadata' ? '元数据读取失败，尚未生成目标 DDL。'
     : stage === 'preflight' ? '该对象预检未通过，尚未执行该对象的目标写入。'
     : stage === 'dependency' ? '该对象依赖的表或对象失败，未执行该对象的目标写入。'
     : stage === 'task' ? '任务已终止，后续对象未执行；此前已成功提交的对象和分页予以保留。'
     : stage === 'unsupported' ? '该对象暂不支持自动转换，未生成目标 DDL。'
+    : stage === 'validation' ? '目标校验失败，报告未记录目标 DDL。'
     : stage === 'execute' ? 'DDL 执行失败，但报告未记录目标 DDL。' : '未记录 DDL。'
   const sourceKind = category === 'triggers' ? '触发器' : category === 'views' ? '视图' : '表'
   return { stageLabel, emptyDDLMessage, sourceDDLLabel: `源端${sourceKind}定义（仅供参考，需适配目标库）`, sourceDDLCopyLabel: `复制源端${sourceKind}定义`, showTargetDDL: category !== 'data' || !!item.ddl?.trim() }
@@ -224,6 +226,9 @@ export function reportCategories(report: MigrationReport) {
       }
     }
     const isCompatibility = !!compatibilityReport
+    const items = category.items ?? []
+    // View-only planners can record successful executions alongside failures.
+    const failureItems = key === 'views' ? items.filter(item => item.error) : items
     return {
       autoIncrementItems: isTriggerAdaptation && adaptation?.mode === 'mysql_auto_increment' ? adaptation.items ?? [] : [],
       ...category, ...presentation, key, label, isTrigger, isTriggerAdaptation, isCompatibility,
@@ -237,7 +242,7 @@ export function reportCategories(report: MigrationReport) {
       reused: compatibilityReport?.reused ?? 0,
       success: isTrigger ? 0 : category.success,
       failed: isTrigger ? 0 : category.failed,
-      items: isTrigger ? [] : (category.items ?? []).map((item, index) => ({
+      items: isTrigger ? [] : failureItems.map((item, index) => ({
         ...item, ...describeFailure(item, key, dataIssues),
         suggestedDDLLabel: key === 'data' ? '建议 DDL（手动执行）' : '建议 DDL（手动创建）',
         repairKind: key.startsWith('native:') ? key.slice(7) : key,

@@ -24,6 +24,11 @@ type RepairManifest struct {
 	Objects []repair.Object `json:"objects"`
 }
 type repairRecorder struct {
+	preparedViews      map[string]preparedViewCandidate
+	sourceViews        []source.ViewInfo
+	viewsRead          bool
+	sqlServerViewPlans map[string]*sqlServerViewPlan
+	oracleViewPlans    map[string]oracleViewPlan
 	mu                 sync.Mutex
 	objects            []repair.Object
 	objectIndex        map[string]int
@@ -132,7 +137,7 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 		return
 	}
 	if m.isCrossOracle() && len(m.cfg.ViewNames) > 0 {
-		m.recordCrossOracleViewManifest(ctx)
+		m.recordOracleViewManifest(ctx, m.cfg.ViewNames)
 		if cancelled() {
 			return
 		}
@@ -625,21 +630,13 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			return
 		}
 	}
-	if want("views") && m.isOraclePGSQLServer() {
+	if want("views") && m.isOracle() {
+		m.recordOracleViewManifest(ctx, m.cfg.ViewNames)
+	} else if want("views") && m.isSQLServer() {
 		m.recordSQLServerViewManifest(ctx, m.cfg.ViewNames, selected)
-	} else if want("views") && !m.isOscarDameng() {
+	} else if want("views") && !m.isPGMySQL() {
 		finishStage = startRepairPreparationStage(m.log, "收集视图")
-		var values []source.ViewInfo
-		var viewErr error
-		if m.isOscarMySQL() {
-			values, viewErr = m.readViews(ctx)
-		} else if r, ok := m.reader.(interface {
-			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
-		}); ok {
-			values, viewErr = r.GetViewsForTarget(ctx, m.writer.DBType())
-		} else {
-			values, viewErr = m.reader.GetViews(ctx)
-		}
+		values, viewErr := m.readViews(ctx)
 		if viewErr != nil {
 			if m.stopOracleDamengTask(ctx, viewErr) {
 				return
@@ -651,27 +648,8 @@ func (m *Migrator) beginRepair(ctx context.Context) {
 			if len(m.cfg.ViewNames) > 0 && !slices.Contains(m.cfg.ViewNames, src) {
 				continue
 			}
-			name := m.objName(src)
-			o := repair.Object{Kind: "view", Name: name, SourceName: src, TargetName: name}
-			if m.isOscar() || m.isSQLServerPG() || m.isOscarMySQL() {
-				var err error
-				if m.isSQLServerPG() || m.isOscarMySQL() {
-					o.SourceDDL = v.Definition
-				}
-				v, err = m.prepareView(ctx, v)
-				if err != nil {
-					o.Error = err.Error()
-					var issue *sqlServerPGViewError
-					if errors.As(err, &issue) && issue.suggested != "" {
-						o.SuggestedDDL = m.sqlServerViewCandidate(name, issue.suggested)
-					}
-					add(o, nil)
-					continue
-				}
-			} else {
-				v.ViewName = name
-			}
-			add(o, m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
+			o, statements := m.viewRepairCandidate(ctx, v)
+			add(o, statements)
 		}
 		finishStage()
 		if cancelled() {
@@ -1494,7 +1472,7 @@ func LegacyRepairObjects(report MigrationReport, schema string) []repair.Object 
 				o.Table, o.SourceTable = item.Table, item.Table
 				o.ID = repair.Hash([]any{c.kind, i, item.Table, item.Name, item.DDL, item.Error})[:32]
 			}
-			if c.kind == "trigger" {
+			if c.kind == "trigger" || c.kind == "view" {
 				if item.SourceName != "" {
 					o.SourceName = item.SourceName
 				}

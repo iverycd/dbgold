@@ -15,7 +15,6 @@ type oracleDMPreparedWriter struct {
 	*oracleDMWriter
 	prepared bool
 	useDate  bool
-	badView  string
 	options  dialect.TypeOpt
 	dia      *dialect.DaMengDialect
 }
@@ -27,13 +26,8 @@ func (w *oracleDMPreparedWriter) Dialect() dialect.Dialect {
 	return w.dia
 }
 
-func (w *oracleDMPreparedWriter) PrepareOracleDameng(_ context.Context, infos []*source.TableDDLInfo, opt dialect.TypeOpt) error {
+func (w *oracleDMPreparedWriter) PrepareOracleDameng(_ context.Context, _ []*source.TableDDLInfo, opt dialect.TypeOpt) error {
 	w.prepared, w.options = true, opt
-	for _, info := range infos {
-		if w.badView != "" && info.TableName == w.badView {
-			return fmt.Errorf("列 %s.TS 无法保留九位精度", info.TableName)
-		}
-	}
 	return nil
 }
 func (w *oracleDMPreparedWriter) OracleDamengUsesDate() bool { return w.useDate }
@@ -98,13 +92,13 @@ func TestOracleDamengDataOnlyPreparesOptionsBeforeExistingCheck(t *testing.T) {
 	require.Equal(t, 1, w.existingChecks)
 }
 
-func TestOracleDamengOneViewCapabilityFailureDoesNotBlockOtherViews(t *testing.T) {
+func TestOracleDamengOneViewExecutionFailureDoesNotBlockOtherViews(t *testing.T) {
 	r, w, m := oracleDMFixture("schema_only")
 	r.views = []source.ViewInfo{
 		{ViewName: "BadView", Definition: `SELECT "Txt" FROM "SRC"."Mixed"`},
 		{ViewName: "GoodView", Definition: `SELECT "Txt" FROM "SRC"."Mixed"`},
 	}
-	m.writer = &oracleDMPreparedWriter{oracleDMWriter: w, badView: "BadView"}
+	w.viewErrors = map[string]error{"BADVIEW": fmt.Errorf("达梦执行失败：列精度无效")}
 	report := m.Run(context.Background())
 	require.Equal(t, 1, report.Views.Failed)
 	require.Equal(t, 1, report.Views.Success)
@@ -113,14 +107,14 @@ func TestOracleDamengOneViewCapabilityFailureDoesNotBlockOtherViews(t *testing.T
 	require.True(t, strings.Contains(report.Views.Items[0].Error, "精度"))
 }
 
-func TestOracleDamengViewOnlyChecksExistingDependencyTypes(t *testing.T) {
+func TestOracleDamengViewOnlyExecutesWithoutTableTypeChecks(t *testing.T) {
 	_, w, m := oracleDMFixture("schema_only")
 	w.existingErr = fmt.Errorf("目标 XMLTYPE 被改成 VARCHAR")
 	results := m.MigrateViews(context.Background(), []string{"V"})
 	require.Len(t, results, 1)
-	require.Contains(t, results[0].Error, "XMLTYPE")
-	require.Equal(t, 1, w.existingChecks)
-	require.Empty(t, w.views)
+	require.Empty(t, results[0].Error)
+	require.Zero(t, w.existingChecks)
+	require.Len(t, w.views, 1)
 }
 
 type oracleDMRownumViewWriter struct {
@@ -136,7 +130,7 @@ func (w *oracleDMRownumViewWriter) ValidateOracleDamengView(_ context.Context, s
 	return nil
 }
 
-func TestOracleDamengRownumViewCapabilityFailureDoesNotBlockOtherViews(t *testing.T) {
+func TestOracleDamengRownumViewReturnsTargetErrorAndContinues(t *testing.T) {
 	r, w, m := oracleDMModuleVisitLogFixture()
 	r.views = append(r.views, source.ViewInfo{
 		ViewName:   "VIEW_VISIT_CODES",
@@ -145,14 +139,17 @@ func TestOracleDamengRownumViewCapabilityFailureDoesNotBlockOtherViews(t *testin
 	})
 	validated := &oracleDMRownumViewWriter{oracleDMWriter: w}
 	m.writer = validated
+	w.viewErrors = map[string]error{"VIEW_MODULEVISITLOG": fmt.Errorf("达梦拒绝 ROWNUM")}
 	results := m.MigrateViews(context.Background(), []string{"VIEW_MODULEVISITLOG", "VIEW_VISIT_CODES"})
 	require.Len(t, results, 2)
 	require.Equal(t, "VIEW_MODULEVISITLOG", results[0].Name)
-	require.Contains(t, results[0].Error, "ROWNUM 能力探测失败")
+	require.Equal(t, "达梦拒绝 ROWNUM", results[0].Error)
+	require.Equal(t, "execute", results[0].Stage)
+	require.NotEmpty(t, results[0].DDL)
 	require.Equal(t, "VIEW_VISIT_CODES", results[1].Name)
 	require.Empty(t, results[1].Error)
-	require.Len(t, validated.validated, 2)
-	require.Equal(t, oracleDMModuleVisitLogSQL, validated.validated[0])
+	require.Empty(t, validated.validated)
+	require.Len(t, w.viewAttempts, 2)
 	require.Len(t, w.views, 1)
 	require.Equal(t, "VIEW_VISIT_CODES", w.views[0].ViewName)
 	require.Contains(t, results[1].DDL, `CREATE OR REPLACE VIEW "APP"."VIEW_VISIT_CODES" ("MODULECODE") AS `)

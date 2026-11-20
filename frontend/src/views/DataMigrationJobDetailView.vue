@@ -100,7 +100,7 @@
         </div>
       </section>
 
-      <MigrationRepairPanel ref="repairPanel" :jobID="jobID" :report="report" @show-row-difference="showRowDifference" />
+      <MigrationRepairPanel id="object-repair" ref="repairPanel" :jobID="jobID" :report="report" @show-row-difference="showRowDifference" />
 
       <section class="detail-tabs-surface">
         <DamengNativePreflightPanel v-if="report?.native_schema" :result="report.native_schema.preflight" :inventory="report.native_schema.inventory" :verification="report.native_schema.verification" readonly />
@@ -292,6 +292,9 @@ interface RiskItem { key: string; level: 'warning' | 'danger'; title: string; de
 const route = useRoute()
 const router = useRouter()
 const repairPanel = ref<InstanceType<typeof MigrationRepairPanel> | null>(null)
+watch(repairPanel, panel => {
+  if (panel && route.hash === '#object-repair') panel.$el.scrollIntoView()
+}, { flush: 'post' })
 const job = ref<DataMigrationJob | null>(null)
 const report = ref<MigrationReport | null>(null)
 const savedPGPreflight = computed(() => migrationPGPreflight(report.value))

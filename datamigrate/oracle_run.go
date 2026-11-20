@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 func (m *Migrator) isOracle() bool { return m.cfg.TargetDBType == "oracle" }
 
 type oracleViewPlan struct {
+	sourceDDL  string
 	sourceName string
 	view       source.ViewInfo
 	ddl        string
@@ -50,10 +52,10 @@ func (m *Migrator) oracleSourceSchema() string {
 	return ""
 }
 func (m *Migrator) readOracleViews(ctx context.Context) ([]source.ViewInfo, error) {
-	if s, ok := m.reader.(interface {
+	if _, ok := m.reader.(interface {
 		GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
 	}); ok {
-		return s.GetViewsForTarget(ctx, "oracle")
+		return m.readViews(ctx)
 	}
 	return nil, fmt.Errorf("MySQL Reader 未提供 Oracle 原始视图读取能力")
 }
@@ -933,9 +935,26 @@ func (m *Migrator) planOracleViews(views []source.ViewInfo) []oracleViewPlan {
 	for i, v := range views {
 		sourceName := v.ViewName
 		names[m.objName(v.ViewName)] = true
-		sql, deps, e := oracleview.Convert(v.Definition, m.oracleSourceSchema(), m.cfg.TargetSchema, m.cfg.StripViewSchemas)
+		if m.repairs != nil {
+			if plan, ok := m.repairs.oracleViewPlans[sourceName]; ok {
+				list[i] = plan
+				continue
+			}
+		}
+		raw := v.Definition
+		var sql string
+		var deps []string
+		var e error
 		if m.isCrossOracle() {
-			sql, deps, e = oracleview.ConvertCross(v.Definition, m.reader.DBType(), m.oracleSourceSchema(), m.cfg.TargetSchema)
+			sql, deps, e = oracleview.ConvertCross(raw, m.reader.DBType(), m.oracleSourceSchema(), m.cfg.TargetSchema)
+		} else {
+			sql, deps, e = oracleview.Convert(raw, m.oracleSourceSchema(), m.cfg.TargetSchema, m.cfg.StripViewSchemas)
+			// The MySQL reader supplies the view query body. Its target CREATE
+			// is also available in object repair when translation is incomplete.
+			if e != nil && strings.TrimSpace(raw) != "" {
+				sql, e = raw, nil
+				deps, _ = migrationViewDependencies(raw, m.reader.DBType())
+			}
 		}
 		if v.Unsupported != "" {
 			e = fmt.Errorf("%s", v.Unsupported)
@@ -954,10 +973,12 @@ func (m *Migrator) planOracleViews(views []source.ViewInfo) []oracleViewPlan {
 		for ci := range v.Columns {
 			v.Columns[ci].Name = m.objName(v.Columns[ci].Name)
 		}
+		plan := oracleViewPlan{sourceName: sourceName, sourceDDL: raw, view: v, deps: deps, err: e}
 		if e == nil {
-			v.Definition = sql
+			plan.view.Definition = sql
+			plan.ddl = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, plan.view))
 		}
-		list[i] = oracleViewPlan{sourceName: sourceName, view: v, deps: deps, err: e, ddl: dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))}
+		list[i] = plan
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].view.ViewName < list[j].view.ViewName })
 	out := []oracleViewPlan{}
@@ -1015,8 +1036,11 @@ func (m *Migrator) executeOracleViews(ctx context.Context, plans []oracleViewPla
 		}
 		if e == nil {
 			e = m.repairView(ctx, v.view)
+			if target.IsViewValidationError(e) {
+				stage = "validation"
+			}
 		}
-		r := ObjectResult{Name: v.view.ViewName, SourceName: v.sourceName, TargetName: v.view.ViewName, TargetSchema: m.cfg.TargetSchema, DDL: v.ddl}
+		r := ObjectResult{Name: v.view.ViewName, SourceName: v.sourceName, TargetName: v.view.ViewName, TargetSchema: m.cfg.TargetSchema, DDL: v.ddl, SourceDDL: v.sourceDDL}
 		if e != nil {
 			r.Error = e.Error()
 			r.Stage = stage

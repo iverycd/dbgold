@@ -33,6 +33,7 @@ type PGOraclePreflight struct {
 	createdTables                  map[string]bool
 	dependencies                   map[ObjectRef][]ObjectRef
 	sourceDDL                      map[ObjectRef]string
+	catalogViews                   map[string]bool
 	sequences                      map[ObjectRef]*pgoracle.SequencePlan
 	indexes                        map[ObjectRef]source.IndexInfo
 	foreignKeys                    map[ObjectRef]source.FKInfo
@@ -516,6 +517,10 @@ func (m *Migrator) inspectPGOraclePlan(ctx context.Context, p *PGOraclePreflight
 				}
 				p.add(o.Object, e)
 			}
+		}
+		if o.Object.Kind == "view" {
+			// CREATE VIEW resolves external references in the actual target session.
+			continue
 		}
 		for _, dep := range p.dependencies[o.Object] {
 			if dep.Kind != "table" && dep.Kind != "view" {

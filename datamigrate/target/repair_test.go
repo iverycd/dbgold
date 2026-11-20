@@ -110,25 +110,17 @@ func TestRepairOracleBlockIsOneExecutionUnit(t *testing.T) {
 	require.NoError(t, m.ExpectationsWereMet())
 }
 
-func TestRepairOracleCreationDoesNotQueryCompiledObjectStatus(t *testing.T) {
-	for _, kind := range []string{"view", "sequence"} {
-		t.Run(kind, func(t *testing.T) {
-			w, m := oracleMockWriter(t)
-			q := "CREATE OR REPLACE VIEW APP.V AS SELECT 1 ID FROM DUAL"
-			obj := repair.Object{Kind: kind, Schema: "APP", TargetName: "V"}
-			if kind == "sequence" {
-				q = "CREATE SEQUENCE APP.S START WITH 1"
-				obj.Sequence = &source.SequenceInfo{TableName: "T", ColumnName: "ID"}
-			}
-			m.ExpectExec("ALTER SESSION SET CURRENT_SCHEMA").WillReturnResult(sqlmock.NewResult(0, 0))
-			m.ExpectExec(regexp.QuoteMeta(q)).WillReturnResult(sqlmock.NewResult(0, 0))
-			m.ExpectClose()
-			units, err := ExecuteRepair(context.Background(), w, obj, []repair.Unit{{ID: "ddl", SQL: q, Selected: true}}, nil)
-			require.NoError(t, err)
-			require.Equal(t, "succeeded", units[0].Status)
-			require.NoError(t, m.ExpectationsWereMet())
-		})
-	}
+func TestRepairOracleSequenceDoesNotQueryCompiledObjectStatus(t *testing.T) {
+	w, m := oracleMockWriter(t)
+	q := "CREATE SEQUENCE APP.S START WITH 1"
+	obj := repair.Object{Kind: "sequence", Schema: "APP", TargetName: "S", Sequence: &source.SequenceInfo{TableName: "T", ColumnName: "ID"}}
+	m.ExpectExec("ALTER SESSION SET CURRENT_SCHEMA").WillReturnResult(sqlmock.NewResult(0, 0))
+	m.ExpectExec(regexp.QuoteMeta(q)).WillReturnResult(sqlmock.NewResult(0, 0))
+	m.ExpectClose()
+	units, err := ExecuteRepair(context.Background(), w, obj, []repair.Unit{{ID: "ddl", SQL: q, Selected: true}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "succeeded", units[0].Status)
+	require.NoError(t, m.ExpectationsWereMet())
 }
 
 func TestRepairResultPersistenceFailureAfterSQLIsUnknown(t *testing.T) {

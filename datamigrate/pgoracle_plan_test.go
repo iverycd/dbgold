@@ -208,6 +208,33 @@ func TestPGOraclePreflightReadOnlyAndOriginalSourceNames(t *testing.T) {
 	require.JSONEq(t, string(before), string(after))
 }
 
+func TestPGOracleOnlyCatalogViewWithUnreadableDDLIsEditable(t *testing.T) {
+	r, w, m := pgOracleFixture()
+	r.snapshot.Views = []source.ViewInfo{{ViewName: "HiddenView", Unsupported: "视图定义不可读取"}, {ViewName: "迁移准备", Unsupported: "视图定义不可读取"}}
+	r.snapshot.Objects = []source.PGObject{{Kind: "view", Name: "视图元数据", Reason: "permission denied"}}
+	m.cfg.CaptureRepair = true
+	m.cfg.ViewNames = []string{"HiddenView", "迁移准备"}
+	report := m.Run(t.Context())
+	require.Equal(t, 3, report.Views.Failed)
+	require.Empty(t, w.statements)
+	require.Len(t, report.RepairManifest.Objects, 3)
+	for _, item := range report.RepairManifest.Objects {
+		require.Empty(t, item.Units)
+		require.Empty(t, item.SourceDDL)
+		switch item.SourceName {
+		case "HiddenView", "迁移准备":
+			require.True(t, item.CanEditDDL())
+			require.Equal(t, "failed", item.Status)
+			require.Equal(t, "视图定义不可读取", item.OriginalError)
+		case "视图元数据":
+			require.True(t, item.DiagnosticOnly)
+			require.False(t, item.CanEditDDL())
+		default:
+			t.Fatalf("unexpected repair object %q", item.SourceName)
+		}
+	}
+}
+
 func TestPGOraclePreflightCanStartHealthySubset(t *testing.T) {
 	r, _, m := pgOracleFixture("Bad", "Good")
 	r.snapshot.Tables[0].Info.Columns[0].DataType = "_int4"

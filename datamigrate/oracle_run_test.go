@@ -463,9 +463,12 @@ func TestOracleViewsDependencyOrderAndFailure(t *testing.T) {
 	require.Contains(t, w.sql[1], `"APP"."ACHILD"`)
 	r.views = []source.ViewInfo{{ViewName: "aChild", Definition: "SELECT id FROM zParent"}, {ViewName: "zParent", Definition: "SELECT GROUP_CONCAT(id) FROM Orders"}}
 	w.sql = nil
+	w.viewCause = errors.New("ORA-00904: GROUP_CONCAT: invalid identifier")
 	results = m.MigrateViews(context.Background(), []string{"aChild", "zParent"})
 	require.Len(t, results, 2)
-	require.Contains(t, results[0].Error, "GROUP_CONCAT")
+	require.Equal(t, w.viewCause.Error(), results[0].Error)
+	require.Equal(t, "execute", results[0].Stage)
+	require.Contains(t, results[0].DDL, "SELECT GROUP_CONCAT(id) FROM Orders")
 	require.Contains(t, results[1].Error, "依赖视图")
 	require.Empty(t, w.sql)
 	r.views = []source.ViewInfo{{ViewName: "a", Definition: "SELECT id FROM b"}, {ViewName: "b", Definition: "SELECT id FROM a"}}

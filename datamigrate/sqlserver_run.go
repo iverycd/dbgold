@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -19,7 +20,6 @@ type sqlServerInspector interface {
 	ValidateExisting(context.Context, *source.TableDDLInfo) error
 	RebuildDependencies(context.Context, map[string]bool) ([]dialect.Statement, error)
 	DropDependencies(context.Context, []dialect.Statement) error
-	ObjectExists(context.Context, string) (bool, error)
 }
 
 type sqlServerDDLNotExecuted struct{ error }
@@ -673,6 +673,7 @@ func (m *Migrator) recordSQLServerViewManifest(ctx context.Context, selected []s
 		m.log.Warnf("收集 SQL Server 视图失败: %v", err)
 		return
 	}
+	m.repairs.sqlServerViewPlans = plans
 	for _, name := range sortedSQLServerViewNames(plans) {
 		p := plans[name]
 		targetName := p.view.ViewName
@@ -696,6 +697,16 @@ func (m *Migrator) recordSQLServerViewManifest(ctx context.Context, selected []s
 }
 
 func (m *Migrator) planSQLServerViews(ctx context.Context, selected []string, infos map[string]*source.TableDDLInfo) (map[string]*sqlServerViewPlan, error) {
+	if m.repairs != nil && m.repairs.sqlServerViewPlans != nil {
+		plans := make(map[string]*sqlServerViewPlan)
+		for name, saved := range m.repairs.sqlServerViewPlans {
+			if selected == nil || slices.Contains(selected, name) {
+				p := *saved
+				plans[name] = &p
+			}
+		}
+		return plans, nil
+	}
 	divisionPrecision := 4
 	if r, ok := m.reader.(interface {
 		SQLServerViewPrecision(context.Context) (int, error)
@@ -755,13 +766,17 @@ func (m *Migrator) planSQLServerViews(ctx context.Context, selected []string, in
 			}
 		}
 		def, deps, err := convert(raw)
+		if err != nil && m.reader.DBType() == "mysql" && strings.TrimSpace(raw) != "" {
+			def, err = raw, nil
+			deps, _ = migrationViewDependencies(raw, m.reader.DBType())
+		}
 		if metadataErr != nil {
 			err = metadataErr
 		}
 		if v.Unsupported != "" {
 			err = fmt.Errorf("%s", v.Unsupported)
 		}
-		if err != nil && m.isOraclePGSQLServer() {
+		if err != nil {
 			def = ""
 		}
 		original := v.ViewName
@@ -815,7 +830,7 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 	}
 	if e = inspector.CheckNames(ctx, names); e != nil {
 		var invalid *target.SQLServerNameError
-		if !m.isOraclePGSQLServer() || !errors.As(e, &invalid) {
+		if !errors.As(e, &invalid) {
 			m.stopMigrationTask(ctx, e)
 			sqlServerResult(category, "视图名称预检", "", e)
 			return
@@ -842,27 +857,17 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 		next := []string{}
 		for _, n := range pending {
 			p := plans[n]
+			stage := "preflight"
 			wait := false
 			if p.err == nil {
 				for _, dep := range p.deps {
 					if failedTables[dep] || bad[dep] || m.isOraclePGSQLServer() && m.migrationTableBlocked(dep) {
 						p.err = fmt.Errorf("依赖对象 %s 迁移失败", dep)
+						stage = "dependency"
 						break
 					}
 					if plans[dep] != nil && !done[dep] {
 						wait = true
-						continue
-					}
-					if plans[dep] == nil {
-						exists, err := inspector.ObjectExists(ctx, m.objName(dep))
-						if err != nil {
-							p.err = err
-							break
-						}
-						if !exists {
-							p.err = fmt.Errorf("目标依赖对象 %s 不存在", dep)
-							break
-						}
 					}
 				}
 			}
@@ -874,19 +879,21 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 			if p.view.Definition != "" {
 				ss = m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, p.view)
 			}
-			if p.err == nil && m.isOraclePGSQLServer() {
+			if p.err == nil {
 				p.err = m.repairViewDependencies(n, p.deps)
 			}
 			if p.err == nil {
+				stage = "execute"
 				p.err = m.repairView(ctx, p.view)
-			} else if m.isOraclePGSQLServer() {
+			} else {
 				cause := p.err
 				p.err = m.captureRepairCall(ctx, repair.Object{Kind: "view", Name: p.view.ViewName, SourceName: n, TargetName: p.view.ViewName, SourceDDL: p.sourceDDL}, ss, func(context.Context) error { return sqlServerDDLNotExecuted{cause} })
 			}
 			sqlServerResult(category, p.view.ViewName, dialect.JoinSQL(ss), p.err)
-			if p.err != nil && m.isOraclePGSQLServer() {
+			if p.err != nil {
 				item := &category.Items[len(category.Items)-1]
-				item.SourceName, item.SourceDDL = n, p.sourceDDL
+				item.SourceName, item.SourceDDL, item.Stage = n, p.sourceDDL, stage
+				item.TargetName, item.TargetSchema = p.view.ViewName, m.cfg.TargetSchema
 				if m.stopMigrationTask(ctx, p.err) {
 					return
 				}
@@ -898,10 +905,9 @@ func (m *Migrator) sqlServerViews(ctx context.Context, selected []string, catego
 		if !progress {
 			for _, n := range next {
 				sqlServerResult(category, m.objName(n), "", fmt.Errorf("视图存在循环依赖或依赖无法完成"))
-				if m.isOraclePGSQLServer() {
-					item := &category.Items[len(category.Items)-1]
-					item.SourceName, item.SourceDDL, item.Stage = n, plans[n].sourceDDL, "dependency"
-				}
+				item := &category.Items[len(category.Items)-1]
+				item.SourceName, item.SourceDDL, item.Stage = n, plans[n].sourceDDL, "dependency"
+				item.TargetName, item.TargetSchema = m.objName(n), m.cfg.TargetSchema
 			}
 			break
 		}

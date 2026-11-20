@@ -123,8 +123,36 @@ func TestOracleInvalidViewLeavesAnEditableFailedUnit(t *testing.T) {
 	var events []repair.Event
 	ctx := repair.WithObserver(context.Background(), func(e repair.Event) error { events = append(events, e); return nil })
 	require.ErrorContains(t, w.CreateView(ctx, view), "invalid identifier")
-	require.Equal(t, "failed", events[len(events)-1].Status)
+	require.Len(t, events, 2)
+	require.Equal(t, "running", events[0].Status)
+	require.Equal(t, "failed", events[1].Status)
+	require.Equal(t, events[0].SQL, events[1].SQL)
 	require.NoError(t, m.ExpectationsWereMet())
+}
+
+func TestOracleViewRepairVerifiesCompiledObject(t *testing.T) {
+	for _, status := range []string{"INVALID", "VALID"} {
+		t.Run(status, func(t *testing.T) {
+			w, m := oracleMockWriter(t)
+			m.ExpectExec("ALTER SESSION SET CURRENT_SCHEMA").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectExec("CREATE OR REPLACE VIEW").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery("SELECT STATUS FROM ALL_OBJECTS").WithArgs("APP", "V", "VIEW").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(status))
+			if status == "INVALID" {
+				m.ExpectQuery("SELECT LINE, POSITION, TEXT FROM ALL_ERRORS").WithArgs("APP", "V", "VIEW").WillReturnRows(sqlmock.NewRows([]string{"line", "position", "text"}).AddRow(1, 7, "bad column"))
+			}
+			m.ExpectClose()
+			units := []repair.Unit{{SQL: "CREATE OR REPLACE VIEW V AS SELECT C FROM T", Selected: true}}
+			units, err := ExecuteRepair(context.Background(), w, repair.Object{Kind: "view", TargetName: "V", Schema: "APP"}, units, nil)
+			if status == "INVALID" {
+				require.ErrorContains(t, err, "bad column")
+				require.Equal(t, "failed", units[0].Status)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "succeeded", units[0].Status)
+			}
+			require.NoError(t, m.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestRecoveryOracleOnlyAllowsExactGeneratedTrigger(t *testing.T) {

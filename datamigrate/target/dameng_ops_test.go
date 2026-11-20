@@ -122,3 +122,24 @@ func TestDamengExistingTargetAcceptsCompatibleColumns(t *testing.T) {
 	info := &source.TableDDLInfo{TableName: "T", Columns: []source.ColumnInfo{{Name: "Value", DataType: "decimal", Precision: 38, Scale: 18, IsNullable: true}, {Name: "Uid", DataType: "uniqueidentifier", IsNullable: true}}}
 	require.NoError(t, w.ValidateSQLServerDamengExisting(context.Background(), info, dialect.TypeOpt{CharInLength: true}))
 }
+
+func TestDamengViewUsesRepairSchema(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		w, mock := mockDM(t)
+		view := source.ViewInfo{ViewName: "V", Definition: "SELECT ID FROM T UNION ALL SELECT ID FROM U"}
+		mock.ExpectExec(regexp.QuoteMeta(`SET SCHEMA "APP"`)).WillReturnResult(sqlmock.NewResult(0, 0))
+		create := mock.ExpectExec(regexp.QuoteMeta(`CREATE OR REPLACE VIEW "APP"."V" AS ` + view.Definition))
+		if fail {
+			create.WillReturnError(errors.New("达梦创建失败"))
+		} else {
+			create.WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+		mock.ExpectClose()
+		err := w.CreateView(t.Context(), view)
+		if fail {
+			require.EqualError(t, err, "达梦创建失败")
+		} else {
+			require.NoError(t, err)
+		}
+	}
+}

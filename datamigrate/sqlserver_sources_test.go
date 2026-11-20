@@ -178,3 +178,20 @@ func TestSQLServerRawViewDefinitionIsDiagnosticOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlyUntranslatedCrossViewIsSavedForManualRepair(t *testing.T) {
+	r, w := sqlServerCrossFixture("postgres")
+	raw := `SELECT "id" FROM outside."Orders"`
+	r.views = []source.ViewInfo{{ViewName: "Rejected", Definition: raw}}
+	m := NewMigrator(r, w, &Job{LogCh: make(chan string, 512)}, Config{TargetDBType: "sqlserver", Mode: "all", Content: "schema_only", ViewNames: []string{"Rejected"}, CaptureRepair: true})
+	report := m.Run(context.Background())
+	require.Equal(t, 1, report.Views.Failed)
+	require.NotNil(t, report.RepairManifest)
+	require.Len(t, report.RepairManifest.Objects, 1)
+	obj := report.RepairManifest.Objects[0]
+	require.Equal(t, raw, obj.SourceDDL)
+	require.Empty(t, obj.Units)
+	require.Equal(t, "failed", obj.Status)
+	require.True(t, obj.CanEditDDL())
+	require.Empty(t, w.sql)
+}

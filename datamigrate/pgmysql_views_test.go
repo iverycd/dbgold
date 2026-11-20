@@ -1,13 +1,17 @@
 package datamigrate
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
+	"dbgold/datamigrate/target"
 	"github.com/pingcap/tidb/pkg/parser"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/stretchr/testify/require"
 )
 
 func pgViewTestColumns(names string) []source.ColumnInfo {
@@ -175,4 +179,56 @@ func TestPGViewBitPredicates(t *testing.T) {
 			t.Fatalf("accepted unsafe predicate %s: %s", predicate, got)
 		}
 	}
+}
+
+func TestPGMySQLViewRepairUsesPreflightStatements(t *testing.T) {
+	const raw = "SELECT pg_catalog.unsupported(id) FROM src"
+	const sql = "CREATE OR REPLACE VIEW `dst`.`ready` AS SELECT 1 AS `id`"
+	p := &PGMySQLPreflight{
+		Target:   target.MySQLProfile{Database: "dst"},
+		CanStart: true,
+		snapshot: &source.PGSnapshot{Views: []source.ViewInfo{{ViewName: "manual", Definition: raw}, {ViewName: "ready", Definition: "SELECT 1 AS id"}}},
+		Objects:  []PlannedObject{{Object: ObjectRef{Kind: "view", Name: "ready"}, Target: "ready", Stage: "view", Statements: []dialect.Statement{{SQL: sql}}}},
+		blocked:  map[ObjectRef]error{{Kind: "view", Name: "manual"}: errors.New("function translation unavailable")},
+	}
+	m, _ := newTestMigrator(newOscarFixture(), &recordingOscarWriter{})
+	m.repairs = &repairRecorder{}
+	category := newCategoryReport()
+	require.NoError(t, m.recordPGMySQLViewPlan(p, &category))
+	require.Equal(t, 1, category.Failed)
+	require.Equal(t, raw, category.Items[0].SourceDDL)
+	require.Len(t, m.repairs.objects, 2)
+	manual, ready := m.repairs.objects[0], m.repairs.objects[1]
+	require.True(t, manual.CanEditDDL())
+	require.Empty(t, manual.Units)
+	require.Equal(t, raw, manual.SourceDDL)
+	require.Len(t, ready.Units, 1)
+	require.Equal(t, sql, ready.Units[0].OriginalSQL)
+}
+
+func TestPGMySQLUnreadableCatalogViewHasEditableFailure(t *testing.T) {
+	const reason = "视图定义不可读取"
+	m, _ := newTestMigrator(newOscarFixture(), &recordingOscarWriter{})
+	m.cfg.ViewNames = []string{"HiddenView"}
+	m.repairs = &repairRecorder{}
+	p := &PGMySQLPreflight{
+		Target: target.MySQLProfile{Database: "dst"}, viewOnly: true,
+		snapshot: &source.PGSnapshot{
+			Views:   []source.ViewInfo{{ViewName: "HiddenView", Unsupported: reason}},
+			Objects: []source.PGObject{{Kind: "view", Name: "视图元数据", Reason: "permission denied"}},
+		},
+	}
+	m.planPGViews(p, nil, nil, func(string, string, string) {})
+	p.finish()
+	require.False(t, p.CanStart)
+	category := newCategoryReport()
+	require.NoError(t, m.recordPGMySQLViewPlan(p, &category))
+	require.Len(t, category.Items, 1)
+	require.Equal(t, reason, category.Items[0].Error)
+	require.Len(t, m.repairs.objects, 1)
+	item := m.repairs.objects[0]
+	require.Equal(t, "HiddenView", item.SourceName)
+	require.True(t, item.CanEditDDL())
+	require.Empty(t, item.Units)
+	require.Empty(t, item.SourceDDL)
 }

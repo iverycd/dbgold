@@ -620,8 +620,11 @@
 
           <CompatibilityFunctionsPanel v-for="group in vmCompatibilityGroups" :key="group.key" :report="group.report" :kind="group.kind" />
           <!-- 结果 -->
-          <div v-if="viewMigrate.results.length > 0" class="migration-surface migration-results">
-            <div class="migration-section-heading"><h3>迁移结果</h3></div>
+          <div v-if="viewMigrate.results.length > 0 || viewMigrate.jobId" class="migration-surface migration-results">
+            <div class="migration-section-heading">
+              <h3>迁移结果</h3>
+              <router-link v-if="viewMigrate.jobId" :to="`/history/data/${encodeURIComponent(viewMigrate.jobId)}#object-repair`">查看报告与对象修复</router-link>
+            </div>
             <a-space style="margin-bottom: 8px">
               <a-tag color="green">成功 {{ vmSuccessCount }}</a-tag>
               <a-tag :color="vmFailCount > 0 ? 'red' : 'gray'">失败 {{ vmFailCount }}</a-tag>
@@ -1500,6 +1503,7 @@ const viewMigrate = reactive({
   running: false,
   unsupportedMsg: '',
   results: [] as ObjectResult[],
+  jobId: '',
   compatibilityFunctions: undefined as CompatibilityFunctionsReport | undefined,
 })
 
@@ -1527,6 +1531,8 @@ const vmCanMigrate = computed(() =>
 )
 
 watch(() => [viewMigrate.srcConnId, viewMigrate.srcDatabase, viewMigrate.dstConnId, viewMigrate.dstSchema], () => {
+  viewMigrate.jobId = ''
+  viewMigrate.results = []
   viewMigrate.compatibilityFunctions = undefined
 })
 
@@ -1569,6 +1575,7 @@ async function vmLoadViews() {
   viewMigrate.views = []
   viewMigrate.selected = []
   viewMigrate.results = []
+  viewMigrate.jobId = ''
   viewMigrate.compatibilityFunctions = undefined
   try {
     const res = await listConnectionViews(viewMigrate.srcConnId, viewMigrate.srcDatabase || undefined, vmSelectedDst.value?.db_type)
@@ -1600,9 +1607,19 @@ async function handleMigrateViews() {
   }
   viewMigrate.running = true
   viewMigrate.results = []
+  viewMigrate.jobId = ''
   viewMigrate.compatibilityFunctions = undefined
   try {
-    if (isPGPreflightSelection('views') && !preflightCanStart(await ensurePGCheck('views'))) return
+    if (isPGPreflightSelection('views')) {
+      const check = await ensurePGCheck('views')
+      if (!preflightCanStart(check)) {
+        const errors = check?.issues?.filter(issue => issue.severity === 'error') ?? []
+        if (!errors.length || !errors.every(issue =>
+          issue.object.kind === 'view' && viewMigrate.selected.includes(issue.object.name) &&
+          !pgExclusions.views.some(excluded => excluded.kind === 'view' && excluded.name === issue.object.name)
+        )) return
+      }
+    }
     const res = await apiMigrateViews({
       excluded_objects: pgExclusions.views,
       src_conn_id: viewMigrate.srcConnId!,
@@ -1614,6 +1631,7 @@ async function handleMigrateViews() {
       change_owner: !viewIsOscarMySQL.value && viewMigrate.changeOwner,
       strip_view_schemas: viewMigrate.stripViewSchemas || undefined,
     })
+    viewMigrate.jobId = res.data.job_id ?? ''
     viewMigrate.results = res.data.results ?? []
     viewMigrate.compatibilityFunctions = res.data.compatibility_functions ?? undefined
     const fail = viewMigrate.results.filter((r) => r.error).length
@@ -1884,6 +1902,7 @@ function migrationContextLocked(kind: PGCheckKind): boolean {
 function clearMigrationResults(kind: PGCheckKind) {
   if (kind === 'views') {
     viewMigrate.results = []
+    viewMigrate.jobId = ''
     viewMigrate.compatibilityFunctions = undefined
     return
   }
@@ -1928,6 +1947,7 @@ function resetSourceObjects(kind: PGCheckKind) {
     viewMigrate.views = []
     viewMigrate.selected = []
     viewMigrate.results = []
+    viewMigrate.jobId = ''
     viewMigrate.compatibilityFunctions = undefined
   } else if (kind === 'objects') {
     ++omLoadTablesRequest

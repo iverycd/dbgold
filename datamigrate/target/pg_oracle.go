@@ -299,10 +299,13 @@ func (w *OracleWriter) ExecutePGOracleStatements(ctx context.Context, kind, name
 	if kind == "table" {
 		return w.CreateTable(ctx, statements)
 	}
+	if kind == "view" {
+		return w.executeView(ctx, name, statements)
+	}
 	if err := w.execStatements(ctx, statements); err != nil {
 		return err
 	}
-	if kind == "view" || kind == "trigger" {
+	if kind == "trigger" {
 		return w.observeValidity(ctx, statements, name, strings.ToUpper(kind))
 	}
 	return nil

@@ -279,18 +279,9 @@ func (m *Migrator) preflightCrossSQLServer(ctx context.Context, p *CrossPrefligh
 								v.err = fmt.Errorf("依赖视图 %s 预检失败", dependency)
 								break
 							}
-						} else if rebuild {
-							if !healthy[dependency] {
-								v.err = fmt.Errorf("依赖表 %s 未选中或预检失败", dependency)
-								break
-							}
-						} else {
-							exists, e := inspector.ObjectExists(ctx, m.objName(dependency))
-							if e != nil {
-								v.err = e
-							} else if !exists {
-								v.err = fmt.Errorf("目标依赖对象 %s 不存在", dependency)
-							}
+						} else if rebuild && selected[dependency] && !healthy[dependency] {
+							v.err = fmt.Errorf("依赖表 %s 预检失败", dependency)
+							break
 						}
 					}
 				}

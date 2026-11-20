@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,4 +183,106 @@ func TestMySQLDamengZeroDateIntegration(t *testing.T) {
 			require.NoError(t, rows.Err())
 		})
 	}
+}
+
+func TestMySQLDamengViewRepairDDLIntegration(t *testing.T) {
+	myDSN, dmDSN := os.Getenv("DBGOLD_MYSQL_SCAN_SOURCE_DSN"), os.Getenv("DBGOLD_MYSQL_SCAN_DM_DSN")
+	if myDSN == "" || dmDSN == "" {
+		t.Skip("requires disposable MySQL and DM test instances")
+	}
+	cfg, err := mysql.ParseDSN(myDSN)
+	require.NoError(t, err)
+	admin, err := sql.Open("mysql", myDSN)
+	require.NoError(t, err)
+	t.Cleanup(func() { admin.Close() })
+	cfg.DBName = fmt.Sprintf("dbgold_view_%d", time.Now().UnixNano())
+	contentFixtureExec(t, admin, "CREATE DATABASE "+cfg.DBName)
+	t.Cleanup(func() { contentFixtureExec(t, admin, "DROP DATABASE "+cfg.DBName) })
+	src, err := sql.Open("mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer src.Close()
+	for _, sqlText := range []string{
+		"CREATE TABLE Element (Id INT PRIMARY KEY)",
+		"INSERT INTO Element VALUES (1), (2)",
+		"CREATE TABLE OtherTable (RowId INT PRIMARY KEY)",
+		"CREATE VIEW AppElement AS SELECT Id AS Item FROM Element UNION ALL SELECT Id FROM Element",
+		"CREATE FUNCTION SourceOnlyFunction(x int) RETURNS int DETERMINISTIC NO SQL RETURN x",
+		"CREATE VIEW BadView AS SELECT SourceOnlyFunction(Id) AS Item FROM Element",
+		"CREATE VIEW BadChild AS SELECT Item FROM BadView",
+	} {
+		contentFixtureExec(t, src, sqlText)
+	}
+
+	dm, err := sql.Open("dm", dmDSN)
+	require.NoError(t, err)
+	t.Cleanup(func() { dm.Close() })
+	schema := fmt.Sprintf("DM_VIEW_%d", time.Now().UnixNano())
+	createDMScanSchema(t, dm, schema)
+	reader, err := source.NewMySQLForDameng(cfg.FormatDSN(), cfg.DBName, source.ConnPoolConfig{})
+	require.NoError(t, err)
+	defer reader.Close()
+	writer, err := target.NewDaMeng(dmDSN, schema, target.ConnPoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	defer writer.Close()
+	initial := map[string]string{}
+	config := Config{Content: "both", Mode: "all", TargetSchema: schema, TargetDBType: "dameng", PageSize: 10, MaxParallel: 1, CaptureRepair: true}
+	config.RepairSink = func(manifest RepairManifest) error {
+		for _, o := range manifest.Objects {
+			if o.Kind == "view" && initial[o.SourceName] == "" && len(o.Units) > 0 {
+				initial[o.SourceName] = o.Units[0].SQL
+			}
+		}
+		return nil
+	}
+	job := &Job{LogCh: make(chan string, 4096)}
+	report := NewMigrator(reader, writer, job, config).Run(t.Context())
+	require.NotEmpty(t, report.AutoRepairs)
+	require.Equal(t, 2, report.Tables.Success)
+	require.Equal(t, 1, report.Views.Success, "%+v, logs %v", report.Views, drainLogs(job))
+	require.Equal(t, 2, report.Views.Failed)
+	stages := map[string]string{}
+	for _, obj := range report.Views.Items {
+		stages[obj.SourceName] = obj.Stage
+		require.NotEmpty(t, obj.Error)
+		require.Equal(t, initial[obj.SourceName], obj.DDL)
+	}
+	require.Equal(t, "execute", stages["BadView"])
+	require.Equal(t, "dependency", stages["BadChild"])
+	for _, obj := range report.RepairManifest.Objects {
+		if obj.SourceName == "AppElement" {
+			require.Equal(t, "succeeded", obj.Status)
+			require.Len(t, obj.Units, 1)
+			require.Equal(t, initial["AppElement"], obj.Units[0].SQL)
+		}
+	}
+	var n, sum int
+	require.NoError(t, dm.QueryRowContext(t.Context(), "SELECT COUNT(*), SUM(ITEM) FROM "+schema+".APPELEMENT").Scan(&n, &sum))
+	require.Equal(t, 4, n)
+	require.Equal(t, 6, sum)
+	require.Contains(t, strings.ToUpper(initial["AppElement"]), "UNION ALL")
+
+	contentFixtureExec(t, dm, "DROP VIEW "+schema+".APPELEMENT")
+	selectedJob := &Job{LogCh: make(chan string, 1024)}
+	results := NewMigrator(reader, writer, selectedJob, config).MigrateViews(t.Context(), []string{"AppElement"})
+	require.Len(t, results, 1)
+	require.Empty(t, results[0].Error)
+	require.Equal(t, initial["AppElement"], results[0].DDL)
+	require.NoError(t, dm.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+schema+".APPELEMENT").Scan(&n))
+	require.Equal(t, 4, n)
+
+	// Reuse the populated disposable target to exercise the statement rendered
+	// from SQL Server's full CREATE VIEW metadata against the real DM parser.
+	sqlServerSource, _, _ := repairFixture("sqlserver")
+	sqlServerSource.tables = []string{"Element"}
+	sqlServerSource.views = []source.ViewInfo{{
+		ViewName:   "SqlUnion",
+		Definition: "CREATE OR ALTER VIEW dbo.SqlUnion AS SELECT Id FROM dbo.Element UNION ALL SELECT Id FROM dbo.Element",
+	}}
+	sqlServerJob := &Job{LogCh: make(chan string, 1024)}
+	sqlServerResults := NewMigrator(sqlServerSource, writer, sqlServerJob, config).MigrateViews(t.Context(), []string{"SqlUnion"})
+	require.Len(t, sqlServerResults, 1)
+	require.Empty(t, sqlServerResults[0].Error)
+	require.NoError(t, dm.QueryRowContext(t.Context(), "SELECT COUNT(*), SUM(ID) FROM "+schema+".SQLUNION").Scan(&n, &sum))
+	require.Equal(t, 4, n)
+	require.Equal(t, 6, sum)
 }

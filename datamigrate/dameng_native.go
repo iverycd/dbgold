@@ -760,6 +760,14 @@ func (m *Migrator) runDamengNative(ctx context.Context) MigrationReport {
 		}
 	}
 	report.NativeSchema.Verification = append(report.NativeSchema.Verification, issues...)
+	// A CREATE and COMPILE can both commit before the catalog reveals an
+	// invalid or mismatched ordinary view. Preserve their committed unit
+	// states while routing the object-level failure to the repair editor.
+	for _, issue := range issues {
+		if issue.Severity == "error" && issue.Kind == "view" && issue.ObjectID != "" {
+			states[issue.ObjectID] = nativeObjectFailure("validation", errors.Join(states[issue.ObjectID], errors.New(issue.Reason)))
+		}
+	}
 	if ctx.Err() != nil {
 		report.NativeSchema.Verification = append(report.NativeSchema.Verification, nativeFailure("任务", ctx.Err()))
 	}

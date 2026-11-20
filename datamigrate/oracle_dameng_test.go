@@ -41,10 +41,19 @@ type oracleDMWriter struct {
 	*dmFixtureWriter
 	columns                    []string
 	sequences, calibrated      []source.SequenceInfo
+	viewErrors                 map[string]error
+	viewAttempts               []source.ViewInfo
 	existingChecks             int
 	existingErr, capabilityErr error
 }
 
+func (w *oracleDMWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
+	w.viewAttempts = append(w.viewAttempts, view)
+	if err := w.viewErrors[view.ViewName]; err != nil {
+		return err
+	}
+	return w.dmFixtureWriter.CreateView(ctx, view)
+}
 func (w *oracleDMWriter) ValidateOracleDamengExisting(context.Context, *source.TableDDLInfo, dialect.TypeOpt) error {
 	w.existingChecks++
 	return w.existingErr
@@ -139,7 +148,7 @@ func TestOracleDamengModesAndRawViewMapping(t *testing.T) {
 				require.Len(t, w.created, 1)
 				require.Contains(t, w.created[0], `"ROW_ID" NUMBER(18,0)`)
 				require.Len(t, w.views, 1)
-				require.Contains(t, w.views[0].Definition, `"ROW_ID"`)
+				require.Contains(t, w.views[0].Definition, `"ROWID"`)
 				require.Contains(t, w.views[0].Definition, `'AbC'`)
 				require.NotContains(t, w.views[0].Definition, "ctid")
 			}
@@ -203,6 +212,7 @@ func TestOracleDamengViewsOnlyAndMissingDependencies(t *testing.T) {
 	require.Empty(t, w.created)
 	require.Empty(t, w.copied)
 	r.views = []source.ViewInfo{{ViewName: "BAD", Definition: `SELECT ID FROM MISSING`}}
+	w.viewErrors = map[string]error{"BAD": fmt.Errorf("目标对象 MISSING 不存在")}
 	out = m.MigrateViews(context.Background(), []string{"BAD"})
 	require.Len(t, out, 1)
 	require.NotEmpty(t, out[0].Error)
@@ -256,7 +266,7 @@ func TestOracleDamengGroupedJoinViewDependenciesAndDDL(t *testing.T) {
 	require.Equal(t, "V", w.views[0].ViewName)
 	require.Equal(t, "JOINEDVIEW", w.views[1].ViewName)
 	require.Equal(t, "JOINEDVIEW", out[1].Name)
-	require.Equal(t, `CREATE OR REPLACE VIEW "APP"."JOINEDVIEW" ("ROW_ID", "JOINEDTXT") AS SELECT "M"."ROW_ID", "V"."HEADERTXT" FROM (("APP"."MIXED" "M" INNER JOIN "APP"."V" "V" ON ((("M"."ROW_ID" = "V"."HEADERID")))))`, out[1].DDL)
+	require.Equal(t, `CREATE OR REPLACE VIEW "APP"."JOINEDVIEW" ("ROWID", "JOINEDTXT") AS SELECT "M"."ROWID", "V"."HEADERTXT" FROM (("APP"."MIXED" "M" INNER JOIN "APP"."V" "V" ON ((("M"."ROWID" = "V"."HEADERID")))))`, out[1].DDL)
 	require.Equal(t, "RowId", r.views[0].Columns[0].Name, "source metadata must not be changed")
 	require.Empty(t, w.created, "view-only migration must not create dependency tables")
 	require.Empty(t, w.copied, "view-only migration must not copy dependency table data")
@@ -268,9 +278,11 @@ func TestOracleDamengGroupedJoinViewMissingDependency(t *testing.T) {
 		ViewName:   "JoinedView",
 		Definition: `SELECT m."RowId" FROM ("SRC"."Mixed" m INNER JOIN ("SRC"."MissingView" v) ON (m."RowId" = v."RowId"))`,
 	}}
+	w.viewErrors = map[string]error{"JOINEDVIEW": fmt.Errorf("目标对象 MissingView 不存在")}
 	out := m.MigrateViews(context.Background(), []string{"JoinedView"})
 	require.Len(t, out, 1)
-	require.Equal(t, "dependency", out[0].Stage)
+	require.Equal(t, "execute", out[0].Stage)
+	require.Len(t, w.viewAttempts, 1)
 	require.Contains(t, out[0].Error, "MissingView")
 	require.Empty(t, w.views)
 	require.Empty(t, w.created)
@@ -330,7 +342,7 @@ func TestOracleDamengNestedViewUnionAggregationAndRownum(t *testing.T) {
 	require.Contains(t, w.views[0].Definition, `FROM "APP"."FRAME_VISITLOG_HISTROY"`)
 	require.Contains(t, w.views[0].Definition, `UNION ALL`)
 	require.Contains(t, w.views[0].Definition, `GROUP BY "MODULECODE", "MODULEGUID", "BASEOUGUID", "MODULENAME"`)
-	require.Equal(t, 2, w.existingChecks, "both nested UNION dependencies must be validated")
+	require.Zero(t, w.existingChecks, "existing tables do not require column-map preflight for CREATE VIEW")
 	require.Equal(t, oracleDMModuleVisitLogSQL, r.views[0].Definition, "source SQL must not be changed")
 	require.Equal(t, originalColumns, r.views[0].Columns, "source view metadata must not be changed")
 	require.Equal(t, originalTableColumns, r.ddl["FRAME_VISITLOG"].Columns, "source table metadata must not be changed")
@@ -380,7 +392,7 @@ func TestOracleDamengViewCompatibilityAndNamespace(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			r, w, m := oracleDMFixture("both")
 			if kind == "compatibility" {
-				w.capabilityErr = fmt.Errorf("Oracle兼容模式未开启")
+				w.viewErrors = map[string]error{"V": fmt.Errorf("Oracle兼容模式未开启")}
 			} else {
 				r.views[0].ViewName = "mixed"
 			}

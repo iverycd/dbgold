@@ -215,25 +215,25 @@ func TestDamengRepairViewsAndDependencies(t *testing.T) {
 	require.Equal(t, 2, report.Views.Success)
 	require.Equal(t, 2, report.Views.Failed)
 	require.Len(t, report.AutoRepairs, 2)
-	require.Equal(t, "Parent", w.views[0].ViewName)
-	require.Contains(t, w.views[0].Definition, `"T"."ROW_ID_2"`)
-	require.Contains(t, w.views[1].Definition, `"V"."ROW_ID_2" AS "ID"`)
-	// Fresh migrator must discover/reuse mappings, without re-creating any table.
+	require.Equal(t, "PARENT", w.views[0].ViewName)
+	require.Contains(t, w.views[0].Definition, `"T".*`)
+	require.Contains(t, w.views[1].Definition, `"V"."ROWID" AS "ID"`)
+	// Selecting only the child executes just its target DDL.
 	w.views = nil
 	vm := NewMigrator(r, w, &Job{LogCh: make(chan string, 1024)}, m.cfg)
 	results := vm.MigrateViews(context.Background(), []string{"Child"})
 	require.Len(t, results, 1)
 	require.Empty(t, results[0].Error)
 	require.Len(t, w.views, 1)
-	require.Equal(t, "Child", w.views[0].ViewName)
-	require.Contains(t, w.views[0].Definition, `"V"."ROW_ID_2"`)
+	require.Equal(t, "CHILD", w.views[0].ViewName)
+	require.Contains(t, w.views[0].Definition, `"V"."ROWID"`)
 }
 
-func TestMySQLDamengMappedViewWithNullComparison(t *testing.T) {
+func TestMySQLDamengViewPreservesNullComparison(t *testing.T) {
 	r, w, m := repairFixture("mysql")
 	m.cfg.Content = "schema_only"
 	m.cfg.TargetSchema = "SZX_EXCHANGE"
-	// The fixture's existing ROWID columns activate column mapping for all views.
+	// Other tables in this job require ROWID repairs.
 	r.tables = append(r.tables, "wyceshi", "wycc")
 	joinColumn := source.ColumnInfo{Name: "operateuserbaseouguid", DataType: "varchar", Length: 36}
 	r.ddl["wyceshi"] = &source.TableDDLInfo{TableName: "wyceshi", Columns: []source.ColumnInfo{
@@ -257,10 +257,7 @@ func TestMySQLDamengMappedViewWithNullComparison(t *testing.T) {
 	require.Len(t, w.views, 1)
 	view := w.views[0]
 	require.Equal(t, "jyjtest6", view.ViewName)
-	require.Contains(t, view.Definition, `"SZX_EXCHANGE"."WYCESHI" CROSS JOIN "SZX_EXCHANGE"."WYCC"`)
-	require.Contains(t, view.Definition, `"WYCESHI"."YEARFLAG" <> NULL`)
-	require.Contains(t, view.Definition, ` AND `)
-	require.Contains(t, view.Definition, `"WYCC"."OPERATEUSERBASEOUGUID" = "WYCESHI"."OPERATEUSERBASEOUGUID"`)
+	require.Equal(t, r.views[0].Definition, view.Definition)
 }
 
 func TestDamengObjectOnlyExternalReference(t *testing.T) {
@@ -274,20 +271,21 @@ func TestDamengObjectOnlyExternalReference(t *testing.T) {
 	require.Len(t, w.validated, 2) // T and existing referenced U
 }
 
-func TestDamengGenericViewReuseRejectsMissingTargetMapping(t *testing.T) {
+func TestDamengViewCreationKeepsOriginalColumnReference(t *testing.T) {
 	for _, kind := range []string{"mysql", "postgres"} {
 		r, w, m := repairFixture(kind)
 		r.views = []source.ViewInfo{{ViewName: "V", Definition: "SELECT t.RowId AS SavedId FROM T t"}}
 		report := m.Run(context.Background())
 		require.Zero(t, report.Views.Failed)
-		require.Contains(t, w.views[0].Definition, `"T"."ROW_ID_2" AS "SAVEDID"`)
+		require.Equal(t, r.views[0].Definition, w.views[0].Definition)
 		w.views = nil
 		w.validationErr = fmt.Errorf("目标缺少 ROW_ID_2")
 		vm := NewMigrator(r, w, &Job{LogCh: make(chan string, 1024)}, m.cfg)
 		out := vm.MigrateViews(context.Background(), []string{"V"})
 		require.Len(t, out, 1)
-		require.Contains(t, out[0].Error, "目标缺少 ROW_ID_2")
-		require.Empty(t, w.views)
+		require.Empty(t, out[0].Error)
+		require.Len(t, w.views, 1)
+		require.Equal(t, r.views[0].Definition, w.views[0].Definition)
 	}
 }
 
@@ -311,4 +309,72 @@ func TestDamengRepairRejectsUnsafeTableAndContinuesHealthyTable(t *testing.T) {
 		require.Len(t, report.AutoRepairs, 1)
 		require.Equal(t, "U", report.AutoRepairs[0].Table)
 	}
+}
+
+type damengViewResultWriter struct {
+	*repairWriter
+	attempts []string
+}
+
+func (w *damengViewResultWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
+	ddl := dialect.JoinSQL(w.Dialect().ViewStatements("APP", view))
+	w.attempts = append(w.attempts, ddl)
+	if view.ViewName == "InvalidView" {
+		return fmt.Errorf("DM -2111: 无效的列名")
+	}
+	return w.repairWriter.CreateView(ctx, view)
+}
+
+func TestMySQLDamengUnionUsesRepairDDL(t *testing.T) {
+	r, base, m := repairFixture("mysql")
+	w := &damengViewResultWriter{repairWriter: base}
+	m.writer = w
+	m.cfg.Content, m.cfg.CaptureRepair = "schema_only", true
+	r.tables = append(r.tables, "Element")
+	r.ddl["Element"] = &source.TableDDLInfo{TableName: "Element", Columns: []source.ColumnInfo{{Name: "Id", DataType: "int"}}}
+	r.views = []source.ViewInfo{
+		{ViewName: "Blocked", Definition: "SELECT bad FROM InvalidView"},
+		{ViewName: "InvalidView", Definition: "SELECT bad FROM Element"},
+		{ViewName: "AppElement", Definition: "SELECT e.Id AS ITEM FROM Element e UNION ALL SELECT e.Id FROM Element e"},
+	}
+	initial := map[string]string{}
+	m.cfg.RepairSink = func(manifest RepairManifest) error {
+		for _, obj := range manifest.Objects {
+			if obj.Kind == "view" && initial[obj.Name] == "" {
+				require.Len(t, obj.Units, 1)
+				initial[obj.Name] = obj.Units[0].SQL
+			}
+		}
+		return nil
+	}
+	report := m.Run(t.Context())
+	require.NotEmpty(t, report.AutoRepairs, "other tables in the job need column-name repairs")
+	require.Equal(t, 1, report.Views.Success)
+	require.Equal(t, 2, report.Views.Failed)
+	require.Len(t, report.Views.Items, 2)
+	require.Equal(t, []string{initial["InvalidView"], initial["AppElement"]}, w.attempts)
+	require.Contains(t, initial["AppElement"], r.views[2].Definition)
+	for _, result := range report.Views.Items {
+		require.Equal(t, initial[result.SourceName], result.DDL)
+		if result.SourceName == "InvalidView" {
+			require.Equal(t, "execute", result.Stage)
+			require.Equal(t, "DM -2111: 无效的列名", result.Error)
+		} else {
+			require.Equal(t, "dependency", result.Stage)
+			require.Contains(t, result.Error, "InvalidView")
+		}
+	}
+}
+
+func TestSQLServerDamengUnionUsesSingleTargetHeader(t *testing.T) {
+	r, w, m := repairFixture("sqlserver")
+	r.views = []source.ViewInfo{{
+		ViewName: "Pick", Definition: "CREATE OR ALTER VIEW dbo.Pick AS SELECT T.Txt FROM dbo.T UNION ALL SELECT 'ROWID' AS Txt FROM dbo.U",
+	}}
+	results := m.MigrateViews(t.Context(), []string{"Pick"})
+	require.Len(t, results, 1)
+	require.Empty(t, results[0].Error)
+	require.Equal(t, 1, strings.Count(results[0].DDL, "CREATE"))
+	require.Contains(t, results[0].DDL, `"APP"."T" UNION ALL SELECT 'ROWID' AS "TXT" FROM "APP"."U"`)
+	require.Len(t, w.views, 1)
 }

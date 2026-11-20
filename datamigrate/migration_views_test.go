@@ -6,9 +6,30 @@ import (
 	"errors"
 	"testing"
 
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/source"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSelectedViewsUseSourceQueryForBusinessViewNames(t *testing.T) {
+	ctx := context.Background()
+	r, w, m := repairFixture("mysql")
+	m.cfg.CaptureRepair = true
+	m.cfg.ViewNames = []string{"view_huiyuanhistorychange", "view_pwprojectinfo", "view_pwprojectinfo_history", "view_sys_changdinew"}
+	const body = "SELECT 1 AS id UNION ALL SELECT 2 AS id"
+	for _, name := range m.cfg.ViewNames {
+		r.views = append(r.views, source.ViewInfo{ViewName: name, Definition: body})
+	}
+
+	report, _ := m.RunSelectedViews(ctx)
+	require.Equal(t, len(m.cfg.ViewNames), report.Views.Success)
+	require.Len(t, w.views, len(m.cfg.ViewNames))
+	require.Len(t, report.RepairManifest.Objects, len(m.cfg.ViewNames))
+	for i, view := range w.views {
+		require.Equal(t, body, view.Definition)
+		require.Equal(t, dialect.JoinSQL(w.Dialect().ViewStatements(m.cfg.TargetSchema, view)), report.RepairManifest.Objects[i].DDL)
+	}
+}
 
 func TestMigrationViewDependenciesRespectQueryScopes(t *testing.T) {
 	for _, tt := range []struct {

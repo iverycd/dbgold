@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sort"
@@ -210,11 +211,61 @@ func (w *OracleWriter) CreateForeignKey(ctx context.Context, f source.FKInfo) er
 	return w.execStatements(ctx, w.dia.ForeignKeyStatements(w.schema, f))
 }
 func (w *OracleWriter) CreateView(ctx context.Context, v source.ViewInfo) error {
-	statements := w.dia.ViewStatements(w.schema, v)
-	if err := w.execStatements(ctx, statements); err != nil {
+	return w.executeView(ctx, v.ViewName, w.dia.ViewStatements(w.schema, v))
+}
+
+// The CREATE and its validity check form one repair unit. An INVALID object
+// must not leave a completed CREATE followed by a second copy of the same SQL.
+func (w *OracleWriter) executeView(ctx context.Context, name string, statements []dialect.Statement) error {
+	if len(statements) != 1 {
+		return fmt.Errorf("视图 %s 需要一条完整的 Oracle 建视图语句", name)
+	}
+	query := statements[0].SQL
+	if err := w.validateSQLText(query); err != nil {
 		return err
 	}
-	return w.observeValidity(ctx, statements, v.ViewName, "VIEW")
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if w.schema != w.username {
+		defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }()
+		if _, err := conn.ExecContext(ctx, "ALTER SESSION SET CURRENT_SCHEMA = "+w.dia.QuoteIdent(w.schema)); err != nil {
+			return err
+		}
+	}
+	if err := repair.Observe(ctx, query, "running", nil); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, query)
+	if err == nil {
+		err = w.validateCreatedView(ctx, conn, name)
+	}
+	status := "succeeded"
+	if err != nil {
+		status = repairErrorStatus(err)
+	}
+	return errors.Join(err, repair.Observe(ctx, query, status, err))
+}
+
+type oracleViewValidationError struct{ error }
+
+func (e oracleViewValidationError) Error() string {
+	return "创建后核验 Oracle 视图失败: " + e.error.Error()
+}
+func (e oracleViewValidationError) Unwrap() error { return e.error }
+
+func IsViewValidationError(err error) bool {
+	var validation oracleViewValidationError
+	return errors.As(err, &validation)
+}
+
+func (w *OracleWriter) validateCreatedView(ctx context.Context, conn *sql.Conn, name string) error {
+	if err := w.validateObjectOn(ctx, conn, name, "VIEW"); err != nil {
+		return oracleViewValidationError{err}
+	}
+	return nil
 }
 
 type oracleInvalidObjectError struct{ message string }

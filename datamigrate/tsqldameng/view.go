@@ -192,9 +192,44 @@ func (r *viewRenderer) fail(s string) string {
 	return ""
 }
 func (r *viewRenderer) selectNode(n ast.Node) string {
+	if set, ok := n.(*ast.SetOprStmt); ok {
+		if set.With != nil || set.Limit != nil || set.OrderBy != nil || set.SelectList == nil {
+			return r.fail("带 WITH、排序或行数限制的集合查询")
+		}
+		return r.selectNode(set.SelectList)
+	}
+	if list, ok := n.(*ast.SetOprSelectList); ok {
+		if list.With != nil || list.Limit != nil || list.OrderBy != nil {
+			return r.fail("带 WITH、排序或行数限制的集合查询")
+		}
+		var parts []string
+		for i, child := range list.Selects {
+			var operator *ast.SetOprType
+			switch branch := child.(type) {
+			case *ast.SelectStmt:
+				operator = branch.AfterSetOperator
+			case *ast.SetOprSelectList:
+				operator = branch.AfterSetOperator
+			default:
+				return r.fail("未知集合查询分支")
+			}
+			if i > 0 {
+				if operator == nil || (*operator != ast.Union && *operator != ast.UnionAll) {
+					return r.fail("UNION/UNION ALL 之外的集合运算")
+				}
+				parts = append(parts, operator.String())
+			}
+			body := r.selectNode(child)
+			if _, nested := child.(*ast.SetOprSelectList); nested {
+				body = "(" + body + ")"
+			}
+			parts = append(parts, body)
+		}
+		return strings.Join(parts, " ")
+	}
 	s, ok := n.(*ast.SelectStmt)
 	if !ok {
-		return r.fail("UNION 或非 SELECT 语句")
+		return r.fail("非 SELECT 语句")
 	}
 	if s.With != nil || s.Limit != nil || s.OrderBy != nil || s.SelectIntoOpt != nil || s.LockInfo != nil || len(s.WindowSpecs) > 0 {
 		return r.fail("WITH、排序、窗口、锁定或行数限制")

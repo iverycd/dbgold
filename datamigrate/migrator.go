@@ -287,13 +287,12 @@ func (m *Migrator) stripViewSchemas(def string) string {
 
 // Run 执行完整的三阶段迁移，返回 MigrationReport；结束时不关闭 job.LogCh（由调用方关闭）
 func (m *Migrator) Run(ctx context.Context) MigrationReport {
-	m.sqlServerSource = nil
-	m.resetOscarMySQLViews()
+	m.resetViewMigrationState()
+	defer m.clearSourceTableDDLCache()
 	m.oscarAppendCounts = nil
 	m.gaussKeysRead, m.gaussKeys, m.gaussKeysErr = false, nil, nil
 	m.gaussTableKeys = nil
 	m.mainMigrationFinished = false
-	m.compatibilityFunctions = nil
 	m.mysqlPGSpatial = mysqlPGSpatialState{}
 	m.mysqlPGIndexCatalog = nil
 	defer func() { m.mysqlPGIndexCatalog = nil }()
@@ -301,21 +300,12 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	if r, ok := m.reader.(interface{ ResetOracleMySQLAutoIncrements() }); ok {
 		r.ResetOracleMySQLAutoIncrements()
 	}
-	m.tableState.mu.Lock()
-	m.tableState.failures = map[string]migrationTableFailure{}
-	m.tableState.objects = map[ObjectRef]error{}
-	m.tableState.mu.Unlock()
 	var cancel context.CancelCauseFunc
 	ctx, cancel = context.WithCancelCause(ctx)
 	defer cancel(nil)
 	ctx = context.WithValue(ctx, oracleDamengTaskKey{}, cancel)
 	m.oracleMySQL = nil
-	m.sqlServerSource = nil
 	m.oracleMySQLIndexes = nil
-	m.resetSourceTableDDLCache()
-	defer m.clearSourceTableDDLCache()
-	m.partitionState = nil
-	m.dmPlans, m.dmUsable, m.dmBlocked = nil, nil, nil
 	if setter, ok := m.writer.(sourceTypeSetter); ok && m.isMySQLDameng() {
 		// Index coverage belongs to this run. Object-only migrations may reuse
 		// a writer without recreating any table, so reset at the run boundary.
@@ -344,6 +334,18 @@ func (m *Migrator) Run(ctx context.Context) MigrationReport {
 	var report MigrationReport
 	if cross != nil && !cross.CanStart {
 		report = newMigrationReport()
+		for _, issue := range cross.Issues {
+			if issue.Severity != "error" || issue.Object.Kind != "view" {
+				continue
+			}
+			name := m.objName(issue.Object.Name)
+			report.Views.Total++
+			report.Views.Failed++
+			report.Views.Items = append(report.Views.Items, ObjectResult{ObjectKind: "view", Name: name, SourceName: issue.Object.Name, TargetName: name, TargetSchema: m.cfg.TargetSchema, Stage: "preflight", SourceDDL: issue.Definition, Error: issue.Reason})
+		}
+		if m.cfg.CaptureRepair && report.Views.Failed > 0 && ctx.Err() == nil {
+			m.beginSelectedViewRepair(ctx)
+		}
 	} else {
 		report = m.runWithRepair(ctx)
 	}
@@ -1623,35 +1625,8 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 			} else {
 				recordMetadataFailure(&report.Views, err)
 			}
-		} else if m.isOscarDameng() {
-			m.recordOscarDamengViews(views, report)
 		} else {
 			report.Views.Total += len(views)
-			if m.isOracleDameng() {
-				for _, result := range m.migrateOracleDamengViews(ctx, views, nil) {
-					if result.Error != "" {
-						report.Views.Failed++
-						report.Views.Items = append(report.Views.Items, result)
-					} else {
-						report.Views.Success++
-					}
-				}
-				views = nil
-				if ctx.Err() != nil {
-					return
-				}
-			}
-			if m.hasDamengRenames() {
-				for _, result := range m.migrateDamengMappedViews(ctx, views, nil) {
-					if result.Error != "" {
-						report.Views.Failed++
-						report.Views.Items = append(report.Views.Items, result)
-					} else {
-						report.Views.Success++
-					}
-				}
-				views = nil // already executed in dependency order
-			}
 			m.migrateIndependentViews(ctx, views, &report.Views)
 		}
 		if m.isOscarDameng() {
@@ -1734,9 +1709,11 @@ func (m *Migrator) createPostDDL(ctx context.Context, report *MigrationReport, t
 	}
 }
 
-// prepareView shares the final view definition between execution and Oscar's
-// initial repair inventory, even if migration stops before reaching the view.
+// prepareView applies target dialect and schema settings once for migration and repair.
 func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.ViewInfo, error) {
+	if m.isSQLServerDameng() || m.isOracleDameng() || m.isOscarDameng() {
+		return m.prepareDamengView(v)
+	}
 	if m.isOscarMySQL() {
 		return m.prepareOscarMySQLView(ctx, v)
 	}
@@ -1746,18 +1723,6 @@ func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.V
 	vCopy := v
 	vCopy.ViewName = m.objName(v.ViewName)
 	vCopy.Definition = m.writer.Dialect().AdjustViewDefinition(v.Definition)
-	if v.ViewName == "view_huiyuanhistorychange" {
-		vCopy.Definition = `select huiyuan_histroyofchange.danweiguid AS DanWeiGuid,huiyuan_histroyofchange.pguid AS PGuid,huiyuan_histroyofchange.pname AS PName,huiyuan_histroyofchange.beforeinfo AS BeforeInfo,huiyuan_histroyofchange.changercode AS ChangerCode,huiyuan_histroyofchange.afterinfo AS AfterInfo,huiyuan_histroyofchange.changename AS ChangeName,huiyuan_histroyofchange.belongxiaqucode AS BelongXiaQuCode,huiyuan_histroyofchange.operateusername AS OperateUserName,huiyuan_histroyofchange.operatedate AS OperateDate,huiyuan_histroyofchange.row_id AS Row_ID,huiyuan_histroyofchange.danweitype AS DanWeiType,huiyuan_histroyofchange.changetype AS ChangeType,huiyuan_histroyofchange.changedate AS ChangeDate,huiyuan_histroyofchange.xiaqucode AS XiaQuCode,huiyuan_histroyofchange.viewurl AS ViewUrl,huiyuan_histroyofchange.status AS STATUS,huiyuan_histroyofchange.infoguid AS InfoGuid,huiyuan_histroyofchange.copystatus AS CopyStatus,huiyuan_histroyofchange.changecontent AS ChangeContent,huiyuan_histroyofchange.tableid AS TableID,huiyuan_histroyofchange.fieldid AS FieldID,table_struct.bak2 AS Bak2,table_struct.bak1 AS Bak1,table_struct.bak3 AS Bak3,huiyuan_histroyofchange.rowguid AS ROWGUID FROM huiyuan_histroyofchange INNER JOIN table_struct ON (((huiyuan_histroyofchange.fieldid = table_struct.fieldid::varchar) and (huiyuan_histroyofchange.tableid = table_struct.tableid::varchar)))`
-	}
-	if v.ViewName == "view_pwprojectinfo" {
-		vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib.pw_name AS pwname, pw_lib.shengfenzh AS shengfenzh, pw_lib.mobile AS mobile, pw_lib.operateusername AS operateusername, pw_lib.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '可以参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib ON yytz_project_pw.pingweiguid = pw_lib.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib.pw_name, pw_lib.shengfenzh, pw_lib.mobile, pw_lib.operateusername, pw_lib.danweiguid`
-	}
-	if v.ViewName == "view_pwprojectinfo_history" {
-		vCopy.Definition = `SELECT yytz_project_pw.pingweiguid AS pingweiguid, yytz_project_pw.row_id AS row_id, pw_lib_history.pw_name AS pwname, pw_lib_history.shengfenzh AS shengfenzh, pw_lib_history.mobile AS mobile, pw_lib_history.operateusername AS operateusername, pw_lib_history.danweiguid AS danweiguid, SUM(CASE WHEN yytz_project_pw.feedbackstatus = '确认参加' THEN 1 ELSE 0 END) AS pscount, COUNT(1) AS allcount FROM yytz_project_pw INNER JOIN pw_lib_history ON yytz_project_pw.pingweiguid = pw_lib_history.pingweiguid WHERE yytz_project_pw.projectguid IN (SELECT yytz_project.projectguid FROM yytz_project WHERE yytz_project.auditstatus = '3') GROUP BY yytz_project_pw.pingweiguid, yytz_project_pw.row_id, pw_lib_history.pw_name, pw_lib_history.shengfenzh, pw_lib_history.mobile, pw_lib_history.operateusername, pw_lib_history.danweiguid`
-	}
-	if v.ViewName == "view_sys_changdinew" {
-		vCopy.Definition = `SELECT mtr_project.rowguid AS RowGuid, mtr_usetime.row_id AS Row_ID, mtr_project.yudingtitle AS YuDingTitle, mtr_usetime.usedate::varchar AS UseDate, mtr_usetime.usefromhour::varchar AS UseFromHour, mtr_project.xiaqucode AS XiaQuCode, mtr_project.statuscode AS StatusCode, mtr_project.projecttype AS ProjectType, mtr_usetime.usetohour::varchar AS UseToHour, mtr_project.yudingguid AS YuDingGuid, mtr_project.showkaibiao AS ShowKaiBiao, mtr_project.showpingbiao AS ShowPingBiao, mtr_project.showbiaoduanname AS ShowBiaoDuanName, mtr_project.showbiaoduanno AS ShowBiaoDuanNo, mtr_usetime.showfromhour AS ShowFromHour, mtr_usetime.showtohour AS ShowToHour, mtr_usetime.usestep AS UseStep, mtr_usetime.rowguid AS TimeRowGuid, mtr_usetime.mtr_guid AS MTR_Guid, mtr_usetime.usestep_minute AS UseStep_Minute, mtr_project.showusedate::varchar AS ShowUseDate, mtr_usetime.usetype AS MTR_type FROM mtr_project INNER JOIN mtr_usetime ON mtr_usetime.yudingguid = mtr_project.yudingguid UNION ALL SELECT mtr_usetimehistory.rowguid AS ROWGUID, NULL, mtr_usetimehistory.yudingtitle_new AS YUDINGTITLE_NEW, NULL, mtr_usetimehistory.showusedate_new::varchar AS SHOWUSEDATE_NEW, mtr_usetimehistory.xiaqucode AS XIAQUCODE, '2', '0', mtr_usetimehistory.showpbuesdate_new AS SHOWPBUESDATE_NEW, 'history', NULL, NULL, mtr_usetimehistory.showkaibiaoguid_new AS SHOWKAIBIAOGUID_NEW, mtr_usetimehistory.showpinbiaoguid_new AS SHOWPINBIAOGUID_NEW, NULL, NULL, NULL, mtr_usetimehistory.usestep_new AS USESTEP_NEW, mtr_usetimehistory.pbusestep_new AS PBUSESTEP_NEW, NULL, NULL, NULL FROM mtr_usetimehistory WHERE mtr_usetimehistory.auditstatus <> '3'`
-	}
 	// 去除用户指定的跨库模式名前缀(忽略大小写)
 	if m.isOscar() {
 		sourceSchema := ""
@@ -1779,26 +1744,11 @@ func (m *Migrator) prepareView(ctx context.Context, v source.ViewInfo) (source.V
 
 // createOneView 创建准备后的视图并按需修改 owner，返回实际 DDL 与执行错误。
 func (m *Migrator) createOneView(ctx context.Context, v source.ViewInfo) (string, error) {
-	if m.isSQLServerDameng() {
-		v.ViewName = m.objName(v.ViewName)
-		ddl := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, v))
-		return ddl, m.repairView(ctx, v)
-	}
-	vCopy, err := m.prepareView(ctx, v)
+	vCopy, err := m.preparedMigrationView(ctx, v)
 	if err != nil {
-		if m.isSQLServerPG() || m.isOscarMySQL() {
-			return "", err
-		}
-		return dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy)), err
+		return "", err
 	}
-	// 拼出完整 DDL 用于报告展示，与 writer.CreateView 实际执行的语句一致
-	viewDDL := fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\" AS\n%s;", vCopy.ViewName, vCopy.Definition)
-	if m.cfg.TargetSchema != "" {
-		viewDDL = fmt.Sprintf("CREATE OR REPLACE VIEW \"%s\".\"%s\" AS\n%s;", m.cfg.TargetSchema, vCopy.ViewName, vCopy.Definition)
-	}
-	if m.isOscar() || m.isSQLServerPG() || m.isOscarMySQL() {
-		viewDDL = dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
-	}
+	viewDDL := dialect.JoinSQL(m.writer.Dialect().ViewStatements(m.cfg.TargetSchema, vCopy))
 	if err := m.repairView(ctx, vCopy); err != nil {
 		m.log.Errorf("创建视图失败 [%s]: %v", vCopy.ViewName, err)
 		return viewDDL, err
@@ -1822,46 +1772,11 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	if m.isOscarMySQL() {
 		return m.migrateOscarMySQLViews(ctx, viewNames)
 	}
-	if m.isOscarDameng() {
-		results := make([]ObjectResult, 0, len(viewNames))
-		for _, name := range viewNames {
-			results = append(results, m.oscarDamengViewResult(source.ViewInfo{ViewName: name}))
-		}
-		return results
-	}
-	if m.isOracleDameng() {
-		taskCtx, cancel := context.WithCancelCause(ctx)
-		defer cancel(nil)
-		taskCtx = context.WithValue(taskCtx, oracleDamengTaskKey{}, cancel)
-		results := m.migrateOracleDamengViewsOnly(taskCtx, viewNames)
-		if taskCtx.Err() != nil {
-			results = append(results, ObjectResult{Name: "任务级错误", Stage: "task", Error: fmt.Sprintf("视图迁移任务已终止: %v", context.Cause(taskCtx))})
-		}
-		return results
-	}
 	if err := m.prepareCompatibilityFunctions(ctx); err != nil && ctx.Err() != nil {
 		return []ObjectResult{}
 	}
-	if m.writer.DBType() == "dameng" {
-		if len(m.cfg.StripViewSchemas) > 0 && m.isSQLServerDameng() {
-			return []ObjectResult{{Name: "视图模式", Error: "此组合不支持删除跨库/schema 前缀"}}
-		}
-		// Read-only discovery lets a fresh migrator reuse the same deterministic
-		// mapping. Actual target verification is restricted to view dependencies.
-		tables, err := m.migrationTables(ctx)
-		if err != nil {
-			return []ObjectResult{{Name: "视图依赖表", Error: err.Error()}}
-		}
-		mappingUncertain := false
-		for _, table := range tables {
-			if _, err := m.planDamengTable(ctx, table); err != nil {
-				mappingUncertain = true
-				continue
-			}
-		}
-		if m.hasDamengRenames() || mappingUncertain {
-			return m.migrateDamengViewsOnly(ctx, viewNames)
-		}
+	if m.writer.DBType() == "dameng" && len(m.cfg.StripViewSchemas) > 0 && (m.isSQLServerDameng() || m.isOracleDameng()) {
+		return []ObjectResult{{Name: "视图模式", Error: "此组合不支持删除跨库/schema 前缀"}}
 	}
 	if m.isSQLServer() {
 		report := newCategoryReport()
@@ -1882,9 +1797,6 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 	}
 	if len(viewNames) == 0 {
 		return []ObjectResult{{Name: "视图范围", Error: "必须选择视图"}}
-	}
-	if m.isSQLServerDameng() {
-		return m.migrateSQLServerDamengViews(ctx, viewNames)
 	}
 	if m.isPGOracle() {
 		m.cfg.ViewNames = viewNames
@@ -1924,34 +1836,21 @@ func (m *Migrator) MigrateViews(ctx context.Context, viewNames []string) []Objec
 		m.log.Errorf("获取视图信息失败: %v", err)
 		return []ObjectResult{{Name: "视图元数据", Error: err.Error()}}
 	}
-	results := make([]ObjectResult, 0, len(viewNames))
-	if m.isOscar() {
-		names := make(oscarNames)
-		for _, v := range views {
-			if want[v.ViewName] {
-				if err := names.add(m.objName(v.ViewName), "view "+v.ViewName); err != nil {
-					for _, name := range viewNames {
-						results = append(results, ObjectResult{Name: m.objName(name), Error: err.Error()})
-					}
-					return results
-				}
-			}
+	selected := make([]source.ViewInfo, 0, len(want))
+	found := make(map[string]bool, len(want))
+	for _, view := range views {
+		if want[view.ViewName] {
+			selected = append(selected, view)
+			found[view.ViewName] = true
 		}
 	}
-	for _, v := range views {
-		if !want[v.ViewName] {
-			continue
+	category := newCategoryReport()
+	results := m.migrateIndependentViews(ctx, selected, &category)
+	for _, name := range viewNames {
+		if !found[name] {
+			results = append(results, ObjectResult{Name: m.objName(name), SourceName: name, Stage: "metadata", Error: "所选视图不存在或不可见"})
+			found[name] = true
 		}
-		if ctx.Err() != nil {
-			break
-		}
-		ddl, cerr := m.createOneView(ctx, v)
-		res := ObjectResult{Name: m.objName(v.ViewName), DDL: ddl}
-		if cerr != nil {
-			res.Error = cerr.Error()
-			m.attachSQLServerViewIssue(&res, v, cerr)
-		}
-		results = append(results, res)
 	}
 	return results
 }

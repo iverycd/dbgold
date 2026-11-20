@@ -2210,3 +2210,23 @@ test('legacy target SQL can be restored and suggested SQL is formatted without m
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
+
+test('failed native view edits one definition and keeps its physical compile step server-owned', async () => {
+  const first = 'CREATE VIEW "APP"."V" AS SELECT 0'
+  const edited = 'CREATE OR REPLACE VIEW "APP"."V" AS SELECT 1'
+  const compile = 'ALTER VIEW "APP"."V" COMPILE'
+  const obj = record({ id: 'v', kind: 'view', name: 'V', target_name: 'V', schema: 'APP', native_view_editable: true, native_fingerprint: 'f',
+    native: { kind: 'view', schema: 'APP', name: 'V', units: [{ phase: 'after_data', sql: edited }, { phase: 'compile', sql: compile }] },
+    native_view_draft: { original: { units: [{ sql: first, phase: 'after_data' }] } }, units: [unit('create','succeeded',{sql: edited}), unit('compile','failed',{sql: compile})] })
+  let saved
+  const p = panel({ jobID: 'job' }, { saveRepairDraft: async (_id, _object, payload) => { saved = payload; return {data:obj} } })
+  p.openEditor(obj)
+  assert.equal(p.draftUnits.value.length, 1)
+  assert.equal(p.draftUnits.value[0].sql, edited)
+  p.restoreOriginal()
+  assert.equal(p.draftUnits.value[0].sql, first)
+  await p.saveDraft()
+  assert.equal(saved.mode, 'native_view')
+  assert.deepEqual([...saved.units.map(u => u.sql)], [first])
+  assert.equal(utils.canEditRepairDDL({...obj.object, native_view_editable:false}),false)
+})

@@ -274,7 +274,22 @@ func (w *DaMengWriter) CreateComment(ctx context.Context, cm source.CommentInfo)
 }
 
 func (w *DaMengWriter) CreateView(ctx context.Context, view source.ViewInfo) error {
-	return w.execStatements(ctx, w.dia.ViewStatements(w.schema, view))
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// Unqualified references must resolve under the same schema as in repair.
+	// Discard this session so another pooled operation cannot inherit SET SCHEMA.
+	defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }); _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "SET SCHEMA "+w.dia.QuoteIdent(w.schema)); err != nil {
+		return err
+	}
+	for _, statement := range w.dia.ViewStatements(w.schema, view) {
+		if _, err := execObserved(ctx, conn, statement.SQL); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CountRows 返回指定表的行数。

@@ -134,6 +134,12 @@ func uncertainRepairError(err error) bool {
 }
 
 func repairErrorStatus(err error) string {
+	if IsViewValidationError(err) {
+		var invalid *oracleInvalidObjectError
+		if !errors.As(err, &invalid) {
+			return "unknown"
+		}
+	}
 	var manualInvalid manualTriggerInvalidError
 	if errors.As(err, &manualInvalid) {
 		return "failed"
@@ -312,6 +318,7 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 	}
 	var tx *sql.Tx
+	var validateView func() error
 	var exec func(string) error
 	var releaseIntervalSession func()
 	onlyIntervalMarker := len(selected) == 1 && obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[selected[0]].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan)
@@ -366,6 +373,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		defer close()
 		if a.family == "dameng" || obj.PartitionPlan != nil && len(obj.PartitionPlan.KeyColumns) > 0 {
 			releaseIntervalSession = close
+		}
+		if ow, ok := w.(*OracleWriter); ok && repairKind(obj.Kind) == "view" {
+			validateView = func() error { return ow.validateCreatedView(ctx, conn, obj.TargetName) }
 		}
 		// Constrain unqualified identifiers on the same physical connection as
 		// every repair unit. Dispose changed sessions rather than leaking state.
@@ -468,6 +478,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			} else {
 				err = exec(out[i].SQL)
 			}
+		}
+		if err == nil && validateView != nil && i == selected[len(selected)-1] {
+			err = validateView()
 		}
 		if err != nil {
 			out[i].Status, out[i].Error = repairErrorStatus(err), err.Error()

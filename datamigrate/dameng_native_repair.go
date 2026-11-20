@@ -320,7 +320,11 @@ func (m *Migrator) collectNativeResults(report *MigrationReport, p *damengnative
 				continue
 			}
 			if state, ok := status[o.ID]; ok {
-				markNativeBlockedRecord(o, states[o.ID])
+				cause := states[o.ID]
+				markNativeBlockedRecord(o, cause)
+				if cause != nil && nativeFailureStage(cause) == "validation" {
+					o.Error, o.RequiresReview = cause.Error(), true
+				}
 				o.Status = state
 				if (state == "failed" || state == "blocked") && o.Error == "" {
 					o.Error = "原生对象或关联数据未完成"

@@ -350,9 +350,11 @@ func (m *Migrator) migrateOscarMySQLViews(ctx context.Context, names []string) [
 	if _, err := configureOscarMySQL(ctx, m.writer); err != nil {
 		return []ObjectResult{{Name: "MySQL 预检", Stage: "preflight", Error: err.Error()}}
 	}
-	m.resetSourceTableDDLCache()
-	defer m.clearSourceTableDDLCache()
-	m.resetOscarMySQLViews()
+	if m.repairs == nil {
+		m.resetSourceTableDDLCache()
+		defer m.clearSourceTableDDLCache()
+		m.resetOscarMySQLViews()
+	}
 	m.tableState.mu.Lock()
 	m.tableState.objects, m.tableState.failures = nil, nil
 	m.tableState.mu.Unlock()
@@ -378,20 +380,8 @@ func (m *Migrator) migrateOscarMySQLViews(ctx context.Context, names []string) [
 		}
 	}
 	category := newCategoryReport()
-	m.migrateIndependentViews(ctx, selected, &category)
-	results = append(results, category.Items...)
-	failed := map[string]bool{}
-	for _, item := range category.Items {
-		failed[m.migrationTargetNameKey(item.Name)] = true
-	}
-	if ctx.Err() == nil {
-		for _, view := range selected {
-			name := m.objName(view.ViewName)
-			if !failed[m.migrationTargetNameKey(name)] {
-				results = append(results, ObjectResult{Name: name, SourceName: view.ViewName, TargetName: name})
-			}
-		}
-	} else {
+	results = append(results, m.migrateIndependentViews(ctx, selected, &category)...)
+	if ctx.Err() != nil {
 		results = append(results, ObjectResult{Name: "视图迁移", Stage: "task", Error: context.Cause(ctx).Error()})
 	}
 	return results

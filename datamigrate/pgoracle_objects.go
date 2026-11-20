@@ -363,6 +363,7 @@ func (m *Migrator) planPGOracleViews(p *PGOraclePreflight, views []source.ViewIn
 	for _, v := range views {
 		viewNames[v.ViewName] = true
 	}
+	p.catalogViews = viewNames
 	for _, v := range views {
 		ref := ObjectRef{Kind: "view", Name: v.ViewName}
 		if p.excluded(ref) || p.viewOnly && !slices.Contains(m.cfg.ViewNames, v.ViewName) {

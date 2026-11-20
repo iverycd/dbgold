@@ -758,6 +758,9 @@ func trimOuter(tokens []sqlsyntax.Token) []sqlsyntax.Token {
 // TranslateView compiles a known SELECT grammar into Oracle SQL. Unsupported
 // syntax is an object-level error; source text is never passed through as SQL.
 func TranslateView(view source.ViewInfo, sourceSchema, targetSchema string, relations map[string][]source.ColumnInfo, name func(string) string) (string, []string, error) {
+	if view.Unsupported != "" {
+		return "", nil, fmt.Errorf("%s", view.Unsupported)
+	}
 	if name == nil {
 		name = func(s string) string { return s }
 	}

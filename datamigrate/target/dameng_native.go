@@ -990,6 +990,9 @@ func (w *DaMengNativeWriter) VerifyDamengNative(ctx context.Context, expected *d
 					}
 				}
 				match := nativeConsumeDefinitionCandidate(mappedUnit, candidates, used)
+				if !match && want.Kind == "view" && len(candidates) == 1 && !used[0] && sameNativeViewDefinition(w.schema, want.Name, mappedUnit.SQL, candidates[0].SQL) {
+					used[0], match = true, true
+				}
 				if !match {
 					issues = append(issues, damengnative.Issue{ObjectID: want.ID, Kind: want.Kind, Name: want.Name, Severity: "error", Reason: "目标原生定义与冻结源定义不同"})
 					break

@@ -23,14 +23,22 @@ func (m *Migrator) readViews(ctx context.Context) ([]source.ViewInfo, error) {
 		}
 		return m.oscarMySQLViews, m.oscarMySQLViewsError
 	}
-	if m.isOscar() || m.isOracleDameng() || m.isSQLServerPG() {
-		if reader, ok := m.reader.(interface {
-			GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
-		}); ok {
-			return reader.GetViewsForTarget(ctx, m.writer.DBType())
-		}
+	if m.repairs != nil && m.repairs.viewsRead {
+		return slices.Clone(m.repairs.sourceViews), nil
 	}
-	return m.reader.GetViews(ctx)
+	var views []source.ViewInfo
+	var err error
+	if reader, ok := m.reader.(interface {
+		GetViewsForTarget(context.Context, string) ([]source.ViewInfo, error)
+	}); ok {
+		views, err = reader.GetViewsForTarget(ctx, m.writer.DBType())
+	} else {
+		views, err = m.reader.GetViews(ctx)
+	}
+	if m.repairs != nil && err == nil {
+		m.repairs.sourceViews, m.repairs.viewsRead = slices.Clone(views), true
+	}
+	return views, err
 }
 
 // Oscar relations share a schema namespace. Check the complete set before any

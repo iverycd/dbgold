@@ -654,6 +654,23 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		repairError(c, store.ErrRepairConflict)
 		return
 	}
+	if req.Mode == "native_view" {
+		if j.SrcDBType != "dameng" || j.DstDBType != "dameng" || binding.TargetSchema != o.Schema || len(req.Units) != 1 {
+			repairError(c, fmt.Errorf("达梦原生视图修复需要原目标模式及一条完整 CREATE VIEW"))
+			return
+		}
+		candidate, err := o.WithNativeViewDraft(req.Units[0].SQL, req.Reviewed)
+		if err != nil {
+			repairError(c, err)
+			return
+		}
+		if err = store.SaveMigrationRepairObject(row.JobID, row.ObjectID, req.Version, repairJSON(candidate)); err != nil {
+			repairError(c, err)
+			return
+		}
+		c.JSON(200, gin.H{"object": repairObjectResponse(j, candidate), "version": req.Version + 1})
+		return
+	}
 	if req.Mode != "" && req.Mode != "manual_trigger" {
 		repairError(c, fmt.Errorf("不支持的对象修复模式"))
 		return
@@ -970,7 +987,7 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 	}
 	if a.Kind == "ddl" {
 		o.Status = a.Status
-		if o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
+		if o.NativeViewDraft != nil || o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
 			o.Error = a.Error
 		}
 		o.Verification = nil
@@ -1041,6 +1058,10 @@ func ExecuteMigrationRepair(c *gin.Context) {
 				o.Units[i].Selected = true
 			}
 		}
+	}
+	if o.NativeViewDraft != nil && (j.SrcDBType != "dameng" || j.DstDBType != "dameng" || o.RequiresReview) {
+		repairError(c, fmt.Errorf("请保存并核对绑定达梦目标的普通视图 DDL"))
+		return
 	}
 	if o.RequiresReview && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil && o.Native == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
 		repairError(c, fmt.Errorf("请先审阅并保存执行单元"))

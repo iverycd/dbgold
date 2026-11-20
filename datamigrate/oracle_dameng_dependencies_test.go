@@ -198,7 +198,7 @@ func TestOracleDamengStandaloneViewsStopOnceOnConnectionFailure(t *testing.T) {
 		{ViewName: "Disconnected", Definition: `SELECT "Txt" FROM "SRC"."Mixed"`},
 		{ViewName: "Never", Definition: `SELECT "Txt" FROM "SRC"."Mixed"`},
 	}
-	w.capability["Disconnected"] = driver.ErrBadConn
+	w.viewErrors = map[string]error{"DISCONNECTED": driver.ErrBadConn}
 	results := m.MigrateViews(context.Background(), []string{"First", "Disconnected", "Never"})
 	require.Len(t, results, 2)
 	require.Empty(t, results[0].Error)
@@ -206,5 +206,6 @@ func TestOracleDamengStandaloneViewsStopOnceOnConnectionFailure(t *testing.T) {
 	require.Equal(t, "task", results[1].Stage)
 	require.ErrorContains(t, fmt.Errorf("%s", results[1].Error), "bad connection")
 	require.Len(t, w.views, 1)
-	require.NotContains(t, w.probes, "Never")
+	require.Len(t, w.viewAttempts, 2)
+	require.Equal(t, "DISCONNECTED", w.viewAttempts[1].ViewName)
 }

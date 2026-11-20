@@ -126,21 +126,24 @@ func (m *Migrator) validateCrossOracleIndex(idx source.IndexInfo, info *source.T
 	return nil
 }
 
-func (m *Migrator) recordCrossOracleViewManifest(ctx context.Context) {
+func (m *Migrator) recordOracleViewManifest(ctx context.Context, selected []string) {
 	views, err := m.readOracleViews(ctx)
 	if err != nil {
 		m.repairs.sinkErr = err
 		return
 	}
-	raw := map[string]string{}
-	for _, v := range views {
-		raw[v.ViewName] = v.Definition
-	}
-	views = slices.DeleteFunc(views, func(v source.ViewInfo) bool {
-		return !slices.Contains(m.cfg.ViewNames, v.ViewName) || m.crossExcluded("view", "", v.ViewName)
+	views = slices.DeleteFunc(slices.Clone(views), func(v source.ViewInfo) bool {
+		return len(selected) > 0 && !slices.Contains(selected, v.ViewName) || m.isCrossOracle() && m.crossExcluded("view", "", v.ViewName)
 	})
-	for _, v := range m.planOracleViews(views) {
-		o := repair.Object{ID: repairID("view", "", v.view.ViewName), Kind: "view", Name: v.view.ViewName, SourceName: v.sourceName, TargetName: v.view.ViewName, Schema: m.cfg.TargetSchema, SourceDDL: raw[v.sourceName], Status: "pending", RequiresReview: true}
+	names := map[string]bool{}
+	for _, v := range views {
+		names[m.objName(v.ViewName)] = true
+	}
+	plans := m.planOracleViews(views)
+	m.repairs.oracleViewPlans = make(map[string]oracleViewPlan, len(plans))
+	for _, v := range plans {
+		m.repairs.oracleViewPlans[v.sourceName] = v
+		o := repair.Object{ID: repairID("view", "", v.view.ViewName), Kind: "view", Name: v.view.ViewName, SourceName: v.sourceName, TargetName: v.view.ViewName, Schema: m.cfg.TargetSchema, SourceDDL: v.sourceDDL, Status: "pending", RequiresReview: true}
 		if v.err != nil {
 			o.Error = v.err.Error()
 		} else {
@@ -148,7 +151,7 @@ func (m *Migrator) recordCrossOracleViewManifest(ctx context.Context) {
 			o.DDL, o.Units = dialect.JoinSQL(ss), unitsFor(ss)
 		}
 		for _, dep := range v.deps {
-			if raw[dep] != "" {
+			if names[m.objName(dep)] {
 				o.Dependencies = append(o.Dependencies, repairID("view", "", m.objName(dep)))
 			}
 		}

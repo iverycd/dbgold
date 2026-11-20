@@ -2,11 +2,13 @@ package datamigrate
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"dbgold/datamigrate/dialect"
+	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/datamigrate/sqlsyntax"
 	"dbgold/datamigrate/typemap"
@@ -402,6 +404,9 @@ func (p *pgViewParser) from() (string, error) {
 	return left, nil
 }
 func translatePGView(v source.ViewInfo, schema, database string, relations map[string][]source.ColumnInfo, name func(string) string) (string, []string, error) {
+	if v.Unsupported != "" {
+		return "", nil, fmt.Errorf("%s", v.Unsupported)
+	}
 	ts, e := sqlsyntax.Lex(v.Definition)
 	if e != nil {
 		return "", nil, e
@@ -737,4 +742,58 @@ func pgViewConstant(rendered string, c source.ColumnInfo) (string, error) {
 		return "", fmt.Errorf("位串常量投影尚不支持自动转换")
 	}
 	return "CAST(" + literal + " AS " + cast + ")", nil
+}
+
+// PG-to-MySQL view statements are produced by the catalog-aware preflight.
+// Keep exactly its executable units and retain untranslated source definitions
+// as editable failures, including when no selected view can start.
+func (m *Migrator) recordPGMySQLViewPlan(p *PGMySQLPreflight, category *CategoryReport) error {
+	if p.snapshot == nil || m.cfg.objectMode() || m.cfg.Content == "data_only" || m.cfg.Mode == "include" && !p.viewOnly {
+		return nil
+	}
+	planned := map[string]PlannedObject{}
+	for _, obj := range p.Objects {
+		if obj.Object.Kind == "view" {
+			planned[obj.Object.Name] = obj
+		}
+	}
+	changed := false
+	for _, v := range p.snapshot.Views {
+		ref := ObjectRef{Kind: "view", Name: v.ViewName}
+		if p.viewOnly && !slices.Contains(m.cfg.ViewNames, v.ViewName) || slices.Contains(p.Excluded, ref) {
+			continue
+		}
+		plan, ok := planned[v.ViewName]
+		reason := p.blocked[ref]
+		if !ok && reason == nil {
+			continue
+		}
+		name := m.objName(v.ViewName)
+		o := repair.Object{ID: repairID("view", "", name), Kind: "view", Name: name, SourceName: v.ViewName, TargetName: name, Schema: p.Target.Database, SourceDDL: v.Definition, DDL: dialect.JoinSQL(plan.Statements), Units: unitsFor(plan.Statements), Status: "pending"}
+		if reason != nil && (!ok || !p.CanStart) {
+			o.Status, o.Error, o.RequiresReview = "failed", reason.Error(), true
+			category.Total++
+			category.Failed++
+			category.Items = append(category.Items, ObjectResult{ObjectKind: "view", Name: name, SourceName: v.ViewName, TargetName: name, TargetSchema: o.Schema, Stage: "preflight", SourceDDL: v.Definition, DDL: o.DDL, Error: o.Error})
+		}
+		if m.repairs != nil {
+			for _, dep := range p.dependencies[ref] {
+				depName, depTable := m.objName(dep.Name), ""
+				if dep.Kind == "table" {
+					depTable = depName
+				}
+				o.Dependencies = append(o.Dependencies, repairID(dep.Kind, depTable, depName))
+			}
+			if i := m.repairs.objectPosition(o.ID); i >= 0 {
+				m.repairs.objects[i] = o
+			} else {
+				m.repairs.appendObject(o)
+			}
+			changed = true
+		}
+	}
+	if changed {
+		return m.flushRepairsLocked()
+	}
+	return nil
 }

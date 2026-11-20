@@ -190,7 +190,7 @@ func (w *PostgresWriter) CreateView(ctx context.Context, view source.ViewInfo) e
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL search_path TO "%s"`, w.schema)); err != nil {
+	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO "+w.dia.QuoteIdent(w.schema)); err != nil {
 		return err
 	}
 	return execObservedTransaction(ctx, tx, stmts)

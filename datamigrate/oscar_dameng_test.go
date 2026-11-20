@@ -150,8 +150,15 @@ func TestOscarDamengContinuesAfterLocalTableFailures(t *testing.T) {
 			require.Equal(t, "dependency", report.Constraints.Items[0].Stage)
 			require.Contains(t, report.Constraints.Items[0].Error, "Broken")
 			require.Empty(t, w.views)
-			require.Contains(t, report.Warnings[0].SourceDDL, "SELECT")
-			require.Equal(t, "dependency", report.Views.Items[0].Stage)
+			require.Len(t, report.Views.Items, 3)
+			stages := map[string]bool{}
+			for _, item := range report.Views.Items {
+				require.Contains(t, item.SourceDDL, "SELECT")
+				require.Empty(t, item.DDL)
+				stages[item.Stage] = true
+			}
+			require.True(t, stages["dependency"])
+			require.True(t, stages["unsupported"])
 			require.NotNil(t, report.RepairManifest)
 			require.True(t, report.HasFailures())
 		})
