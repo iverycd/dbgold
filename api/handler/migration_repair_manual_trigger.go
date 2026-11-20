@@ -113,7 +113,28 @@ func manualTriggerTable(o repair.Object) string {
 	return ""
 }
 
+// Only persisted objects already exposed by the repair editor can enter manual SQL mode.
+func canSaveManualSQL(j *store.DataMigrationJob, o repair.Object) bool {
+	if slices.Contains([]string{"unknown", "running", "queued", "unverified", "needs_verification"}, o.Status) {
+		return false
+	}
+	if o.ManualSQL {
+		return true
+	}
+	if o.Kind == "trigger" {
+		return canEditManualTrigger(j, o)
+	}
+	if o.Native != nil {
+		return j.SrcDBType == "dameng" && j.DstDBType == "dameng" && o.CanEditNativeView()
+	}
+	return !(j.DstDBType == "gaussdb" && o.Kind == "distribution") && o.CanEditDDL()
+}
+
 func repairObjectResponse(j *store.DataMigrationJob, o repair.Object) repair.Object {
+	if o.ManualSQL {
+		o.NativeViewEditable, o.ManualTriggerEditable = false, false
+		return o
+	}
 	if j.DstDBType == "gaussdb" && o.Kind == "distribution" {
 		o.DiagnosticOnly = true
 		o.Error = "GaussDB 不支持原地修改分布列；请对失败主键或唯一索引使用“重新生成索引计划”。原失败记录保留，现有数据无需重建。"

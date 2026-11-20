@@ -22,6 +22,7 @@ export interface RepairColumn {
 export interface RepairVerification { status: string; message: string }
 export interface ManualVerification { confirmed_by: number; confirmed_at: string; evidence: string; fingerprint: string }
 export interface RepairObject {
+  manual_sql?: boolean
   manual_trigger?: { sql: string; function_sql?: string; revision: number; [key: string]: unknown }
   manual_trigger_editable?: boolean
   native?: { id: string; kind: string; name: string; schema: string; managed?: boolean; units: { sql: string; phase: string }[] }
@@ -127,7 +128,7 @@ const base = (job: string) => `/migration/data-migrate/${encodeURIComponent(job)
 const objectURL = (job: string, object: string) => `${base(job)}/repairs/${encodeURIComponent(object)}`
 export const listRepairs = (job: string) => api.get<RepairList>(`${base(job)}/repairs`)
 export const bindRepairConnections = (job: string, data: BindingRequest) => api.put(`${base(job)}/repairs/binding`, data)
-export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean; index_plan?: boolean; mode?: 'manual_trigger' | 'native_view' }) => api.put<RepairRecord>(objectURL(job, object), data)
+export const saveRepairDraft = (job: string, object: string, data: { version: number; units: RepairUnit[]; column_mapping?: Record<string, string>; reviewed?: boolean; sequence_plan?: boolean; index_plan?: boolean; mode?: 'manual_sql' | 'manual_trigger' | 'native_view' }) => api.put<RepairRecord>(objectURL(job, object), data)
 export const refreshIndexRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/index-plan`, data)
 export const refreshSequenceRepairPlan = (job: string, object: string, data: { version: number }) => api.post<SequenceRepairPlan>(`${objectURL(job, object)}/sequence-plan`, data)
 export const previewTriggerRepairPlan = (job: string, object: string, data: { version: number }) => api.post<TriggerRepairPlan>(`${objectURL(job, object)}/trigger-plan`, data)

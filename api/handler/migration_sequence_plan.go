@@ -169,6 +169,7 @@ func sequencePlanCandidate(object repair.Object, statements []dialect.Statement)
 		units = append(units, unit)
 	}
 	object.Units = units
+	object.ManualSQL = false
 	object.Status = "draft"
 	object.RequiresReview = true
 	object.SuggestedDDL = dialect.JoinSQL(statements)

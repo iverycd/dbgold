@@ -319,6 +319,10 @@ func previewRecovery(ctx context.Context, r source.Reader, w target.Writer, cfg 
 		if o.Status == "succeeded" {
 			continue
 		}
+		if o.ManualSQL {
+			p.Related = append(p.Related, o)
+			continue
+		}
 		candidate := o
 		if !oscarDameng || !o.DiagnosticOnly && o.Sequence == nil {
 			candidate = regenerateRepairCandidate(w, cfg, obj, o, p.ColumnMapping)

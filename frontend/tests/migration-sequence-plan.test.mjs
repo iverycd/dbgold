@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import test from 'node:test'
 import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
@@ -10,9 +9,6 @@ import { parse } from '@vue/compiler-sfc'
 
 const file = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 const transpile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-const require = createRequire(import.meta.url)
-const formattingContext = { exports: {}, require }
-vm.runInNewContext(transpile(file('../src/utils/sqlFormatting.ts')), formattingContext)
 const utilityContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityContext)
 const batchContext = { exports: {}, require: () => utilityContext.exports }
@@ -30,7 +26,7 @@ function panel(overrides = {}) {
       if (id === 'vue') return { ...Vue, onUnmounted() {} }
       if (id === '@/utils/migrationRepair') return utilityContext.exports
       if (id === '@/utils/migrationRepairBatch') return batchContext.exports
-      if (id === '@/utils/sqlFormatting') return formattingContext.exports
+      if (id === '@/utils/clipboard') return { copyText: overrides.copyText || (async () => {}) }
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async () => ({ data: { job_id: 'job', status: 'failed', src_db_type: 'oracle', dst_db_type: 'dameng' } }) }
@@ -115,33 +111,25 @@ test('manual or unknown drafts cannot refresh, and local edits are never overwri
   assert.ok(app.messages.some(message => message.includes('未覆盖')))
 })
 
-test('editing or restoring a generated plan cannot bypass server plan validation', async () => {
+test('edited plan SQL is saved verbatim in manual mode', async () => {
   const saves = []
   const app = panel({
     refreshSequenceRepairPlan: async () => ({ data: candidate() }),
     saveRepairDraft: async (_job, _object, data) => {
       saves.push(data)
-      if (data.units[0].sql !== candidate().object.units[0].sql) throw new Error('序列计划已变化或执行单元已被编辑')
-      return { data: { version: 2, object: { ...candidate().object, requires_review: false, units: data.units } } }
+      return { data: { version: 2, object: { ...candidate().object, manual_sql: true, units: data.units } } }
     },
   })
   await tick()
-  const original = record()
-  app.records.value = [original]
-  app.openEditor(original)
+  app.openEditor(record())
   await app.refreshSequencePlan()
-  app.draftUnits.value[0].sql += ' -- formatted by user'
-  assert.equal(app.sequencePlanPending.value, true)
-  assert.equal(await app.saveDraft(), false)
-  assert.equal(saves[0].sequence_plan, true, 'edited generated SQL still requires fresh server plan validation')
-  assert.equal(app.records.value[0].version, 1)
-  assert.ok(app.draftUnits.value[0].sql.includes('formatted by user'))
-  app.restoreOriginal()
-  assert.equal(app.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(candidate().object.units[0].sql, 'dameng'))
-  assert.equal(app.sequencePlanPending.value, true, 'restoring SQL must not downgrade the candidate to manual execution')
+  const sql = '  -- adjustment\n ALTER SEQUENCE "APP"."ALT" CURRENT VALUE 91; '
+  app.draftUnits.value[0].sql = sql
   assert.equal(await app.saveDraft(), true)
-  assert.equal(saves[1].sequence_plan, true)
-  assert.equal(app.sequencePlanPending.value, false)
+  assert.equal(saves[0].mode, 'manual_sql')
+  assert.equal(saves[0].sequence_plan, undefined)
+  assert.equal(app.draftUnits.value[0].sql, sql)
+  assert.equal(app.canRefreshSequencePlan.value, false)
 })
 
 test('a late plan response cannot replace another object editor', async () => {

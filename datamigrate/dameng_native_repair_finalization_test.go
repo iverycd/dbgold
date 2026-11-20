@@ -180,6 +180,17 @@ func TestEditedNativeViewVerifiesOriginalSourceAndSavedTarget(t *testing.T) {
 	require.NoError(t, NativeRepairFinalizationReady(objects, "event"))
 	require.NoError(t, VerifyNativeRepairFinalization(context.Background(), r, w, cfg, objects))
 	require.Equal(t, sql, w.verifySnapshot.Objects[len(w.verifySnapshot.Objects)-1].Units[0].SQL)
+	// A later raw script keeps its execution status separate from the catalog
+	// reference used to decide whether automatic event policies can resume.
+	manual := &objects[len(objects)-1]
+	manual.ManualSQL = true
+	manual.Units = []repair.Unit{{SQL: "SELECT 1 FROM DUAL", Status: "succeeded"}}
+	manual.Status = "failed"
+	require.Error(t, NativeRepairFinalizationReady(objects, "event"))
+	manual.Status = "succeeded"
+	require.NoError(t, NativeRepairFinalizationReady(objects, "event"))
+	require.NoError(t, VerifyNativeRepairFinalization(context.Background(), r, w, cfg, objects))
+	require.Equal(t, sql, w.verifySnapshot.Objects[len(w.verifySnapshot.Objects)-1].Units[0].SQL)
 	r.snapshot.Objects[len(r.snapshot.Objects)-1].Units = []damengnative.Unit{{SQL: strings.Replace(raw, "SELECT A", "SELECT B", 1), Phase: "after_data"}}
 	require.ErrorContains(t, VerifyNativeRepairFinalization(context.Background(), r, w, cfg, objects), "已偏离")
 }

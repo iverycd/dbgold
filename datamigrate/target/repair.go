@@ -179,9 +179,13 @@ func ValidatePGUniqueConstraintRepair(obj repair.Object, units []repair.Unit, db
 
 // ExecuteRepair executes the stored units verbatim. A PL/SQL body is one unit;
 // neither semicolons nor client-side delimiters are used to split SQL here.
-// The caller validates statement scope and supplies an immutable object identity.
+// Editor SQL runs directly on the bound target. Generated repairs retain their
+// object-specific execution and verification.
 // Source function names, when available, are used to prepare PG-family views.
 func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []repair.Unit, onStep func([]repair.Unit) error, sourceFunctionNames ...string) ([]repair.Unit, error) {
+	if obj.ManualSQL {
+		return executeManualRepairSQL(ctx, w, units, onStep)
+	}
 	if ow, ok := w.(*OracleWriter); ok && obj.Sequence != nil && obj.Sequence.Native != nil && obj.Sequence.Native.OracleCross {
 		return ow.executeCrossOracleSequenceRepair(ctx, obj, units, onStep)
 	}
@@ -213,12 +217,6 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		return executeMySQLDamengTriggerRepair(ctx, w, obj, units, onStep)
 	}
 	out := slices.Clone(units)
-	persist := func() error {
-		if onStep == nil {
-			return nil
-		}
-		return onStep(slices.Clone(out))
-	}
 	a, err := repairAccess(w)
 	if err != nil {
 		return out, err
@@ -286,21 +284,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if sw, ok := w.(*SQLServerWriter); ok && IsSQLServerSequenceRepair(obj, w.DBType()) {
 		return sw.executeSQLServerSequenceRepair(ctx, obj, out, onStep)
 	}
-	selected := []int{}
-	for i, u := range out {
-		if u.Status == "succeeded" {
-			out[i].Selected = false
-			continue
-		}
-		if u.Selected {
-			if strings.TrimSpace(u.SQL) == "" {
-				return out, fmt.Errorf("执行步骤 %d SQL 为空", i+1)
-			}
-			selected = append(selected, i)
-		}
-	}
-	if len(selected) == 0 {
-		return out, fmt.Errorf("未选择执行步骤")
+	selected, err := selectedRepairSteps(out)
+	if err != nil {
+		return out, err
 	}
 	if a.family == "postgres" {
 		if err := preparePGSpatialRepair(ctx, a.db, obj); err != nil {
@@ -354,10 +340,7 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		} else if mw, ok := w.(*MySQLWriter); ok && source.IsPGFamily(mw.srcType) {
 			conn, close, err = mw.pgSession(ctx)
 		} else {
-			conn, err = a.db.Conn(ctx)
-			if err == nil {
-				close = func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }); _ = conn.Close() }
-			}
+			conn, close, err = disposableRepairConnection(ctx, a.db)
 		}
 		if err != nil {
 			return out, err
@@ -379,26 +362,16 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 		}
 		// Constrain unqualified identifiers on the same physical connection as
 		// every repair unit. Dispose changed sessions rather than leaking state.
-		sessionSQL := ""
-		switch a.family {
-		case "postgres":
-			if repairKind(obj.Kind) != "view" {
-				sessionSQL = "SET search_path TO " + w.Dialect().QuoteIdent(schema)
-			}
-		case "oracle":
-			sessionSQL = "ALTER SESSION SET CURRENT_SCHEMA = " + w.Dialect().QuoteIdent(schema)
-		case "dameng":
-			sessionSQL = "SET SCHEMA " + w.Dialect().QuoteIdent(schema)
-			if savedComment.Table != "" {
-				sessionSQL = "SET SCHEMA " + damengnative.Quote(savedComment.Schema)
-			}
-		case "mysql":
-			// pgSession restores sql_mode/time_zone and closes its connection. Mark
-			// it non-reusable first so USE cannot leak its database to another job.
-			if !mysqlOscar {
-				defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }()
-			}
-			sessionSQL = "USE " + w.Dialect().QuoteIdent(schema)
+		sessionSQL := repairSchemaSQL(a.family, w, schema)
+		if a.family == "postgres" && repairKind(obj.Kind) == "view" {
+			sessionSQL = "" // Set transaction-local search_path below.
+		}
+		if savedComment.Table != "" {
+			sessionSQL = "SET SCHEMA " + damengnative.Quote(savedComment.Schema)
+		}
+		if a.family == "mysql" && !mysqlOscar {
+			// pgSession restores session properties and may return the connection to the pool.
+			defer func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }()
 		}
 		if sessionSQL != "" {
 			if _, err = conn.ExecContext(ctx, sessionSQL); err != nil {
@@ -431,92 +404,34 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			exec = func(q string) error { _, e := conn.ExecContext(ctx, q); return e }
 		}
 	}
-	executed := []int{}
-	rollback := func() {
-		if tx == nil {
-			return
-		}
-		e := tx.Rollback()
-		state := "rolled_back"
-		if e != nil {
-			state = "unknown"
-		}
-		for _, n := range executed {
-			out[n].Status = state
-			if e != nil {
-				out[n].Error = e.Error()
-			}
-		}
-	}
-	for _, i := range selected {
-		if err = ctx.Err(); err != nil {
-			rollback()
-			_ = persist()
-			return out, err
-		}
-		out[i].Status, out[i].Error = "running", ""
-		if err = persist(); err != nil {
-			out[i].Status = "pending"
-			rollback()
-			return out, fmt.Errorf("保存执行前状态失败，未执行该步骤: %w", err)
-		}
+	execute := func(i int) error {
 		if ow, ok := w.(*OracleWriter); ok {
-			err = ow.validateSQLText(out[i].SQL)
-		}
-		if err == nil {
-			if obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[i].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan) {
-				materializer, ok := w.(PartitionIntervalMaterializer)
-				if !ok || i != len(out)-1 || obj.PartitionPlan.Interval.Table != obj.TargetName || obj.PartitionPlan.Interval.Schema != obj.Schema {
-					err = fmt.Errorf("INTERVAL 物化单元不属于目标冻结表或不是最终步骤")
-				} else {
-					if releaseIntervalSession != nil {
-						releaseIntervalSession()
-						releaseIntervalSession = nil
-					}
-					err = materializer.MaterializePartitionIntervals(ctx, obj.PartitionPlan)
-				}
-			} else {
-				err = exec(out[i].SQL)
+			if err := ow.validateSQLText(out[i].SQL); err != nil {
+				return err
 			}
 		}
-		if err == nil && validateView != nil && i == selected[len(selected)-1] {
-			err = validateView()
-		}
-		if err != nil {
-			out[i].Status, out[i].Error = repairErrorStatus(err), err.Error()
-			rollback()
-			pe := persist()
-			return out, errors.Join(err, pe)
-		}
-		executed = append(executed, i)
-		if tx == nil {
-			out[i].Status = "succeeded"
-		}
-		if err = persist(); err != nil {
-			rollback()
-			if tx == nil {
-				out[i].Status, out[i].Error = "unknown", err.Error()
+		if obj.PartitionPlan != nil && obj.PartitionPlan.Interval != nil && out[i].SQL == partition.IntervalMaterializationSQL(obj.PartitionPlan) {
+			materializer, ok := w.(PartitionIntervalMaterializer)
+			if !ok || i != len(out)-1 || obj.PartitionPlan.Interval.Table != obj.TargetName || obj.PartitionPlan.Interval.Schema != obj.Schema {
+				return fmt.Errorf("INTERVAL 物化单元不属于目标冻结表或不是最终步骤")
 			}
-			return out, fmt.Errorf("SQL 已执行，但保存结果失败: %w", err)
+			if releaseIntervalSession != nil {
+				releaseIntervalSession()
+				releaseIntervalSession = nil
+			}
+			if err := materializer.MaterializePartitionIntervals(ctx, obj.PartitionPlan); err != nil {
+				return err
+			}
+		} else if err := exec(out[i].SQL); err != nil {
+			return err
 		}
+		if validateView != nil && i == selected[len(selected)-1] {
+			return validateView()
+		}
+		return nil
 	}
-	if tx != nil {
-		err = tx.Commit()
-		for _, i := range executed {
-			out[i].Status = "succeeded"
-			if err != nil {
-				out[i].Status, out[i].Error = "unknown", err.Error()
-			}
-		}
-		if pe := persist(); err != nil || pe != nil {
-			for _, i := range executed {
-				out[i].Status = "unknown"
-				if pe != nil {
-					out[i].Error = pe.Error()
-				}
-			}
-			return out, errors.Join(err, pe)
-		}
+	if err := runRepairSteps(ctx, out, selected, tx, execute, onStep); err != nil {
+		return out, err
 	}
 	if obj.PartitionPlan != nil && (obj.PartitionPlan.Interval != nil || len(obj.PartitionPlan.KeyColumns) > 0 || partitionConvertedKeyNeedsColumns(obj.PartitionPlan.Source, obj.PartitionPlan.Target)) {
 		if releaseIntervalSession != nil {
@@ -543,6 +458,105 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	}
 	invalidateRecoveryCache(w)
 	return out, nil
+}
+
+func selectedRepairSteps(out []repair.Unit) ([]int, error) {
+	selected := []int{}
+	for i, u := range out {
+		if u.Status == "succeeded" {
+			out[i].Selected = false
+			continue
+		}
+		if u.Selected {
+			if strings.TrimSpace(u.SQL) == "" {
+				return nil, fmt.Errorf("执行步骤 %d SQL 为空", i+1)
+			}
+			selected = append(selected, i)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("未选择执行步骤")
+	}
+	return selected, nil
+}
+
+// runRepairSteps persists each transition around execution and, for transactional
+// targets, only marks successful statements committed after the transaction commits.
+func runRepairSteps(ctx context.Context, out []repair.Unit, selected []int, tx *sql.Tx, execute func(int) error, onStep func([]repair.Unit) error) error {
+	persist := func() error {
+		if onStep == nil {
+			return nil
+		}
+		return onStep(slices.Clone(out))
+	}
+	var err error
+	executed := []int{}
+	rollback := func() {
+		if tx == nil {
+			return
+		}
+		e := tx.Rollback()
+		state := "rolled_back"
+		if e != nil {
+			state = "unknown"
+		}
+		for _, n := range executed {
+			out[n].Status = state
+			if e != nil {
+				out[n].Error = e.Error()
+			}
+		}
+	}
+	for _, i := range selected {
+		if err = ctx.Err(); err != nil {
+			rollback()
+			_ = persist()
+			return err
+		}
+		out[i].Status, out[i].Error = "running", ""
+		if err = persist(); err != nil {
+			out[i].Status = "pending"
+			rollback()
+			return fmt.Errorf("保存执行前状态失败，未执行该步骤: %w", err)
+		}
+		err = execute(i)
+		if err != nil {
+			out[i].Status, out[i].Error = repairErrorStatus(err), err.Error()
+			rollback()
+			pe := persist()
+			return errors.Join(err, pe)
+		}
+		executed = append(executed, i)
+		if tx == nil {
+			out[i].Status = "succeeded"
+		}
+		if err = persist(); err != nil {
+			rollback()
+			if tx == nil {
+				out[i].Status, out[i].Error = "unknown", err.Error()
+			}
+			return fmt.Errorf("SQL 已执行，但保存结果失败: %w", err)
+		}
+	}
+	if tx != nil {
+		err = tx.Commit()
+		for _, i := range executed {
+			out[i].Status = "succeeded"
+			if err != nil {
+				out[i].Status, out[i].Error = "unknown", err.Error()
+			}
+		}
+		if pe := persist(); err != nil || pe != nil {
+			for _, i := range executed {
+				out[i].Status = "unknown"
+				if pe != nil {
+					out[i].Error = pe.Error()
+				}
+			}
+			return errors.Join(err, pe)
+		}
+	}
+	return nil
 }
 
 func repairKind(kind string) string {

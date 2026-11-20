@@ -36,6 +36,7 @@ const emit = defineEmits<{
 const editorHost = ref<HTMLElement | null>(null)
 const dialectCompartment = new Compartment()
 const readOnlyCompartment = new Compartment()
+const lineSeparatorCompartment = new Compartment()
 let view: EditorView | null = null
 
 function languageExtension() {
@@ -108,9 +109,14 @@ function selectedOrCurrentSQL(state: EditorState): string {
   return hasContent ? text.slice(start).trim() : previousStatement
 }
 
+function documentSeparator(value: string): string {
+  // CodeMirror splits on this separator and uses it to serialize the document.
+  // Using LF for mixed endings also preserves carriage returns in CRLF lines.
+  return value.includes('\r\n') && !/(^|[^\r])\n|\r(?!\n)/.test(value) ? '\r\n' : '\n'
+}
 function getExecutableSQL(): string {
-  if (!view) return props.modelValue.trim()
-  return props.executionMode === 'document' ? view.state.doc.toString().trim() : selectedOrCurrentSQL(view.state)
+  if (props.executionMode === 'document') return view ? view.state.sliceDoc() : props.modelValue
+  return view ? selectedOrCurrentSQL(view.state) : props.modelValue.trim()
 }
 
 function formatSQL(): void {
@@ -141,6 +147,7 @@ onMounted(() => {
       doc: props.modelValue,
       extensions: [
         basicSetup,
+        lineSeparatorCompartment.of(props.executionMode === 'document' ? EditorState.lineSeparator.of(documentSeparator(props.modelValue)) : []),
         dialectCompartment.of(languageExtension()),
         readOnlyCompartment.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
         Prec.highest(keymap.of([{
@@ -151,10 +158,9 @@ onMounted(() => {
             return true
           },
         }])),
-        // Document editors retain CodeMirror's default blank-line shortcut.
-        props.executionMode === 'document' ? executeKeymap : Prec.highest(executeKeymap),
+        Prec.highest(executeKeymap),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) emit('update:modelValue', update.state.doc.toString())
+          if (update.docChanged) emit('update:modelValue', update.state.sliceDoc())
           if (update.docChanged || update.selectionSet) {
             const hasSelection = Boolean(selectedSQL(update.state))
             if (hasSelection !== Boolean(selectedSQL(update.startState))) emit('selection-change', hasSelection)
@@ -173,7 +179,10 @@ onMounted(() => {
 })
 
 watch(() => props.modelValue, (value) => {
-  if (!view || value === view.state.doc.toString()) return
+  if (!view || value === view.state.sliceDoc()) return
+  if (props.executionMode === 'document' && view.state.lineBreak !== documentSeparator(value)) {
+    view.dispatch({ effects: lineSeparatorCompartment.reconfigure(EditorState.lineSeparator.of(documentSeparator(value))) })
+  }
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } })
 })
 

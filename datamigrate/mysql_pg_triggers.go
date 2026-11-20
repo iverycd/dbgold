@@ -227,6 +227,7 @@ func BuildMySQLPGTriggerRepairPlan(ctx context.Context, r source.Reader, w targe
 		return repair.Object{}, fmt.Errorf("重新规划后的触发器身份与原对象不一致")
 	}
 	candidate := original
+	candidate.ManualSQL = false
 	plan := found.plan
 	candidate.MySQLPGTrigger = &plan
 	candidate.DiagnosticOnly = false

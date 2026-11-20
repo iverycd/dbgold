@@ -252,11 +252,17 @@ test('comment-only input has no current statement, and document mode keeps its f
     assert.equal(empty.getExecutableSQL(), '')
     empty.runShortcut('Mod-Enter')
     assert.deepEqual(empty.emitted.at(-1), ['execute', ''])
-    const modelValue = 'SELECT 1;\nSELECT 2;'
+    const modelValue = '  SELECT 1;\r\nSELECT 2;  \r\n'
     const script = scope.run(() => editor({ modelValue, dialect: 'postgres', executionMode: 'document' }))
     script.view.dispatch({ selection: EditorSelection.range(0, 9) })
     assert.equal(script.getExecutableSQL(), modelValue)
     script.runShortcut('Mod-Enter')
-    assert.deepEqual(script.emitted.at(-1), ['update:modelValue', 'SELECT 1;\n\nSELECT 2;'])
+    assert.deepEqual(script.emitted.at(-1), ['execute', modelValue])
+    script.view.dispatch({ changes: { from: 0, insert: '-- ' } })
+    assert.deepEqual(script.emitted.at(-1), ['update:modelValue', '-- ' + modelValue])
+    const formatted = scope.run(() => editor({ modelValue: 'select a, b\r\nfrom t', dialect: 'postgres', executionMode: 'document', formatDbType: 'postgres' }))
+    formatted.formatSQL()
+    assert.ok(formatted.view.state.doc.lines > 2)
+    assert.doesNotMatch(formatted.getExecutableSQL(), /(^|[^\r])\n/)
   } finally { scope.stop() }
 })

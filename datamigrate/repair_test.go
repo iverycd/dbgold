@@ -312,6 +312,17 @@ func TestRecoveryEmptyTableFullReloadAndColumnMapping(t *testing.T) {
 	require.Equal(t, 0, *truncated)
 	require.Equal(t, []string{"renamed"}, w.columns)
 }
+func TestRecoveryPreviewKeepsSelectedManualSQL(t *testing.T) {
+	r, w, cfg, table, ops, _ := recoveryFixture(t)
+	index := repair.Object{
+		ID: "index", Kind: "index", Table: table.Table, ManualSQL: true,
+		Index: &source.IndexInfo{TableName: table.Table, IndexName: "idx", Columns: []string{"ID"}},
+		Units: []repair.Unit{{ID: "custom", SQL: "  UPDATE other.table_name SET x = 1;\n", Selected: true}},
+	}
+	preview, err := previewRecovery(context.Background(), r, w, cfg, table, []repair.Object{index}, nil, ops)
+	require.NoError(t, err)
+	require.Equal(t, []repair.Object{index}, preview.Related)
+}
 func TestRecoveryPartialFailureStopsAndCannotAppend(t *testing.T) {
 	r, w, cfg, o, ops, _ := recoveryFixture(t)
 	w.failWrite = 2

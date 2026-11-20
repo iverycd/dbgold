@@ -27,6 +27,7 @@ type Unit struct {
 }
 
 type Object struct {
+	ManualSQL             bool                   `json:"manual_sql,omitempty"` // Selected units are user-authored SQL for the bound target connection.
 	PGOracleSequence      *pgoracle.SequencePlan `json:"pg_oracle_sequence,omitempty"`
 	GaussDBDistribution   []string               `json:"gaussdb_distribution,omitempty"`
 	PartitionPlan         *partition.Plan        `json:"partition_plan,omitempty"`
@@ -151,6 +152,9 @@ func (o *Object) NormalizeLegacyExecution() bool {
 
 // CanEditDDL requires an object identity, not just a report category label.
 func (o Object) CanEditDDL() bool {
+	if o.ManualSQL {
+		return true
+	}
 	if o.Sequence != nil && o.Sequence.Native != nil && o.Sequence.Native.OracleCross {
 		return false
 	}
@@ -179,6 +183,9 @@ func (o Object) CanEditDDL() bool {
 // Generated MySQL trigger programs can be retried as a complete immutable
 // transaction, while remaining unavailable to the general SQL draft editor.
 func (o Object) CanExecuteDDL() bool {
+	if o.ManualSQL {
+		return true
+	}
 	if o.Sequence != nil && o.Sequence.Native != nil && o.Sequence.Native.OracleCross {
 		return o.TrustedCrossOracleSequence()
 	}

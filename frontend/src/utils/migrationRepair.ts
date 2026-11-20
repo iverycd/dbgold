@@ -107,9 +107,13 @@ export function canRetryNative(object: RepairObject): boolean {
 export function canRetryManualTrigger(object: RepairObject): boolean {
   return object.kind === 'trigger' && !!object.manual_trigger && !isManualPGTrigger(object) && object.manual_trigger.revision > 0 && !object.diagnostic_only && object.status === 'unknown' && !!object.schema?.trim() && !!object.table?.trim() && !!object.target_name?.trim() && !!object.units?.length && object.units.some(unit => unit.sql === object.manual_trigger!.sql) && object.units.every(unit => !!unit.original_sql?.trim() && unit.sql === unit.original_sql && !unit.destructive)
 }
-export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object) || canRetryManualTrigger(object)
+export const canExecuteRepairDDL = (object: RepairObject) => canEditRepairDDL(object) || !object.manual_sql && (canRetryMySQLPGTrigger(object) || canRetryMySQLDamengTrigger(object) || canRetryNative(object) || canRetryManualTrigger(object))
 
 export function canEditRepairDDL(object: RepairObject): boolean {
+  if (object.manual_sql) {
+    const readOnly = (status: string) => ['unknown', 'unverified', 'needs_verification', 'running', 'queued'].includes(status)
+    return !readOnly(object.status) && !object.units?.some(unit => readOnly(unit.status))
+  }
   if (object.native_view_editable && object.kind === 'view' && object.native?.kind === 'view') return true
   if (object.kind === 'trigger') return !!object.manual_trigger_editable && !!object.schema?.trim() && !!object.target_name?.trim() && !!object.table?.trim()
   if (object.native || object.diagnostic_only || !object.schema?.trim() || !object.target_name?.trim()) return false
@@ -134,6 +138,7 @@ export function cloneRepairUnits(units: RepairUnit[] | null | undefined): Repair
   return (units || []).map(unit => ({ ...unit, selected: unitCommitted(unit.status) || unit.destructive ? false : !!unit.selected }))
 }
 export function cloneRepairExecutionUnits(object: RepairObject): RepairUnit[] {
+  if (object.manual_sql) return cloneRepairUnits(object.units)
   if (object.manual_trigger) return object.units.map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   if (object.native) return (object.units || []).map(unit => ({ ...unit, selected: !unitCommitted(unit.status) && !unit.destructive }))
   const units = cloneRepairUnits(object.units)
@@ -159,6 +164,7 @@ export function qualifiedRepairName(object: RepairObject) {
 }
 
 export function recoveryUnavailableReason(object: RepairObject) {
+  if (object.manual_sql && object.native) return '请在对象修复弹窗中执行达梦原生对象的手工 SQL'
   if (isManualPGTrigger(object)) return '请在对象修复弹窗单独提交手工触发器'
   if (['unknown', 'unverified', 'running'].includes(object.status)) return repairStatus(object.status)
   const unit = object.units?.find(unit => unit.status === 'unknown' || unit.status === 'running')
@@ -383,9 +389,9 @@ export function repairDisplayStatuses(row: RepairDisplayRow): { label: string; s
   const { object } = row
   const data = repairDisplayDataStatus(row)
   const isTable = ['table', 'tables'].includes(object.kind)
-  const created = isTable && data?.status === 'row_count_mismatch' && unitCommitted(object.status) && object.units?.some(unit =>
+  const created = !object.manual_sql && isTable && data?.status === 'row_count_mismatch' && unitCommitted(object.status) && object.units?.some(unit =>
     unitCommitted(unit.status) && /^\s*create\s+(?:(?:global|local|temporary|temp|unlogged)\s+)*table\s+(?!if\s+not\s+exists\b)\S/i.test(unit.sql))
-  const statuses = object.kind === 'data' ? [] : [{ label: isTable ? '表结构' : '', status: object.status, text: created ? '已创建' : repairStatus(object.status) }]
+  const statuses = object.kind === 'data' ? [] : [{ label: object.manual_sql ? '手工 SQL' : isTable ? '表结构' : '', status: object.status, text: created ? '已创建' : repairStatus(object.status) }]
   if (data) statuses.push({ label: '数据', status: data.status, text: data.text })
   return statuses
 }

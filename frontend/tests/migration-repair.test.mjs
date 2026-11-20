@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import test from 'node:test'
 import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
@@ -10,12 +9,8 @@ import { parse, compileScript, compileStyle } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-dom'
 import { renderToString } from '@vue/server-renderer'
 import Arco from '@arco-design/web-vue'
-import { formatDialect, postgresql } from 'sql-formatter'
 
 function transpile(source) { return ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText }
-const require = createRequire(import.meta.url)
-const formattingContext = { exports: {}, require }
-vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/sqlFormatting.ts', import.meta.url), 'utf8')), formattingContext)
 const utilsContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(readFileSync(new URL('../src/utils/migrationRepair.ts', import.meta.url), 'utf8')), utilsContext)
 const utils = utilsContext.exports
@@ -33,7 +28,7 @@ const recoveryDescriptor = parse(readFileSync(new URL('../src/components/TableRe
 const recoveryContext = { exports: {}, require: id => id === 'vue' ? Vue : utils }
 vm.runInNewContext(transpile(compileScript(recoveryDescriptor, { id: 'table-recovery', inlineTemplate: true }).content), recoveryContext)
 const fields = 'records, binding, job, activeAttempt, editing, draftUnits, mappingForm, addColumnMapping, editorVisible, executionSnapshot, executionKey, recoveryVisible, recoveryObject, recoveryForm, recoveryPlan, canRecover, canExecute, stats, addUnit, restoreOriginal, attempts, openEditor, closeEditor, useSuggested, prepareExecute, confirmExecute, saveDraft, openRecovery, reviewRelated, loadPreview, invalidatePreview, confirmRecovery, refresh, refreshHistory, exportHistory, bindingForm, openBinding, saveBinding, summary, focusObject, page, highlightedObjectID, pendingFocus, showAllObjects, repairSection, errorDetailsVisible, errorObjectID, errorDetailRecord, openErrorDetails, closeErrorDetails'
-const renderFields = 'emit, loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, relatedChoices, recoveryError, recoveryIssue, closeRecovery, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, pgTriggerDraftComplete, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
+const renderFields = 'emit, loading, error, filter, keyword, busy, cancelling, saving, submitting, executeVersion, historyVisible, loadingHistory, visibleAttempts, visibleRecords, editorDialect, qualified, primaryRecord, dependencyNames, statusColor, copyUnitSQL, objectName, openHistory, cancelAttempt, selectSourceConnection, sourceConnections, targetConnections, relatedCandidates, relatedChoices, recoveryError, recoveryIssue, closeRecovery, bindingVisible, previewing, selectRepairFilter, emptyDescription, pgTriggerEditor, pgTriggerUnitLabel, unknownExecutionMessage, canRetryOriginalPGTrigger, triggerPlanAvailable, triggerPlanCandidate, triggerPlanReviewed, canRefreshTriggerPlan, refreshingTriggerPlan, refreshTriggerPlan, saveTriggerPlan, clearTriggerPlan'
 const batchFields = 'selectedObjectIDs, batchPreviewVisible, batchReviewed, batchPreparing, batchRunning, batchItems, batchStopped, batchHasRun, batchError, selectAllFiltered, clearBatchSelection, prepareBatch, confirmBatch, stopBatch, batchIneligibleReason, batchExecutableCount, batchCompletedCount, batchItemStatus, leaveBatchPage, restoreBatchPage'
 function panel(props, overrides = {}) {
   const lifecycle = {}, messages = [], scheduled = [], emitted = []
@@ -53,8 +48,8 @@ function panel(props, overrides = {}) {
       if (id === 'vue') return { ...Vue, onUnmounted: fn => { lifecycle.unmount = fn } }
       if (id === '@/utils/migrationRepair') return utils
       if (id === '@/utils/migrationRepairBatch') return batchUtils
+      if (id === '@/utils/clipboard') return { copyText: overrides.copyText || (async () => {}) }
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
-      if (id === '@/utils/sqlFormatting') return formattingContext.exports
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: overrides.getDataMigrationJob || (async id => ({ data: { job_id: id, status: 'failed', dst_db_type: 'postgres' } })) }
       if (id === '@/api/connections') return { listConnections: overrides.listConnections || (async () => ({ data: [] })) }
@@ -325,7 +320,7 @@ test('focus waits for loading and task changes clear pending navigation and old 
   } finally { scope.stop() }
 })
 
-async function renderPanel({ inspectRecovery, ...p }, onRender, onEditor, onTooltip) {
+async function renderPanel({ inspectRecovery, inspectEditor, ...p }, onRender, onEditor, onTooltip) {
   const code = compile(descriptor.template.content, { mode: 'function', prefixIdentifiers: true }).code
   const render = vm.runInNewContext(`(function() { ${code} })()`, { Vue })
   const app = Vue.createSSRApp({
@@ -347,6 +342,7 @@ async function renderPanel({ inspectRecovery, ...p }, onRender, onEditor, onTool
     if (!props.visible) return null
     const tree = Vue.h('div', [...slots.default?.() || [], ...slots.footer?.() || []])
     if (attrs.title === '接续此表迁移') inspectRecovery?.(tree)
+    if (String(attrs.title).startsWith('对象修复 ·')) inspectEditor?.(tree)
     return tree
   } })
   app.component('a-table-column', { setup: () => () => null })
@@ -924,7 +920,7 @@ test('repair formatting uses the target dialect and honors read-only and busy st
   } finally { scope.stop() }
 })
 
-test('SQL formats by default and persists through saving, reopening and direct execution', async () => {
+test('manual SQL preserves whitespace, comments and line endings when saved, reopened and executed', async () => {
   const scope = Vue.effectScope()
   try {
     const original = 'Create View "OrdersView" AS select Id, Name from "Orders" where Id > 1;'
@@ -937,15 +933,16 @@ test('SQL formats by default and persists through saving, reopening and direct e
       },
     })); await tick()
     p.openEditor(saved)
-    const formatted = formatDialect(original, { dialect: postgresql, keywordCase: 'preserve', tabWidth: 2 })
-    assert.equal(p.draftUnits.value[0].sql, formatted, 'opening an editable draft formats it automatically')
+    assert.equal(p.draftUnits.value[0].sql, original)
+    const edited = '  -- keep this comment\r\nBEGIN\r\n  NULL;\r\nEND;  \r\n'
+    p.draftUnits.value[0].sql = edited
     assert.equal(await p.saveDraft(), true)
     p.closeEditor(); p.openEditor(saved)
-    assert.equal(p.draftUnits.value[0].sql, formatted)
+    assert.equal(p.draftUnits.value[0].sql, edited)
     assert.equal(p.draftUnits.value[0].original_sql, original)
     assert.equal(p.editing.value.object.ddl, original)
     await p.prepareExecute()
-    assert.equal(p.executionSnapshot.value[0].sql, formatted)
+    assert.equal(p.executionSnapshot.value[0].sql, edited)
     p.draftUnits.value[0].sql = original
     p.lifecycle.unmount()
   } finally { scope.stop() }
@@ -1162,6 +1159,43 @@ test('rendered manual repair shows its entry and editor while keeping source def
   } finally { scope.stop() }
 })
 
+test('copy buttons use the current SQL of each step, including read-only steps', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const copied = []
+    const p = scope.run(() => panel({ jobID: 'job' }, { copyText: async text => {
+      if (text === 'denied') throw new Error('clipboard unavailable')
+      copied.push(text)
+    } })); await tick()
+    const original = record({ units: [unit('done', 'succeeded'), unit('edit', 'failed')] })
+    p.openEditor(original)
+    const draft = '  SELECT 1;\r\n-- keep whitespace  '
+    p.draftUnits.value[1].sql = draft
+    p.draftUnits.value[1].selected = false
+    p.addUnit()
+    let buttons
+    async function readButtons() {
+      await renderPanel({ ...p, inspectEditor: tree => {
+        buttons = findNodes(tree, node => node.props?.onClick && node.children?.default && nodeText(node.children.default()) === '复制 SQL')
+      } })
+    }
+    await readButtons()
+    assert.equal(buttons.length, 3)
+    assert.equal(buttons[2].props.disabled, true)
+    await buttons[0].props.onClick(); await buttons[1].props.onClick()
+    assert.deepEqual(copied, ['CREATE done', draft])
+    assert.equal(p.messages.at(-1), 'SQL 已复制')
+    assert.equal(p.draftUnits.value[1].selected, false)
+    p.draftUnits.value[1].sql = 'denied'
+    await readButtons(); await buttons[1].props.onClick()
+    assert.equal(p.messages.at(-1), '复制 SQL 失败')
+    p.openEditor(record({ kind: 'trigger', mysql_pg_trigger: {}, units: [unit('a', 'failed'), unit('b', 'failed')] }))
+    await readButtons(); await buttons[1].props.onClick()
+    assert.equal(copied.at(-1), 'CREATE b')
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
 test('SQL Server view suggestions stay read-only until explicitly adopted and do not execute on adoption', async () => {
   const scope = Vue.effectScope()
   try {
@@ -1183,7 +1217,7 @@ test('SQL Server view suggestions stay read-only until explicitly adopted and do
     assert.ok(text.includes(suggested))
     p.useSuggested()
     assert.equal(p.draftUnits.value.length, 1)
-    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(suggested, 'kingbase'))
+    assert.equal(p.draftUnits.value[0].sql, suggested)
     assert.equal(p.draftUnits.value[0].original_sql, '')
     assert.deepEqual(calls, [], 'adoption changes only the local draft')
     assert.equal(failed.object.source_ddl, source)
@@ -1320,7 +1354,7 @@ test('one action saves a versioned complete-unit snapshot before execution', asy
     await p.prepareExecute()
     assert.equal(calls.length, 2)
     assert.equal(p.executionSnapshot.value.length, 1)
-    assert.equal(p.executionSnapshot.value[0].sql, formattingContext.exports.formatSQLText('BEGIN NULL; END;', 'postgres'))
+    assert.equal(p.executionSnapshot.value[0].sql, 'BEGIN NULL; END;')
     await p.confirmExecute()
     assert.equal(calls[1][0], 'execute')
     assert.equal(calls[1][3].version, 2)
@@ -1880,35 +1914,26 @@ const pgTriggerRecord = (extra = {}) => manualTriggerRecord({ ddl: '', error: '�
 const pgJob = async id => ({ data: { job_id: id, status: 'failed', src_db_type: 'mysql', dst_db_type: 'vastbase' } })
 const pgTriggerUnits = [unit('function', 'rolled_back', { sql: pgFunctionSQL, original_sql: pgFunctionSQL }), unit('trigger', 'failed', { sql: pgTriggerSQL, original_sql: pgTriggerSQL })]
 
-test('PG-family conversion failures open two empty SQL editors and require the complete pair', async () => {
+test('PG-family trigger repairs can submit one user-selected SQL step', async () => {
   const scope = Vue.effectScope()
   try {
-    const original = pgTriggerRecord()
+    const original = pgTriggerRecord(), saves = []
     const p = scope.run(() => panel({ jobID: 'job' }, {
       getDataMigrationJob: pgJob,
-      saveRepairDraft: async () => assert.fail('incomplete pair must never be saved'),
-      executeRepair: async () => assert.fail('incomplete pair must never be executed'),
+      saveRepairDraft: async (_job, _id, data) => {
+        saves.push(data)
+        return { data: { version: 2, object: { ...original.object, manual_sql: true, units: data.units } } }
+      },
     })); await tick()
-    for (const target of ['postgres', 'gaussdb', 'highgo', 'gbase', 'seabox', 'kingbase', 'vastbase']) {
-      p.job.value.dst_db_type = target
-      p.openEditor(original)
-      assert.deepEqual([...p.draftUnits.value.map(item => item.sql)], ['', ''], target)
-      assert.equal(p.canExecute.value, false)
-    }
-    const editors = []
-    const html = await renderPanel(p, undefined, editor => editors.push(editor.modelValue))
-    assert.deepEqual(editors, ['', ''])
-    assert.match(html, /触发器函数 SQL/)
-    assert.match(html, /创建触发器 SQL/)
-    assert.match(html, /SOURCE TRIGGER REFERENCE/)
-    assert.match(html, /语句 declare 需要人工适配/)
-    assert.match(html, /重新生成触发器方案/)
-    p.draftUnits.value[0].sql = pgFunctionSQL
+    p.openEditor(original)
+    const html = await renderPanel(p)
+    for (const label of ['SOURCE TRIGGER REFERENCE', '语句 declare 需要人工适配', '重新生成触发器方案', '添加执行单元']) assert.ok(html.includes(label))
     assert.equal(p.canExecute.value, false)
-    assert.equal(await p.saveDraft(), false)
-    await p.prepareExecute()
-    p.draftUnits.value[1].sql = pgTriggerSQL
+    p.draftUnits.value[0].sql = pgFunctionSQL
     assert.equal(p.canExecute.value, true)
+    await p.prepareExecute()
+    assert.equal(saves[0].mode, 'manual_sql')
+    assert.deepEqual([...p.executionSnapshot.value.map(item => item.sql)], [pgFunctionSQL])
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
@@ -1950,7 +1975,7 @@ test('PG manual pair can be reopened, edited after a step error, and submitted a
       listRepairs: async () => repairList([saved]),
       saveRepairDraft: async (_job, _id, draft) => {
         calls.push(['save', draft.version, draft.mode, ...draft.units.map(item => item.sql)])
-        saved = { version: saved.version + 1, object: { ...saved.object, status: 'draft', diagnostic_only: false, manual_trigger: { function_sql: draft.units[0].sql, sql: draft.units[1].sql, revision: saved.version }, units: draft.units.map(item => ({ ...item, status: 'pending', error: '' })) } }
+        saved = { version: saved.version + 1, object: { ...saved.object, status: 'draft', diagnostic_only: false, manual_sql: true, units: draft.units.map(item => ({ ...item, status: 'pending', error: '' })) } }
         return { data: saved }
       },
       executeRepair: async (_job, _id, request) => {
@@ -1962,6 +1987,7 @@ test('PG manual pair can be reopened, edited after a step error, and submitted a
       getRepairAttempt: async () => ({ data: { id: `attempt-${submissions}`, object_id: 'obj', kind: 'ddl', status: saved.object.status, units: saved.object.units } }),
     })); await tick(); p.openEditor(saved)
     p.draftUnits.value[0].sql = pgFunctionSQL
+    p.addUnit()
     const broken = pgTriggerSQL.replace('BEFORE INSERT', 'BEFORE UPDATE OF missing')
     p.draftUnits.value[1].sql = broken
     assert.equal(await p.saveDraft(), true)
@@ -1976,10 +2002,10 @@ test('PG manual pair can be reopened, edited after a step error, and submitted a
     await p.prepareExecute()
     assert.equal(p.editorVisible.value, false)
     assert.deepEqual(calls.map(call => [...call]), [
-      ['save', 1, 'manual_trigger', pgFunctionSQL, broken],
-      ['save', 2, 'manual_trigger', pgFunctionSQL, broken],
+      ['save', 1, 'manual_sql', pgFunctionSQL, broken],
+      ['save', 2, 'manual_sql', pgFunctionSQL, broken],
       ['execute', 3, true],
-      ['save', 4, 'manual_trigger', pgFunctionSQL, pgTriggerSQL],
+      ['save', 4, 'manual_sql', pgFunctionSQL, pgTriggerSQL],
       ['execute', 5, true],
     ])
     p.lifecycle.unmount()
@@ -2006,7 +2032,7 @@ test('PG manual pair stays out of batch and table recovery, and unknown results 
   } finally { scope.stop() }
 })
 
-test('server capability enables one formatted target CREATE draft for every failed Dameng trigger variant', async () => {
+test('Dameng trigger drafts expose their existing units without changing SQL or replaying successful steps', async () => {
   const scope = Vue.effectScope()
   try {
     const p = scope.run(() => panel({ jobID: 'job' })); await tick()
@@ -2015,9 +2041,9 @@ test('server capability enables one formatted target CREATE draft for every fail
       const original = manualTriggerRecord(extra)
       p.openEditor(original)
       assert.equal(utils.canEditRepairDDL(original.object), true)
-      assert.equal(p.draftUnits.value.length, 1)
-      assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(triggerSQL, 'dameng'))
-      assert.equal(p.draftUnits.value[0].selected, true)
+      assert.equal(p.draftUnits.value.length, original.object.units.length)
+      assert.equal(p.draftUnits.value[0].sql, triggerSQL)
+      assert.equal(p.draftUnits.value[0].selected, !extra.native)
       assert.equal(p.draftUnits.value[0].destructive, false)
       assert.equal(p.editing.value.object.source_ddl, 'SOURCE TRIGGER REFERENCE')
       assert.equal(p.editing.value.object.ddl, triggerSQL)
@@ -2025,7 +2051,7 @@ test('server capability enables one formatted target CREATE draft for every fail
       assert.ok(html.includes('保存并执行'))
       assert.ok(!html.includes('确认执行 DDL'))
       assert.ok(!html.includes('我已核对完整执行单元'))
-      assert.ok(!html.includes('添加执行单元'))
+      assert.ok(html.includes('添加执行单元'))
     }
     p.lifecycle.unmount()
   } finally { scope.stop() }
@@ -2063,7 +2089,7 @@ test('manual trigger saves its single SQL with explicit mode then executes direc
     p.job.value.dst_db_type = 'dameng'; p.openEditor(saved)
     await p.prepareExecute()
     assert.deepEqual(calls.map(call => call[0]), ['save', 'execute'])
-    assert.equal(calls[0][1].mode, 'manual_trigger')
+    assert.equal(calls[0][1].mode, 'manual_sql')
     assert.equal(calls[0][1].reviewed, true)
     assert.equal(calls[0][1].units.length, 1)
     assert.equal(calls[1][1].version, 2)
@@ -2190,7 +2216,42 @@ test('batch executes a saved native manual trigger plan without resaving its phy
   } finally { scope.stop() }
 })
 
-test('legacy target SQL can be restored and suggested SQL is formatted without modifying originals', async () => {
+test('manual SQL drafts retain selection across batch and recovery and report only SQL execution', async () => {
+  const scope = Vue.effectScope()
+  try {
+    const units = [unit('chosen', 'pending', { sql: '  SELECT 1; ' }), unit('omitted', 'pending', { selected: false })]
+    const saved = record({ manual_sql: true, kind: 'index', table: 'Orders', status: 'draft', units })
+    let requests = 0
+    const p = scope.run(() => panel({ jobID: 'job' }, {
+      listRepairs: async () => repairList([saved]),
+      saveRepairDraft: async () => assert.fail('batch must execute the saved version'),
+      executeRepair: async (_job, _id, request) => {
+        requests++
+        assert.equal(request.version, saved.version)
+        return { data: { id: 'attempt', object_id: 'obj', kind: 'ddl', status: 'succeeded', units: [units[0]] } }
+      },
+    })); await tick()
+    p.selectAllFiltered(); await p.prepareBatch()
+    assert.deepEqual([...p.batchItems.value[0].record.object.units.filter(unit => unit.selected).map(unit => unit.sql)], ['  SELECT 1; '])
+    p.batchReviewed.value = true; await p.confirmBatch()
+    assert.equal(requests, 1)
+    assert.equal(utils.recoveryUnavailableReason(saved.object), '')
+    assert.match(utils.recoveryUnavailableReason({ ...saved.object, native: {} }), /单独|修复弹窗/)
+    const native = { ...saved.object, manual_sql: true, native: {}, manual_trigger: { sql: 'old plan' } }
+    p.openEditor({ object: native, version: 4 })
+    assert.deepEqual([...p.draftUnits.value.map(unit => [unit.sql, unit.selected])], units.map(unit => [unit.sql, unit.selected]))
+    p.openEditor({ object: { ...native, status: 'unknown' }, version: 5 })
+    assert.equal(p.canExecute.value, false)
+    const html = await renderPanel(p)
+    assert.ok(html.includes('复制 SQL'))
+    assert.doesNotMatch(html, /保存并执行|重试原 SQL/)
+    const [status] = utils.repairObjectStatuses({ ...saved.object, status: 'succeeded', kind: 'table' })
+    assert.deepEqual([status.label, status.text], ['手工 SQL', '执行成功'])
+    p.lifecycle.unmount()
+  } finally { scope.stop() }
+})
+
+test('legacy and suggested trigger SQL can be restored verbatim', async () => {
   const scope = Vue.effectScope()
   try {
     const suggested = triggerSQL.replace('"Audit"', '"SuggestedAudit"')
@@ -2199,19 +2260,19 @@ test('legacy target SQL can be restored and suggested SQL is formatted without m
     p.job.value.dst_db_type = 'dameng'; p.openEditor(original)
     p.draftUnits.value[0].sql = 'unsaved user changes'
     p.restoreOriginal()
-    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(triggerSQL, 'dameng'))
+    assert.equal(p.draftUnits.value[0].sql, triggerSQL)
     p.useSuggested()
-    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(suggested, 'dameng'))
+    assert.equal(p.draftUnits.value[0].sql, suggested)
     assert.equal(original.object.ddl, triggerSQL)
     assert.equal(original.object.suggested_ddl, suggested)
     const savedSQL = triggerSQL.replace('"Audit"', '"SavedAudit"')
-    p.openEditor(manualTriggerRecord({ manual_trigger: { sql: savedSQL, revision: 2 } }))
-    assert.equal(p.draftUnits.value[0].sql, formattingContext.exports.formatSQLText(savedSQL, 'dameng'))
+    p.openEditor(manualTriggerRecord({ manual_trigger: { sql: savedSQL, revision: 2 }, units: [unit('create-trigger', 'pending', { sql: savedSQL, original_sql: triggerSQL })] }))
+    assert.equal(p.draftUnits.value[0].sql, savedSQL)
     p.lifecycle.unmount()
   } finally { scope.stop() }
 })
 
-test('failed native view edits one definition and keeps its physical compile step server-owned', async () => {
+test('native view exposes the frozen create and lets the operator replace the failed compile step', async () => {
   const first = 'CREATE VIEW "APP"."V" AS SELECT 0'
   const edited = 'CREATE OR REPLACE VIEW "APP"."V" AS SELECT 1'
   const compile = 'ALTER VIEW "APP"."V" COMPILE'
@@ -2221,12 +2282,12 @@ test('failed native view edits one definition and keeps its physical compile ste
   let saved
   const p = panel({ jobID: 'job' }, { saveRepairDraft: async (_id, _object, payload) => { saved = payload; return {data:obj} } })
   p.openEditor(obj)
-  assert.equal(p.draftUnits.value.length, 1)
+  assert.equal(p.draftUnits.value.length, 2)
+  assert.equal(p.draftUnits.value[0].selected, false)
   assert.equal(p.draftUnits.value[0].sql, edited)
-  p.restoreOriginal()
-  assert.equal(p.draftUnits.value[0].sql, first)
+  p.draftUnits.value[1].sql = first
   await p.saveDraft()
-  assert.equal(saved.mode, 'native_view')
-  assert.deepEqual([...saved.units.map(u => u.sql)], [first])
+  assert.equal(saved.mode, 'manual_sql')
+  assert.deepEqual([...saved.units.map(u => u.sql)], [edited, first])
   assert.equal(utils.canEditRepairDDL({...obj.object, native_view_editable:false}),false)
 })

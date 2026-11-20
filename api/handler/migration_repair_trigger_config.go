@@ -151,6 +151,9 @@ func validateMySQLPGTriggerDependencyObjects(o repair.Object, objects []repair.O
 }
 
 func validateMigrationRepairDependencies(jobID string, object repair.Object) error {
+	if object.ManualSQL {
+		return nil
+	}
 	if object.ManualTrigger != nil {
 		return validateManualTriggerDependencies(jobID, object)
 	}

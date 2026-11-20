@@ -1,4 +1,4 @@
-import { EditorSelection, Transaction, type EditorState, type TransactionSpec } from '@codemirror/state'
+import { EditorSelection, Text, Transaction, type EditorState, type TransactionSpec } from '@codemirror/state'
 import { isolateHistory } from '@codemirror/commands'
 import { formatDialect, mysql, plsql, postgresql, sql, transactsql } from 'sql-formatter'
 
@@ -37,8 +37,8 @@ export function createSQLFormatTransaction(state: EditorState, dbType: string): 
   const text = state.sliceDoc(from, to)
   if (!text.trim()) return null
 
-  const formatted = formatSQLText(text, dbType)
-  if (formatted === text) return null
+  const formatted = Text.of(formatSQLText(text, dbType).split(/\r\n?|\n/))
+  if (formatted.eq(state.doc.slice(from, to))) return null
 
   return {
     changes: { from, to, insert: formatted },

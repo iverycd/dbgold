@@ -654,6 +654,26 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		repairError(c, store.ErrRepairConflict)
 		return
 	}
+	if req.Mode == "manual_sql" && (req.IndexPlan || req.SequencePlan) {
+		repairError(c, fmt.Errorf("请选择手工 SQL 或重新生成的计划"))
+		return
+	}
+	manual := req.Mode == "manual_sql" || o.ManualSQL && req.Mode == "" && !req.IndexPlan && !req.SequencePlan
+	if manual {
+		if !canSaveManualSQL(j, o) {
+			repairError(c, fmt.Errorf("此记录不支持手工编辑 SQL"))
+			return
+		}
+		if slicesContainUncertainManualUnits(o.Units) {
+			repairError(c, fmt.Errorf("存在执行结果未知的单元，不允许重放"))
+			return
+		}
+		o.DiagnosticOnly = false
+		if !o.ManualSQL && o.OriginalError == "" {
+			o.OriginalError = o.Error
+		}
+	}
+	o.ManualSQL = manual
 	if req.Mode == "native_view" {
 		if j.SrcDBType != "dameng" || j.DstDBType != "dameng" || binding.TargetSchema != o.Schema || len(req.Units) != 1 {
 			repairError(c, fmt.Errorf("达梦原生视图修复需要原目标模式及一条完整 CREATE VIEW"))
@@ -671,11 +691,11 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 		c.JSON(200, gin.H{"object": repairObjectResponse(j, candidate), "version": req.Version + 1})
 		return
 	}
-	if req.Mode != "" && req.Mode != "manual_trigger" {
+	if req.Mode != "" && req.Mode != "manual_trigger" && req.Mode != "manual_sql" {
 		repairError(c, fmt.Errorf("不支持的对象修复模式"))
 		return
 	}
-	if req.Mode == "manual_trigger" || o.ManualTrigger != nil {
+	if !manual && (req.Mode == "manual_trigger" || o.ManualTrigger != nil) {
 		if binding.TargetSchema != o.Schema {
 			repairError(c, fmt.Errorf("触发器目标 Schema 与原修复绑定不一致"))
 			return
@@ -770,13 +790,20 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 				repairError(c, fmt.Errorf("成功步骤不可修改或再次执行"))
 				return
 			}
+			if manual && old.Destructive && u.SQL != old.SQL {
+				repairError(c, fmt.Errorf("只读步骤不可修改"))
+				return
+			}
 			old.SQL = u.SQL
-			old.Selected = u.Selected && old.Status != "succeeded"
+			old.Selected = u.Selected && old.Status != "succeeded" && !(manual && old.Destructive)
 			u = old
 		} else {
 			u.OriginalSQL = ""
 			u.Status = "pending"
 			u.Error = ""
+			if manual {
+				u.Destructive = false
+			}
 		}
 		out = append(out, u)
 	}
@@ -786,17 +813,17 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 			return
 		}
 	}
-	if len(out) > 100 && o.PartitionPlan == nil {
+	if len(out) > 100 && (manual || o.PartitionPlan == nil) {
 		repairError(c, fmt.Errorf("执行单元过多"))
 		return
 	}
-	if o.Index != nil && o.Index.PGUniqueConstraint {
+	if !manual && o.Index != nil && o.Index.PGUniqueConstraint {
 		if err := validateRepairObjectScope(o, out, j.DstDBType); err != nil {
 			repairError(c, err)
 			return
 		}
 	}
-	if o.PartitionPlan != nil {
+	if !manual && o.PartitionPlan != nil {
 		if err := validateRepairObjectScope(o, out, j.DstDBType); err != nil {
 			repairError(c, err)
 			return
@@ -823,7 +850,10 @@ func SaveMigrationRepairDraft(c *gin.Context) {
 	if req.ColumnMapping != nil {
 		o.ColumnMapping = req.ColumnMapping
 	}
-	if req.Reviewed {
+	if manual {
+		o.RequiresReview = !req.Reviewed
+		o.Verification, o.ManualVerification = nil, nil
+	} else if req.Reviewed {
 		o.RequiresReview = false
 	}
 	if sqlChanged || o.Status != "succeeded" {
@@ -987,7 +1017,7 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 	}
 	if a.Kind == "ddl" {
 		o.Status = a.Status
-		if o.NativeViewDraft != nil || o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
+		if o.ManualSQL || o.NativeViewDraft != nil || o.ManualTrigger != nil && o.ManualTrigger.FunctionSQL != "" {
 			o.Error = a.Error
 		}
 		o.Verification = nil
@@ -1002,6 +1032,66 @@ func finishRepair(a *store.MigrationRepairAttempt, o repair.Object, err error) {
 		slog.Error("persist repair completion failed", "attempt", a.ID, "err", e)
 	}
 }
+func prepareRepairExecution(j *store.DataMigrationJob, b *store.MigrationRepairBinding, o *repair.Object) error {
+	if o.ManualSQL {
+		if b.TargetSchema == "" || b.TargetSchema != o.Schema {
+			return fmt.Errorf("请绑定原迁移任务的目标 Schema")
+		}
+		if o.RequiresReview {
+			return fmt.Errorf("请先审阅并保存执行单元")
+		}
+		if !canSaveManualSQL(j, *o) || slicesContainUncertainManualUnits(o.Units) {
+			return fmt.Errorf("执行结果未知，不允许重放")
+		}
+		return validateRepairUnitSelection(o.Units)
+	}
+	if o.ManualTrigger != nil {
+		if !manualTriggerMatchesTarget(*o, j.DstDBType) {
+			return fmt.Errorf("手工触发器计划与原目标不一致")
+		}
+		if o.ManualTrigger.FunctionSQL != "" && !canEditManualTrigger(j, *o) {
+			return fmt.Errorf("请核对目标触发器状态，仅确认未提交的修订可再次执行")
+		}
+		if o.RequiresReview {
+			return fmt.Errorf("请保存当前 SQL 后执行")
+		}
+	}
+	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
+		return fmt.Errorf("执行结果未知，不允许自动重放")
+	}
+	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil || o.ManualTrigger != nil || o.PGOracleSequence != nil || o.TrustedCrossOracleSequence() {
+		// The read-only retry action always requests the whole frozen transaction;
+		// it does not expose or depend on persisted per-unit selection controls.
+		for i := range o.Units {
+			if o.Units[i].Status != "succeeded" {
+				o.Units[i].Selected = true
+			}
+		}
+	}
+	if o.NativeViewDraft != nil && (j.SrcDBType != "dameng" || j.DstDBType != "dameng" || o.RequiresReview) {
+		return fmt.Errorf("请保存并核对绑定达梦目标的普通视图 DDL")
+	}
+	if o.RequiresReview && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil && o.Native == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
+		return fmt.Errorf("请先审阅并保存执行单元")
+	}
+	for _, u := range o.Units {
+		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
+			return fmt.Errorf("存在未知执行结果，不允许自动重放")
+		}
+	}
+	if o.Native == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
+		if e := validateRepairObjectUnits(*o, j.DstDBType); e != nil {
+			return e
+		}
+	} else if o.Native != nil && !o.TrustedNative() {
+		return fmt.Errorf("达梦原生执行计划已变化，禁止重放")
+	}
+	if e := validateRepairObjectScope(*o, o.Units, j.DstDBType); e != nil {
+		return e
+	}
+	return validateMigrationRepairDependencies(j.JobID, *o)
+}
+
 func ExecuteMigrationRepair(c *gin.Context) {
 	j, b, row, o, ok := loadRepairObject(c, true)
 	if !ok {
@@ -1032,73 +1122,16 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, store.ErrRepairConflict)
 		return
 	}
-	if o.ManualTrigger != nil {
-		if !manualTriggerMatchesTarget(o, j.DstDBType) {
-			repairError(c, fmt.Errorf("手工触发器计划与原目标不一致"))
-			return
-		}
-		if o.ManualTrigger.FunctionSQL != "" && !canEditManualTrigger(j, o) {
-			repairError(c, fmt.Errorf("请核对目标触发器状态，仅确认未提交的修订可再次执行"))
-			return
-		}
-		if o.RequiresReview {
-			repairError(c, fmt.Errorf("请保存当前 SQL 后执行"))
-			return
-		}
-	}
-	if o.Status == "unknown" && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
-		repairError(c, fmt.Errorf("执行结果未知，不允许自动重放"))
-		return
-	}
-	if o.MySQLPGTrigger != nil || o.MySQLDamengTrigger != nil || o.Native != nil || o.ManualTrigger != nil || o.PGOracleSequence != nil || o.TrustedCrossOracleSequence() {
-		// The read-only retry action always requests the whole frozen transaction;
-		// it does not expose or depend on persisted per-unit selection controls.
-		for i := range o.Units {
-			if o.Units[i].Status != "succeeded" {
-				o.Units[i].Selected = true
-			}
-		}
-	}
-	if o.NativeViewDraft != nil && (j.SrcDBType != "dameng" || j.DstDBType != "dameng" || o.RequiresReview) {
-		repairError(c, fmt.Errorf("请保存并核对绑定达梦目标的普通视图 DDL"))
-		return
-	}
-	if o.RequiresReview && o.MySQLPGTrigger == nil && o.MySQLDamengTrigger == nil && o.Native == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
-		repairError(c, fmt.Errorf("请先审阅并保存执行单元"))
-		return
-	}
-	for _, u := range o.Units {
-		if (u.Status == "unknown" || u.Status == "running") && o.Native == nil && o.MySQLDamengTrigger == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
-			repairError(c, fmt.Errorf("存在未知执行结果，不允许自动重放"))
-			return
-		}
-	}
-	if o.Native == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
-		if e := validateRepairObjectUnits(o, j.DstDBType); e != nil {
-			repairError(c, e)
-			return
-		}
-	} else if o.Native != nil && !o.TrustedNative() {
-		repairError(c, fmt.Errorf("达梦原生执行计划已变化，禁止重放"))
-		return
-	}
-	if e := validateRepairObjectScope(o, o.Units, j.DstDBType); e != nil {
+	if e := prepareRepairExecution(j, b, &o); e != nil {
 		repairError(c, e)
 		return
 	}
-	if e := validateMigrationRepairDependencies(j.JobID, o); e != nil {
-		repairError(c, e)
-		return
-	}
-	needsLinkSource := false
-	needsNativeFinalState := datamigrate.NativeRepairHasFinalState(o)
-	if nativeEventRepairObject(o) && nativeRepairHasPendingOrdinaryUnits(o) {
-		// A stale successful activation can coexist with an absent/uncertain
-		// CREATE after interruption. Event DDL retry must pause the whole
-		// authenticated job group before issuing ordinary DDL as well.
-		needsNativeFinalState = true
-	}
-	if o.Native != nil {
+	nativeRetry := !o.ManualSQL && o.Native != nil
+	needsLinkSource, needsNativeFinalState := false, false
+	if nativeRetry {
+		// An earlier activation can coexist with an interrupted CREATE. Pause
+		// the job's event group before replaying the native installation.
+		needsNativeFinalState = datamigrate.NativeRepairHasFinalState(o) || nativeEventRepairObject(o) && nativeRepairHasPendingOrdinaryUnits(o)
 		for _, unit := range o.Native.Units {
 			needsLinkSource = needsLinkSource || unit.SourceSQLHash != ""
 		}
@@ -1108,7 +1141,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		repairError(c, e)
 		return
 	}
-	viewCompatibility := pgCompatibilityRepairView(j.DstDBType, o)
+	viewCompatibility := !o.ManualSQL && pgCompatibilityRepairView(j.DstDBType, o)
 	if viewCompatibility && src == nil && b.SrcConnID != 0 && sourceOverride(b, j.SrcDBType) != "" {
 		// A view can be repaired with the target connection alone. Only consult
 		// the source when its original scope and connection can be validated.
@@ -1183,9 +1216,11 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		if setter, ok := w.(interface{ SetSourceType(string) }); ok {
 			setter.SetSourceType(j.SrcDBType)
 		}
-		if e := checkNativeRepairEventSafety(ctx, w, o); e != nil {
-			finishRepair(a, o, e)
-			return
+		if nativeRetry {
+			if e := checkNativeRepairEventSafety(ctx, w, o); e != nil {
+				finishRepair(a, o, e)
+				return
+			}
 		}
 		var functionNames []string
 		if viewCompatibility && src != nil {

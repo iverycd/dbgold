@@ -23,6 +23,19 @@ func NativeRepairHasFinalState(object repair.Object) bool {
 	return false
 }
 
+// A manual script has its own execution ledger. The archived native plan is
+// still the reference for whole-job source and destination catalog checks.
+func nativeCatalogReference(object repair.Object) repair.Object {
+	if !object.ManualSQL || object.Native == nil {
+		return object
+	}
+	object.Units = make([]repair.Unit, len(object.Native.Units))
+	for i, unit := range object.Native.Units {
+		object.Units[i] = repair.Unit{SQL: unit.SQL, OriginalSQL: unit.SQL}
+	}
+	return object
+}
+
 // NativeRepairFinalizationReady is shared by DDL retry and attached recovery.
 // Final-state units may all be pending at once; every other object/data unit
 // must be complete. The executing object's ordinary steps run before the final
@@ -32,11 +45,18 @@ func NativeRepairFinalizationReady(objects []repair.Object, currentID string) er
 		if object.Native == nil || object.Native.Managed || object.DiagnosticOnly || object.ID == currentID {
 			continue
 		}
-		if !object.TrustedNative() || object.ManualTrigger != nil && !object.TrustedManualTrigger() {
+		reference := nativeCatalogReference(object)
+		if !reference.TrustedNative() || reference.ManualTrigger != nil && !reference.TrustedManualTrigger() {
 			return fmt.Errorf("对象 %s 的原生冻结计划不可信", object.Name)
 		}
 		if object.DataStatus != "succeeded" && object.DataStatus != "not_required" {
 			return fmt.Errorf("表 %s 的数据尚未完成，自动执行策略保持暂停", object.Name)
+		}
+		if object.ManualSQL {
+			if object.Status != "succeeded" {
+				return fmt.Errorf("对象 %s 的手工 SQL 尚未执行成功", object.Name)
+			}
+			continue
 		}
 		for i, unit := range object.Units {
 			if i < len(object.Native.Units) {
@@ -86,6 +106,7 @@ func VerifyNativeRepairFinalization(ctx context.Context, r source.Reader, w targ
 	manualTargets := map[string]damengnative.Object{}
 	for _, object := range objects {
 		if object.Native != nil && object.Native.Kind != "native_drop" {
+			object = nativeCatalogReference(object)
 			baseline := object
 			if object.ManualTrigger != nil {
 				// An approved target adaptation does not change the frozen source

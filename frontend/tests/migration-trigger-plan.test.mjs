@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import test from 'node:test'
 import { migrationDataIssueUtils } from './helpers/migration-report.mjs'
 import vm from 'node:vm'
@@ -10,9 +9,6 @@ import { parse } from '@vue/compiler-sfc'
 
 const file = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 const transpile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-const require = createRequire(import.meta.url)
-const formattingContext = { exports: {}, require }
-vm.runInNewContext(transpile(file('../src/utils/sqlFormatting.ts')), formattingContext)
 const utilityContext = { exports: {}, require: id => { assert.equal(id, './migrationDataIssues'); return migrationDataIssueUtils } }
 vm.runInNewContext(transpile(file('../src/utils/migrationRepair.ts')), utilityContext)
 const batchContext = { exports: {}, require: () => utilityContext.exports }
@@ -30,7 +26,7 @@ function panel(overrides = {}) {
       if (id === 'vue') return { ...Vue, onUnmounted() {} }
       if (id === '@/utils/migrationRepair') return utilityContext.exports
       if (id === '@/utils/migrationRepairBatch') return batchContext.exports
-      if (id === '@/utils/sqlFormatting') return formattingContext.exports
+      if (id === '@/utils/clipboard') return { copyText: overrides.copyText || (async () => {}) }
       if (id === '@/utils/dbType') return { getDbTypeLabel: value => value }
       if (id === '@/api/migrationRepair') return api
       if (id === '@/api/migration') return { getDataMigrationJob: async () => ({ data: { job_id: 'job', status: 'failed', src_db_type: 'mysql', dst_db_type: 'postgres' } }) }

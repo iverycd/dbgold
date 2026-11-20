@@ -88,9 +88,12 @@ func recoveryRelated(jobID string, o repair.Object, ids []string) ([]repair.Obje
 		if item.Status == "succeeded" {
 			continue
 		}
-		if item.ManualTrigger != nil && item.ManualTrigger.FunctionSQL != "" {
+		if item.ManualSQL && ids == nil {
+			continue // A saved script runs in recovery only when explicitly selected.
+		}
+		if item.ManualSQL && item.Native != nil || item.ManualTrigger != nil && item.ManualTrigger.FunctionSQL != "" {
 			if want[item.ID] {
-				return nil, nil, fmt.Errorf("请在对象修复弹窗单独提交手工触发器 %s", item.TargetName)
+				return nil, nil, fmt.Errorf("请在对象修复弹窗单独提交 %s 的手工 SQL", item.TargetName)
 			}
 			continue
 		}
@@ -334,6 +337,13 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			repairError(c, e)
 			return
 		}
+		if related.ManualSQL {
+			if e = validateRepairUnitSelection(related.Units); e != nil {
+				repairError(c, e)
+				return
+			}
+			continue
+		}
 		if scopeErr := validateRepairObjectScope(related, related.Units, j.DstDBType); scopeErr != nil {
 			repairError(c, scopeErr)
 			return
@@ -467,7 +477,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 				selectedUnits := nativeRecoveryPhaseUnits(item, "install")
 				units, executeErr := item.Units, error(nil)
 				if item.Native == nil || nativeRecoveryHasSelected(selectedUnits) {
-					if !functionNamesLoaded && pgCompatibilityRepairView(w.DBType(), item) {
+					if !item.ManualSQL && !functionNamesLoaded && pgCompatibilityRepairView(w.DBType(), item) {
 						functionNames = repairCompatibilityFunctionNames(ctx, r, j.JobID)
 						functionNamesLoaded = true
 					}
@@ -505,7 +515,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 					if completed[item.ID] {
 						nativeRecoveryCompleteManaged(all, completed)
 					}
-					if completed[item.ID] && item.Kind == "sequence" && item.Sequence != nil {
+					if completed[item.ID] && !item.ManualSQL && item.Kind == "sequence" && item.Sequence != nil {
 						sequenceColumns[item.Sequence.ColumnName] = true
 						if item.Sequence.Native != nil {
 							for _, b := range item.Sequence.Native.Bindings {

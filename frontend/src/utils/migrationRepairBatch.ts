@@ -29,7 +29,7 @@ const hasUnknownResult = (object: RepairObject) => unknownStatus(object.status) 
 export function batchIneligibleReason(object: RepairObject): string {
   if (hasUnknownResult(object)) return '存在执行结果未知的记录，请先在目标数据库核对'
   if (object.diagnostic_only) return '仅供诊断的记录不可执行'
-  if (unitCommitted(object.status)) return ['table', 'tables'].includes(object.kind) ? '表结构已执行成功，无需重复执行 DDL' : '对象已执行成功，无需再次执行'
+  if (unitCommitted(object.status)) return !object.manual_sql && ['table', 'tables'].includes(object.kind) ? '表结构已执行成功，无需重复执行 DDL' : '对象已执行成功，无需再次执行'
   if (attemptRunning(object.status) || (object.units || []).some(unit => attemptRunning(unit.status))) return '对象正在执行'
   if (isManualPGTrigger(object)) return '请在对象修复弹窗中提交手工触发器 SQL'
   if (!canExecuteRepairDDL(object)) return '缺少可执行的目标对象信息'
@@ -98,7 +98,7 @@ function unitsKey(record: RepairRecord): string {
 }
 function targetKey(record: RepairRecord): string {
   const object = record.object
-  return JSON.stringify([object.id, object.kind, object.schema, object.target_name, object.table, [...(object.dependencies || [])].sort()])
+  return JSON.stringify([!!object.manual_sql, object.id, object.kind, object.schema, object.target_name, object.table, [...(object.dependencies || [])].sort()])
 }
 function errorText(error: unknown): string {
   const detail = error as { response?: { data?: { error?: string; message?: string } }; message?: string }
