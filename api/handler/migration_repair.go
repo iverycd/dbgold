@@ -563,7 +563,7 @@ func repairCompatibilityFunctionNames(ctx context.Context, r source.Reader, jobI
 	return names
 }
 
-func validateRepairUnits(units []repair.Unit) error {
+func validateRepairUnitSelection(units []repair.Unit) error {
 	if len(units) > 100 {
 		return fmt.Errorf("单对象执行单元不能超过100个")
 	}
@@ -575,6 +575,29 @@ func validateRepairUnits(units []repair.Unit) error {
 		selected++
 		if strings.TrimSpace(u.SQL) == "" || len(u.SQL) > 1<<20 {
 			return fmt.Errorf("执行单元不能为空且不能超过1 MiB")
+		}
+	}
+	if selected == 0 {
+		return fmt.Errorf("请选择至少一个未成功的执行单元")
+	}
+	return nil
+}
+
+func validateRepairObjectUnits(o repair.Object, dbType string) error {
+	if isDamengCommentRepair(o, dbType) {
+		// Its complete statement is parsed by the DM grammar in the scope check.
+		return validateRepairUnitSelection(o.Units)
+	}
+	return validateRepairUnits(o.Units)
+}
+
+func validateRepairUnits(units []repair.Unit) error {
+	if err := validateRepairUnitSelection(units); err != nil {
+		return err
+	}
+	for _, u := range units {
+		if !u.Selected || u.Status == "succeeded" {
+			continue
 		}
 		tokens, _, e := scanQueryTokens(u.SQL)
 		if e != nil {
@@ -605,9 +628,6 @@ func validateRepairUnits(units []repair.Unit) error {
 				}
 			}
 		}
-	}
-	if selected == 0 {
-		return fmt.Errorf("请选择至少一个未成功的执行单元")
 	}
 	return nil
 }
@@ -1033,7 +1053,7 @@ func ExecuteMigrationRepair(c *gin.Context) {
 		}
 	}
 	if o.Native == nil && o.ManualTrigger == nil && o.PGOracleSequence == nil && !o.TrustedCrossOracleSequence() {
-		if e := validateRepairUnits(o.Units); e != nil {
+		if e := validateRepairObjectUnits(o, j.DstDBType); e != nil {
 			repairError(c, e)
 			return
 		}

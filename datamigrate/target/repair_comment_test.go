@@ -157,3 +157,65 @@ func TestExecuteRepairMySQLCommentPinsStringEscaping(t *testing.T) {
 	require.Equal(t, "succeeded", units[0].Status)
 	require.NoError(t, m.ExpectationsWereMet())
 }
+
+func TestDamengCommentRepairReadsSubmittedTextOnTheSameSession(t *testing.T) {
+	const ddl = `COMMENT ON TABLE "APP"."Mixed.Table" IS 'old'`
+	const edited = `COMMENT ON TABLE "APP"."Mixed.Table" IS 'new''s; text'`
+	for _, tc := range []struct {
+		name, actual, status string
+		readErr              error
+	}{
+		{"edited text", "new's; text", "succeeded", nil},
+		{"original text still present", "old", "failed", nil},
+		{"catalog unavailable after DDL", "", "unknown", errors.New("catalog unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+			obj := repair.Object{Kind: "comment", Table: "mixed.table", Schema: "app", DDL: ddl,
+				Units: []repair.Unit{{SQL: edited, OriginalSQL: ddl, Selected: true}}}
+			w := &DaMengWriter{db: db, schema: "APP", dia: dialect.NewDaMeng()}
+			mock.ExpectExec(`SET SCHEMA "APP"`).WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectExec(regexp.QuoteMeta(edited)).WillReturnResult(sqlmock.NewResult(0, 0))
+			read := mock.ExpectQuery("SELECT COMMENTS FROM ALL_TAB_COMMENTS").WithArgs("APP", "Mixed.Table")
+			if tc.readErr != nil {
+				read.WillReturnError(tc.readErr)
+			} else {
+				read.WillReturnRows(sqlmock.NewRows([]string{"COMMENTS"}).AddRow(tc.actual))
+			}
+			mock.ExpectClose()
+			units, err := ExecuteRepair(t.Context(), w, obj, obj.Units, nil)
+			if tc.status == "succeeded" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Equal(t, tc.status, units[0].Status)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestInspectSavedDamengComment(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	const ddl = `COMMENT ON COLUMN "App"."Mixed"."Col" IS 'old'`
+	obj := repair.Object{Kind: "comment", Schema: "App", DDL: ddl, Units: []repair.Unit{
+		{SQL: `COMMENT ON COLUMN "Mixed"."Col" IS 'edited'`, OriginalSQL: ddl, Status: "succeeded"},
+		{SQL: `COMMENT ON COLUMN "Mixed"."Col" IS 'unsent'`, Status: "pending"},
+	}}
+	w := &DaMengWriter{db: db, schema: "APP", dia: dialect.NewDaMeng()}
+	v, err := InspectRepair(t.Context(), w, obj)
+	require.NoError(t, err)
+	require.Equal(t, "failed", v.Status, "a different quoted schema must not be inspected")
+	w.schema = "App"
+	mock.ExpectQuery("SELECT COMMENTS FROM ALL_COL_COMMENTS").WithArgs("App", "Mixed", "Col").
+		WillReturnRows(sqlmock.NewRows([]string{"COMMENTS"}).AddRow("edited"))
+	v, err = InspectRepair(t.Context(), w, obj)
+	require.NoError(t, err)
+	require.Equal(t, "succeeded", v.Status)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

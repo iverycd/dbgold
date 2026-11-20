@@ -142,6 +142,9 @@ func InspectRepair(ctx context.Context, w Writer, obj repair.Object) (repair.Ver
 	if err != nil {
 		return repair.Verification{}, err
 	}
+	if _, ok := w.(*DaMengWriter); ok && repairKind(obj.Kind) == "comment" {
+		return inspectSavedDamengComment(ctx, a.db, schema, obj)
+	}
 	if schema != obj.Schema {
 		return verification("failed", "目标 schema 与原对象不一致")
 	}

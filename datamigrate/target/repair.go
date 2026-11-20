@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"dbgold/datamigrate/damengnative"
 	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/partition"
 	"dbgold/datamigrate/repair"
@@ -138,7 +139,7 @@ func repairErrorStatus(err error) string {
 		return "failed"
 	}
 	var manualUnknown manualTriggerUnknownError
-	if errors.As(err, &manualUnknown) {
+	if errors.As(err, &manualUnknown) || errors.Is(err, errDamengCommentReadback) {
 		return "unknown"
 	}
 	if uncertainRepairError(err) {
@@ -220,7 +221,16 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 	if err != nil {
 		return out, err
 	}
-	if obj.Schema == "" || obj.Schema != schema {
+	var savedComment damengnative.CommentStatement
+	expectedSchema := obj.Schema
+	if a.family == "dameng" && repairKind(obj.Kind) == "comment" {
+		savedComment, err = savedDamengComment(obj)
+		if err != nil {
+			return out, err
+		}
+		expectedSchema = savedComment.Schema
+	}
+	if expectedSchema == "" || expectedSchema != schema {
 		return out, fmt.Errorf("目标 schema 与原修复对象不一致")
 	}
 	if dm, ok := w.(*DaMengWriter); ok && dm.srcType == "oscar" && !repairDefinitionEdited(obj) {
@@ -369,6 +379,9 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 			sessionSQL = "ALTER SESSION SET CURRENT_SCHEMA = " + w.Dialect().QuoteIdent(schema)
 		case "dameng":
 			sessionSQL = "SET SCHEMA " + w.Dialect().QuoteIdent(schema)
+			if savedComment.Table != "" {
+				sessionSQL = "SET SCHEMA " + damengnative.Quote(savedComment.Schema)
+			}
 		case "mysql":
 			// pgSession restores sql_mode/time_zone and closes its connection. Mark
 			// it non-reusable first so USE cannot leak its database to another job.
@@ -402,6 +415,8 @@ func ExecuteRepair(ctx context.Context, w Writer, obj repair.Object, units []rep
 				}
 			}
 			exec = func(q string) error { _, e := tx.ExecContext(ctx, q); return e }
+		} else if savedComment.Table != "" {
+			exec = func(q string) error { return executeDamengComment(ctx, conn, savedComment, q) }
 		} else {
 			exec = func(q string) error { _, e := conn.ExecContext(ctx, q); return e }
 		}

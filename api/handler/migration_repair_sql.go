@@ -131,6 +131,10 @@ func qualifiedRepairIdentity(parts []string, defaultSchema string) (string, stri
 	return "", "", fmt.Errorf("DDL不能跨数据库或服务器修改对象")
 }
 
+func isDamengCommentRepair(obj repair.Object, dbType string) bool {
+	return dbType == "dameng" && obj.Native == nil && (obj.Kind == "comment" || obj.Kind == "comments")
+}
+
 // Procedural languages are not a general SQL sandbox. Only unchanged trusted
 // generated blocks (with optional numeric-literal edits), or blocks consisting
 // entirely of statically scoped literal DDL, can pass this boundary.
@@ -227,6 +231,9 @@ func validateRepairObjectScope(obj repair.Object, units []repair.Unit, dbType st
 			return fmt.Errorf("触发器原生成计划仅支持 PostgreSQL 内核目标")
 		}
 		return target.ValidateMySQLPGTriggerRepair(obj, units)
+	}
+	if isDamengCommentRepair(obj, dbType) {
+		return target.ValidateDamengCommentRepair(obj, units)
 	}
 	for _, u := range units {
 		if !u.Selected || u.Status == "succeeded" {

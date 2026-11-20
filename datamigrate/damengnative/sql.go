@@ -22,6 +22,10 @@ func nativeTokens(s string) ([]sqlToken, error) {
 }
 
 func nativeTokensUntil(s string, stop func(sqlToken) bool) ([]sqlToken, error) {
+	return scanNativeTokens(s, stop, nil)
+}
+
+func scanNativeTokens(s string, stop func(sqlToken) bool, checkBlockComment func(string) error) ([]sqlToken, error) {
 	var tokens []sqlToken
 	appendToken := func(t sqlToken) bool {
 		tokens = append(tokens, t)
@@ -56,6 +60,11 @@ func nativeTokensUntil(s string, stop func(sqlToken) bool) ([]sqlToken, error) {
 			}
 			if depth != 0 {
 				return nil, fmt.Errorf("原生 DDL 包含未闭合注释")
+			}
+			if checkBlockComment != nil {
+				if err := checkBlockComment(s[start+2 : i-2]); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}

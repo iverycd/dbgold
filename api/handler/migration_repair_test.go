@@ -313,6 +313,53 @@ func TestRepairBlocksCannotHideUnrelatedDynamicSQL(t *testing.T) {
 	require.Error(t, validateRepairObjectScope(obj, []repair.Unit{unit}, "oracle"))
 }
 
+func TestDamengCommentRepairObjectScope(t *testing.T) {
+	const schema = "TP_EPOINTBID_TP_SZCG"
+	const table = "cg_projectdailichouqu"
+	const ddl = `COMMENT ON COLUMN "TP_EPOINTBID_TP_SZCG"."CG_PROJECTDAILICHOUQU"."DAILIPHONE" IS 'dailiphone'`
+	report := datamigrate.MigrationReport{Comments: datamigrate.CategoryReport{Items: []datamigrate.ObjectResult{{
+		Name: table + ".DAILIPHONE", Table: table, Stage: "dependency", DDL: ddl, Error: "依赖表记录超长",
+	}}}}
+	objects := datamigrate.LegacyRepairObjects(report, schema)
+	require.Len(t, objects, 1)
+	obj := objects[0]
+	require.Equal(t, "blocked", obj.Status)
+	require.NoError(t, validateRepairObjectScope(obj, obj.Units, "dameng"))
+	check := func(sql string) error {
+		return validateRepairObjectScope(obj, []repair.Unit{{SQL: sql, Selected: true}}, "dameng")
+	}
+	require.NoError(t, check(`comment on column cg_projectdailichouqu.dailiphone is '客户''s; 电话'`))
+	edited := obj
+	edited.Units = []repair.Unit{{Selected: true, SQL: `/* review */ COMMENT ON COLUMN cg_projectdailichouqu.dailiphone IS '/*! 字面文本 */ C:\'`}}
+	require.NoError(t, validateRepairObjectUnits(edited, "dameng"))
+	require.NoError(t, validateRepairObjectScope(obj, edited.Units, "dameng"))
+	for _, sql := range []string{
+		strings.Replace(ddl, schema, "OTHER", 1),
+		strings.Replace(ddl, "CG_PROJECTDAILICHOUQU", "OTHER", 1),
+		strings.Replace(ddl, "DAILIPHONE", "OTHER", 1),
+		strings.Replace(ddl, "DAILIPHONE", "dailiphone", 1),
+		`COMMENT ON TABLE "CG_PROJECTDAILICHOUQU" IS 'text'`,
+		`ALTER TABLE "CG_PROJECTDAILICHOUQU" ADD X INT`,
+		ddl + "; " + ddl,
+		"/*! executable */ " + ddl,
+	} {
+		require.Error(t, check(sql), sql)
+	}
+	obj.Units = nil
+	require.NoError(t, check(ddl), "original object DDL survives replacing a draft unit")
+	obj.DDL = ""
+	require.Error(t, check(ddl), "a draft cannot establish its own scope")
+	obj.Comment = &source.CommentInfo{TableName: table, ColumnName: "Dailiphone"}
+	require.NoError(t, check(ddl), "structured metadata follows the target dialect")
+	obj.Comment.ColumnName = ""
+	require.Error(t, check(ddl))
+	require.NoError(t, check(`COMMENT ON TABLE cg_projectdailichouqu IS 'updated'`))
+	obj.Units = []repair.Unit{{OriginalSQL: `COMMENT ON COLUMN "Mixed.Table"."A""b" IS 'old'`}}
+	obj.Comment = nil
+	require.NoError(t, check(`COMMENT ON COLUMN "Mixed.Table"."A""b" IS 'new'`))
+	require.Error(t, check(`COMMENT ON COLUMN "MIXED.TABLE"."A""B" IS 'new'`))
+}
+
 func TestRepairCannotRenameOrMoveTable(t *testing.T) {
 	obj := repair.Object{Kind: "table", TargetName: "Orders", Table: "Orders", Schema: "app"}
 	for _, sql := range []string{`ALTER TABLE app.Orders RENAME TO stolen`, `ALTER TABLE app.Orders RENAME TO other_schema.stolen`, `ALTER TABLE app.Orders SET SCHEMA archive`} {

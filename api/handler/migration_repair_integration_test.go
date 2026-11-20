@@ -8,14 +8,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"dbgold/config"
 	"dbgold/datamigrate"
+	"dbgold/datamigrate/dialect"
 	"dbgold/datamigrate/repair"
 	"dbgold/datamigrate/source"
 	"dbgold/store"
@@ -23,6 +26,61 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDamengCommentRepairAPIIntegration(t *testing.T) {
+	dsn := os.Getenv("DBGOLD_API_TEST_DM_DSN")
+	if dsn == "" {
+		t.Skip("requires a disposable Dameng target in DBGOLD_API_TEST_DM_DSN")
+	}
+	parsed, err := url.Parse(dsn)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(parsed.Port())
+	require.NoError(t, err)
+	db, err := sql.Open("dm", dsn)
+	require.NoError(t, err)
+	defer db.Close()
+	schema := strings.ToUpper(parsed.User.Username())
+	table := fmt.Sprintf("cg_projectdailichouqu_%d", time.Now().UnixNano())
+	qualified := dialect.NewDaMeng().QualifyTable(schema, table)
+	_, err = db.Exec("CREATE TABLE " + qualified + " (DAILIPHONE VARCHAR(32))")
+	require.NoError(t, err)
+	defer func() { _, err := db.Exec("DROP TABLE " + qualified); require.NoError(t, err) }()
+
+	require.NoError(t, store.InitWithError(&config.Config{SQLitePath: filepath.Join(t.TempDir(), "repair.db")}))
+	password, _ := parsed.User.Password()
+	dst := &store.Connection{OwnerID: 1, Name: "dm", DBType: "dameng", Host: parsed.Hostname(), Port: port, Username: parsed.User.Username(), Password: password}
+	require.NoError(t, store.CreateConnection(dst))
+	job := &store.DataMigrationJob{JobID: "comment-test", OwnerID: 1, Status: "failed", SrcDBType: "mysql", DstDBType: "dameng", DstConnID: dst.ID, DstSchema: schema}
+	require.NoError(t, store.CreateDataMigrationJob(job))
+	tableObj := repair.Object{ID: "table", Kind: "table", Table: table, TargetName: table, Schema: schema, Status: "succeeded", DataStatus: "failed"}
+	ddl := "COMMENT ON COLUMN " + qualified + `."DAILIPHONE" IS 'dailiphone'`
+	cm := repair.Object{ID: "comment", Kind: "comment", Schema: schema, Table: table, TargetName: table + ".DAILIPHONE",
+		DDL: ddl, Status: "blocked", Dependencies: []string{tableObj.ID}, Units: []repair.Unit{{ID: "step-1", OriginalSQL: ddl, SQL: ddl, Selected: true, Status: "blocked"}}}
+	report := datamigrate.MigrationReport{
+		Data:           datamigrate.CategoryReport{Failed: 1, Items: []datamigrate.ObjectResult{{Name: table, Error: "Error -2665: 记录超长"}}},
+		RepairManifest: &datamigrate.RepairManifest{Config: datamigrate.Config{TargetSchema: schema}, Objects: []repair.Object{tableObj, cm}},
+	}
+	require.NoError(t, store.CreateDataMigrationReport(&store.DataMigrationReport{JobID: job.JobID, ReportJSON: repairJSON(report)}))
+	path := "/jobs/comment-test/repairs/comment"
+	saved := repairRequest(t, http.MethodPut, path, repairJSON(map[string]any{"version": 1, "units": cm.Units, "reviewed": true}), 1, SaveMigrationRepairDraft)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	run := repairRequest(t, http.MethodPost, path, `{"version":2,"confirmed":true,"request_id":"retry-comment"}`, 1, ExecuteMigrationRepair)
+	require.Equal(t, http.StatusAccepted, run.Code, run.Body.String())
+	var attempt store.MigrationRepairAttempt
+	require.Eventually(t, func() bool {
+		return store.DB.Where("request_id = ?", "retry-comment").First(&attempt).Error == nil && attempt.Status != "running"
+	}, 15*time.Second, 20*time.Millisecond)
+	require.Equal(t, "succeeded", attempt.Status, attempt.Error)
+	var text string
+	require.NoError(t, db.QueryRow("SELECT COMMENTS FROM ALL_COL_COMMENTS WHERE OWNER=? AND TABLE_NAME=? AND COLUMN_NAME=?", schema, strings.ToUpper(table), "DAILIPHONE").Scan(&text))
+	require.Equal(t, "dailiphone", text)
+	row, err := store.GetMigrationRepairObject(job.JobID, tableObj.ID)
+	require.NoError(t, err)
+	require.JSONEq(t, repairJSON(tableObj), row.ObjectJSON)
+	history, err := store.GetDataMigrationReport(job.JobID)
+	require.NoError(t, err)
+	require.Equal(t, repairJSON(report), history.ReportJSON)
+}
 
 // Opt-in end-to-end exercise of the public handlers and durable async workers.
 func TestRepairMySQLAPIIntegration(t *testing.T) {

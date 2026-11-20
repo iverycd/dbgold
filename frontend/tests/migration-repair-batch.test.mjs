@@ -129,6 +129,21 @@ test('queue waits for actual terminal progress before saving and executing a dep
   assert.equal(h.latest()[0].record.version, 1, 'confirmed version remains available for the preview')
 })
 
+test('batch retries a blocked Dameng column comment when its table exists but its data failed', async () => {
+  const table = 'cg_projectdailichouqu'
+  const schema = 'TP_EPOINTBID_TP_SZCG'
+  const sql = `COMMENT ON COLUMN "${schema}"."CG_PROJECTDAILICHOUQU"."DAILIPHONE" IS 'dailiphone'`
+  const parent = record(table, { kind: 'table', schema, status: 'succeeded', data_status: 'failed' })
+  const comment = record('phone', { kind: 'comment', schema, table, target_name: table + '.DAILIPHONE', status: 'blocked',
+    dependencies: [table], ddl: sql, units: [unit('step-1', { sql, original_sql: sql, status: 'blocked' })] })
+  const h = setup([parent, comment], {}, ['phone'])
+  await h.queue.run()
+  assert.equal(h.actions('save')[0][2].object.units[0].sql, sql)
+  assert.deepEqual(h.actions('execute').map(call => call[1]), ['phone'])
+  assert.equal(h.latest()[0].status, 'succeeded')
+  assert.equal(h.state.records[0].object.data_status, 'failed')
+})
+
 test('ordinary failure skips downstream objects while independent objects continue', async () => {
   const h = setup([record('child', { dependencies: ['base'] }), record('base'), record('other')])
   h.deps.execute = async id => { h.state.calls.push(['execute', id]); return attempt(id, id === 'base' ? 'failed' : 'succeeded', { error: id === 'base' ? 'bad SQL' : '' }) }

@@ -339,7 +339,7 @@ func ExecuteMigrationRecovery(c *gin.Context) {
 			return
 		}
 		if related.Native == nil {
-			if e = validateRepairUnits(related.Units); e != nil {
+			if e = validateRepairObjectUnits(related, j.DstDBType); e != nil {
 				repairError(c, fmt.Errorf("关联对象 %s: %w", related.Name, e))
 				return
 			}
